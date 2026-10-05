@@ -8,7 +8,7 @@ name: Publish
 # One-time setup (see README "Publishing" for details):
 #   1. `npm login` locally as a maintainer of the @matt-cochran scope.
 #   2. On npmjs.com, configure this repository and workflow as a Trusted
-#      Publisher for @matt-cochran/junior (GitHub Actions, environment blank,
+#      Publisher for @matthew-cochran/junior (GitHub Actions, environment blank,
 #      workflow `publish.yml`). No NPM_TOKEN secret is needed; OIDC supplies a
 #      short-lived credential via `id-token: write`.
 

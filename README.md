@@ -16,12 +16,12 @@ The detailed reference below retains the legacy `worker.ts` commands and all con
 
 ## Install
 
-The published package is `@matt-cochran/junior` (Node 24 or newer). It ships
+The published package is `@matthew-cochran/junior` (Node 24 or newer). It ships
 compiled JavaScript under `dist/`; there is no install-time build and no runtime
 npm dependency.
 
 ```bash
-npm install -g @matt-cochran/junior
+npm install -g @matthew-cochran/junior
 junior --help
 junior --version
 junior init

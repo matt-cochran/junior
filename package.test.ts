@@ -57,7 +57,7 @@ before(() => {
     encoding: 'utf8',
     stdio: 'pipe',
   });
-  pkgDir = join(prefix, 'node_modules', '@matt-cochran', 'junior');
+  pkgDir = join(prefix, 'node_modules', '@matthew-cochran', 'junior');
   binPath = process.platform === 'win32'
     ? join(prefix, 'node_modules', '.bin', 'junior.cmd')
     : join(prefix, 'node_modules', '.bin', 'junior');
@@ -114,7 +114,7 @@ function taskFile(dir: string, over: any = {}): string {
 
 // --- package metadata -------------------------------------------------------
 
-test('The package is published under the scoped junior name', () => assert.equal(pkg.name, '@matt-cochran/junior'));
+test('The package is published under the scoped junior name', () => assert.equal(pkg.name, '@matthew-cochran/junior'));
 test('The package version is pinned to 0.1.0', () => assert.equal(pkg.version, '0.1.0'));
 test('The package is not marked private', () => assert.notEqual(pkg.private, true));
 test('The package exposes the junior bin at the compiled entry', () => assert.equal(pkg.bin.junior, 'dist/junior.js'));
