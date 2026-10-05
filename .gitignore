@@ -1,2 +1,4 @@
 .delivery/
+.artifacts/
 node_modules/
+*:Zone.Identifier

@@ -1,0 +1,27 @@
+{
+  "constraints": [
+    "One bounded continuation of prior session; no rewrites, commits, dependencies, nested Pi calls, or filesystem-wide searches",
+    "Only /home/mc/working/junior-upgrade; complete implementation before optional refactoring; use existing modules/tests"
+  ],
+  "workflow": "checks_first",
+  "resumeFrom": "/home/mc/working/junior-upgrade/.delivery/D07-isolation-evidence/1791214948166/result.json",
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ]
+    }
+  ],
+  "acceptance": [
+    "Complete all D07-isolation-evidence requirements from /home/mc/working/delivery-worker/tasks/D07-isolation-evidence.json; retain evidence.ts isolation.ts and current tests; finish worker lifecycle integration and README",
+    "All worker.test.ts checks pass; currently boundedGitEvidence was re-exported without local import causing ReferenceError; isolation lifecycle not fully integrated and new tests fail; run tests for concrete errors",
+    "No weakened/removed tests, production source checkout unchanged, lock cleanup on blocked preflight/errors verified; no new features beyond D07"
+  ],
+  "model": "deepseek/deepseek-v4.1-flash",
+  "id": "D07-complete",
+  "provider": "openrouter",
+  "deliverable": "Finish the partially implemented isolation/evidence deliverable and pass its existing acceptance suite",
+  "cwd": "/home/mc/working/junior-upgrade"
+}

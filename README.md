@@ -1,3 +1,18 @@
+# Junior
+
+Delegate one bounded deliverable to DeepSeek, then review a compact receipt and independent evidence. The manager keeps the contract and acceptance decision; Junior handles execution, checks, artifacts and optional Jev gates.
+
+```bash
+node junior.ts init
+node junior.ts doctor
+node junior.ts handoff /absolute/task.json
+node junior.ts status /absolute/result.json
+npm test
+```
+
+Implementation handoffs default to a clean Git worktree. `init` writes project files and installs project-local manager skills; review/commit those files before a worktree handoff, or explicitly choose `isolation: "none"`. Optional report-only workflows are `recon`, `fmeca`, `evaluate`, and fresh-session `qa`. Shared FMECA/CPM/Crossmatrix state uses `junior.ts tools`; TRIZ is a [separate tool](https://github.com/matt-cochran/triz).
+
+The detailed reference below retains the legacy `worker.ts` commands and all configuration options.
 # Junior — deliverable delegation
 Run inside Ubuntu WSL with Node 22.19 or newer (Node 26.5 is the tested
 version; load nvm first, for example `nvm use 24`).
@@ -8,6 +23,23 @@ node worker.ts init [--install]
 node worker.ts validate smoke.json
 node worker.ts run smoke.json --mock
 node worker.ts status .delivery/<id>/<timestamp>/result.json
+
+# Compact manager entry point (same worker/setup structures underneath).
+node junior.ts handoff tasks/example-task.json --mock
+node junior.ts handoff tasks/example-task.json --full
+node junior.ts status .delivery/<id>/<timestamp>/result.json
+node junior.ts status .delivery/<id>/<timestamp>/result.json --full
+node junior.ts doctor
+node junior.ts init [--install]
+node junior.ts validate smoke.json
+node junior.ts run smoke.json --mock
+
+`junior.ts handoff` is the compact entry point. It defaults a task to
+`isolation: "worktree"` unless the task explicitly sets `isolation: "none"`,
+runs the task and prints one small handoff object (see **Runtime, deadlines and
+handoff** below). `junior.ts` `init`/`doctor`/`run`/`validate`/`status` delegate
+to the same `setup.ts`/`worker.ts` code as the legacy `worker.ts` CLI, which is
+retained unchanged for saved artifact/session paths.
 
 `doctor` performs a read-only readiness check with no arguments. `init` creates
 project defaults and an example task only when absent. Neither makes a paid
@@ -40,6 +72,10 @@ This prototype was built as small, inspectable stages:
    continuation (D05-workflows).
 7. Idempotent `init` plus a read-only `doctor` readiness check for Ubuntu WSL
    (D06-setup).
+8. Complete before/after change evidence, content fingerprints, and advisory
+   execution/session locks (D07-evidence).
+9. Streaming child lifecycle, validated deadlines, tool watchdog, repair
+   lineage and the compact manager handoff (D08-runtime-handoff).
 
 ## Setup
 - Node 22.19 or newer (`node --test`, `node worker.ts`); the worker is tested on
@@ -74,6 +110,10 @@ or makes a paid network call. Checks:
 - **Model**: verifies the configured provider/model (default `openrouter/deepseek/deepseek-v4.1-flash`) against Pi's
   local catalog (`models-store.json`) and agent `models.json` with no network
   call, and gives an actionable diagnosis when it is missing.
+- **Skill**: reports delegation-skill readiness **separately** from Pi execution
+  readiness in the `skill` field (`current`, `outdated`, `customized` or
+  `missing` per manager). A missing or customized skill does not change the
+  Pi execution `ok`/exit status.
 
 The result includes `checks` (one entry per prerequisite) and `remediation`
 strings. If `pi` is missing it recommends `init --install`; if credentials are
@@ -85,13 +125,43 @@ Idempotent project setup. It creates, only when absent:
 - `delivery.config.json` with the project defaults (`provider`, `model`, and the
   pinned tested Pi version (1.0.3)).
 - `tasks/example-task.json` with a runnable example contract.
+- The packaged delegation skill under `.agents/skills/junior/` (Codex) and
+  `.claude/skills/junior/` (Claude Code), copied from the canonical
+  `skills/junior/SKILL.md` resolved relative to the Junior module, never from
+  the caller's working directory.
 
 Existing files are preserved and global auth/model configuration is never
 touched. `run` loads `delivery.config.json` from the task's resolved `cwd`; an
 explicit task `provider`/`model` always takes precedence over the defaults.
 
 `init` reports readiness honestly: it runs the same checks as `doctor` and
-returns `ready`, plus `instructions` when something is missing.
+returns `ready` (Pi execution **and** skill install), plus `instructions` when
+something is missing.
+
+> **Project init creates Git changes.** It writes config, the example task and
+> the skill directories into the target checkout. The default `handoff`
+> isolation is `worktree`, which requires a clean source checkout, so commit or
+> review these init files (or pass `isolation: "none"`) before the first
+> handoff. Junior never commits and never silently excludes generated files.
+
+#### Skill install and upgrade
+By default `init` installs the skill for both managers into the project. The
+operations are explicitly scoped:
+
+- `--target codex|claude|both|none` (or `--no-skill`) selects the manager
+  targets; the default is `both` for the project.
+- `--user` switches to a user-wide install under `HOME` —
+  `HOME/.agents/skills/junior` for Codex and `HOME/.claude/skills/junior` for
+  Claude Code. Without `--user`, `init` never writes outside the project.
+- `--skill-root DIR` supplies an explicit skill root (for example a Windows
+  manager user directory) and overrides the resolved root.
+
+Reruns are safe: an identical copy is left as-is, a missing copy is created, an
+unmodified but outdated copy is reported and preserved until `--upgrade`, and a
+customized copy is reported as a conflict and preserved unless `--force` is
+given. Junior records the hash it wrote in a `.junior-manifest.json` beside the
+installed skill; `--upgrade` only replaces a file whose current hash still
+matches that manifest, so a customization is never silently overwritten.
 
 #### `init --install`
 Installing Pi happens only through the explicit `--install` flag. Ordinary
@@ -185,8 +255,8 @@ supplies explicit, attributable pricing:
 
 ## Workflow templates
 Each task selects one deterministic template. `workflow` accepts `recon`,
-`test_first`, `checks_first` or `auto` (the default when omitted). An explicit
-value always wins and the classifier is not asked:
+`test_first`, `checks_first`, `fmeca`, `evaluate` or `auto` (the default when
+omitted). An explicit value always wins and the classifier is not asked:
 
 ```json
 { "workflow": "test_first" }
@@ -200,6 +270,20 @@ value always wins and the classifier is not asked:
   implement the smallest change that makes it pass, then run focused checks.
 - `checks_first`: inspect-first; run the existing checks before changing
   anything. Used for setup and documentation work and as the `auto` fallback.
+- `fmeca`: analysis-only qualitative FMECA across UX / user interaction,
+  runtime behavior, technical architecture and project / delivery design. It
+  reports bounded, highest-impact failure modes (8-15 where the scope warrants,
+  never invented to fill a quota) over at most three iterations, with evidence
+  labels, prevention-first mitigation, production observability and conditional
+  residual risk. It does not modify production code; removal or demotion is a
+  proposal only. That is an instruction to the worker, **not** a sandbox
+  guarantee.
+- `evaluate`: analysis-only architecture review. It establishes architecture
+  validity first (component classification, simpler alternatives, and
+  removal/demotion proposals), then applies the same FMECA discipline, then
+  runs a calibration / observability / over-engineering / incremental-delivery
+  reality check. It does not modify production code; removal or demotion is a
+  proposal only.
 - `auto`: ask Jev exactly one `choice` question (with the fixed descriptions
   above, in the same readiness classify call) and use a confident answer. A
   below-threshold answer, a classifier outage, or no classifier defaults to the
@@ -207,9 +291,43 @@ value always wins and the classifier is not asked:
 
 The final prompt is always assembled from a fixed common block and the fixed
 workflow block plus the task contract JSON. No Jev-generated prose is inserted.
-Each run saves `prompt.txt` and `workflow.json` (selected template IDs and the
-workflow decision) in its artifact directory, and the result carries `workflow`
-and `templates`.
+Each run saves `prompt.txt` and `workflow.json` (selected template IDs, the
+deterministic report path for analysis workflows, and the workflow decision) in
+its artifact directory, and the result carries `workflow` and `templates`.
+
+### Analysis report lifecycle
+`fmeca`, `evaluate` (and the analysis-only `recon`) are a **contract boundary,
+not an OS sandbox**. For `fmeca` and `evaluate` the worker appends a
+deterministic report path to the prompt:
+
+```
+<artifactDir>/analysis-report.md
+```
+
+The worker writes the report there before finishing. The run reports
+`ready_for_review` only when the report exists; a missing report downgrades an
+otherwise-passing run to `needs_review` (it never upgrades a failure). The full
+result carries `analysis` (`workflow`, `report`, `reportPresent`), and the
+compact handoff exposes `analysis` plus `artifacts.report`, with the missing
+report listed under `unresolved`. `--mock` performs no Pi call and therefore
+writes no report, so a bare mock analysis run is `needs_review`; offline tests
+inject a spawn seam that writes the report, with no paid call.
+
+Analysis-to-implementation is an **explicit authorization** step: resuming an
+analysis-only session (`recon`, `fmeca` or `evaluate`) with `auto` can never
+select the code-writing `test_first` template. It falls back to the
+inspect-first `checks_first` and records that an explicit workflow is required
+in the new contract.
+
+```bash
+# 1. Analysis only (no production changes).
+node worker.ts run tasks/fmeca-task.json
+# 2. Review the analysis report and the compact handback.
+node junior.ts status .delivery/fmeca-task/<timestamp>/result.json
+# 3. Explicitly authorize implementation by selecting a code workflow and
+#    resuming; `auto` alone is not authorization.
+node worker.ts run tasks/implementation-task.json
+```
 
 ## Session continuation
 A task may continue a prior Pi session by pointing `resumeFrom` at that run's
@@ -250,6 +368,153 @@ receipt always preserves the observed `cacheRead` counters, the requested and
 observed provider/model, and does not claim actual billing. Each result carries
 a `cache` note to that effect.
 
+## Git worktree isolation
+`isolation` is opt-in per task and defaults to `none`:
+
+```json
+{ "isolation": "worktree" }
+```
+
+- `none` (default): the worker runs in the task's resolved `cwd`. This preserves
+the prior behavior; preexisting uncommitted work is left in place.
+- `worktree`: before any paid call the worker creates a unique detached Git
+worktree at the source `HEAD`, runs Pi and every check in that checkout, and
+keeps artifacts in the source `.delivery/` directory. The result records
+`sourceCwd`, `executionCwd` and `isolation`. The worktree is **retained for
+review**; the worker never merges, removes, commits or pushes it. Review the
+isolated checkout and integrate it yourself (use `git worktree list` to find it,
+then inspect/diff or merge it manually).
+
+`isolation=worktree` refuses to start when the source checkout is dirty
+(staged, unstaged or nonignored untracked changes) and reports an actionable
+diagnostic instead of silently omitting edits. Commit or stash the work, or use
+`isolation=none`. This is **not a sandbox**: the worker runs with the same
+filesystem and network access as the caller; isolation only provides a separate
+checkout and a clean evidence baseline.
+
+Continuation (`resumeFrom`) is checkout-scoped because a Pi session is bound to
+its working directory. A continuation must use the same isolation as the prior
+run: resuming a `none` run as `worktree` (or vice versa) is rejected before any
+paid call. A `worktree` continuation reuses the prior run's execution checkout
+rather than creating a new one.
+
+Concurrent runs are serialized by advisory lock files under
+`.delivery/locks/`: the execution checkout and, when resuming, the Pi session.
+A second run fails fast before any classifier or worker call. Locks are released
+on every success and error path. A foreign or stale lock is never deleted
+automatically; the error names the lock file and its holder, and removal is a
+manual `rm`.
+
+## Change evidence
+Each run captures a **before** and **after** snapshot of the execution checkout
+and saves the complete pair as `evidence.json` in its artifact directory, so
+preexisting changes are distinguishable from changes the run made. Evidence is
+taken against `HEAD` (`git diff HEAD`) and includes staged, unstaged, deleted
+and renamed tracked changes plus nonignored untracked files. The result carries
+`evidence` with `changedFiles`, `runChangedFiles`, `preexistingFiles`,
+`truncated` and `unavailable`; the same complete evidence is passed to the Jev
+postflight gate.
+
+Evidence is defensive and bounded: untracked symlinks are never followed (the
+target string is recorded, not read), binary files are never decoded as text,
+and the diff is capped with explicit `limits` metadata (`diffTruncated`,
+`statTruncated`, `filesTruncated`, `untrackedBytes`). A truncated diff means the
+gate and reviewer saw a prefix, not the whole change; an `unavailable` diff
+means no evidence was collected (for example outside a Git repository).
+
+## Runtime, deadlines and handoff
+Live runs no longer use a blocking `spawnSync` call. Pi runs as a streaming
+async child in its own process group; stdout is appended live to `events.jsonl`
+and stderr to `worker.log`, and a `runtime.json` heartbeat is written atomically
+(tmp + rename). Tests inject an offline child, so `node --test` never makes a
+paid call or installs anything.
+
+### Execution settings
+All optional, nested under `execution` (top-level keys are also accepted). Every
+value must be a finite positive number within its bound; otherwise `validate`
+rejects the task before any paid call.
+
+| Setting | Default | Bound | Meaning |
+| --- | --- | --- | --- |
+| `deadlineMs` | 600000 | 1 .. 86400000 | total wall deadline for the whole run |
+| `quietMs` | 120000 | 1 .. 86400000 | no-output interval reported as `quiet` |
+| `toolTimeoutMs` | 300000 | 1 .. 86400000 | per-tool watchdog limit |
+| `heartbeatMs` | 5000 | 1 .. 3600000 | heartbeat write interval |
+| `checkTimeoutMs` | 120000 | 1 .. 86400000 | per-check limit (also capped by `toolTimeoutMs` and the remaining deadline) |
+
+The total wall deadline starts **before** readiness, isolation and the
+classifier, and covers checks, postflight and every attempt. Each phase uses the
+remaining time; no success (`ready_for_review`/`simulation_passed`) is ever
+reported after the deadline. The classifier SDK startup and the `git`
+subprocesses used for isolation/evidence are bounded by the remaining budget; a
+subprocess that is already running when the deadline passes may still take a
+short bounded cleanup window, which is the strongest guarantee actually
+implemented (never a harder one).
+
+### Runtime states
+`runtime.json` records `state`, `phase`, `elapsedMs`, `lastActivityAt`,
+`currentTool`, `activeToolMs`, the settings, `deadlineAt` and the stop reason.
+States: `running`, `quiet`, `tool_timed_out`, `deadline_exceeded`, `failed`,
+`interrupted`, `ready_for_review`.
+
+- `quiet` means no activity for `quietMs`. It is reported only; quiet **never**
+  restarts or kills the child.
+- The tool watchdog times `tool_execution_start` through `tool_execution_end`;
+  `tool_execution_update` events do **not** reset the duration. On expiry the
+  process group is stopped with `SIGTERM`, then `SIGKILL` after a bounded grace
+  period. On Linux the child is detached into its own process group, so shell
+  descendants are cancelled too.
+- `SIGINT`/`SIGTERM` produce an `interrupted` handback: process groups are
+  stopped, `events.jsonl`/`worker.log`/`evidence.json` are preserved, partial
+  edits stay in the checkout, and locks are released.
+- Independent checks run through the same async bounded executor as the worker,
+  not a blocking `spawnSync`. Each check is bounded by `checkTimeoutMs`,
+  `toolTimeoutMs` and the remaining deadline, and its process group is stopped
+  with `SIGTERM` then a bounded `SIGKILL`, so a hung check with a TERM-ignoring
+  descendant cannot survive. Interrupting a run while a check is running
+  cancels that check and yields `interrupted`; the heartbeat keeps advancing to
+  the `checks` phase.
+- Completion is driven by the child `close` event (not `exit`), so trailing
+  stdout bytes that arrive after `exit` are still parsed; the bounded `SIGKILL`
+  escalation is not cancelled just because the direct child exited.
+- Worker stdout/stderr (and the persisted artifacts) are capped (8 MiB default).
+  Overflow is reported explicitly (`outputTruncated`, `workerError`) and the
+  receipt is never claimed complete. A synchronous spawn throw, a stream error
+  or a disk-persistence failure produce a recoverable failed result with the
+  evidence still captured.
+
+Malformed or partial event lines, and child startup errors, still produce an
+inspectable failed result with the artifacts on disk.
+
+### Repair lineage
+There are **no automatic retries or restarts**. A repair is an explicit task
+with `repairFrom` (a prior `result.json`) instead of `resumeFrom`. It reuses the
+prior Pi session, defaults to at most one repair (`maxRepairs`), and persists a
+lineage counter (`rootId`, `repairs`, `maxRepairs`, `deadlineAt`) in every
+result. A repair over budget, or one whose inherited lineage deadline has
+already elapsed, is rejected **before any paid call**. An optional
+`lineageDeadlineMs` sets one absolute lineage deadline for the whole chain.
+
+### Compact handoff
+`junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
+`outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact
+location, changed file paths, compact check results, unresolved issues,
+requested/observed model, token totals (including `cacheRead`/`cacheWrite`),
+honest cost (`billedUsd` always `null`) and the runtime stop reason. A zero raw
+Pi catalog cost is **not** reported as a known charge (`cost.available` is only
+true for a real estimate or a strictly positive Pi-reported total). Repeated
+per-event stop reasons are deduplicated into `runtime.stopReasonSummary`.
+The full receipt, events, evidence and runtime heartbeat stay in the artifact
+files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
+`result.json`) and are available through `status --full`.
+
+### Prompt search restriction
+The common prompt restricts file reads and searches to the execution checkout
+and to context/dependency paths named in the task, and instructs the worker to
+stop and report a blocker rather than widening the search or performing a broad
+filesystem search. This is an **instruction to the worker, not a sandbox
+guarantee**.
+
 ## Jev readiness and completion gates
 Jev gates are opt-in per task and default off:
 
@@ -281,20 +546,32 @@ The result's `jev` record holds the mode, classifier model and whether it was
 explicit, whether the gate ran, the preflight/postflight statuses, the raw
 answers, classifier usage (with the same availability distinction as receipts),
 any error, and actionable criterion IDs (`gapIds`, `uncertainIds`) for parent
-review. There is no automatic repair yet.
+review. Repairs are explicit and budgeted (see **Repair lineage**); there is no
+automatic repair.
 
 Passing checks and gates means ready for review, not accepted. This prototype
 runs one worker synchronously and independent checks. It does not implement
-dependencies, automatic repairs, sandboxing, or parallel jobs, and it makes no
-claim of independent upstream attestation or full code correctness.
+dependencies, sandboxing, or parallel jobs, and it makes no claim of independent
+upstream attestation or full code correctness. Automatic retries and restarts
+are deliberately absent (see below); repairs are explicit and budgeted.
 
 ## Premium-model delegation skill
 
-The canonical skill is `skills/junior/SKILL.md`. It teaches the manager to define
-one bounded deliverable, delegate to DeepSeek, inspect evidence and accept the
-result. Install the folder as `~/.codex/skills/junior` for Codex or
-`~/.claude/skills/junior` for Claude Code. Windows Codex uses its Windows user
-skill directory. Copies need updating when the canonical skill changes.
+The canonical skill is `skills/junior/SKILL.md`. It teaches the manager to
+locate the `junior.ts` CLI, define one bounded deliverable, delegate to
+DeepSeek, review the compact receipt and explicitly bounded repair, and accept
+the result. `junior init` installs it into the project for both managers:
+`.agents/skills/junior` for Codex and `.claude/skills/junior` for Claude Code.
+Use `--user` for `HOME/.agents/skills/junior` and `HOME/.claude/skills/junior`,
+or `--skill-root DIR` for an explicit user skill root (for example a Windows
+manager directory).
+
+Codex discovers project skills under `.agents/skills` (official reference:
+<https://learn.chatgpt.com/docs/build-skills>). Claude Code discovers project
+skills under `.claude/skills` and user skills under `~/.claude/skills` (the same
+locations `junior init` writes). Copies need updating when the canonical skill
+changes; `init --upgrade` replaces only the unmodified installed copy, while
+`--force` is required for a customization.
 
 Invoke it explicitly with `$junior` in Codex or `/junior` in Claude Code, for
 example: “Use Junior to implement this deliverable; you manage and review it.”
@@ -303,3 +580,14 @@ explicit invocation is the clearest way to select this workflow.
 
 The project is named Junior; its existing `delivery-worker` directory and
 `node worker.ts` commands are retained to preserve saved artifact/session paths.
+Testing convention: all newly written or changed tests use atomic scenarios, declarative names, and exactly one behavioral assertion per test against public deliverable behavior. Use a proportionate testing pyramid: focused tests first, integration tests for real boundaries, and essential end-to-end acceptance checks. Avoid implementation-detail assertions, bundled unrelated assertions, duplicated layers, and unrelated rewrites of existing suites. The shared prompt applies this policy in every workflow, including TDD.
+
+## Common tool handoffs
+
+`node junior.ts tools init hop.json config.json`, `tools call hop.json fmeca|cpm|crossmatrix request.json`, and `tools inspect hop.json` expose the same persistent Praxec adapter to managers and workers. See [tool configuration and native state](tools/README.md). Add `hopFrom` to a delivery contract to provide the latest integrity-checked snapshots to both Jev gates and the worker, without loading transcripts. Context is bounded to the latest snapshot per tool. State changes invalidate previous acceptance; workers never accept their own work. Manager acceptance is an explicit library operation, not authentication or a security boundary.
+
+Use `thinking: "low"` (the default) for bounded worker tasks; increase it explicitly for difficult deliverables. Output-limit termination is a failed receipt, even when existing checks pass. Newly written tests follow the shared atomic, declarative, one-behavioral-assertion convention.
+
+Optional QA: `node junior.ts qa qa-contract.json` (or a `handoff` contract with `workflow: "qa"`) requires `reviewFrom` pointing at a prior result. It starts a fresh reviewer session, reviews in place, saves an evidence-based report, and flags detected production edits. Missing reports cannot succeed. Review completion is not manager acceptance; repairs require a separate deliverable. A prompt restriction is not an OS sandbox. QA checks should be read-only; it has the same filesystem permissions as the executor.
+
+Development: `npm test` runs the offline public-behavior suites. No npm dependencies are needed. The legacy `worker.ts` CLI remains supported; `junior.ts` is the compact manager entry point. Runtime, evidence, isolation, setup, and tool adapters share one implementation each.

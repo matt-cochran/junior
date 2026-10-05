@@ -1,0 +1,31 @@
+{
+  "workflow": "test_first",
+  "constraints": [
+    "Only junior-upgrade worker.ts junior.ts handoff.ts skills/junior/SKILL.md README.md and new qa.test.ts; do not edit runtime/setup/skills installer modules or worker.test.ts",
+    "Use existing report/runtime helpers no separate supervisor or persistent PM. Current shared prompt policy applies. No paid model calls nested agents git commits pushes",
+    "Read only named local relevant files; no broad filesystem search"
+  ],
+  "acceptance": [
+    "Explicit workflow qa uses existing runtime/classifier/report machinery, deterministic report path, fresh Pi session; reject resumeFrom or repairFrom for QA before paid calls, to avoid implementer-session bias",
+    "QA requires reviewFrom prior result.json; validate required result shape and artifact/context paths before paid calls, and construct compact grounded review context from prior result, original prompt/contract evidence and complete change evidence; never load entire transcript by default",
+    "Prompt report-only: compare deliverable acceptance with complete tracked/staged/untracked changes and independent checks, identify missing behavioral coverage and regressions, evidence-anchored findings severity with file references and acceptance IDs, uncertainties and recommended checks; no production edits commits pushes repairs nested paid calls",
+    "Require report artifact for ready_for_review; report means review completed, not deliverable accepted. Flag unexpected production changes as needs_review using existing evidence delta; no automatic remediation. Prompt scope is instruction not sandbox; documentation honest",
+    "Junior qa CLI or node junior.ts handoff contract.json workflow qa is ergonomic; existing CLI handoff should default none for qa since review must inspect subject checkout including uncommitted changes instead of snapshot wrong HEAD. If explicit worktree qa requested, reject as incompatible before paid calls unless implemented exactsubject fidelity",
+    "Register QA template/version in fixed choices for Jev but auto must not authorize QA without reviewFrom; ordinary tasks cannot become code-writing authorization through QA continuation",
+    "Update canonical skills and README concise QA example fresh reviewer session explicit bounded time, no acceptance or automatic fix authority; portable executable root retained",
+    "Add qa.test.ts focused public behavior tests with exactly one assertion per declarative atomic test; preserve prior tests, no source-text assertions; no dependencies"
+  ],
+  "cwd": "/home/mc/working/junior-upgrade",
+  "deliverable": "Add optional bounded fresh-session QA review workflow to Junior without a standing agent or duplicated runner",
+  "id": "D12-bounded-qa",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts",
+        "qa.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ]
+}

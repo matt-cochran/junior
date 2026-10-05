@@ -16,6 +16,8 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -25,6 +27,13 @@ export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
 export const TESTED_PI_VERSION = '1.0.3';
 export const DOCTOR_TIMEOUT_MS = 10000;
 export const INSTALL_TIMEOUT_MS = 300000;
+
+/** Packaged delegation skill installed by `init`. The source is resolved from
+ * this module's location, never from the caller's working directory. */
+export const SKILL_NAME = 'junior';
+export const SKILL_FILENAME = 'SKILL.md';
+export const SKILL_MANIFEST_FILENAME = '.junior-manifest.json';
+export const PACKAGED_SKILL_PATH = join(dirname(fileURLToPath(import.meta.url)), 'skills', SKILL_NAME, SKILL_FILENAME);
 
 export type ExecResult = { status:number|null; stdout?:string; stderr?:string; error?:string };
 
@@ -41,6 +50,8 @@ export type SetupDeps = {
  mkdir?:(path:string)=>void;
  /** Pre-resolved Pi package metadata; tests inject it instead of reading disk. */
  installedPi?:{name:string;version:string}|null;
+ /** Packaged skill source path; tests inject a fixture instead of the module copy. */
+ skillSource?:string;
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -186,6 +197,8 @@ export type DoctorResult = {
  pi:PiCheck;
  credentials:CredentialCheck;
  model:ModelCheck;
+ /** Skill readiness is reported separately; it does not change Pi execution readiness (`ok`). */
+ skill:SkillReadiness;
  checks:DoctorCheck[];
  remediation:string[];
 };
@@ -215,7 +228,8 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
   { id:'credentials', ok:credentials.present, detail:credentials.present ? `${provider} credential present (${credentials.sources.join(', ')})` : `no ${provider} credential` },
   { id:'model', ok:model.available, detail:model.available ? `${provider}/${defaults.model} in ${model.source}` : (model.note as string) },
  ];
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, checks, remediation };
+ const skill=inspectSkill(deps);
+ return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, checks, remediation };
 }
 
 export type InitResult = {
@@ -225,6 +239,7 @@ export type InitResult = {
  preserved:string[];
  ready:boolean;
  pi:PiCheck;
+ skill:SkillResult;
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; error?:string };
  instructions:string[];
 };
@@ -245,9 +260,9 @@ function exampleTask(cwd:string, execPath:string):any {
 /** Idempotent project setup. Creates project defaults and an example task only
  * when absent; existing files and all global auth/model configuration are
  * preserved. Installation happens only when `opts.install` is true. */
-export function init(deps:SetupDeps = {}, opts:{install?:boolean} = {}):InitResult {
+export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  const cwd=deps.cwd ?? process.cwd();
- const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d))); 
+ const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
  const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
  const created:string[]=[];
  const preserved:string[]=[];
@@ -270,6 +285,7 @@ export function init(deps:SetupDeps = {}, opts:{install?:boolean} = {}):InitResu
   created.push('tasks/example-task.json');
  }
 
+ const skill=installSkill(deps, opts);
  let readiness=doctor(deps);
  let install:InitResult['install'];
  if (opts.install && readiness.pi.found && readiness.pi.version) {
@@ -287,8 +303,9 @@ export function init(deps:SetupDeps = {}, opts:{install?:boolean} = {}):InitResu
   }
  }
  if (install?.attempted && install.ok) readiness=doctor(deps);
- const instructions=readiness.ok ? [] : readiness.remediation;
- return { command:'init', cwd, created, preserved, ready:readiness.ok, pi:readiness.pi, install, instructions };
+ const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
+ const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
+ return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, install, instructions };
 }
 
 export type Defaults = { provider:string; model:string; source:'builtin'|'project'; path:string|null };
@@ -306,4 +323,172 @@ export function loadDefaults(cwd:string, deps:SetupDeps = {}):Defaults {
   } catch { /* a malformed config falls back to built-ins */ }
  }
  return {provider:DEFAULT_PROVIDER, model:DEFAULT_MODEL, source:'builtin', path:null};
+}
+
+// ---------------------------------------------------------------------------
+// Packaged delegation skill install.
+//
+// `init` copies the canonical `skills/junior/SKILL.md` (resolved relative to
+// this module) into the Codex project root `.agents/skills/junior` and the
+// Claude Code project root `.claude/skills/junior`. User-wide installs require
+// the explicit `scope: "user"` option and write under `HOME` (or an explicit
+// skill root), never implicitly. A small `.junior-manifest.json` beside each
+// installed skill records the last hash this command wrote, so an outdated but
+// unmodified copy can be upgraded explicitly while a customization is only
+// ever replaced with an explicit `force`.
+// ---------------------------------------------------------------------------
+
+export type SkillManager = 'codex' | 'claude';
+export type SkillTargetSelection = SkillManager | 'both' | 'none';
+export type SkillScope = 'project' | 'user';
+
+export type SkillActionStatus = 'created' | 'identical' | 'outdated' | 'customized' | 'upgraded' | 'forced';
+export type SkillAction = { manager:SkillManager; path:string; status:SkillActionStatus; message:string };
+export type SkillResult = { target:SkillTargetSelection; scope:SkillScope; source:string; actions:SkillAction[]; ok:boolean };
+export type SkillReadiness = {
+ ready:boolean;
+ source:string;
+ targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
+};
+export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string };
+export type InitOptions = SkillInstallOptions & { install?:boolean };
+
+function sha256(text:string):string {
+ return createHash('sha256').update(text).digest('hex');
+}
+
+function selectedManagers(target:SkillTargetSelection):SkillManager[] {
+ if (target === 'both') return ['codex','claude'];
+ if (target === 'none') return [];
+ return [target];
+}
+
+/** Resolve the directory that will contain the `junior/` skill folder. */
+function skillRootFor(deps:SetupDeps, scope:SkillScope, manager:SkillManager, explicitRoot?:string):string {
+ if (explicitRoot) return explicitRoot;
+ if (scope === 'user') {
+  const env=deps.env ?? process.env;
+  const home=env.HOME || env.USERPROFILE || '';
+  return manager === 'codex' ? join(home,'.agents','skills') : join(home,'.claude','skills');
+ }
+ const cwd=deps.cwd ?? process.cwd();
+ return manager === 'codex' ? join(cwd,'.agents','skills') : join(cwd,'.claude','skills');
+}
+
+function readManifestHash(deps:SetupDeps, manifestPath:string):string|null {
+ if (!exists(deps,manifestPath)) return null;
+ try {
+  const parsed=JSON.parse(readText(deps,manifestPath));
+  const hash=parsed?.skills?.[SKILL_NAME]?.hash;
+  return typeof hash === 'string' && hash ? hash : null;
+ } catch { return null; }
+}
+
+function writeSkillManifest(deps:SetupDeps, manifestPath:string, hash:string, source:string):void {
+ const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
+ const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
+ mkdir(dirname(manifestPath));
+ write(manifestPath, JSON.stringify({ skill:SKILL_NAME, skills:{ [SKILL_NAME]:{ hash, source } } },null,2)+'\n');
+}
+
+function readSkillSource(deps:SetupDeps):{ path:string; text:string } {
+ const path=deps.skillSource ?? PACKAGED_SKILL_PATH;
+ return { path, text:readText(deps,path) };
+}
+
+/** Install the packaged skill for the selected managers. Missing copies are
+ * created; identical copies are left alone; an unmodified but outdated copy is
+ * only replaced with `upgrade`; a customized copy is preserved unless `force`. */
+export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {}):SkillResult {
+ const target=opts.target ?? 'both';
+ const scope=opts.scope ?? 'project';
+ const { path:sourcePath, text:source }=readSkillSource(deps);
+ const sourceHash=sha256(source);
+ const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
+ const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
+ const actions:SkillAction[]=[];
+ for (const manager of selectedManagers(target)) {
+  const root=skillRootFor(deps,scope,manager,opts.skillRoot);
+  const dir=join(root,SKILL_NAME);
+  const path=join(dir,SKILL_FILENAME);
+  const manifestPath=join(root,SKILL_MANIFEST_FILENAME);
+  if (!exists(deps,path)) {
+   mkdir(dir); write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
+   actions.push({manager,path,status:'created',message:`installed the ${manager} skill at ${path}`});
+   continue;
+  }
+  const currentHash=sha256(readText(deps,path));
+  if (currentHash === sourceHash) {
+   if (readManifestHash(deps,manifestPath) !== sourceHash) writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
+   actions.push({manager,path,status:'identical',message:`the ${manager} skill is already current`});
+   continue;
+  }
+  const recorded=readManifestHash(deps,manifestPath);
+  if (recorded && currentHash === recorded) {
+   if (opts.upgrade) {
+    write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
+    actions.push({manager,path,status:'upgraded',message:`upgraded the ${manager} skill from its recorded version`});
+   } else {
+    actions.push({manager,path,status:'outdated',message:`the ${manager} skill is outdated; re-run with --upgrade to replace the unmodified installed copy`});
+   }
+   continue;
+  }
+  if (opts.force) {
+   write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
+   actions.push({manager,path,status:'forced',message:`replaced the customized ${manager} skill because --force was given`});
+  } else {
+   actions.push({manager,path,status:'customized',message:`the ${manager} skill was customized; it was preserved unchanged (use --force to replace)`});
+  }
+ }
+ const ok=actions.every((a)=>a.status !== 'outdated' && a.status !== 'customized');
+ return { target, scope, source:sourcePath, actions, ok };
+}
+
+/** Read-only skill readiness for the selected managers. Never writes. */
+export function inspectSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {}):SkillReadiness {
+ const target=opts.target ?? 'both';
+ const scope=opts.scope ?? 'project';
+ const { path:sourcePath, text:source }=readSkillSource(deps);
+ const sourceHash=sha256(source);
+ const targets:SkillReadiness['targets']=[];
+ for (const manager of selectedManagers(target)) {
+  const root=skillRootFor(deps,scope,manager,opts.skillRoot);
+  const path=join(root,SKILL_NAME,SKILL_FILENAME);
+  let status:SkillReadiness['targets'][number]['status'];
+  if (!exists(deps,path)) status='missing';
+  else {
+   const currentHash=sha256(readText(deps,path));
+   if (currentHash === sourceHash) status='current';
+   else if (readManifestHash(deps,join(root,SKILL_MANIFEST_FILENAME)) === currentHash) status='outdated';
+   else status='customized';
+  }
+  targets.push({manager,path,status});
+ }
+ return { ready:targets.every((t)=>t.status === 'current'), source:sourcePath, targets };
+}
+
+const SKILL_TARGETS:SkillTargetSelection[]=['codex','claude','both','none'];
+function isSkillTarget(value:string|undefined):value is SkillTargetSelection {
+ return !!value && (SKILL_TARGETS as string[]).includes(value);
+}
+
+/** Parse the `init` flags shared by the `worker.ts` and `junior.ts` CLIs. */
+export function parseInitOptions(argv:string[]):InitOptions {
+ const opts:InitOptions={};
+ for (let i=0;i<argv.length;i++) {
+  const a=argv[i];
+  if (a === '--install') opts.install=true;
+  else if (a === '--user') opts.scope='user';
+  else if (a === '--project') opts.scope='project';
+  else if (a === '--upgrade') opts.upgrade=true;
+  else if (a === '--force') opts.force=true;
+  else if (a === '--no-skill') opts.target='none';
+  else if (a === '--scope') opts.scope = argv[++i] === 'user' ? 'user' : 'project';
+  else if (a.startsWith('--scope=')) opts.scope = a.slice('--scope='.length) === 'user' ? 'user' : 'project';
+  else if (a === '--target') { const v=argv[++i]; opts.target=isSkillTarget(v) ? v : 'both'; }
+  else if (a.startsWith('--target=')) { const v=a.slice('--target='.length); opts.target=isSkillTarget(v) ? v : 'both'; }
+  else if (a === '--skill-root') opts.skillRoot=argv[++i];
+  else if (a.startsWith('--skill-root=')) opts.skillRoot=a.slice('--skill-root='.length);
+ }
+ return opts;
 }

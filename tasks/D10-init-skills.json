@@ -1,0 +1,29 @@
+{
+  "workflow": "test_first",
+  "acceptance": [
+    "Project init installs packaged skill into target cwd .agents/skills/junior for Codex and .claude/skills/junior for Claude Code by default; resolve packaged source relative module, not cwd",
+    "Support explicit user-wide install flag, Codex/Claude/both/no-skill target selection; no implicit writes outside project; Codex user path HOME/.agents/skills, Claude HOME/.claude/skills; allow explicit user skill root for Windows manager",
+    "Safe rerun: identical current, missing create, differing customized file preserved with outdated/conflict diagnostics; explicit upgrade replaces only manifest-recorded previous hash, otherwise explicit force; never silently overwrite customization",
+    "Doctor reports skill readiness separately from Pi execution readiness; preserve existing config/auth and setup behavior",
+    "Update canonical skill to junior.ts handoff compact receipts actual worktree/runtime guarantees workflow fmeca/evaluate and explicit bounded repair. Keep concise and portable; discover executable location instead of universal hardcoded path",
+    "Offline tests verify create identical customized-preservation explicit upgrade and user targets without touching real user locations; no paid calls or installs",
+    "README cites official Codex discovery https://learn.chatgpt.com/docs/build-skills and Claude skill location; all current tests retained",
+    "Explain that project init creates Git changes; default worktree handoff requires a clean source, so report commit/review init files or explicit isolation none before first handoff. Never auto commit or silently exclude generated files"
+  ],
+  "cwd": "/home/mc/working/junior-upgrade",
+  "deliverable": "Install and diagnose the packaged Junior delegation skill through junior init",
+  "constraints": [
+    "Only junior-upgrade source and temporary injected test destinations; no global installs/config edits commits pushes dependencies paid calls or nested workers",
+    "Preserve existing setup/runtime; no working directory rename, duplicate orchestration or broad filesystem searches"
+  ],
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "id": "D10-init-skills"
+}

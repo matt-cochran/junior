@@ -1,0 +1,35 @@
+{
+  "provider": "openrouter",
+  "id": "D08-runtime-handoff",
+  "cwd": "/home/mc/working/junior-upgrade",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "deliverable": "Provide one ergonomic Junior handoff with observable bounded execution and compact manager handback",
+  "constraints": [
+    "Only junior-upgrade checkout, preserve D07 and existing changes; no dependencies, commits, pushes, auth/config edits or nested Pi runs",
+    "Do not broaden architecture or implement evaluate/fmeca/skill-install in this deliverable; these follow separately",
+    "Read relevant files/tests selectively; no filesystem-wide searches; prioritize a tested working artifact"
+  ],
+  "acceptance": [
+    "Fix D07 review gaps first with regression tests: session lock key must use resume.parentSessionId, release acquired checkout lock when subsequent session lock acquisition fails, and evidenceDelta must detect content edits to an already modified tracked file (status M alone is not a fingerprint)",
+    "Add node junior.ts handoff /absolute/task.json as compact entry point; task defaults isolation=worktree unless explicit none; supports init doctor run validate status using existing worker/setup structures rather than divergent implementations; legacy worker CLI remains",
+    "Manager handoff stdout compact JSON: id outcome source/execution cwd artifact location changed file paths compact check results unresolved issues requested/observed model token totals honest cost and runtime stop reason; full receipt/events/evidence available artifacts and status --full; no dump of repeated event stopReasons",
+    "Replace live spawnSync Pi with streaming async child lifecycle and persistent events.jsonl/worker.log; runtime.json heartbeat atomically records state running/quiet/tool_timed_out/deadline_exceeded/failed/interrupted/ready_for_review, elapsed last activity current tool and phase; use actual Pi tool_execution_start/update/end events; quiet never auto restarts/kills",
+    "Validated task execution settings deadlineMs quietMs toolTimeoutMs heartbeatMs with sensible defaults and finite positive bounds. Total wall deadline starts before readiness/isolation/classifier, covers worker checks/postflight and all attempts; each phase uses remaining time; no success after deadline",
+    "Tool execution watchdog times from tool_execution_start through tool_execution_end, updates do not reset tool duration; exceed limit stops Pi process group with TERM then bounded KILL; Linux detached process group cancellation covers shell children. Checks also bounded by remaining deadline and tool limit",
+    "SIGINT/SIGTERM returns interrupted handback, stops process groups, preserves logs/evidence/partial edits and releases locks; malformed/partial events or child startup errors also produce inspectable failed receipt. Preserve before/after evidence even on timeouts",
+    "No automatic retries/restarts. Explicit repair contracts reuse session with max one repair by default and persisted lineage counter; reject over-budget repair before paid calls; deadline includes explicit persisted recovery lineage budget or clearly define one absolute lineage deadline",
+    "Common prompt restricts searches to execution checkout and named context/dependency paths, stop on blockers, no broad filesystem search. This is instruction not sandbox guarantee",
+    "Offline child-process fixture tests verify activity->quiet->running, live heartbeat/log visibility, tool timeout, total deadline including checks, descendant cancellation, interruption, partial handback/lock release, repair rejection, compact receipt and existing test seams. No paid calls or installation in tests",
+    "README documents all CLI modes/states/settings and operational limits, keep code modular and maintain existing tests"
+  ],
+  "workflow": "test_first",
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ]
+    }
+  ]
+}

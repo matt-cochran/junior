@@ -1,0 +1,28 @@
+{
+  "constraints": [
+    "Only junior-upgrade existing runtime worker tests handoff README; focused corrections, no new features, dependencies commits pushes or nested workers",
+    "One review repair, preserve current implementation, actual tests offline process fixtures only"
+  ],
+  "acceptance": [
+    "Replace independent check spawnSync with async bounded process-group executor so check deadlines and SIGINT work, heartbeat stays live and grandchildren cannot survive; test a hung check with TERM-ignoring descendant",
+    "Fix streaming completion: consume stdout/stderr through close rather than exit to avoid losing final receipt bytes; process-tree cancellation must still SIGKILL TERM-ignoring descendants even when Pi parent exits quickly; do not clear kill escalation merely on direct child exit",
+    "Handle synchronous spawn throw, output stream errors and disk persistence failure with recoverable failure result and evidence. Add bound to stdout/stderr accumulation so unbounded output cannot exhaust memory; classify truncation explicitly rather than claim valid complete receipt",
+    "Enforce remaining deadline before worker launch and bound classifier startup readiness with remaining budget; git setup/evidence subprocesses must use remaining budget or document bounded cleanup overrun, never advertise harder guarantee than implemented. Interruption during preflight/postflight must stop paid phase promptly or bounded abort and produce interrupted",
+    "Regression tests exercise final trailing receipt bytes, parent exits on TERM while descendant ignores TERM, async check interruption, startup throw, output cap and already expired deadline avoiding worker startup; no weakened tests",
+    "Compact cost unknown remains honest: never mark zero raw Pi catalog cost as known charge; preserve requested source cwd and token/cache totals in compact receipt"
+  ],
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ]
+    }
+  ],
+  "resumeFrom": "/home/mc/working/junior-upgrade/.delivery/D08-runtime-handoff/1791215942358/result.json",
+  "deliverable": "Correct runtime lifecycle review findings before integration",
+  "cwd": "/home/mc/working/junior-upgrade",
+  "workflow": "test_first",
+  "id": "D08-runtime-review-fixes"
+}

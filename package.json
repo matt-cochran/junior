@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "version": "0.1.0",
+  "name": "junior",
+  "bin": {
+    "junior": "./junior.ts"
+  },
+  "description": "Bounded DeepSeek deliverables with independently checked handoffs",
+  "type": "module",
+  "scripts": {
+    "doctor": "node junior.ts doctor",
+    "test": "node --test worker.test.ts review.test.ts qa.test.ts hop-context.test.ts tools/tools.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

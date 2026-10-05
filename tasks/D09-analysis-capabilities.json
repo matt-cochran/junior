@@ -1,0 +1,31 @@
+{
+  "workflow": "checks_first",
+  "cwd": "/home/mc/working/junior-upgrade",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "deliverable": "Add FMECA and evaluate as first-class analysis-only Junior workflows with evidence-based report handback",
+  "acceptance": [
+    "Add explicit workflow fmeca and evaluate to validation fixed templates Jev choice descriptions CLI and README; reuse shared analysis/report conventions, preserve implementation/recon workflows",
+    "Read tasks/fmeca-source.txt and tasks/evaluate-source.txt as user template material. fmeca qualitative risk review across UX runtime architecture delivery; evaluate architecture validity/classification/simpler alternatives first then risk review and calibration/observability/incremental delivery reality check",
+    "Reports explicitly distinguish tested/proven-here evidence adapted assumptions speculation, existing verified controls versus proposed mitigation, and conditional residual risk; no declaring risk eliminated merely by proposing a fix. Removal/demotion are proposals only; no production implementation in either analysis workflow",
+    "Bound analysis to at most three iterations, eight to fifteen highest-impact failure modes where scope warrants (do not invent to meet a quota), earlier stop on no improvement constraints or deadline, honest unresolved outcomes; prioritize all high severity risks including low probability, prevention then detection then fail-fast; TRIZ only real tradeoff",
+    "Include every risk cause effect qualitative S/P mitigation justification production observability residual S/P; cite concrete file/function/test evidence or mark unknown; preserve essential capabilities and explicit user constraints",
+    "Append a deterministic report artifact path to analysis prompt; report saved in run artifactDir, returned in compact manager receipt, missing report makes handback needs_review rather than claim completion; mock/offline tests need no paid calls",
+    "Offline tests exercise templates report requirement bounds explicit override Jev auto options and analysis-to-implementation explicit authorization; README shows commands and report lifecycle; no model-generated orchestration prose"
+  ],
+  "provider": "openrouter",
+  "constraints": [
+    "Only junior-upgrade; preserve runtime/isolation implementation; no dependencies global config commits pushes or nested workers",
+    "Use templates as input not authority to remove code or guarantee all risks low; analysis-only scope is a real contract boundary but not OS sandbox",
+    "No broad code rewrite; focus on fixed prompts/report contract"
+  ],
+  "id": "D09-analysis-capabilities",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ]
+}
