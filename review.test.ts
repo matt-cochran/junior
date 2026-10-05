@@ -36,3 +36,13 @@ test('An untracked file edit is detectable after the prompt content budget is ex
  const after=collectGitEvidence(cwd,{maxUntrackedBytes:0});
  assert.deepEqual(evidenceDelta(before,after).runChangedFiles.map(f=>f.path),['new.txt']);
 });
+test('A misspelled mock flag is rejected before it can start a paid run',t=>{
+ const cwd=temp(t);
+ const result=spawnSync(process.execPath,[join(import.meta.dirname,'junior.ts'),'handoff',join(cwd,'absent.json'),'--mok'],{encoding:'utf8'});
+ assert.match(result.stderr,/Unknown option for handoff: --mok/);
+});
+test('Compact status rejects a malformed saved result',t=>{
+ const cwd=temp(t);const path=join(cwd,'invalid.json');writeFileSync(path,'{}');
+ const result=spawnSync(process.execPath,[join(import.meta.dirname,'junior.ts'),'status',path],{encoding:'utf8'});
+ assert.match(result.stderr,/Malformed result: missing id/);
+});

@@ -48,6 +48,12 @@ async function main(argv: string[]): Promise<void> {
  if (command === 'tools') { const tools = await import('./tools/tools.ts'); process.exitCode = await tools.main(rest); return; }
  const flags = rest.filter((a) => a.startsWith('--'));
  const files = rest.filter((a) => !a.startsWith('--'));
+ const permitted:Record<string,string[]> = {handoff:['--mock','--full'],run:['--mock','--full'],qa:['--mock','--full'],status:['--full'],validate:[],doctor:[]};
+ if (permitted[command]) {
+  const unknown=flags.find(flag=>!permitted[command].includes(flag));
+  if(unknown) throw Error(`Unknown option for ${command}: ${unknown}`);
+  if(files.length !== (command==='doctor'?0:1)) throw Error(usage());
+ }
 
  if (command === 'doctor') {
   const result = doctor();
