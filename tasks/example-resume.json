@@ -1,0 +1,23 @@
+{
+  "id": "example-resume",
+  "deliverable": "Implement the strategy recommended by example-recon",
+  "cwd": ".",
+  "workflow": "test_first",
+  "resumeFrom": ".delivery/example-recon/REPLACE_WITH_TIMESTAMP/result.json",
+  "acceptance": [
+    "The recommended change is implemented and the focused checks pass"
+  ],
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": ["--test", "worker.test.ts"]
+    }
+  ],
+  "constraints": [
+    "Do not commit or push",
+    "This task is the explicit authorization to change production code"
+  ],
+  "jev": {
+    "mode": "shadow"
+  }
+}

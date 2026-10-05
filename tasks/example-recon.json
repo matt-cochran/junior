@@ -1,0 +1,23 @@
+{
+  "id": "example-recon",
+  "deliverable": "Inspect the delivery worker and recommend a follow-up strategy without changing production code",
+  "cwd": ".",
+  "workflow": "recon",
+  "acceptance": [
+    "Findings are reported as tested, inferred or unknown with evidence",
+    "A recommended follow-up strategy is stated"
+  ],
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": ["--test", "worker.test.ts"]
+    }
+  ],
+  "constraints": [
+    "Keep experiments in .delivery scratch; retain no production changes",
+    "Do not commit or push"
+  ],
+  "jev": {
+    "mode": "shadow"
+  }
+}

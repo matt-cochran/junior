@@ -1,0 +1,32 @@
+{
+  "id": "D07-isolation-evidence",
+  "acceptance": [
+    "Replace unstaged-only evidence with tracked changes against HEAD including staged, unstaged, deleted, renamed plus nonignored untracked files; return changedFiles and bounded evidence with explicit truncation/unavailable metadata, never follow untracked symlinks out of checkout or read binary as text",
+    "Capture before-run evidence so preexisting changes are distinguishable from run changes; save evidence artifact and pass complete evidence to Jev, preserve existing exports/API behavior",
+    "Task isolation=worktree creates unique detached worktree at source HEAD before worker execution; refuse dirty source for this mode with actionable diagnostic rather than silently omitting edits; keep artifacts in source .delivery, record sourceCwd and executionCwd and retain checkout for review, never auto merge/remove/commit",
+    "All Pi execution and checks use executionCwd; recon runs in its isolated checkout and remains analysis-only by instruction; continuation with same worktree preserves correct cwd or explicitly rejects incompatible isolation/resume before paid calls",
+    "Lock execution checkout and Pi session if resuming; concurrent attempts fail before worker/model calls; release locks on all return/error paths; do not auto delete unknown/stale locks, give actionable diagnostics",
+    "Offline tests with temporary real Git repos verify staged/untracked/deleted evidence, truncation, symlink handling, dirty-source refusal, source untouched in worktree, checks cwd and concurrent lock rejection/release; preserve prior tests",
+    "README describes isolation defaults, non-sandbox limitations, review/integration workflow and evidence limitations"
+  ],
+  "cwd": "/home/mc/working/junior-upgrade",
+  "deliverable": "Add safe opt-in Git worktree isolation and complete bounded change evidence to Junior",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "constraints": [
+    "Only this isolated junior-upgrade repo; no global configuration, dependencies, pushes or implementation commits; do not edit original delivery-worker",
+    "No nested Pi calls. Searches only checkout and known Pi package directory. Keep modules small and focused; no scheduler framework",
+    "Preserve existing behavior unless explicitly required; default old run isolation remains none, future handoff command will default worktree"
+  ],
+  "jev": {
+    "mode": "off"
+  },
+  "workflow": "test_first"
+}

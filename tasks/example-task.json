@@ -1,0 +1,17 @@
+{
+  "id": "example-task",
+  "deliverable": "Verify the delivery worker setup end to end",
+  "cwd": "/home/mc/working/delivery-worker",
+  "acceptance": [
+    "The delivery worker reports ready for review"
+  ],
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": [
+        "-e",
+        "console.log('setup check passed')"
+      ]
+    }
+  ]
+}

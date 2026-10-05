@@ -1,0 +1,27 @@
+{
+  "id": "D02-receipt",
+  "acceptance": [
+    "Use Pi --mode json instead of print; save stdout separately as events.jsonl and stderr as worker.log",
+    "Result includes requested provider/model and observed unique provider/model pairs from authoritative assistant message_end events, session ID, and aggregated usage from those events only (no double counting turn_end or agent_end)",
+    "Missing observed metadata is explicitly unknown; mocks never claim an observed model; metadata is Pi-reported, not independent upstream attestation",
+    "Malformed JSONL must be surfaced in receipt; assistant error/aborted stopReason or missing agent_settled must prevent ready_for_review despite exit zero",
+    "status exposes receipt when present and still supports old result files",
+    "Add parser fixture tests for repeated events, multiple models, missing metadata, malformed JSONL, mock receipt and failure completion; keep prior tests"
+  ],
+  "deliverable": "Record verifiable Pi execution receipts",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "cwd": "/home/mc/working/delivery-worker",
+  "constraints": [
+    "Edit only worker.ts, worker.test.ts, README.md; no dependencies or nested Pi calls; no credentials access; no commits",
+    "Installed Pi docs: /home/mc/.nvm/versions/node/v26.5.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/json.md and message-types.md",
+    "Keep scope minimal; receipt parser exported for tests; preserve existing commands"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "pi": {
+    "name": "@earendil-works/pi-coding-agent",
+    "testedVersion": "1.0.3"
+  }
+}

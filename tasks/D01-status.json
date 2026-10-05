@@ -1,0 +1,27 @@
+{
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "cwd": "/home/mc/working/delivery-worker",
+  "constraints": [
+    "Only change worker.ts, worker.test.ts, README.md; no dependencies, no git commits, no authentication/config changes",
+    "Do not weaken existing tests or verification commands",
+    "Use Node built-ins; preserve test import behavior; do not run nested Pi workers",
+    "Keep implementation minimal; document status usage"
+  ],
+  "acceptance": [
+    "node worker.ts status <result.json> outputs the saved run id, outcome, checks, and artifact location as JSON",
+    "Missing file, invalid JSON, and malformed result shape produce a concise error and nonzero exit code",
+    "Valid failed-run results are displayed successfully; status is inspection, not execution",
+    "Existing validate and run commands retain behavior and existing tests remain intact",
+    "Add focused tests exercising status through the actual CLI for successful, failed, missing, invalid JSON, and malformed results"
+  ],
+  "deliverable": "Add a status command to the existing delivery-worker TypeScript CLI",
+  "id": "D01-status"
+}

@@ -1,0 +1,32 @@
+{
+  "constraints": [
+    "Scope only delivery-worker; no new dependencies, no config edits, no commits or pushes",
+    "Existing changes from D04 accepted: preserve them; no implementation rewrite",
+    "Use installed Pi session docs; keep Jev workflow choice separate from gates where needed; make classifier failures bounded with timeout",
+    "Use file pointers in task contracts and let worker read context; do not copy this conversation"
+  ],
+  "jev": {
+    "mode": "shadow"
+  },
+  "deliverable": "Add deterministic workflow templates selected by Jev and explicit Pi session continuation",
+  "acceptance": [
+    "Task workflow supports recon, test_first, checks_first, auto; explicit choice overrides classifier; auto uses one Jev choice question with descriptions, low confidence/outage defaults inspect-first checks_first and records recommendation",
+    "Prompt assembled from fixed common and workflow blocks plus task contract; no Jev-generated prose; recon returns tested/inferred/unknown findings and recommended strategy, keeps experiments in .delivery scratch and no retained production changes by instruction (not sandbox guarantee)",
+    "test_first instructs failing behavior test then implementation and focused checks; setup/docs use checks_first; prompt and selected template IDs saved as artifacts",
+    "Optional task resumeFrom is prior result.json; validate same resolved cwd and requested provider/model, valid prior Pi session ID; pass explicit --session ID, never --continue; record parent result and resumed session; new contract appended, never automatic recon-to-code approval",
+    "Cache reuse described as best effort; preserve observed cacheRead counters and requested/observed model receipt; no claim of guaranteed cache or actual billing",
+    "Offline tests for template override, uncertain classification, prompt blocks, session mismatch/no ID and correct argv; prior tests retained",
+    "Document examples for recon followed by explicitly authorized test_first continuation; no nested paid runs"
+  ],
+  "id": "D05-workflows",
+  "checks": [
+    {
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node",
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ]
+    }
+  ],
+  "cwd": "/home/mc/working/delivery-worker"
+}

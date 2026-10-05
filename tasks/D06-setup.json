@@ -1,0 +1,32 @@
+{
+  "deliverable": "Add idempotent init and read-only doctor commands to the delivery worker CLI for Ubuntu WSL",
+  "acceptance": [
+    "node worker.ts doctor accepts no task file, emits concise JSON readiness checks and nonzero exit when required prerequisites fail; no installation, config writes or paid network calls",
+    "Check supported Node version, resolved Pi executable/version and executable location to reveal PATH/nvm mismatch; inspect credential presence without returning credential values; verify requested DeepSeek model via local Pi catalog or SDK with bounded calls and actionable missing-model diagnosis",
+    "node worker.ts init safely creates project defaults and example task only if absent; preserve existing files and all global auth/model configuration; defaults consumed by run with explicit task provider/model taking precedence",
+    "Install missing Pi only through explicit init --install flag using exact currently installed tested package/version discovered from local package.json; use npm argv without shell interpolation and bounded timeout; ordinary init reports install instruction when missing",
+    "Authentication guidance uses pi /login and /model; no secret collection, output, key copying or login automation; paid smoke test separate explicit opt-in only, existing smoke command can serve this purpose",
+    "Offline tests use injected environment/process/filesystem or temporary directories for ready/missing Pi, auth/model failure, repeat init preserves files, explicit install behavior, defaults precedence and existing CLI commands; actual tests must never install or call paid APIs",
+    "README documents WSL setup, commands, supported version, flags and exact paid-smoke opt-in; init reports readiness honestly"
+  ],
+  "jev": {
+    "mode": "off"
+  },
+  "workflow": "test_first",
+  "cwd": "/home/mc/working/delivery-worker",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "id": "D06-setup",
+  "constraints": [
+    "Only delivery-worker source, tests, README and optional setup module; preserve all existing changes; no dependencies, commits, pushes, global configuration writes or actual installations during implementation",
+    "Restrict searches to project and known /home/mc/.nvm/versions/node/v26.5.0/lib/node_modules/@earendil-works/pi-coding-agent; no filesystem-wide searches",
+    "Inspect local Pi docs and package metadata; never read or print credential values; no nested Pi workers; keep solution minimal"
+  ]
+}

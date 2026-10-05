@@ -1,0 +1,25 @@
+{
+  "id": "example-shadow",
+  "deliverable": "Illustrative shadow task showing optional explicit pricing",
+  "cwd": ".",
+  "acceptance": [
+    "The task validates and its independent checks run"
+  ],
+  "checks": [
+    {
+      "command": "node",
+      "args": ["--test", "worker.test.ts"]
+    }
+  ],
+  "pricing": {
+    "input": 0.1,
+    "output": 0.2,
+    "cacheRead": 0.01,
+    "cacheWrite": 0.1,
+    "source": "illustrative-example-only (replace with verified provider pricing)",
+    "date": "2025-01-01"
+  },
+  "jev": {
+    "mode": "shadow"
+  }
+}

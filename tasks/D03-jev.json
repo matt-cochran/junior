@@ -1,0 +1,29 @@
+{
+  "cwd": "/home/mc/working/delivery-worker",
+  "id": "D03-jev",
+  "constraints": [
+    "Edit only this delivery-worker directory; no credentials printed or embedded; no global config edits; no git commits",
+    "Use installed Pi SDK via explicit module resolution or configurable module path, no dependency install without reporting need",
+    "Do not invoke nested workers; do not run a live Jev probe; keep scope minimal"
+  ],
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "acceptance": [
+    "Fix receipt missing usage/cost: expose explicit availability; absent cost must not masquerade as free; reject settled streams with no assistant messages",
+    "Add optional task jev config mode shadow or enforce, default off; preflight assesses contract clarity and unresolved assumptions; postflight assesses each acceptance criterion using independent check results and bounded git diff evidence",
+    "Use installed Pi SDK modelRegistry.classify with OpenRouter typesafe/jev-1.13 classifier, reusing Pi AuthStorage normally; no premium chat call for gates; learn API from installed docs/sdk.md and examples",
+    "Missing classifier catalog entry may be supplied explicitly using verified SDK API; gate errors and low confidence are uncertain; shadow records and continues, enforce blocks readiness or marks needs_review; no gate can override failed worker/checks",
+    "Record Jev answers/model/usage/error in result, plus actionable criterion IDs for parent review; no automatic repair yet",
+    "Implement asynchronous run if necessary; CLI awaits it and tests updated without weakening checks",
+    "Add offline injected/mock classifier tests covering preflight block, postflight gap, outage, shadow behavior, and failed checks; no paid calls in tests",
+    "Document micro-deliverable stages and setup; do not claim independent upstream attestation or full code correctness"
+  ],
+  "deliverable": "Add opt-in Jev readiness and completion gates with honest execution cost receipts"
+}

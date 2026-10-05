@@ -1,0 +1,45 @@
+{
+  "constraints": [
+    "Read worker.ts worker.test.ts README.md; scope only this directory; do not change Pi user configuration or access credentials",
+    "No dependency installation; no nested Pi or paid classifier calls; outer wrapper owns Jev shadow assessment",
+    "No final implementation commit: baseline commit only, keep resulting diff reviewable",
+    "Keep changes small; do not rewrite gate subsystem"
+  ],
+  "id": "D04-cost-shadow",
+  "cwd": "/home/mc/working/delivery-worker",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "worker.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    },
+    {
+      "args": [
+        "rev-parse",
+        "--is-inside-work-tree"
+      ],
+      "command": "git"
+    },
+    {
+      "args": [
+        "check-ignore",
+        ".delivery/probe"
+      ],
+      "command": "git"
+    }
+  ],
+  "jev": {
+    "mode": "shadow"
+  },
+  "deliverable": "Establish Git change tracking and trustworthy estimated execution costs for the delivery worker",
+  "acceptance": [
+    "Initialize a Git repository here only; ignore .delivery/ and node_modules; create an initial baseline commit of current source before edits with explicit file staging; if identity missing use command-local identity, never global config; no pushes",
+    "Distinguish Pi catalog-estimated cost from actual billed cost; raw Pi zero with positive usage and no verified pricing must be unknown, not free",
+    "Support optional explicit task pricing rates per million tokens for input, output, cacheRead, cacheWrite, with source and date; validate finite nonnegative rates; calculate estimate from independently observed usage without double counting reasoning",
+    "Result exposes estimatedUsd, pricingSource, pricingDate, billedUsd null, and raw Pi cost separately; unknown rates or multiple observed models produce unknown estimate",
+    "Add focused offline tests for zero catalog costs, known estimate arithmetic including cache, missing rates, invalid rates, multiple models and status exposure; preserve existing checks",
+    "Document the cost schema and interpretation and add one reusable shadow task example; do not fetch live pricing or embed unverified rates"
+  ]
+}
