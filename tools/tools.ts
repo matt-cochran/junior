@@ -35,7 +35,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { isDirectEntry } from "../cli-entry.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -1062,8 +1062,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+if (isDirectEntry(import.meta.url)) {
   void main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   });

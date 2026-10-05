@@ -16,10 +16,11 @@ import { readFileSync } from 'node:fs';
 import { run, validate, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions } from './setup.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
+import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 
 function usage(): string {
  return [
-  'Usage: node junior.ts <command> [args]',
+  'Usage: junior <command> [args]',
   '  handoff <task.json> [--mock] [--full]   run a task and print the compact handoff (default isolation=worktree; qa defaults to none)',
   '  qa      <task.json> [--mock] [--full]   run the report-only QA review workflow in place (fresh reviewer session)',
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
@@ -45,6 +46,8 @@ export function withHandoffIsolation(raw: any): any {
 async function main(argv: string[]): Promise<void> {
  const command = argv[0];
  const rest = argv.slice(1);
+ if (!command || command === '--help' || command === '-h' || command === 'help') { console.log(usage()); return; }
+ if (command === '--version' || command === '-v' || command === 'version') { console.log(readPackageVersion(import.meta.url)); return; }
  if (command === 'tools') { const tools = await import('./tools/tools.ts'); process.exitCode = await tools.main(rest); return; }
  const flags = rest.filter((a) => a.startsWith('--'));
  const files = rest.filter((a) => !a.startsWith('--'));
@@ -62,7 +65,14 @@ async function main(argv: string[]): Promise<void> {
   return;
  }
  if (command === 'init') {
-  const result = init({}, parseInitOptions(rest));
+  const opts = parseInitOptions(rest);
+  const result:any = init({}, opts);
+  if (opts.install) {
+   const installer = await import('./installer.ts');
+   const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
+   result.tools = report;
+   if (!report.ok) process.exitCode = 1;
+  }
   console.log(JSON.stringify(result, null, 2));
   if (result.install && !result.install.ok) process.exitCode = 1;
   return;
@@ -101,6 +111,6 @@ async function main(argv: string[]): Promise<void> {
  throw Error(usage());
 }
 
-if (process.argv[1]?.endsWith('/junior.ts')) {
+if (isDirectEntry(import.meta.url)) {
  main(process.argv.slice(2)).catch((e) => { console.error(String(e)); process.exitCode = 1; });
 }

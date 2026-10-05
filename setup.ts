@@ -18,6 +18,7 @@ import { join, dirname, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -34,6 +35,17 @@ export const SKILL_NAME = 'junior';
 export const SKILL_FILENAME = 'SKILL.md';
 export const SKILL_MANIFEST_FILENAME = '.junior-manifest.json';
 export const PACKAGED_SKILL_PATH = join(dirname(fileURLToPath(import.meta.url)), 'skills', SKILL_NAME, SKILL_FILENAME);
+
+/** Resolve the CLI entry that ships beside this module: `dist/junior.js` when
+ * compiled, or `junior.ts` in a source checkout. The installed skill records
+ * this path so it can invoke the packaged CLI without assuming a checkout. */
+export function resolveJuniorCliPath(moduleDir:string = dirname(fileURLToPath(import.meta.url))):string {
+ const js=join(moduleDir,'junior.js');
+ if (existsSync(js)) return js;
+ const ts=join(moduleDir,'junior.ts');
+ if (existsSync(ts)) return ts;
+ return js;
+}
 
 export type ExecResult = { status:number|null; stdout?:string; stderr?:string; error?:string };
 
@@ -52,6 +64,8 @@ export type SetupDeps = {
  installedPi?:{name:string;version:string}|null;
  /** Packaged skill source path; tests inject a fixture instead of the module copy. */
  skillSource?:string;
+ /** Managed prebuilt-tool root; tests inject a fixture instead of the user home. */
+ toolsRoot?:string;
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -199,6 +213,9 @@ export type DoctorResult = {
  model:ModelCheck;
  /** Skill readiness is reported separately; it does not change Pi execution readiness (`ok`). */
  skill:SkillReadiness;
+ /** Prebuilt integration readiness is reported separately from Pi execution/auth readiness. */
+ integrations:IntegrationsResult;
+ integrationsReady:boolean;
  checks:DoctorCheck[];
  remediation:string[];
 };
@@ -229,7 +246,8 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
   { id:'model', ok:model.available, detail:model.available ? `${provider}/${defaults.model} in ${model.source}` : (model.note as string) },
  ];
  const skill=inspectSkill(deps);
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, checks, remediation };
+ const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
+ return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, checks, remediation };
 }
 
 export type InitResult = {
@@ -351,7 +369,7 @@ export type SkillReadiness = {
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
 export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string };
-export type InitOptions = SkillInstallOptions & { install?:boolean };
+export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean };
 
 function sha256(text:string):string {
  return createHash('sha256').update(text).digest('hex');
@@ -388,7 +406,8 @@ function writeSkillManifest(deps:SetupDeps, manifestPath:string, hash:string, so
  const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
  const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
  mkdir(dirname(manifestPath));
- write(manifestPath, JSON.stringify({ skill:SKILL_NAME, skills:{ [SKILL_NAME]:{ hash, source } } },null,2)+'\n');
+ const cli=resolveJuniorCliPath();
+ write(manifestPath, JSON.stringify({ skill:SKILL_NAME, skills:{ [SKILL_NAME]:{ hash, source, cli } } },null,2)+'\n');
 }
 
 function readSkillSource(deps:SetupDeps):{ path:string; text:string } {
@@ -481,6 +500,8 @@ export function parseInitOptions(argv:string[]):InitOptions {
   else if (a === '--user') opts.scope='user';
   else if (a === '--project') opts.scope='project';
   else if (a === '--upgrade') opts.upgrade=true;
+  else if (a === '--update') opts.update=true;
+  else if (a === '--with-triz') opts.withTriz=true;
   else if (a === '--force') opts.force=true;
   else if (a === '--no-skill') opts.target='none';
   else if (a === '--scope') opts.scope = argv[++i] === 'user' ? 'user' : 'project';

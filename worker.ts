@@ -1,4 +1,5 @@
 import {loadHopContext} from './hop-context.ts';
+import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -1453,7 +1454,7 @@ export function status(path:string) {
  if (typeof result.workerError === 'string') out.workerError=result.workerError;
  return out;
 }
-if (process.argv[1]?.endsWith('/worker.ts')) {
+if (isDirectEntry(import.meta.url)) {
  try {
  const argv=process.argv.slice(2);
  const command=argv[0];

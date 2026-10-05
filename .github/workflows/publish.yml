@@ -1,0 +1,60 @@
+name: Publish
+
+# Manual or tag-driven npm publishing with provenance. This workflow never runs
+# on its own; a maintainer either pushes a `vX.Y.Z` tag or dispatches it with a
+# matching tag input. It gates on the packaged tests, pins the tag to the
+# package version, skips an already-published version, and only then publishes.
+#
+# One-time setup (see README "Publishing" for details):
+#   1. `npm login` locally as a maintainer of the @matt-cochran scope.
+#   2. On npmjs.com, configure this repository and workflow as a Trusted
+#      Publisher for @matt-cochran/junior (GitHub Actions, environment blank,
+#      workflow `publish.yml`). No NPM_TOKEN secret is needed; OIDC supplies a
+#      short-lived credential via `id-token: write`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (vX.Y.Z); required for manual runs
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - name: Gate on the packaged tests
+        run: npm test
+      - name: Verify the release tag matches the package version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: node scripts/verify-tag-version.mjs
+      - name: Use a provenance-capable npm only when needed
+        run: |
+          if ! node -e "const [a,b,c]=require('node:child_process').execSync('npm --version').toString().trim().split('.').map(Number);process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)"; then
+            npm install -g npm@latest
+          fi
+      - name: Check whether this version is already published
+        id: published
+        run: node scripts/check-published.mjs
+      - name: Publish with provenance
+        if: steps.published.outputs.published != 'true'
+        run: npm publish --provenance --access public
