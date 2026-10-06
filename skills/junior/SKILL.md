@@ -59,7 +59,10 @@ node <cli> handoff /absolute/task.json
 
 `handoff` prints a compact receipt. Add `--full` for the full result, `--mock`
 for an offline simulation with no provider spend. `doctor` is a read-only
-readiness check; `init` is idempotent project setup.
+readiness check; `init` is idempotent project setup. `init` records exact local
+Git exclusions (`.git/info/exclude`) for the files it generates and `.delivery/`,
+so a fresh project is immediately ready for a `worktree` handoff without a
+manual commit or stash.
 
 ## Runtime and isolation guarantees
 
@@ -71,6 +74,13 @@ readiness check; `init` is idempotent project setup.
   setting only reports a no-output interval and is **not** a hard deadline. The
   process group is cancelled on interrupt and execution/session locks are
   released.
+- Retained worktrees live at `.delivery/<id>/<timestamp>/worktree`; logs and
+  results stay beside them. Review them, then clean unreviewed ones with
+  `junior prune [--older-than 24h] [--keep-last N] [--dry-run]`. `prune` removes
+  only inactive clean registered Junior worktrees, never uses `--force`, preserves
+  the artifact directory, and skips dirty, locked, foreign, symlinked or
+  escaping paths and the source checkout. `doctor` reports the retained count
+  and disk usage read-only.
 - The receipt records requested and observed model, usage, cost availability,
   stop reasons, changed files and artifact paths. `ready_for_review` is a
   handoff, not acceptance. An unavailable estimate with `billedUsd: null` is

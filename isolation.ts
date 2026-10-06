@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
@@ -28,6 +28,11 @@ export function resolveIsolation(t: any): { mode: IsolationMode; error?: string 
 
 function git(cwd: string, args: string[], timeoutMs = 60000) {
  return spawnSync('git', args, { cwd, encoding: 'utf8', timeout: typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 1, maxBuffer: 8 * 1024 * 1024 });
+}
+
+/** Bounded Git subprocess runner shared by the retention/quarantine helpers. */
+export function runGit(cwd: string, args: string[], timeoutMs = 60000) {
+ return git(cwd, args, timeoutMs);
 }
 
 /** Report whether a checkout has any staged, unstaged or nonignored untracked
@@ -52,6 +57,47 @@ export function createDetachedWorktree(sourceCwd: string, dest: string, timeoutM
  const r = git(sourceCwd, ['worktree', 'add', '--detach', dest, 'HEAD'], timeoutMs);
  if (r.error) return { ok: false, error: r.error.message };
  if (r.status !== 0) return { ok: false, error: (r.stderr || r.stdout || `git worktree add exited ${r.status}`).trim() };
+ return { ok: true };
+}
+
+/** Header written before the exact Junior-generated local exclude patterns. */
+export const JUNIOR_EXCLUDE_HEADER = '# junior-generated (local, not committed)';
+
+/** Append exact Junior-owned paths to the repository-local `.git/info/exclude`.
+ * Existing content is preserved verbatim and already-present patterns are not
+ * duplicated. Outside a Git checkout there is nothing to do. This is a local
+ * exclusion only; it never edits a tracked `.gitignore` or a user's rules. */
+export function ensureLocalExcludes(cwd: string, patterns: string[]): { path: string | null; added: string[]; error?: string } {
+ const gd = git(cwd, ['rev-parse', '--git-dir']);
+ if (gd.error) return { path: null, added: [], error: gd.error.message };
+ if (gd.status !== 0) return { path: null, added: [] };
+ const raw = (gd.stdout || '').trim();
+ if (!raw) return { path: null, added: [] };
+ const gitDir = isAbsolute(raw) ? raw : resolve(cwd, raw);
+ const excludePath = join(gitDir, 'info', 'exclude');
+ let existing = '';
+ try { existing = readFileSync(excludePath, 'utf8'); } catch { /* an absent exclude file is the normal case */ }
+ const lines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
+ const wanted = patterns.filter((p) => p && !lines.has(p));
+ if (wanted.length === 0) return { path: excludePath, added: [] };
+ const prefix = existing.length === 0 ? '' : existing.endsWith('\n') ? existing : `${existing}\n`;
+ const header = lines.has(JUNIOR_EXCLUDE_HEADER) ? '' : `${JUNIOR_EXCLUDE_HEADER}\n`;
+ try {
+  mkdirSync(dirname(excludePath), { recursive: true });
+  writeFileSync(excludePath, `${prefix}${header}${wanted.join('\n')}\n`);
+ } catch (e: any) {
+  return { path: excludePath, added: [], error: e?.message || String(e) };
+ }
+ return { path: excludePath, added: wanted };
+}
+
+/** Remove a registered linked worktree and deregister it. Uses no `--force`, so
+ * Git still refuses to discard modified or untracked files. */
+export function removeRegisteredWorktree(sourceCwd: string, path: string, timeoutMs?: number): { ok: boolean; error?: string } {
+ const r = git(sourceCwd, ['worktree', 'remove', path], timeoutMs);
+ if (r.error) return { ok: false, error: r.error.message };
+ if (r.status !== 0) return { ok: false, error: (r.stderr || r.stdout || `git worktree remove exited ${r.status}`).trim() };
+ git(sourceCwd, ['worktree', 'prune'], timeoutMs);
  return { ok: true };
 }
 

@@ -19,6 +19,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
+import { ensureLocalExcludes } from './isolation.ts';
+import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -295,6 +297,8 @@ export type DoctorResult = {
  /** Prebuilt integration readiness is reported separately from Pi execution/auth readiness. */
  integrations:IntegrationsResult;
  integrationsReady:boolean;
+ /** Read-only retained-worktree count and disk usage; never blocks readiness. */
+ retention:RetentionSummary;
  checks:DoctorCheck[];
  remediation:string[];
 };
@@ -332,7 +336,8 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  ];
  const skill=inspectSkill(deps);
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, checks, remediation };
+ const retention=retainedWorktreeSummary(cwd);
+ return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
@@ -366,6 +371,8 @@ export type InitResult = {
  ready:boolean;
  pi:PiCheck;
  skill:SkillResult;
+ /** Exact Junior-owned paths newly added to the repository-local exclude file. */
+ excluded:string[];
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; error?:string };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
@@ -383,6 +390,23 @@ function exampleTask(cwd:string, execPath:string):any {
   acceptance:['The delivery worker reports ready for review'],
   checks:[{command:execPath, args:['-e',"console.log('setup check passed')"]}],
  };
+}
+
+/** Exact repo-relative paths `init` newly created and therefore owns. A
+ * pre-existing untracked config, task or skill is never hidden from the user.
+ * `.delivery/` is always excluded because it is runtime-owned output. */
+function generatedExcludePatterns(skill:SkillResult, created:string[]):string[] {
+ const patterns=['/.delivery/'];
+ if (created.includes('delivery.config.json')) patterns.push('/delivery.config.json');
+ if (created.includes('tasks/example-task.json')) patterns.push('/tasks/example-task.json');
+ if (skill.scope === 'project') {
+  for (const action of skill.actions) {
+   if (action.status !== 'created') continue;
+   const root=action.manager === 'codex' ? '.agents/skills' : '.claude/skills';
+   patterns.push(`/${root}/junior/`, `/${root}/${SKILL_MANIFEST_FILENAME}`);
+  }
+ }
+ return [...new Set(patterns)];
 }
 
 /** Idempotent project setup. Creates project defaults and an example task only
@@ -414,6 +438,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  }
 
  const skill=installSkill(deps, opts);
+ const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(skill, created)).added;
  let readiness=doctor(deps);
  let install:InitResult['install'];
  if (opts.install && readiness.pi.found && readiness.pi.version) {
@@ -433,7 +458,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
- return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, install,
+ return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, install,
   installSummary:summarizeInstall(install,null), instructions };
 }
 

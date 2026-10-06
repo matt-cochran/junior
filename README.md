@@ -5,12 +5,13 @@ Delegate one bounded deliverable to a capable commodity model (DeepSeek is the t
 ```bash
 node junior.ts init
 node junior.ts doctor
+node junior.ts prune --dry-run
 node junior.ts handoff /absolute/task.json
 node junior.ts status /absolute/result.json
 npm test
 ```
 
-Implementation handoffs default to a clean Git worktree. `init` writes project files and installs project-local manager skills; review/commit those files before a worktree handoff, or explicitly choose `isolation: "none"`. Optional report-only workflows are `recon`, `fmeca`, `evaluate`, and fresh-session `qa`. Shared FMECA/CPM/Crossmatrix state uses `junior.ts tools`; TRIZ is a [separate tool](https://github.com/matt-cochran/triz).
+Implementation handoffs default to a clean Git worktree. `init` writes project files and installs project-local manager skills, then records **exact** local Git exclusions for the files it generated so the checkout is not dirtied by Junior-owned scaffold or `.delivery/` artifacts; a fresh `init` is immediately ready for a worktree handoff. Retained worktrees can be reviewed and then safely cleaned with `junior prune`. Optional report-only workflows are `recon`, `fmeca`, `evaluate`, and fresh-session `qa`. Shared FMECA/CPM/Crossmatrix state uses `junior.ts tools`; TRIZ is a [separate tool](https://github.com/matt-cochran/triz).
 
 The detailed reference below retains the legacy `worker.ts` commands and all configuration options.
 
@@ -118,6 +119,7 @@ node junior.ts handoff tasks/example-task.json --full
 node junior.ts status .delivery/<id>/<timestamp>/result.json
 node junior.ts status .delivery/<id>/<timestamp>/result.json --full
 node junior.ts doctor
+node junior.ts prune [--older-than 24h] [--keep-last 2] [--dry-run]
 node junior.ts init [--install]
 node junior.ts validate smoke.json
 node junior.ts run smoke.json --mock
@@ -200,8 +202,10 @@ This prototype was built as small, inspectable stages:
   inside WSL and use it for both `node` and the global `pi` install so the two
   resolve from the same bin directory.
 - The worker shells out to `pi` for live runs; `--mock` performs no Pi call.
-- Logs and results are saved in the target checkout under `.delivery/`. Add it
-  to that repository's ignore rules.
+- Logs and results are saved in the target checkout under `.delivery/`. `init`
+  adds `.delivery/` and the exact generated scaffold/skill paths to the
+  repository-local `.git/info/exclude` (never a tracked `.gitignore`), so it
+  never broadly ignores a `tasks/` or manager skill directory.
 - Jev gates use the installed Pi SDK. Resolution order: `PI_SDK_MODULE` (or
   `PI_SDK_PATH`) if set, then the global `node_modules` beside the running
   `node`, then normal package resolution. No dependency install is performed.
@@ -239,6 +243,13 @@ or makes a paid network call. Checks:
   readiness in the `skill` field (`current`, `outdated`, `customized` or
   `missing` per manager). A missing or customized skill does not change the
   Pi execution `ok`/exit status.
+- **Retained worktrees**: reports the count and approximate disk usage of
+  retained Junior worktrees under `.delivery/<id>/<timestamp>/worktree`, plus a
+  readiness note pointing at `junior prune`. The traversal never follows a
+  symlinked root or parent outside `.delivery/`, and when an entry/time bound
+  stops the walk the note says the measurement was truncated instead of
+  presenting a partial size as complete. This is a read-only count; it never
+  removes anything and never makes a provider call.
 - **Integrations**: reports prebuilt FMECA/CPM/Crossmatrix readiness (installed
   version, release provenance and binary path) separately from Pi execution and
   auth readiness in the `integrations`/`integrationsReady` fields, plus the
@@ -274,11 +285,17 @@ explicit task `provider`/`model` always takes precedence over the defaults.
 returns `ready` (Pi execution **and** skill install), plus `instructions` when
 something is missing.
 
-> **Project init creates Git changes.** It writes config, the example task and
-> the skill directories into the target checkout. The default `handoff`
-> isolation is `worktree`, which requires a clean source checkout, so commit or
-> review these init files (or pass `isolation: "none"`) before the first
-> handoff. Junior never commits and never silently excludes generated files.
+> **Project init keeps the checkout clean.** For the files it actually creates
+> it appends exact local exclusions to `.git/info/exclude`: `/delivery.config.json`,
+> `/tasks/example-task.json`, `/.delivery/`, and the specific installed
+> `junior` skill + manifest paths. A pre-existing untracked config, task or
+> skill is **not** excluded, so it stays visible as a source change; `.delivery/`
+> is always excluded because it is runtime-owned output. Existing exclude
+> content, tracked edits and unrelated untracked files are untouched, and
+> nothing under `tasks/` or a manager skill root other than the Junior-owned
+> paths is ignored. A fresh `init` is therefore immediately ready for the
+> default `worktree` handoff with no manual commit or stash. Junior never
+> commits and never edits a tracked `.gitignore`.
 
 #### Skill install and upgrade
 By default `init` installs the skill for both managers into the project. The
@@ -593,10 +610,45 @@ then inspect/diff or merge it manually).
 
 `isolation=worktree` refuses to start when the source checkout is dirty
 (staged, unstaged or nonignored untracked changes) and reports an actionable
-diagnostic instead of silently omitting edits. Commit or stash the work, or use
-`isolation=none`. This is **not a sandbox**: the worker runs with the same
-filesystem and network access as the caller; isolation only provides a separate
-checkout and a clean evidence baseline.
+diagnostic instead of silently omitting edits. Because `init` records local
+Git exclusions for its exact generated paths, the files it creates do not make
+the source dirty. Commit or stash any other work, or use `isolation=none`.
+This is **not a sandbox**: the worker runs with the same filesystem and network
+access as the caller; isolation only provides a separate checkout and a clean
+evidence baseline.
+
+### Retained worktrees and `prune`
+Each `worktree` run retains its linked checkout at
+`.delivery/<id>/<timestamp>/worktree` for review, alongside the run's
+`result.json`, `worker.log`, `events.jsonl` and `evidence.json`. The worktree is
+never merged, committed or removed by the worker.
+
+```bash
+node junior.ts prune --dry-run              # report candidates only
+node junior.ts prune --older-than 24h       # remove clean worktrees older than a day
+node junior.ts prune --keep-last 2          # keep the two newest, remove the rest
+node junior.ts prune --older-than 7d --keep-last 2
+```
+
+`prune` removes **only** inactive, clean, registered Junior worktrees and then
+deregisters them; removal never passes `--force`. With no filters it removes
+every eligible worktree, so run `--dry-run` first. It skips and reports:
+
+- worktrees with unreviewed tracked or untracked changes,
+- clean worktrees whose detached commits are not reachable from any retained
+  source branch, tag or remote ref (an unreviewed commit is never discarded),
+- worktrees held by an active `.delivery/locks/` advisory lock,
+- foreign/non-Junior worktrees and the source checkout,
+- paths that are symlinks or resolve outside `.delivery/`.
+
+The artifact directory (logs and results) is preserved; only the linked
+worktree checkout is removed. Before inspecting or removing a candidate,
+`prune` acquires the same `checkout:<path>` advisory lock an execution uses and
+releases it in `finally`, so a live run and a prune cannot race; an existing
+active lock is never removed. `--older-than` takes `s`, `m`, `h` or `d`; the
+filters compose so a worktree is removed only when it is older than the
+duration **and** outside the last-N window. `doctor.retention` reports the
+current count, disk usage and readiness note without writing.
 
 Continuation (`resumeFrom`) is checkout-scoped because a Pi session is bound to
 its working directory. A continuation must use the same isolation as the prior

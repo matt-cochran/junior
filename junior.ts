@@ -17,6 +17,7 @@ import { run, validate, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, summarizeInstall } from './setup.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
+import { parseDuration, pruneWorktrees } from './retention.ts';
 
 function usage(): string {
  return [
@@ -28,6 +29,8 @@ function usage(): string {
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...            persistent FMECA / CPM / Crossmatrix handoff',
   '  doctor                                  read-only readiness check',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]',
+  '          remove inactive clean retained Junior worktrees',
   '  init    [--install] [--target codex|claude|both|none] [--user]',
   '          [--upgrade] [--force] [--skill-root DIR]   idempotent project setup + skill install',
  ].join('\n');
@@ -73,6 +76,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior status <result.json> [--full]' },
  doctor: { flags: [], valueFlags: [], min: 0, max: 0,
   help: 'Usage: junior doctor' },
+ prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
+  help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
  init: {
   flags: ['--install', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -151,6 +156,24 @@ async function main(argv: string[]): Promise<void> {
   const result = doctor();
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
+  return;
+ }
+ if (command === 'prune') {
+  const olderRaw = parsed.values['--older-than'];
+  let olderThanMs: number | undefined;
+  if (olderRaw !== undefined) {
+   const parsedMs = parseDuration(olderRaw);
+   if (parsedMs === null) throw Error(`Invalid --older-than duration: ${olderRaw} (use e.g. 30m, 24h, 7d)`);
+   olderThanMs = parsedMs;
+  }
+  const keepRaw = parsed.values['--keep-last'];
+  let keepLast: number | undefined;
+  if (keepRaw !== undefined) {
+   keepLast = Number(keepRaw);
+   if (!Number.isInteger(keepLast) || keepLast < 0) throw Error(`Invalid --keep-last count: ${keepRaw}`);
+  }
+  const result = pruneWorktrees(process.cwd(), { olderThanMs, keepLast, dryRun: parsed.flags.has('--dry-run') });
+  console.log(JSON.stringify(result, null, 2));
   return;
  }
  if (command === 'init') {

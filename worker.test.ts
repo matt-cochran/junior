@@ -865,6 +865,90 @@ test('Doctor checks the configured provider and model',()=>{
  assert.equal(d.credentials.provider,'deepseek');
 });
 
+// --- D06b init local exclusions + immediate mock handoff (real Git fixtures) ---
+const initRepo=()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-init-git-'));
+ const git=(args:string[])=>spawnSync('git',args,{cwd:dir,encoding:'utf8'});
+ git(['init','-q']);
+ git(['config','user.email','t@example.com']);
+ git(['config','user.name','tester']);
+ git(['config','commit.gpgsign','false']);
+ writeFileSync(join(dir,'base.txt'),'base\n');
+ git(['add','base.txt']);
+ git(['commit','-qm','base']);
+ return {dir,git};
+};
+const exampleTaskFrom=(dir:string)=>JSON.parse(readFileSync(join(dir,'tasks','example-task.json'),'utf8'));
+
+test('Init adds local exclusions so generated scaffold does not dirty the checkout',()=>{
+ const repo=initRepo();
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.equal(sourceDirty(repo.dir).dirty,false);
+});
+test('Init preserves existing local exclude content',()=>{
+ const repo=initRepo();
+ const exclude=join(repo.dir,'.git','info','exclude');
+ writeFileSync(exclude,'# user rule\n/my-secret\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.match(readFileSync(exclude,'utf8'),/user rule/);
+});
+test('Init leaves a pre-existing untracked config visible as a source change',()=>{
+ const repo=initRepo();
+ writeFileSync(join(repo.dir,'delivery.config.json'),'{"provider":"openrouter","model":"x"}\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.match(sourceDirty(repo.dir).status||'',/delivery\.config\.json/);
+});
+test('Init leaves a pre-existing untracked example task visible as a source change',()=>{
+ const repo=initRepo();
+ mkdirSync(join(repo.dir,'tasks'),{recursive:true});
+ writeFileSync(join(repo.dir,'tasks','example-task.json'),'{}\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.match(sourceDirty(repo.dir).status||'',/tasks\//);
+});
+test('Init leaves a pre-existing customized skill visible as a source change',()=>{
+ const repo=initRepo();
+ mkdirSync(join(repo.dir,'.agents','skills','junior'),{recursive:true});
+ writeFileSync(join(repo.dir,'.agents','skills','junior','SKILL.md'),'custom\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}),{target:'codex'});
+ assert.match(sourceDirty(repo.dir).status||'',/\.agents\//);
+});
+test('Init preserves an untracked user file as a source change',()=>{
+ const repo=initRepo();
+ writeFileSync(join(repo.dir,'user.txt'),'user\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.match(sourceDirty(repo.dir).status||'',/user\.txt/);
+});
+test('Init preserves a tracked user modification as a source change',()=>{
+ const repo=initRepo();
+ writeFileSync(join(repo.dir,'base.txt'),'changed\n');
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ assert.match(sourceDirty(repo.dir).status||'',/base\.txt/);
+});
+test('Init does not broadly ignore the tasks directory',()=>{
+ const repo=initRepo();
+ mkdirSync(join(repo.dir,'tasks'),{recursive:true});
+ writeFileSync(join(repo.dir,'tasks','keep.txt'),'keep\n');
+ repo.git(['add','tasks/keep.txt']);
+ repo.git(['commit','-qm','track tasks']);
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ writeFileSync(join(repo.dir,'tasks','other-task.json'),'{}\n');
+ assert.match(sourceDirty(repo.dir).status||'',/tasks\/other-task\.json/);
+});
+test('Fresh init followed immediately by a mock worktree handoff succeeds',async()=>{
+ const repo=initRepo();
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ const r=await run({...exampleTaskFrom(repo.dir),isolation:'worktree'},true);
+ assert.equal(r.status,'simulation_passed');
+});
+test('A second consecutive mock worktree handoff after init succeeds',async()=>{
+ const repo=initRepo();
+ init(setupDeps(repo.dir,{execPath:process.execPath}));
+ const task=exampleTaskFrom(repo.dir);
+ await run({...task,isolation:'worktree'},true);
+ const r=await run({...task,isolation:'worktree'},true);
+ assert.equal(r.status,'simulation_passed');
+});
+
 // --- D10 packaged skill install + diagnosis (offline; temporary destinations only) ---
 const skillSource=(content:string)=>{const d=mkdtempSync(join(tmpdir(),'delivery-skill-src-'));const f=join(d,'SKILL.md');writeFileSync(f,content);return f;};
 const codexSkill=(root:string)=>join(root,'.agents','skills','junior','SKILL.md');

@@ -1024,6 +1024,16 @@ test('Doctor recommends a catalog refresh when only another provider is populate
  assert.match(doctor(deps).remediation.join(' '), /pi update --models/);
 });
 
+test('Doctor reports a zero retained-worktree count outside a Git checkout', () => {
+ const { deps } = doctorFixture();
+ assert.equal(doctor(deps).retention.count, 0);
+});
+
+test('Doctor retained-worktree note explains there is nothing to prune', () => {
+ const { deps } = doctorFixture();
+ assert.match(doctor(deps).retention.note, /No retained worktrees/);
+});
+
 test('Install summary records a Pi attempt from the install result', () => {
  const summary = summarizeInstall({ requested: true, attempted: true, ok: true }, null);
  assert.equal(summary.pi.attempted, true);

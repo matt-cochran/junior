@@ -31,7 +31,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -160,6 +160,22 @@ test('junior init reports an unattempted install summary by default', () => {
 
 test('junior doctor rejects an unknown option', () => {
   assert.notEqual(runJunior(['doctor', '--bogus'], workdir()).status, 0);
+});
+
+test('junior prune rejects an unknown option', () => {
+  assert.notEqual(runJunior(['prune', '--bogus'], workdir()).status, 0);
+});
+
+test('junior prune rejects an invalid --older-than value', () => {
+  assert.notEqual(runJunior(['prune', '--older-than=soon'], workdir()).status, 0);
+});
+
+test('junior prune rejects a missing --older-than value', () => {
+  assert.notEqual(runJunior(['prune', '--older-than'], workdir()).status, 0);
+});
+
+test('junior prune --dry-run exits successfully outside a Git checkout', () => {
+  assert.equal(runJunior(['prune', '--dry-run'], workdir()).status, 0);
 });
 
 test('junior doctor rejects excess positional arguments', () => {
