@@ -722,3 +722,7 @@ Optional QA: `node junior.ts qa qa-contract.json` (or a `handoff` contract with 
 Development: `npm test` runs the offline public-behavior suites. No npm dependencies are needed. The legacy `worker.ts` CLI remains supported; `junior.ts` is the compact manager entry point. Runtime, evidence, isolation, setup, and tool adapters share one implementation each.
 
 Private release repositories (including TRIZ) require `GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Junior sends it only to the GitHub API host and drops authorization on asset redirects. Public Praxec releases require no token.
+
+### Frontier-attention classification
+
+Jev preflight asks `requires_frontier` in the same classification call as readiness. The `attention` field in the compact handoff reports `frontier_required`, `delegate`, `clarify`, or `uncertain` with a target, reason and raw probability. Enforce mode stops frontier-required, missing or uncertain readiness before starting the worker; shadow mode records it and continues. Off remains the default. No frontier model is automatically called. Classification is advisory evidence, not a calibrated capability guarantee.

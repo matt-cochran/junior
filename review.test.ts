@@ -4,7 +4,7 @@ import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {run, collectGitEvidence, evidenceDelta} from './worker.ts';
+import {run, collectGitEvidence, evidenceDelta, assessPreflight} from './worker.ts';
 import {compactHandoff} from './handoff.ts';
 
 function temp(t:any) { const dir=mkdtempSync(join(tmpdir(),'junior-review-')); t.after(()=>rmSync(dir,{recursive:true,force:true})); return dir; }
@@ -45,4 +45,32 @@ test('Compact status rejects a malformed saved result',t=>{
  const cwd=temp(t);const path=join(cwd,'invalid.json');writeFileSync(path,'{}');
  const result=spawnSync(process.execPath,[join(import.meta.dirname,'junior.ts'),'status',path],{encoding:'utf8'});
  assert.match(result.stderr,/Malformed result: missing id/);
+});
+
+const gateTask={id:'routing',deliverable:'Implement an approved bounded behavior',acceptance:['Public behavior matches the contract'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]};
+const routingClassifier=(probability?:number):any=>async()=>({stopReason:'stop',answers:{contract_clear:{type:'bool',probability:0.95},blocking_assumptions:{type:'bool',probability:0.05},...(probability===undefined?{}:{requires_frontier:{type:'bool',probability}})}});
+test('A frontier-required task is assigned to frontier attention',async()=>{
+ assert.equal((await assessPreflight(gateTask,routingClassifier(0.95))).attention.target,'frontier');
+});
+test('A confidently delegatable task passes readiness',async()=>{
+ assert.equal((await assessPreflight(gateTask,routingClassifier(0.05))).status,'pass');
+});
+test('Missing frontier classification cannot silently pass readiness',async()=>{
+ assert.equal((await assessPreflight(gateTask,routingClassifier())).status,'uncertain');
+});
+test('Uncertain frontier classification asks the manager to decide',async()=>{
+ assert.equal((await assessPreflight(gateTask,routingClassifier(0.5))).attention.target,'manager');
+});
+test('Enforced frontier attention does not start the commodity worker',async t=>{
+ let started=0;const cwd=temp(t);
+ await run({...gateTask,cwd,jev:{mode:'enforce'}},false,{classify:routingClassifier(0.95),spawnPi:()=>{started++;return {status:0,stdout:stream('stop')};}});
+ assert.equal(started,0);
+});
+test('The compact receipt exposes frontier attention to the manager',async t=>{
+ const cwd=temp(t);const result=await run({...gateTask,cwd,jev:{mode:'enforce'}},false,{classify:routingClassifier(0.95)});
+ assert.equal(compactHandoff(result).attention?.decision,'frontier_required');
+});
+test('Shadow frontier classification remains advisory',async t=>{
+ const cwd=temp(t);const result=await run({...gateTask,cwd,jev:{mode:'shadow'}},true,{classify:async({questions}:any)=>Object.hasOwn(questions,'requires_frontier')?routingClassifier(0.95)():{stopReason:'stop',answers:{AC1:{type:'bool',probability:0.95}}}});
+ assert.equal(result.status,'simulation_passed');
 });
