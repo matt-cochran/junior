@@ -146,6 +146,35 @@ constraints, model and `jev`. Provider/model come from `delivery.config.json`
 when present, otherwise they default to openrouter and
 deepseek/deepseek-v4.1-flash; an explicit task value always wins.
 
+### Contract fields and unknown keys
+`validate` recognizes exactly the supported top-level fields (`id`,
+`deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `provider`, `model`,
+`thinking`, `pricing`, `jev`, `workflow`, `isolation`, `resumeFrom`, `repairFrom`,
+`reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `hopFrom`, `hopRevision`,
+`hopContext`, `execution`, and the five execution settings directly:
+`deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`).
+A misspelled or unsupported top-level key is rejected with `Unknown contract
+field: <key>` rather than silently ignored, and each check accepts only
+`command`, `args` and `cwd` (an unknown check key is rejected with `Unknown
+check field: <key>`). Nested known fields (for example `execution.quietMs`,
+`jev.mode` and `pricing.source`) remain supported.
+
+### Check working directory (`checks[].cwd`)
+Each check may set an optional `cwd`. It defaults to the execution checkout
+(`executionCwd`). A relative `cwd` resolves under the execution checkout and is
+rejected if it escapes it. An absolute `cwd` inside the source checkout is
+remapped to the equivalent path in the isolated worktree, so a monorepo check
+authored against the source path (for example `/repo/packages/app`) runs against
+the isolated copy (`.../worktree/packages/app`) instead of the source tree. An
+absolute `cwd` outside the workspace, an empty or non-string `cwd`, and any
+check `cwd` that escapes the workspace are rejected by `validate` before any
+paid call. A check `cwd` whose lexical path is inside the workspace but whose
+real (symlink-resolved) target points outside is rejected before execution. If
+`resolveCheckCwd` rejects a `cwd`, the check is recorded as failed with the
+rejection reason and the command is not run; the worker never silently falls
+back to the checkout root. Every check result records the actual resolved `cwd`
+it ran in, so a manager can verify what was tested.
+
 ## Micro-deliverable stages
 This prototype was built as small, inspectable stages:
 

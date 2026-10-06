@@ -1770,3 +1770,117 @@ test('Cancellation completes kill escalation before returning handback',async()=
  assert.equal(r.deadlineExceeded,true);
  assert.deepEqual(signals,['SIGTERM','SIGKILL']);
 });
+
+// --- Issue #14: check cwd resolution and strict contract keys (offline) ---
+const addNestedPackage=(repo:any)=>{mkdirSync(join(repo.dir,'packages','app'),{recursive:true});writeFileSync(join(repo.dir,'packages','app','package.json'),'{"name":"app"}\n');repo.git(['add','packages']);repo.git(['commit','-qm','add package']);};
+const cwdCheck=(cwd?:any)=>({command:process.execPath,args:['-e',"require('fs').writeFileSync('marker.txt','1')"],...(cwd!==undefined?{cwd}:{})});
+const makeDirLink=(target:string,link:string)=>{try{symlinkSync(target,link,process.platform==='win32'?'junction':'dir');return true;}catch{return false;}};
+const markerCheck=(cwd:string)=>({command:process.execPath,args:['-e',"require('fs').writeFileSync('marker.txt','1')"],cwd});
+const symlinkEscape=()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const outside=mkdtempSync(join(tmpdir(),'delivery-outside-'));
+ const link=join(repo.dir,'linkout');
+ if(!makeDirLink(outside,link)) return null;
+ return {repo,outside,link,check:markerCheck(link)};
+};
+
+test('A check with a relative nested cwd runs in the nested package directory',async()=>{
+ const repo=gitRepo(); addNestedPackage(repo);
+ await run(okTask(repo,{checks:[cwdCheck('packages/app')]}),true);
+ assert.ok(existsSync(join(repo.dir,'packages','app','marker.txt')));
+});
+
+test('A check with a relative nested cwd records the nested execution path',async()=>{
+ const repo=gitRepo(); addNestedPackage(repo);
+ const r=await run(okTask(repo,{checks:[cwdCheck('packages/app')]}),true);
+ assert.equal(r.checks[0].cwd,join(repo.dir,'packages','app'));
+});
+
+test('A check without cwd records the execution checkout as its cwd',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const r=await run(okTask(repo,{checks:[cwdCheck()]}),true);
+ assert.equal(r.checks[0].cwd,r.executionCwd);
+});
+
+test('A check with a relative nested cwd in worktree isolation resolves under the execution checkout',async()=>{
+ const repo=gitRepo(); addNestedPackage(repo);
+ const r=await run(okTask(repo,{isolation:'worktree',checks:[cwdCheck('packages/app')]}),true);
+ assert.equal(r.checks[0].cwd,join(r.executionCwd!,'packages','app'));
+});
+
+test('An absolute source-checkout cwd is remapped to the isolated worktree path',async()=>{
+ const repo=gitRepo(); addNestedPackage(repo);
+ const r=await run(okTask(repo,{isolation:'worktree',checks:[cwdCheck(join(repo.dir,'packages','app'))]}),true);
+ assert.equal(r.checks[0].cwd,join(r.executionCwd!,'packages','app'));
+});
+
+test('An absolute remapped worktree cwd runs in the isolated package',async()=>{
+ const repo=gitRepo(); addNestedPackage(repo);
+ const r=await run(okTask(repo,{isolation:'worktree',checks:[cwdCheck(join(repo.dir,'packages','app'))]}),true);
+ assert.ok(existsSync(join(r.executionCwd!,'packages','app','marker.txt')));
+});
+
+test('Validate rejects a relative check cwd that escapes the workspace',()=>{
+ assert.throws(()=>validate({...task(),checks:[{command:process.execPath,args:[],cwd:'../outside'}]}),/check\.cwd/);
+});
+
+test('Validate rejects an absolute check cwd outside the workspace',()=>{
+ assert.throws(()=>validate({...task(),checks:[{command:process.execPath,args:[],cwd:join(tmpdir(),'delivery-outside-'+Date.now())}]}),/check\.cwd/);
+});
+
+test('Validate rejects a malformed check cwd',()=>{
+ assert.throws(()=>validate({...task(),checks:[{command:process.execPath,args:[],cwd:123}]}),/check\.cwd/);
+});
+
+test('Validate rejects an unknown check field',()=>{
+ assert.throws(()=>validate({...task(),checks:[{command:process.execPath,args:[],workdir:'packages/app'}]}),/Unknown check field/);
+});
+
+test('Validate rejects an unknown top-level contract field',()=>{
+ assert.throws(()=>validate({...task(),dependencies:[]}),/Unknown contract field/);
+});
+
+test('Validate retains every supported top-level contract field',()=>{
+ const full={...task(),constraints:['bounded'],provider:'openrouter',model:'m',thinking:'low',
+  pricing:{input:1,output:1,source:'catalog',date:'2026-01-01'},jev:{mode:'shadow'},
+  workflow:'test_first',isolation:'none',resumeFrom:'prior/result.json',repairFrom:'prior/result.json',
+  reviewFrom:'prior/result.json',maxRepairs:1,lineageDeadlineMs:1000,hopFrom:'hop.json',hopRevision:1,
+  hopContext:{from:'hop.json'},
+  execution:{deadlineMs:600000,quietMs:120000,toolTimeoutMs:300000,heartbeatMs:5000,checkTimeoutMs:120000},
+  deadlineMs:600000,quietMs:120000,toolTimeoutMs:300000,heartbeatMs:5000,checkTimeoutMs:120000};
+ assert.doesNotThrow(()=>validate(full));
+});
+
+// --- Issue #14 review repair: symlinked check cwd escapes (offline) ---
+test('A check cwd symlink pointing outside the workspace is not executed',async(t:any)=>{
+ const c=symlinkEscape(); if(!c){t.skip('directory symlinks unavailable');return;}
+ await run(okTask(c.repo,{checks:[c.check]}),true);
+ assert.equal(existsSync(join(c.outside,'marker.txt')),false);
+});
+
+test('A check cwd symlink pointing outside the workspace fails the run',async(t:any)=>{
+ const c=symlinkEscape(); if(!c){t.skip('directory symlinks unavailable');return;}
+ const r=await run(okTask(c.repo,{checks:[c.check]}),true);
+ assert.equal(r.status,'checks_failed');
+});
+
+test('A check cwd symlink escape is recorded with a useful reason',async(t:any)=>{
+ const c=symlinkEscape(); if(!c){t.skip('directory symlinks unavailable');return;}
+ const r=await run(okTask(c.repo,{checks:[c.check]}),true);
+ assert.match(r.checks[0].error,/outside the workspace/);
+});
+
+test('A check cwd symlink escape never runs in the workspace root',async(t:any)=>{
+ const c=symlinkEscape(); if(!c){t.skip('directory symlinks unavailable');return;}
+ await run(okTask(c.repo,{checks:[c.check]}),true);
+ assert.equal(existsSync(join(c.repo.dir,'marker.txt')),false);
+});
+
+test('A check cwd symlink pointing inside the workspace is allowed to run',async(t:any)=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const target=join(repo.dir,'inside'); mkdirSync(target);
+ const link=join(repo.dir,'linkin');
+ if(!makeDirLink(target,link)){t.skip('directory symlinks unavailable');return;}
+ const r=await run(okTask(repo,{checks:[markerCheck(link)]}),true);
+ assert.equal(existsSync(join(target,'marker.txt')),true);
+});

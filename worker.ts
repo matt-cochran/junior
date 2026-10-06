@@ -1,7 +1,7 @@
 import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
-import { resolve, join, dirname } from 'node:path';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
@@ -17,13 +17,91 @@ export type { IsolationMode, LockHandle } from './isolation.ts';
 export { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, ToolWatchdog, RuntimeHeartbeat, EXECUTION_DEFAULTS, EXECUTION_BOUNDS, DEFAULT_MAX_OUTPUT_BYTES } from './runtime.ts';
 export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot, RuntimeState, RuntimePhase } from './runtime.ts';
 
+/** Every top-level contract field the worker understands. A nested `execution`
+ * object is also supported (its keys are validated by
+ * resolveExecutionSettings), and its five runtime settings may also be given
+ * directly at the top level. Unknown fields are rejected so a typo or an
+ * unsupported feature fails before any paid call instead of being ignored. */
+export const TASK_FIELDS = [
+ 'id','deliverable','cwd','acceptance','checks','constraints',
+ 'provider','model','thinking','pricing','jev',
+ 'workflow','isolation',
+ 'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
+ 'hopFrom','hopRevision','hopContext',
+ 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs',
+] as const;
+
+/** Every field a single check object may carry. `cwd` is optional and defaults
+ * to the execution checkout. */
+export const CHECK_FIELDS = ['command','args','cwd'] as const;
+
+/** True when `child` is the same path as or lexically inside `parent`. */
+export function withinWorkspace(parent:string, child:string):boolean {
+ const rel=relative(resolve(parent),resolve(child));
+ return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Real-path aware containment. A lexical check alone cannot see a symlink
+ * whose target lives outside the workspace, so paths that exist are resolved
+ * with `realpath` before the containment check. A path that does not exist yet
+ * is governed by the lexical check, since the command cannot run there
+ * regardless. */
+export function withinRealWorkspace(parent:string, child:string):boolean {
+ if (!withinWorkspace(parent, child)) return false;
+ let realParent:string;
+ try { realParent=realpathSync(parent); } catch { return true; }
+ let realChild:string;
+ try { realChild=realpathSync(child); } catch { return true; }
+ return withinWorkspace(realParent, realChild);
+}
+
+/** Resolve a check's `cwd` against the execution checkout.
+ *
+ * - omitted: the execution checkout itself (existing behavior);
+ * - relative: resolved under the execution checkout and rejected if it escapes;
+ * - absolute inside the execution checkout: used as-is;
+ * - absolute inside the source checkout: remapped to the equivalent path in the
+ *   isolated execution checkout, so a monorepo check authored against the
+ *   source path runs against the isolated copy;
+ * - anything else: rejected. */
+export function resolveCheckCwd(cwd:unknown, sourceCwd:string, executionCwd:string):{cwd?:string;error?:string} {
+ if (cwd === undefined) return {cwd:executionCwd};
+ if (typeof cwd !== 'string' || !cwd.trim()) return {error:'Invalid check.cwd (expected a non-empty string)'};
+ const raw=cwd.trim();
+ if (!isAbsolute(raw)) {
+  const abs=resolve(executionCwd, raw);
+  if (!withinRealWorkspace(executionCwd, abs)) return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
+  return {cwd:abs};
+ }
+ const abs=resolve(raw);
+ if (withinWorkspace(executionCwd, abs)) {
+  if (!withinRealWorkspace(executionCwd, abs)) return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
+  return {cwd:abs};
+ }
+ if (withinWorkspace(sourceCwd, abs)) {
+  const rel=relative(resolve(sourceCwd), abs);
+  const mapped= rel ? join(executionCwd, rel) : executionCwd;
+  if (!withinRealWorkspace(executionCwd, mapped)) return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
+  return {cwd:mapped};
+ }
+ return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
+}
+
 export function validate(t: any) {
  for (const k of ['id','deliverable','cwd']) if (typeof t[k] !== 'string' || !t[k].trim()) throw Error(`Missing ${k}`);
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
  if (t.thinking !== undefined && !['off','minimal','low','medium','high','xhigh','max'].includes(t.thinking)) throw Error('Invalid thinking level');
  if (!Array.isArray(t.acceptance) || !t.acceptance.length || t.acceptance.some((x:any)=>typeof x !== 'string' || !x.trim())) throw Error('Missing acceptance');
  if (!Array.isArray(t.checks) || !t.checks.length) throw Error('Missing checks');
- for (const c of t.checks) if (typeof c.command !== 'string' || !Array.isArray(c.args) || c.args.some((x:any)=>typeof x !== 'string')) throw Error('Invalid check');
+ for (const c of t.checks) {
+  if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.command !== 'string' || !Array.isArray(c.args) || c.args.some((x:any)=>typeof x !== 'string')) throw Error('Invalid check');
+  for (const k of Object.keys(c)) if (!(CHECK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown check field: ${k}`);
+  if (c.cwd !== undefined) {
+   if (typeof c.cwd !== 'string' || !c.cwd.trim()) throw Error('Invalid check.cwd (expected a non-empty string)');
+   const abs=isAbsolute(c.cwd) ? resolve(c.cwd) : resolve(resolve(t.cwd), c.cwd);
+   if (!withinWorkspace(resolve(t.cwd), abs)) throw Error(`Invalid check.cwd (outside the workspace): ${c.cwd}`);
+  }
+ }
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
@@ -37,6 +115,7 @@ export function validate(t: any) {
   if (!t.jev || typeof t.jev !== 'object' || Array.isArray(t.jev)) throw Error('Invalid jev config');
   if (t.jev.mode !== undefined && !['off','shadow','enforce'].includes(t.jev.mode)) throw Error('Invalid jev.mode (expected off, shadow or enforce)');
  }
+ for (const k of Object.keys(t)) if (!(TASK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown contract field: ${k}`);
  return t;
 }
 
@@ -1320,10 +1399,17 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     if (rem <= 0) { deadlineDuringChecks=true; break; }
     const c=t.checks[i];
     const timeout=Math.max(1, Math.min(settings.checkTimeoutMs, settings.toolTimeoutMs, rem));
-    const r=await executeCheck({ spawnChild:spawnChildDetached, command:c.command, args:c.args, cwd:executionCwd,
+    const resolved=resolveCheckCwd(c.cwd, sourceCwd, executionCwd);
+    if (resolved.error) {
+     writeFileSync(join(dir,`check-${i}.log`),`${resolved.error}\n`);
+     checks.push({...c,exitCode:null,error:resolved.error,timedOut:false,interrupted:false,outputTruncated:false});
+     continue;
+    }
+    const checkCwd=resolved.cwd!;
+    const r=await executeCheck({ spawnChild:spawnChildDetached, command:c.command, args:c.args, cwd:checkCwd,
      timeoutMs:timeout, deadlineAt, signal, maxOutputBytes:deps.maxOutputBytes, heartbeat });
     writeFileSync(join(dir,`check-${i}.log`),`${r.stdout || ''}\n${r.stderr || ''}`);
-    checks.push({...c,exitCode:r.exitCode,error:r.error,timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated});
+    checks.push({...c,cwd:checkCwd,exitCode:r.exitCode,error:r.error,timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated});
     if (r.interrupted || signal?.aborted) { interruptedDuringChecks=true; break; }
     if (r.deadlineExceeded) { deadlineDuringChecks=true; break; }
    }
