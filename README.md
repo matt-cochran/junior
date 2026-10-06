@@ -1,6 +1,6 @@
 # Junior
 
-Delegate one bounded deliverable to DeepSeek, then review a compact receipt and independent evidence. The manager keeps the contract and acceptance decision; Junior handles execution, checks, artifacts and optional Jev gates.
+Delegate one bounded deliverable to a capable commodity model (DeepSeek is the tested default), then review a compact receipt and independent evidence. The manager keeps the contract and acceptance decision; Junior handles execution, checks, artifacts and optional Jev gates.
 
 ```bash
 node junior.ts init
@@ -14,13 +14,33 @@ Implementation handoffs default to a clean Git worktree. `init` writes project f
 
 The detailed reference below retains the legacy `worker.ts` commands and all configuration options.
 
+## Start here
+
+Junior is MIT licensed. A frontier manager defines and reviews the deliverable; the worker returns changes, independent checks, usage, and unresolved work. Jev can block unsuitable or uncertain tasks before execution when enabled with `jev.mode: enforce`; it is off by default. Junior never automatically invokes a frontier model or accepts its own work.
+
+For a reproducible source installation:
+
+```bash
+git clone https://github.com/matt-cochran/junior.git
+cd junior
+npm ci
+npm run build
+node dist/junior.js --help
+npm test
+```
+
+Use Node 24+ and Ubuntu WSL on Windows for worker execution. Native installed-CLI smoke tests cover Linux, macOS, and Windows on x64 and ARM64; process-group cancellation guarantees are tested on Linux. Provider credentials and optional planning tool releases are configured separately by `junior init --install` and `junior doctor`. Do not commit credentials, transcripts, or local task artifacts.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) to contribute, [SECURITY.md](SECURITY.md) for security reporting, and [SUPPORT.md](SUPPORT.md) for troubleshooting. The `tasks/D*` contracts are development history with local paths; adapt examples to your own workspace before executing them. Installation does not authorize paid model calls.
+
 ## Install
 
-The published package is `@matthew-cochran/junior` (Node 24 or newer). It ships
+The npm package name is `@matthew-cochran/junior` (Node 24 or newer). It ships
 compiled JavaScript under `dist/`; there is no install-time build and no runtime
 npm dependency.
 
 ```bash
+# Once a release is available on npm:
 npm install -g @matthew-cochran/junior
 junior --help
 junior --version
@@ -54,14 +74,14 @@ the `files` whitelist. The packaged skill is copied to
 The initial release can be published after `npm login`. Subsequent releases can use GitHub Actions trusted publishing with provenance (npm 11.5.1 or newer).
 
 - `npm pack` (or `npm run pack`) builds and produces
-  `matt-cochran-junior-<version>.tgz`. `prepack` runs the build, so the tarball
+  `matthew-cochran-junior-<version>.tgz`. `prepack` runs the build, so the tarball
   always contains fresh compiled output and never raw TypeScript.
 - `npm run release` runs `npm publish --access public`; the release
   workflow invokes it, never `npm install`.
 
 ### One-time setup
 
-1. `npm login` locally as a maintainer of the `@matt-cochran` scope and confirm
+1. `npm login` locally as a maintainer of the `@matthew-cochran` scope and confirm
    with `npm whoami`.
 2. On npmjs.com, open the package settings and add a **Trusted Publisher**:
    provider GitHub Actions, repository `matt-cochran/junior`, workflow
@@ -76,7 +96,7 @@ The workflow runs the packaged tests, fails if the tag does not match
 publishes. It never publishes on an ordinary push or pull request.
 
 # Junior — deliverable delegation
-Run inside Ubuntu WSL with Node 22.19 or newer (Node 26.5 is the tested
+Run inside Ubuntu WSL with Node 24 or newer (Node 26.5 is the tested
 version; load nvm first, for example `nvm use 24`).
 
 node --test worker.test.ts
@@ -140,7 +160,7 @@ This prototype was built as small, inspectable stages:
    lineage and the compact manager handoff (D08-runtime-handoff).
 
 ## Setup
-- Node 22.19 or newer (`node --test`, `node worker.ts`); the worker is tested on
+- Node 24 or newer (`node --test`, `node worker.ts`); the worker is tested on
   Node 26.5, and `doctor` reports the running version and the minimum. Install nvm
   inside WSL and use it for both `node` and the global `pi` install so the two
   resolve from the same bin directory.
