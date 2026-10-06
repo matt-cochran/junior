@@ -1,6 +1,6 @@
 # Junior
 
-Delegate one bounded deliverable to DeepSeek, then review a compact receipt and independent evidence. The manager keeps the contract and acceptance decision; Junior handles execution, checks, artifacts and optional Jev gates.
+Delegate one bounded deliverable to a capable commodity model (DeepSeek is the tested default), then review a compact receipt and independent evidence. The manager keeps the contract and acceptance decision; Junior handles execution, checks, artifacts and optional Jev gates.
 
 ```bash
 node junior.ts init
@@ -13,8 +13,90 @@ npm test
 Implementation handoffs default to a clean Git worktree. `init` writes project files and installs project-local manager skills; review/commit those files before a worktree handoff, or explicitly choose `isolation: "none"`. Optional report-only workflows are `recon`, `fmeca`, `evaluate`, and fresh-session `qa`. Shared FMECA/CPM/Crossmatrix state uses `junior.ts tools`; TRIZ is a [separate tool](https://github.com/matt-cochran/triz).
 
 The detailed reference below retains the legacy `worker.ts` commands and all configuration options.
+
+## Start here
+
+Junior is MIT licensed. A frontier manager defines and reviews the deliverable; the worker returns changes, independent checks, usage, and unresolved work. Jev can block unsuitable or uncertain tasks before execution when enabled with `jev.mode: enforce`; it is off by default. Junior never automatically invokes a frontier model or accepts its own work.
+
+For a reproducible source installation:
+
+```bash
+git clone https://github.com/matt-cochran/junior.git
+cd junior
+npm ci
+npm run build
+node dist/junior.js --help
+npm test
+```
+
+Use Node 24+ and Ubuntu WSL on Windows for worker execution. Native installed-CLI smoke tests cover Linux, macOS, and Windows on x64 and ARM64; process-group cancellation guarantees are tested on Linux. Provider credentials and optional planning tool releases are configured separately by `junior init --install` and `junior doctor`. Do not commit credentials, transcripts, or local task artifacts.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) to contribute, [SECURITY.md](SECURITY.md) for security reporting, and [SUPPORT.md](SUPPORT.md) for troubleshooting. The `tasks/D*` contracts are development history with local paths; adapt examples to your own workspace before executing them. Installation does not authorize paid model calls.
+
+## Install
+
+The npm package name is `@matthew-cochran/junior` (Node 24 or newer). It ships
+compiled JavaScript under `dist/`; there is no install-time build and no runtime
+npm dependency.
+
+```bash
+# Once a release is available on npm:
+npm install -g @matthew-cochran/junior
+junior --help
+junior --version
+junior init
+```
+
+`junior` is the installed bin (`dist/junior.js`). `junior --help` and
+`junior --version` are offline. `init` is offline unless you pass `--install`,
+and `handoff ... --mock` makes no provider call. The legacy source entry points
+(`node junior.ts ...`, `node worker.ts ...`) are retained unchanged.
+
+### Build from a source checkout
+
+```bash
+npm ci
+npm run build      # transpile production TypeScript to dist/ (no typecheck claim)
+node dist/junior.js --version
+npm test           # builds, then runs the behavioral suite
+```
+
+The build is transpile-only: it uses the TypeScript compiler's
+`transpileModule` with `isolatedModules` and rewrites relative `.ts` imports to
+the emitted `.js` files, so the compiled runtime resolves its own module graph
+without any raw TypeScript or runtime compilation. It makes **no typecheck
+claim**. `dist/` is gitignored but always included in the published tarball via
+the `files` whitelist. The packaged skill is copied to
+`dist/skills/junior/SKILL.md`.
+
+## Publishing
+
+The initial release can be published after `npm login`. Subsequent releases can use GitHub Actions trusted publishing with provenance (npm 11.5.1 or newer).
+
+- `npm pack` (or `npm run pack`) builds and produces
+  `matthew-cochran-junior-<version>.tgz`. `prepack` runs the build, so the tarball
+  always contains fresh compiled output and never raw TypeScript.
+- `npm run release` runs `npm publish --access public`; the release
+  workflow invokes it, never `npm install`.
+
+### One-time setup
+
+1. `npm login` locally as a maintainer of the `@matthew-cochran` scope and confirm
+   with `npm whoami`.
+2. On npmjs.com, open the package settings and add a **Trusted Publisher**:
+   provider GitHub Actions, repository `matt-cochran/junior`, workflow
+   `publish.yml`, environment blank. CI then authenticates with OIDC
+   (`id-token: write`) and attaches provenance; no long-lived `NPM_TOKEN` secret
+   is stored.
+3. Bump `package.json` `version`, commit, then push a matching `vX.Y.Z` tag (or
+   run the **Publish** workflow manually with `tag=vX.Y.Z`).
+
+The workflow runs the packaged tests, fails if the tag does not match
+`package.json`, skips a version that is already on the registry, and only then
+publishes. It never publishes on an ordinary push or pull request.
+
 # Junior — deliverable delegation
-Run inside Ubuntu WSL with Node 22.19 or newer (Node 26.5 is the tested
+Run inside Ubuntu WSL with Node 24 or newer (Node 26.5 is the tested
 version; load nvm first, for example `nvm use 24`).
 
 node --test worker.test.ts
@@ -78,7 +160,7 @@ This prototype was built as small, inspectable stages:
    lineage and the compact manager handoff (D08-runtime-handoff).
 
 ## Setup
-- Node 22.19 or newer (`node --test`, `node worker.ts`); the worker is tested on
+- Node 24 or newer (`node --test`, `node worker.ts`); the worker is tested on
   Node 26.5, and `doctor` reports the running version and the minimum. Install nvm
   inside WSL and use it for both `node` and the global `pi` install so the two
   resolve from the same bin directory.
@@ -114,6 +196,12 @@ or makes a paid network call. Checks:
   readiness in the `skill` field (`current`, `outdated`, `customized` or
   `missing` per manager). A missing or customized skill does not change the
   Pi execution `ok`/exit status.
+- **Integrations**: reports prebuilt FMECA/CPM/Crossmatrix readiness (installed
+  version, release provenance and binary path) separately from Pi execution and
+  auth readiness in the `integrations`/`integrationsReady` fields, plus the
+  optional TRIZ status. It is offline and never compiles Rust; an existing
+  configured local binary is reported usable from its metadata without an
+  implicit build.
 
 The result includes `checks` (one entry per prerequisite) and `remediation`
 strings. If `pi` is missing it recommends `init --install`; if credentials are
@@ -175,6 +263,67 @@ Installing Pi happens only through the explicit `--install` flag. Ordinary
 After a successful installation, readiness is checked again. Fresh installations use the pinned version even when no local Pi metadata exists. It
 reports authentication and model setup instructions to run with the
 active Node/nvm.
+
+#### Prebuilt release tools (`init --install`, `--update`, `--with-triz`)
+`init --install` also downloads checksum-verified **prebuilt** binaries for the
+FMECA, CPM Planner and Crossmatrix MCP servers; no Rust, Cargo or Git local
+build is ever performed, and no shell installer is used. Releases come from the
+stable GitHub release API for `praxec/fmeca`, `praxec/cpm-planner` and
+`praxec/crossmatrix`.
+
+- Asset names are `<binary>-<triple>.tar.gz` on Linux/macOS and
+  `<binary>-<triple>.zip` on Windows. Supported targets:
+
+  | OS | Architecture | Target triple |
+  | --- | --- | --- |
+  | Linux (incl. WSL) | x64 | `x86_64-unknown-linux-gnu` |
+  | Linux (incl. WSL) | arm64 | `aarch64-unknown-linux-gnu` |
+  | macOS | x64 | `x86_64-apple-darwin` |
+  | macOS | arm64 | `aarch64-apple-darwin` |
+  | Windows | x64 | `x86_64-pc-windows-msvc` |
+  | Windows | arm64 | `aarch64-pc-windows-msvc` |
+
+- Windows ARM64 is detected from the native processor environment even when the
+  running Node process is x64-emulated. An unsupported OS/architecture fails
+  explicitly with the matrix above; there is no compile fallback.
+- Every selected asset must match a SHA-256 from the release's
+  `checksums.sha256` (or the release asset digest metadata) before it is
+extracted. Downloads are HTTPS-only to approved GitHub release hosts (redirects
+are re-validated) and are bounded by request timeout, size and an overall
+install deadline.
+- Archives are listed first; absolute paths, `..` traversal and symlink /
+  hardlink entries are rejected. The exact regular binary entry is streamed out
+  with the system `tar` and written atomically only to the managed destination.
+- A downloaded binary must pass a conservative MCP `initialize` protocol probe
+  (no model call) before it replaces anything. A failed download, checksum,
+  extraction or probe preserves the previous working install.
+- The first explicit install resolves the current complete published release.
+  Re-running is idempotent and does not re-download; a newer release is reported
+  but not adopted until `--update`. Installed version, repo, tag, source SHA,
+  asset digest, binary digest and path are recorded in the managed user-state
+  manifest and `.delivery/setup/hop.json`; existing project id, revision,
+  acceptance, native paths and snapshots are preserved, and explicitly custom
+  tool command/args/env are never overwritten. The recorded **source SHA** is
+  taken only from the checksum-verified `release-manifest.json` (`sourceSha` for
+  Praxec, `commit` for TRIZ); it is never fabricated from the binary digest. A
+  new-format manifest must agree with the release tag and list all six supported
+  targets, or the install fails explicitly.
+- `--with-triz` additionally downloads the optional portable compiled-JS archive
+  from `matt-cochran/triz` (`triz-vVERSION-node.tgz`), verifies its checksum and
+  resolves `dist/triz.js`. The file is installed under a managed
+  `package.json` (`"type": "module"`) and must pass a bounded offline ESM smoke
+  test before it replaces a working installation, so a broken module or missing
+  ESM metadata preserves the previous working TRIZ. A newer TRIZ release is
+  never adopted without an explicit `--update`. TRIZ stays a separate CLI run
+  with the active Node; it is never compiled locally and never makes a paid
+  model call.
+- `doctor` verifies each recorded binary against its recorded SHA-256 and checks
+  the executable bit before calling it usable; a bare file's existence is not
+  enough. A configured local path in `.delivery/setup/hop.json` is reported as
+  usable **unverified** provenance when no managed install is present.
+
+Prerequisites for the prebuilt tools are Node, a system `tar`, and (`init
+--install`) `npm` for Pi. Rust/Cargo and Git are **not** client requirements.
 
 ### Authentication and the paid smoke test
 Authenticate only through Pi itself: start `pi` and run `/login`, then choose a
@@ -591,3 +740,9 @@ Use `thinking: "low"` (the default) for bounded worker tasks; increase it explic
 Optional QA: `node junior.ts qa qa-contract.json` (or a `handoff` contract with `workflow: "qa"`) requires `reviewFrom` pointing at a prior result. It starts a fresh reviewer session, reviews in place, saves an evidence-based report, and flags detected production edits. Missing reports cannot succeed. Review completion is not manager acceptance; repairs require a separate deliverable. A prompt restriction is not an OS sandbox. QA checks should be read-only; it has the same filesystem permissions as the executor.
 
 Development: `npm test` runs the offline public-behavior suites. No npm dependencies are needed. The legacy `worker.ts` CLI remains supported; `junior.ts` is the compact manager entry point. Runtime, evidence, isolation, setup, and tool adapters share one implementation each.
+
+Private release repositories (including TRIZ) require `GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Junior sends it only to the GitHub API host and drops authorization on asset redirects. Public Praxec releases require no token.
+
+### Frontier-attention classification
+
+Jev preflight asks `requires_frontier` in the same classification call as readiness. The `attention` field in the compact handoff reports `frontier_required`, `delegate`, `clarify`, or `uncertain` with a target, reason and raw probability. Enforce mode stops frontier-required, missing or uncertain readiness before starting the worker; shadow mode records it and continues. Off remains the default. No frontier model is automatically called. Classification is advisory evidence, not a calibrated capability guarantee.

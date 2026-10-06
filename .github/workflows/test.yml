@@ -1,11 +1,23 @@
 name: Test
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
 permissions:
   contents: read
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  # The full behavioral suite runs on Ubuntu 22.04 because several scenarios
+  # assert POSIX process-group cancellation (TERM then SIGKILL) and signals.
+  # Those guarantees are intentionally not claimed on Windows, where the
+  # installed CLI smoke below is the supported check instead.
+  full:
+    name: Full suite (ubuntu-22.04, Node ${{ matrix.node }})
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         node: [24, 26]
     steps:
@@ -13,4 +25,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
       - run: npm test
+
+  # Lightweight, native installed-CLI smoke on six OS/arch targets and both
+  # supported Node lines. It builds, packs and installs the tarball with
+  # lifecycle scripts ignored, then runs the installed `junior` shim. It does
+  # not exercise POSIX-only behavior, so it is safe on every platform.
+  smoke:
+    name: Installed CLI smoke (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04      # linux x64
+          - ubuntu-22.04-arm   # linux arm64
+          - macos-15-intel           # darwin x64
+          - macos-15           # darwin arm64
+          - windows-latest     # windows x64
+          - windows-11-arm     # windows arm64
+        node: [24, 26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/smoke-installed.mjs

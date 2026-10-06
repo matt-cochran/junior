@@ -12,14 +12,14 @@ and check evidence.
 
 ## Locate the CLI
 
-The skill is installed from a Junior checkout. Do not assume a fixed path:
+The skill may be installed from a source checkout (`junior.ts`) or from the
+published npm package (`dist/junior.js`). Do not assume a fixed path:
 
-- Use `$JUNIOR_CLI` (an absolute path to `junior.ts`) when it is set.
-- Otherwise use the checkout that produced this skill. It is recorded in the
-  manifest beside the installed skill (`.junior-manifest.json`, field
-  `skills.junior.source`); that file's checkout contains `junior.ts`.
-- Otherwise ask the manager for the checkout path and run
-  `node <checkout>/junior.ts`.
+- Use `$JUNIOR_CLI` (an absolute path to the CLI entry) when it is set.
+- Otherwise run the installed `junior` command when it is on `PATH`.
+- Otherwise use the CLI recorded in the manifest beside the installed skill
+  (`.junior-manifest.json`, field `skills.junior.cli`); run `node <that path>`.
+- Otherwise ask the manager for the CLI path and run `node <path> <command>`.
 
 ## Dispatch
 
@@ -53,8 +53,8 @@ absolute. `isolation` defaults to `worktree` for `handoff`; pass `"none"` to run
 in place. Contract scope is instruction, not a sandbox guarantee.
 
 ```bash
-node <checkout>/junior.ts validate /absolute/task.json
-node <checkout>/junior.ts handoff /absolute/task.json
+node <cli> validate /absolute/task.json
+node <cli> handoff /absolute/task.json
 ```
 
 `handoff` prints a compact receipt. Add `--full` for the full result, `--mock`
@@ -67,8 +67,10 @@ readiness check; `init` is idempotent project setup.
   checkout and runs Pi and checks there; the source index is never edited
   implicitly. Worktree isolation refuses a dirty source, so commit or review
   your work first, or pass `isolation: "none"` explicitly.
-- A run is bounded by wall/quiet deadlines and a tool watchdog; the process
-  group is cancelled on interrupt and execution/session locks are released.
+- A run is bounded by a total wall deadline and a tool watchdog; the `quiet`
+  setting only reports a no-output interval and is **not** a hard deadline. The
+  process group is cancelled on interrupt and execution/session locks are
+  released.
 - The receipt records requested and observed model, usage, cost availability,
   stop reasons, changed files and artifact paths. `ready_for_review` is a
   handoff, not acceptance. An unavailable estimate with `billedUsd: null` is
@@ -76,13 +78,15 @@ readiness check; `init` is idempotent project setup.
 
 ## Review and bounded repair
 
-Inspect `artifactDir/result.json`, the check logs and the changed files (bounded
-diff evidence can omit new/staged files). Confirm the observed model matches the
-request. For a specific repair, issue a new bounded contract with `resumeFrom`
-pointing at the prior `result.json` and the same cwd/provider/model. Allow at
-most one automatic repair unless the user authorizes more; escalate an
-unresolved blocker with evidence. Never treat a recon recommendation as
-approval to implement.
+Inspect `artifactDir/result.json`, the check logs and the changed files.
+Change evidence covers the complete tracked, staged and untracked changes; a
+`truncated` diff or receipt means the reviewer saw an explicit prefix, not the
+whole change, so treat the run as incomplete. Confirm the observed model matches
+the request. For a specific repair, issue a new bounded contract with
+`resumeFrom` pointing at the prior `result.json` and the same
+cwd/provider/model. Allow at most one automatic repair unless the user
+authorizes more; escalate an unresolved blocker with evidence. Never treat a
+recon recommendation as approval to implement.
 
 Report the deliverable outcome, verification, remaining issues and recorded
 model/cost briefly. Persist accepted deliverables and next dependencies in a
@@ -90,8 +94,23 @@ small project plan so the manager can resume without reloading transcripts.
 
 ## Shared state and test discipline
 
-Use `node <junior>/junior.ts tools inspect /absolute/hop.json` for the compact shared FMECA/CPM/Crossmatrix state. A contract may supply `hopFrom` and an expected `hopRevision`; verified snapshots go to both Jev and the executor. State mutations invalidate earlier manager acceptance. Keep contracts and tool calls scoped to one deliverable; the worker does not accept its own work.
+Use `node <cli> tools inspect /absolute/hop.json` for the compact
+shared FMECA/CPM/Crossmatrix state. A contract may supply `hopFrom` and an
+expected `hopRevision`; verified snapshots go to both Jev and the executor. State
+mutations invalidate earlier manager acceptance. Keep contracts and tool calls
+scoped to one deliverable; the worker does not accept its own work.
+
+`junior doctor` is read-only and reports prebuilt tool integrations (version,
+provenance, path) separately from Pi execution/auth readiness. `junior init
+--install` downloads checksum-verified prebuilt FMECA/CPM/Crossmatrix release
+binaries (no local Rust build); `--update` explicitly adopts a newer release and
+`--with-triz` adds the optional portable TRIZ CLI. Fresh-session `qa` remains an
+optional, report-only workflow.
 
 All newly written or changed tests use atomic scenarios, declarative names, and exactly one behavioral assertion against a public outcome. Test the deliverable capability rather than private implementation details. Prefer focused tests, fewer boundary integrations, and essential end-to-end acceptance checks. Never bundle unrelated assertions to evade the rule.
 
 `thinking` defaults to `low`; increase it explicitly when needed. A model output-limit stop is incomplete work, regardless of passing existing checks.
+
+## Frontier attention
+
+Use `jev.mode: enforce` when frontier suitability must block execution. The compact receipt's `attention` field reports the target, decision, reason and probability. `frontier_required` returns to the manager before the commodity worker starts in enforce mode; shadow remains advisory. Missing/uncertain classification is not a pass. No frontier model is called automatically. Review the classification and the contract before clarifying, re-scoping or taking over.

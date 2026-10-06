@@ -25,6 +25,7 @@ export type HandoffArtifacts = {
 };
 
 export type CompactHandoff = {
+ attention: {target:string; decision:string; reason:string; probability:number|null; mode:string; workerBlocked:boolean} | null;
  id: string;
  outcome: string;
  source: string;
@@ -157,6 +158,7 @@ export function compactHandoff(result: any): CompactHandoff {
   ...(r.handoff ? {handoff:r.handoff} : {}),
   id: String(r.id ?? 'unknown'),
   outcome: String(r.status ?? r.outcome ?? 'unknown'),
+  attention: r.jev?.preflight?.attention ? {...r.jev.preflight.attention, mode:r.jev.mode, workerBlocked:r.jev.enforced === true && r.workerExitCode === null} : null,
   source: r.simulated ? 'mock' : (r.receipt?.source ?? 'pi_message_end'),
   sourceCwd: r.sourceCwd ?? null,
   execution: {

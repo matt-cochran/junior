@@ -35,7 +35,7 @@ const gateClassifier=(pre:any,post:any={AC1:bool(0.95)}):any=>async({questions}:
  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?pre:post,usage:gateUsage};
 };
 const outage:any=async()=>({stopReason:'error',errorMessage:'classifier outage'});
-const JEVPASS={contract_clear:bool(0.95),blocking_assumptions:bool(0.05)};
+const JEVPASS={requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.05)};
 
 test('Reject incomplete contract',()=>assert.throws(()=>validate({id:'x'})));
 test('Reject invalid jev mode',()=>assert.throws(()=>validate({...task(),jev:{mode:'bogus'}}),/Invalid jev.mode/));

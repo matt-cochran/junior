@@ -1,4 +1,6 @@
 .delivery/
 .artifacts/
 node_modules/
+dist/
+*.tgz
 *:Zone.Identifier

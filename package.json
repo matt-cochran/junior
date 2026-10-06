@@ -1,17 +1,44 @@
 {
-  "private": true,
+  "name": "@matthew-cochran/junior",
   "version": "0.1.0",
-  "name": "junior",
-  "bin": {
-    "junior": "./junior.ts"
-  },
-  "description": "Bounded DeepSeek deliverables with independently checked handoffs",
+  "description": "Bounded commodity-model deliverables with independently checked handoffs",
   "type": "module",
-  "scripts": {
-    "doctor": "node junior.ts doctor",
-    "test": "node --test worker.test.ts review.test.ts qa.test.ts hop-context.test.ts tools/tools.test.ts"
+  "bin": {
+    "junior": "dist/junior.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=24"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Matthew Cochran",
+    "email": "matthew@cochranweb.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matt-cochran/junior.git"
+  },
+  "homepage": "https://github.com/matt-cochran/junior#readme",
+  "bugs": {
+    "url": "https://github.com/matt-cochran/junior/issues"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "pretest": "npm run build",
+    "test": "node --test worker.test.ts review.test.ts qa.test.ts hop-context.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts",
+    "pack": "npm pack",
+    "prepack": "npm run build",
+    "release": "npm publish --access public"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
