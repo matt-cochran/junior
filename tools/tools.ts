@@ -1046,14 +1046,50 @@ function errorEnvelope(err: unknown): { ok: false; error: { code: string; messag
   return { ok: false, error };
 }
 
+const TOOLS_USAGE = [
+  "Usage: junior tools <command> [args]",
+  "  init    <hop.json> [config.json]",
+  "  call    <hop.json> <fmeca|cpm|crossmatrix> <request.json>",
+  "  inspect <hop.json>",
+].join("\n");
+
+const TOOLS_COMMANDS: Record<string, { min: number; max: number; usage: string }> = {
+  init: { min: 1, max: 2, usage: "Usage: junior tools init <hop.json> [config.json]" },
+  call: { min: 3, max: 3, usage: "Usage: junior tools call <hop.json> <fmeca|cpm|crossmatrix> <request.json>" },
+  inspect: { min: 1, max: 1, usage: "Usage: junior tools inspect <hop.json>" },
+};
+
+function wantsHelp(args: string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  // Help is resolved before any command runs, so no HOP file is ever touched.
+  if (!command || command === "--help" || command === "-h" || command === "help") {
+    process.stdout.write(TOOLS_USAGE + "\n");
+    return 0;
+  }
+  const spec = TOOLS_COMMANDS[command];
+  if (!spec) {
+    process.stdout.write(JSON.stringify(errorEnvelope(new HopError("USAGE", TOOLS_USAGE)), null, 2) + "\n");
+    return 1;
+  }
+  if (wantsHelp(rest)) {
+    process.stdout.write(spec.usage + "\n");
+    return 0;
+  }
   try {
+    for (const arg of rest) {
+      if (arg.startsWith("-") && arg !== "-") {
+        throw new HopError("USAGE", `Unknown option for tools ${command}: ${arg}`);
+      }
+    }
+    if (rest.length < spec.min || rest.length > spec.max) throw new HopError("USAGE", spec.usage);
     let output: unknown;
     if (command === "init") output = await cliInit(rest);
     else if (command === "call") output = await cliCall(rest);
-    else if (command === "inspect") output = cliInspect(rest);
-    else throw new HopError("USAGE", "usage: tools.ts <init|call|inspect> ...");
+    else output = cliInspect(rest);
     process.stdout.write(JSON.stringify(output, null, 2) + "\n");
     return 0;
   } catch (err) {

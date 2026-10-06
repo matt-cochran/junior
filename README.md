@@ -48,9 +48,15 @@ junior init
 ```
 
 `junior` is the installed bin (`dist/junior.js`). `junior --help` and
-`junior --version` are offline. `init` is offline unless you pass `--install`,
-and `handoff ... --mock` makes no provider call. The legacy source entry points
-(`node junior.ts ...`, `node worker.ts ...`) are retained unchanged.
+`junior --version` are offline. Every subcommand also accepts `--help`/`-h`,
+which prints that command's usage and exits zero without writing files,
+installing anything, or making a provider call (for example
+`junior init --help` and `junior tools init --help`). Unknown long and short
+options are rejected before any side effect, options that require a value must
+receive one, and excess positional arguments are refused. `init` is offline
+unless you pass `--install`, and `handoff ... --mock` makes no provider call.
+The legacy source entry points (`node junior.ts ...`, `node worker.ts ...`) are
+retained unchanged.
 
 ### Build from a source checkout
 

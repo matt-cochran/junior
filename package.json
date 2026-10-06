@@ -30,7 +30,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "pretest": "npm run build",
-    "test": "node --test worker.test.ts review.test.ts qa.test.ts hop-context.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts",
+    "test": "node --test worker.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts",
     "pack": "npm pack",
     "prepack": "npm run build",
     "release": "npm publish --access public"
