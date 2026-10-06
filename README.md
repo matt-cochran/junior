@@ -217,16 +217,24 @@ required prerequisite fails. It never installs anything, writes configuration,
 or makes a paid network call. Checks:
 
 - **Node**: the running version versus the supported minimum (`22.19.0`).
-- **Pi**: resolves `pi` on `PATH`, records the bounded `pi --version` output and
-  the executable location, and flags a PATH/nvm mismatch when `pi` and the
-  running `node` resolve from different directories (a global install under
-  another nvm version is invisible to the active Node).
+- **Pi**: resolves `pi` on `PATH`, records the bounded `pi --version` output,
+  the executable location, and the tested version pinned by
+  `delivery.config.json` (`pi.testedVersion`) or the built-in default (1.0.3). It
+  reports `versionMatch` and a `versionStatus` pairing: an equal version
+  matches, a newer patch is informational (`patch`), and a newer
+  major/minor or an older install is a warning (`major`/`minor`/`older`).
+  Version differences never fail `doctor`; they only add a note. It also flags a
+  PATH/nvm mismatch when `pi` and the running `node` resolve from different
+  directories (a global install under another nvm version is invisible to the
+  active Node).
 - **Credentials**: inspects whether the requested provider has a credential in
   Pi's `auth.json` or its environment variable. Only provider names and source
   labels are reported; credential values are never returned or printed.
 - **Model**: verifies the configured provider/model (default `openrouter/deepseek/deepseek-v4.1-flash`) against Pi's
   local catalog (`models-store.json`) and agent `models.json` with no network
-  call, and gives an actionable diagnosis when it is missing.
+  call, and gives an actionable diagnosis when it is missing. It also reports
+  the selected provider's catalog as `missing`, `empty`, or `populated` so the
+  remediation is specific; another provider's models never count as populated.
 - **Skill**: reports delegation-skill readiness **separately** from Pi execution
   readiness in the `skill` field (`current`, `outdated`, `customized` or
   `missing` per manager). A missing or customized skill does not change the
@@ -240,7 +248,12 @@ or makes a paid network call. Checks:
 
 The result includes `checks` (one entry per prerequisite) and `remediation`
 strings. If `pi` is missing it recommends `init --install`; if credentials are
-missing it recommends `pi` then `/login` and `/model`.
+missing it recommends `pi` then `/login` and `/model` first. Remediation is
+ordered and specific: a missing or empty selected-provider catalog names the
+provider and leads with `/login` first and then `pi update --models`; an
+authenticated empty catalog suggests `pi update --models`; an authenticated
+populated catalog that lacks the configured model suggests starting `pi` and
+choosing with `/model`.
 
 ### `node worker.ts init`
 Idempotent project setup. It creates, only when absent:
@@ -298,6 +311,15 @@ Installing Pi happens only through the explicit `--install` flag. Ordinary
 After a successful installation, readiness is checked again. Fresh installations use the pinned version even when no local Pi metadata exists. It
 reports authentication and model setup instructions to run with the
 active Node/nvm.
+
+The JSON result keeps the Pi-only `install` field for compatibility and adds an
+`installSummary` that distinguishes the two explicit attempts:
+`installSummary.pi` (`attempted`/`ok`) for Pi, `installSummary.tools` for the
+prebuilt tools (or `null` when not attempted), plus a combined
+`installSummary.attempted` and `installSummary.ok`. A Pi that was already
+present is not re-attempted, so the combined `attempted` is truthful about what
+actually ran, and the process exits nonzero only when an attempted install
+failed.
 
 #### Prebuilt release tools (`init --install`, `--update`, `--with-triz`)
 `init --install` also downloads checksum-verified **prebuilt** binaries for the

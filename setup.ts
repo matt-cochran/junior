@@ -121,14 +121,48 @@ export function discoverInstalledPi(deps:SetupDeps = {}):{name:string;version:st
  return null;
 }
 
-export type PiCheck = { found:boolean; executable:string|null; version:string|null; location:string|null; pathMismatch:boolean; note?:string };
+export type PiVersionStatus = 'match' | 'patch' | 'minor' | 'major' | 'older' | 'unknown';
+export type PiCheck = {
+ found:boolean;
+ executable:string|null;
+ version:string|null;
+ location:string|null;
+ pathMismatch:boolean;
+ /** The Pi version pinned by the project config or the built-in tested default. */
+ testedVersion:string;
+ /** True only when the installed version equals the tested version exactly. */
+ versionMatch:boolean;
+ /** Patch differences are informational; major/minor or older versions warn. */
+ versionStatus:PiVersionStatus;
+ versionWarning:boolean;
+ versionNote?:string;
+ note?:string;
+};
+
+/** Classify an installed Pi version against the tested pin without blocking any
+ * command: an equal version matches, a newer patch is informational, and a
+ * major/minor difference or an older install is a (nonblocking) warning. */
+function classifyPiVersion(installed:string|null, tested:string):{status:PiVersionStatus; match:boolean; warning:boolean; note?:string} {
+ if (!installed) return {status:'unknown', match:false, warning:false};
+ const a=parseSemver(installed), b=parseSemver(tested);
+ if (a[0]===b[0] && a[1]===b[1] && a[2]===b[2]) return {status:'match', match:true, warning:false};
+ if (compareSemver(installed,tested) < 0) return {status:'older', match:false, warning:true,
+  note:`installed pi ${installed} is older than the tested ${tested}`};
+ if (a[0]===b[0] && a[1]===b[1]) return {status:'patch', match:false, warning:false,
+  note:`installed pi ${installed} differs from the tested ${tested} by a patch release`};
+ if (a[0]===b[0]) return {status:'minor', match:false, warning:true,
+  note:`installed pi ${installed} is a newer minor release than the tested ${tested}`};
+ return {status:'major', match:false, warning:true,
+  note:`installed pi ${installed} is a newer major release than the tested ${tested}`};
+}
 
 /** Resolve `pi`, run a bounded `pi --version`, and detect a PATH/nvm mismatch
  * where `pi` and the running `node` live in different directories. */
-export function checkPi(deps:SetupDeps = {}):PiCheck {
+export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VERSION):PiCheck {
  const env=deps.env ?? process.env;
  const executable=whichOnPath('pi',env.PATH,deps);
- if (!executable) return {found:false, executable:null, version:null, location:null, pathMismatch:false};
+ if (!executable) return {found:false, executable:null, version:null, location:null, pathMismatch:false,
+  testedVersion, versionMatch:false, versionStatus:'unknown', versionWarning:false};
  let version:string|null=null;
  let note:string|undefined;
  try {
@@ -143,7 +177,10 @@ export function checkPi(deps:SetupDeps = {}):PiCheck {
  const nodeDir=dirname(deps.execPath ?? process.execPath);
  const pathMismatch=location !== nodeDir;
  if (pathMismatch) note=`pi resolves from ${location} but node runs from ${nodeDir}; a different PATH or nvm version may hide the global install`;
- return {found:true, executable, version, location, pathMismatch, ...(note?{note}:{})};
+ const pairing=classifyPiVersion(version,testedVersion);
+ return {found:true, executable, version, location, pathMismatch,
+  testedVersion, versionMatch:pairing.match, versionStatus:pairing.status, versionWarning:pairing.warning,
+  ...(pairing.note?{versionNote:pairing.note}:{}), ...(note?{note}:{})};
 }
 
 function asSpawn(command:string, args:string[], options:any):ExecResult {
@@ -177,30 +214,72 @@ export function checkCredentials(provider:string, deps:SetupDeps = {}):Credentia
  return { provider, present, sources, providers:[...new Set(providers)] };
 }
 
-export type ModelCheck = { provider:string; id:string; available:boolean; source:string|null; note?:string };
+export type ModelStoreStatus = 'missing' | 'empty' | 'populated';
+export type ModelCheck = {
+ provider:string;
+ id:string;
+ available:boolean;
+ source:string|null;
+ /** Whether the local catalog files are absent, present but empty, or hold models. */
+ storeStatus:ModelStoreStatus;
+ note?:string;
+};
+
+/** Count model entries for one provider in a parsed catalog object. Other
+ * providers never make the selected provider look populated. */
+function countProviderModels(parsed:any, shape:'store'|'custom', provider:string):number {
+ const container=shape === 'store' ? parsed : parsed?.providers;
+ const models=container?.[provider]?.models;
+ return Array.isArray(models) ? models.filter(Boolean).length : 0;
+}
 
 /** Verify the requested model against Pi's local catalog overlay and the
  * agent `models.json`, with no network access. */
 export function checkModel(provider:string, id:string, deps:SetupDeps = {}):ModelCheck {
  const dir=agentDir(deps);
+ let storePresent=false, customPresent=false, catalogModels=0;
  const storePath=join(dir,'models-store.json');
  if (exists(deps,storePath)) {
+  storePresent=true;
   try {
    const j=JSON.parse(readText(deps,storePath));
+   catalogModels+=countProviderModels(j,'store',provider);
    const models=j?.[provider]?.models;
-   if (Array.isArray(models) && models.some((m:any)=>m && m.id===id)) return {provider,id,available:true,source:'models-store.json'};
+   if (Array.isArray(models) && models.some((m:any)=>m && m.id===id)) return {provider,id,available:true,source:'models-store.json',storeStatus:'populated'};
   } catch { /* fall through to the custom models file */ }
  }
  const customPath=join(dir,'models.json');
  if (exists(deps,customPath)) {
+  customPresent=true;
   try {
    const j=JSON.parse(readText(deps,customPath));
+   catalogModels+=countProviderModels(j,'custom',provider);
    const models=j?.providers?.[provider]?.models;
-   if (Array.isArray(models) && models.some((m:any)=>m && m.id===id)) return {provider,id,available:true,source:'models.json'};
+   if (Array.isArray(models) && models.some((m:any)=>m && m.id===id)) return {provider,id,available:true,source:'models.json',storeStatus:'populated'};
   } catch { /* report missing below */ }
  }
- return { provider, id, available:false, source:null,
-  note:`Model ${provider}/${id} was not found in the local Pi catalog. Run \`pi update --models\` to refresh, or start pi and choose a model with /model.` };
+ const storeStatus:ModelStoreStatus = catalogModels > 0 ? 'populated' : (storePresent || customPresent) ? 'empty' : 'missing';
+ const note=storeStatus === 'populated'
+  ? `Model ${provider}/${id} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`
+  : `The ${provider} model catalog is missing or empty; it fills after a credential is present. Start \`pi\` and run \`/login\` first, then refresh with \`pi update --models\`.`;
+ return { provider, id, available:false, source:null, storeStatus, note };
+}
+
+export type TestedPi = { name:string; version:string; source:'project'|'builtin' };
+
+/** Resolve the tested Pi version pinned in the project config, falling back to
+ * the built-in pin. Used only for doctor pairing/diagnosis; it never installs. */
+export function loadTestedPi(cwd:string, deps:SetupDeps = {}):TestedPi {
+ const path=join(cwd,'delivery.config.json');
+ if (exists(deps,path)) {
+  try {
+   const j=JSON.parse(readText(deps,path));
+   const name=typeof j?.pi?.name==='string' && j.pi.name.trim() ? j.pi.name : PI_PACKAGE;
+   const version=typeof j?.pi?.testedVersion==='string' && /^\d+\.\d+\.\d+/.test(j.pi.testedVersion) ? j.pi.testedVersion : null;
+   if (version) return {name, version, source:'project'};
+  } catch { /* a malformed config falls back to the built-in pin */ }
+ }
+ return {name:PI_PACKAGE, version:TESTED_PI_VERSION, source:'builtin'};
 }
 
 export type DoctorCheck = { id:string; ok:boolean; detail:string };
@@ -224,9 +303,11 @@ export type DoctorResult = {
 export function doctor(deps:SetupDeps = {}):DoctorResult {
  const env=deps.env ?? process.env;
  const version=deps.nodeVersion ?? process.versions.node;
+ const cwd=deps.cwd ?? process.cwd();
  const supported=compareSemver(version,SUPPORTED_NODE_MIN) >= 0;
- const pi=checkPi(deps);
- const defaults=loadDefaults(deps.cwd ?? process.cwd(),deps);
+ const testedPi=loadTestedPi(cwd,deps);
+ const pi=checkPi(deps,testedPi.version);
+ const defaults=loadDefaults(cwd,deps);
  const provider=defaults.provider;
  const credentials=checkCredentials(provider,deps);
  const model=checkModel(provider,defaults.model,deps);
@@ -236,18 +317,45 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  if (!pi.found) remediation.push(`Install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm.`);
  else if (!pi.version) remediation.push('Pi could not run successfully; check its executable and active Node installation.');
  else if (pi.pathMismatch) remediation.push('Install Pi with the active nvm Node so `pi` and `node` resolve from the same bin directory.');
+ if (pi.versionWarning && pi.versionNote) remediation.push(pi.versionNote);
  if (!credentials.present) remediation.push('Authenticate with Pi: start `pi` and run `/login`, then select the model with `/model`.');
- if (!model.available) remediation.push(model.note as string);
+ if (!model.available) {
+  if (model.storeStatus === 'populated') remediation.push(`Model ${provider}/${defaults.model} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`);
+  else remediation.push(`The ${provider} model catalog is missing or empty; run \`pi update --models\` to refresh it after \`/login\`.`);
+ }
 
  const checks:DoctorCheck[]=[
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
-  { id:'pi', ok:pi.found && !!pi.version, detail:pi.found ? `${pi.executable} (${pi.version ?? 'version unknown'})` : 'pi not found on PATH' },
+  { id:'pi', ok:pi.found && !!pi.version, detail:pi.found ? `${pi.executable} (${pi.version ?? 'version unknown'}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
   { id:'credentials', ok:credentials.present, detail:credentials.present ? `${provider} credential present (${credentials.sources.join(', ')})` : `no ${provider} credential` },
   { id:'model', ok:model.available, detail:model.available ? `${provider}/${defaults.model} in ${model.source}` : (model.note as string) },
  ];
  const skill=inspectSkill(deps);
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, checks, remediation };
+}
+
+export type InitInstallAttempt = { attempted:boolean; ok:boolean };
+/** Truthful combination of the Pi and prebuilt-tools install attempts. The
+ * legacy `install` field stays Pi-only; `installSummary` distinguishes both. */
+export type InitInstallSummary = {
+ pi:InitInstallAttempt;
+ tools:InitInstallAttempt | null;
+ attempted:boolean;
+ ok:boolean;
+};
+
+/** Combine the Pi install result and an optional prebuilt-tools report. A
+ * component that was not attempted is treated as ok and contributes no attempt. */
+export function summarizeInstall(install:InitResult['install'] | undefined, tools:{ ok:boolean } | null = null):InitInstallSummary {
+ const pi:InitInstallAttempt = { attempted: !!install?.attempted, ok: install ? install.ok : true };
+ const toolsAttempt:InitInstallAttempt | null = tools ? { attempted:true, ok:tools.ok } : null;
+ return {
+  pi,
+  tools:toolsAttempt,
+  attempted:pi.attempted || !!toolsAttempt,
+  ok:pi.ok && (toolsAttempt ? toolsAttempt.ok : true),
+ };
 }
 
 export type InitResult = {
@@ -259,6 +367,8 @@ export type InitResult = {
  pi:PiCheck;
  skill:SkillResult;
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; error?:string };
+ /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
+ installSummary:InitInstallSummary;
  instructions:string[];
 };
 
@@ -323,7 +433,8 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
- return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, install, instructions };
+ return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, install,
+  installSummary:summarizeInstall(install,null), instructions };
 }
 
 export type Defaults = { provider:string; model:string; source:'builtin'|'project'; path:string|null };

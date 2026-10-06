@@ -14,7 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { run, validate, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions } from './setup.ts';
+import { doctor, init, parseInitOptions, summarizeInstall } from './setup.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 
@@ -164,10 +164,11 @@ async function main(argv: string[]): Promise<void> {
    const installer = await import('./installer.ts');
    const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
    result.tools = report;
-   if (!report.ok) process.exitCode = 1;
+   // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
+   result.installSummary = summarizeInstall(result.install, report);
   }
   console.log(JSON.stringify(result, null, 2));
-  if (result.install && !result.install.ok) process.exitCode = 1;
+  if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;
   return;
  }
  if (command === 'validate') {

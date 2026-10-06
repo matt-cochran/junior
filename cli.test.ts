@@ -153,6 +153,11 @@ test('junior init accepts the documented --target option', () => {
 
 // --- subcommand strict flag parsing ----------------------------------------
 
+test('junior init reports an unattempted install summary by default', () => {
+  const out = JSON.parse(runJunior(['init'], workdir()).stdout);
+  assert.equal(out.installSummary.attempted, false);
+});
+
 test('junior doctor rejects an unknown option', () => {
   assert.notEqual(runJunior(['doctor', '--bogus'], workdir()).status, 0);
 });

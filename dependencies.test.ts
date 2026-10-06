@@ -21,6 +21,7 @@ import {
   parseReleaseManifest,
   resolveLatestRelease,
 } from './installer.ts';
+import { doctor, summarizeInstall, DEFAULT_MODEL, PI_PACKAGE } from './setup.ts';
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
@@ -911,4 +912,139 @@ test('Private release redirects never forward the GitHub token to an asset host'
   return response(200,JSON.stringify({tag_name:'v0.1.0',assets:[]}));
  }});
  assert.equal(authorization,undefined);
+});
+
+// --- doctor Pi version pairing, remediation ordering and install summaries ---
+
+type StoreState = 'missing' | 'empty' | 'populated';
+
+/** A fully offline doctor fixture: an executable `pi`, optional auth/model
+ * files, and a bounded `pi --version` seam. Never installs or calls a network. */
+function doctorFixture(opts: {
+ installed?: string;
+ tested?: string;
+ store?: StoreState;
+ authenticated?: boolean;
+ catalogId?: string;
+ catalogProvider?: string;
+} = {}) {
+ const cwd = tmp('junior-doctor-');
+ const bin = join(cwd, 'bin');
+ mkdirSync(bin, { recursive: true });
+ writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+ const agent = join(cwd, 'agent');
+ mkdirSync(agent, { recursive: true });
+ if (opts.authenticated !== false) {
+  writeFileSync(join(agent, 'auth.json'), JSON.stringify({ openrouter: { type: 'api', key: 'secret' } }));
+ }
+ const store = opts.store ?? 'populated';
+ const catalogProvider = opts.catalogProvider ?? 'openrouter';
+ if (store === 'populated') {
+  writeFileSync(join(agent, 'models-store.json'), JSON.stringify({ [catalogProvider]: { models: [{ id: opts.catalogId ?? DEFAULT_MODEL }] } }));
+ } else if (store === 'empty') {
+  writeFileSync(join(agent, 'models-store.json'), JSON.stringify({ [catalogProvider]: { models: [] } }));
+ }
+ if (opts.tested) {
+  writeFileSync(join(cwd, 'delivery.config.json'), JSON.stringify({ provider: 'openrouter', model: DEFAULT_MODEL, pi: { name: PI_PACKAGE, testedVersion: opts.tested } }));
+ }
+ const installed = opts.installed ?? '1.0.3';
+ const deps = {
+  cwd,
+  env: { PATH: bin, PI_CODING_AGENT_DIR: agent },
+  execPath: join(bin, 'node'),
+  nodeVersion: '26.5.0',
+  exec: () => ({ status: 0, stdout: `pi ${installed}\n` }),
+ };
+ return { cwd, deps };
+}
+
+test('Doctor matches an installed Pi equal to the tested version', () => {
+ const { deps } = doctorFixture({ installed: '1.0.3', tested: '1.0.3' });
+ assert.equal(doctor(deps).pi.versionStatus, 'match');
+});
+
+test('Doctor treats a newer Pi patch as an informational difference', () => {
+ const { deps } = doctorFixture({ installed: '1.0.4', tested: '1.0.3' });
+ assert.equal(doctor(deps).pi.versionWarning, false);
+});
+
+test('Doctor warns on a newer Pi minor version', () => {
+ const { deps } = doctorFixture({ installed: '1.1.0', tested: '1.0.3' });
+ assert.equal(doctor(deps).pi.versionWarning, true);
+});
+
+test('Doctor warns when the installed Pi is older than the tested version', () => {
+ const { deps } = doctorFixture({ installed: '0.9.0', tested: '1.0.3' });
+ assert.equal(doctor(deps).pi.versionStatus, 'older');
+});
+
+test('Doctor reads the tested Pi version from the project config', () => {
+ const { deps } = doctorFixture({ installed: '2.0.0', tested: '2.0.1' });
+ assert.equal(doctor(deps).pi.testedVersion, '2.0.1');
+});
+
+test('A Pi version difference does not fail doctor', () => {
+ const { deps } = doctorFixture({ installed: '2.0.0', tested: '1.0.3' });
+ assert.equal(doctor(deps).ok, true);
+});
+
+test('Doctor recommends login before refreshing the catalog when unauthenticated', () => {
+ const { deps } = doctorFixture({ authenticated: false, store: 'missing' });
+ const remediation = doctor(deps).remediation.join('\n');
+ assert.ok(remediation.indexOf('/login') < remediation.indexOf('pi update --models'));
+});
+
+test('Doctor recommends a catalog refresh for an authenticated empty store', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'empty' });
+ assert.match(doctor(deps).remediation.join(' '), /pi update --models/);
+});
+
+test('Doctor recommends /model for a populated store missing the configured model', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'populated', catalogId: 'openrouter/other' });
+ assert.match(doctor(deps).remediation.join(' '), /\/model/);
+});
+
+test('Doctor does not count another provider catalog as the selected provider store', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'populated', catalogProvider: 'deepseek', catalogId: 'deepseek/some-model' });
+ assert.equal(doctor(deps).model.storeStatus, 'empty');
+});
+
+test('Doctor names the selected provider when its model catalog is missing', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'missing' });
+ assert.match(doctor(deps).model.note ?? '', /openrouter/);
+});
+
+test('Doctor tells the user a missing catalog fills after login then refresh', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'missing' });
+ assert.match(doctor(deps).model.note ?? '', /\/login[\s\S]*pi update --models/);
+});
+
+test('Doctor recommends a catalog refresh when only another provider is populated', () => {
+ const { deps } = doctorFixture({ authenticated: true, store: 'populated', catalogProvider: 'deepseek', catalogId: 'deepseek/some-model' });
+ assert.match(doctor(deps).remediation.join(' '), /pi update --models/);
+});
+
+test('Install summary records a Pi attempt from the install result', () => {
+ const summary = summarizeInstall({ requested: true, attempted: true, ok: true }, null);
+ assert.equal(summary.pi.attempted, true);
+});
+
+test('Install summary records a tools attempt from the tools report', () => {
+ const summary = summarizeInstall({ requested: true, attempted: false, ok: true }, { ok: true });
+ assert.equal(summary.tools?.attempted, true);
+});
+
+test('Install summary reports a combined attempt when only tools were attempted', () => {
+ const summary = summarizeInstall({ requested: true, attempted: false, ok: true }, { ok: true });
+ assert.equal(summary.attempted, true);
+});
+
+test('Install summary reports a combined failure when a tools attempt fails', () => {
+ const summary = summarizeInstall({ requested: true, attempted: true, ok: true }, { ok: false });
+ assert.equal(summary.ok, false);
+});
+
+test('Install summary reports no attempt for a Pi-only setup without installing', () => {
+ const summary = summarizeInstall(undefined, null);
+ assert.equal(summary.attempted, false);
 });
