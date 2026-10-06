@@ -151,7 +151,7 @@ deepseek/deepseek-v4.1-flash; an explicit task value always wins.
 ### Contract fields and unknown keys
 `validate` recognizes exactly the supported top-level fields (`id`,
 `deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `provider`, `model`,
-`thinking`, `pricing`, `jev`, `workflow`, `isolation`, `resumeFrom`, `repairFrom`,
+`thinking`, `pricing`, `billing`, `jev`, `workflow`, `isolation`, `resumeFrom`, `repairFrom`,
 `reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `hopFrom`, `hopRevision`,
 `hopContext`, `execution`, and the five execution settings directly:
 `deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`).
@@ -431,6 +431,11 @@ Each result carries a `receipt` parsed from authoritative assistant
   0 only as placeholders. An empty cost object does not count as a report.
 - `malformed`/`malformedLines`: JSONL records that failed to parse.
 - `settled`: whether Pi emitted `agent_settled`.
+- `responseIds`: unique provider response IDs Pi preserved on assistant
+  `message_end` records (`message.responseId`). A live OpenRouter run populates
+  these as `gen-...` generation IDs. They are the handle for obtaining
+  authoritative billing, but this worker never calls a billing API; see
+  [Authoritative provider billing](#authoritative-provider-billing).
 
 Receipt metadata is Pi-reported, not independent upstream attestation. Mock runs
 set `receipt.source` to `mock`, observe no model, and never claim an observed
@@ -467,14 +472,78 @@ supplies explicit, attributable pricing:
 - `estimatedUsd` is `null` (unknown, **not** free) when pricing is absent, usage
   is unavailable, the observed model is unknown or multiple, or a used bucket
   lacks a rate. `unknownReason` records which case applied.
-- `pricingSource`/`pricingDate` echo the supplied attribution; `billedUsd` is
-  always `null`.
+- `pricingSource`/`pricingDate` echo the supplied attribution. `billedUsd` is
+  `null` unless the task opts in to authoritative billing capture (see
+  [Authoritative provider billing](#authoritative-provider-billing)) and every
+  relevant OpenRouter generation was accounted for; a Pi catalog cost is never
+  promoted to `billedUsd`.
 - This worker does not fetch live pricing and ships no authoritative rates. The
   example task `tasks/example-shadow.json` uses clearly-labelled illustrative
   rates; replace them with verified provider pricing before relying on an
   estimate.
 
 `status` exposes the `cost` object when a saved result carries one.
+
+### Compact cost and token receipt
+The compact manager handoff (`junior.ts handoff` or `status` without `--full`)
+projects one small, truthfully-labelled cost under `model.cost`:
+
+- `amountUsd`, `source` and `available` are the compact answer. `source` is
+  `provider` for a captured authoritative provider bill, `pi_reported` for a
+  finite Pi-reported total, or `estimate` for configured task pricing;
+  `available` is true exactly when `amountUsd` is a finite, nonnegative number.
+  Preference order is provider, then Pi-reported, then estimate. A
+  Pi-reported numeric **zero** is available (a reported free call), while an
+  absent, non-finite, or negative number is unknown. Pi's catalog estimate is
+  never labelled `provider` (billed) cost.
+- `unknownReason` is present only when no source is available and names each
+  missing source separately: `missing upstream billing` (no authoritative
+  provider bill was captured) and `missing Pi pricing` (Pi reported no numeric
+  cost), plus the configured-pricing reason when applicable.
+- `input`, `output`, `cacheRead`, `cacheWrite`, `tokens` (observed total) and
+  `usageAvailable` expose the token counts without hiding the buckets.
+- Legacy fields (`estimatedUsd`, `billedUsd`, `piReportedTotal`) remain for
+  compatibility. `billedUsd` is null unless an authoritative provider bill was
+  captured, and never carries a Pi catalog value. `billingReason` carries the
+  concise reason an opted-in capture was unavailable.
+- `responseIds` carries the provider generation IDs Pi preserved so a manager
+  can reconcile the run against provider billing out of band.
+
+### Authoritative provider billing
+Pi's `usage.cost` is a catalog estimate, so it is never labelled as provider
+billing. A live OpenRouter run **does** preserve the OpenRouter generation ID on
+each assistant `message_end` as `message.responseId` (format `gen-...`; verified
+against a `pi --mode json` stream), and the receipt exposes one `generations`
+entry per assistant message.
+
+Authoritative capture is **opt-in** and off by default. A task enables it with:
+
+```json
+"billing": { "mode": "openrouter", "timeoutMs": 5000 }
+```
+
+- `mode` must be `openrouter`; `timeoutMs` is optional, positive, finite, and
+  bounded (at most 600000 ms). Unknown keys and unknown modes are rejected
+  before any paid call.
+- When enabled, the worker looks up each unique preserved generation id against
+  OpenRouter's documented endpoint
+  (`GET https://openrouter.ai/api/v1/generation?id=<responseId>`) using an API
+  key resolved privately from the environment (`OPENROUTER_API_KEY`) or Pi's
+  AuthStorage/`auth.json`. The key, request headers, raw provider bodies and raw
+  errors are never printed or written to the result.
+- At most one request is made per unique generation, with no retries and a
+  bounded maximum number of ids. The whole lookup is bounded by both the task's
+  remaining wall deadline and `timeoutMs`; the SDK import and credential
+  resolution are bounded the same way.
+- `cost.billedUsd` is set and the compact `source` becomes `provider` **only**
+  when every relevant OpenRouter assistant generation is accounted for with a
+  matching response id and model and a finite, nonnegative `data.total_cost`.
+  A reported zero is a captured bill. Missing ids, mixed providers, partial
+  coverage, wrong ids/models, errors and timeouts leave `billedUsd` `null` with a
+  concise `billingReason`; no estimate is ever promoted to a bill.
+- Billing is an optional observation. Its failure never changes the primary run
+  outcome; the limitation is recorded in the cost projection.
+- Mock runs and runs without a `billing` config make no billing request.
 
 ## Workflow templates
 Each task selects one deterministic template. `workflow` accepts `recon`,
@@ -757,11 +826,15 @@ already elapsed, is rejected **before any paid call**. An optional
 `junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
 `outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact
 location, changed file paths, compact check results, unresolved issues,
-requested/observed model, token totals (including `cacheRead`/`cacheWrite`),
-honest cost (`billedUsd` always `null`) and the runtime stop reason. A zero raw
-Pi catalog cost is **not** reported as a known charge (`cost.available` is only
-true for a real estimate or a strictly positive Pi-reported total). Repeated
-per-event stop reasons are deduplicated into `runtime.stopReasonSummary`.
+requested/observed model, token totals (`input`, `output`, `cacheRead`,
+`cacheWrite` and the observed `tokens` total), the labelled compact cost
+(`cost.amountUsd`/`cost.source`/`cost.available`, preferring an authoritative
+provider bill, then a finite Pi-reported total including a reported zero, then a
+configured estimate), the preserved provider `responseIds`, and the runtime stop
+reason. Pi's catalog estimate is never labelled as provider billing
+(`source` is `pi_reported`), and the legacy cost fields remain for
+compatibility. Repeated per-event stop reasons are deduplicated into
+`runtime.stopReasonSummary`.
 The full receipt, events, evidence and runtime heartbeat stay in the artifact
 files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
 `result.json`) and are available through `status --full`.

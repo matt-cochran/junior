@@ -96,7 +96,7 @@ export function transpile(file, source) {
 
 /** Build `dist/` from the production sources. Returns the emitted file list. */
 export function build() {
-  const files = ['junior.ts','worker.ts','setup.ts','runtime.ts','evidence.ts','isolation.ts','retention.ts','handoff.ts','hop-context.ts','installer.ts','cli-entry.ts','tools/tools.ts'].map((file) => join(root, file));
+  const files = ['junior.ts','worker.ts','setup.ts','runtime.ts','evidence.ts','isolation.ts','retention.ts','billing.ts','handoff.ts','hop-context.ts','installer.ts','cli-entry.ts','tools/tools.ts'].map((file) => join(root, file));
   rmSync(outDir, { recursive: true, force: true });
   const emitted = [];
   for (const file of files) {

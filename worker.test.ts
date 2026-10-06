@@ -1828,7 +1828,7 @@ test('Async check executor enforces its deadline and kills a TERM-ignoring desce
  assert.equal(await aliveAfter(cpid),false,'check executor must kill the whole process tree');
 });
 
-test('Compact handoff preserves source cwd and token/cache totals and stays honest about zero cost',()=>{
+test('Compact handoff preserves source cwd and token/cache totals',()=>{
  const base:any={id:'c',status:'ready_for_review',artifactDir:'/a',sourceCwd:'/src',executionCwd:'/exec',
   isolation:{mode:'worktree'},checks:[],receipt:{requested:{provider:'openrouter',model:'m'},observed:[],observedUnknown:true,
    usage:{input:10,output:20,cacheRead:5,cacheWrite:2,totalTokens:37,available:true}},
@@ -1839,10 +1839,85 @@ test('Compact handoff preserves source cwd and token/cache totals and stays hone
  assert.equal(h.model.cacheRead,5);
  assert.equal(h.model.cacheWrite,2);
  assert.equal(h.model.tokens,37);
- assert.equal(h.model.cost.available,false,'a zero raw catalog total is not a known charge');
+ assert.equal(h.model.cost.available,true,'a reported numeric zero is a known (free) charge');
  assert.equal(h.model.cost.billedUsd,null);
  assert.equal(compactHandoff({...base,cost:{estimatedUsd:0.5,piReported:{total:0,available:true}}}).model.cost.available,true);
  assert.equal(compactHandoff({...base,cost:{estimatedUsd:null,piReported:{total:0.25,available:true}}}).model.cost.available,true);
+});
+
+// --- Issue #13/#16: compact labelled cost and token receipt (offline) ---
+const handoffResult=(over:any={}):any=>({id:'c',status:'ready_for_review',artifactDir:'/a',
+ receipt:{requested:{provider:'openrouter',model:'m'},observed:[{provider:'openrouter',model:'m'}],observedUnknown:false,
+  usage:{input:11,output:22,cacheRead:3,cacheWrite:4,totalTokens:40,available:true},responseIds:['gen-abc']},
+ cost:{estimatedUsd:null,piReported:{total:null,available:false}},...over});
+
+test('Compact cost prefers captured provider billing over Pi and estimate',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:1.5,estimatedUsd:2,piReported:{total:3,available:true}}}));
+ assert.equal(h.model.cost.source,'provider');
+});
+test('Compact cost prefers the captured provider amount over the other candidates',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:1.5,estimatedUsd:2,piReported:{total:3,available:true}}}));
+ assert.equal(h.model.cost.amountUsd,1.5);
+});
+test('Compact cost falls back to a finite Pi-reported total over configured pricing',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:2,piReported:{total:3,available:true}}}));
+ assert.equal(h.model.cost.source,'pi_reported');
+});
+test('Compact cost falls back to configured pricing when no provider or Pi cost exists',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:2,piReported:{total:null,available:false}}}));
+ assert.equal(h.model.cost.source,'estimate');
+});
+test('Compact cost treats a Pi-reported numeric zero as available',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.equal(h.model.cost.available,true);
+});
+test('Compact cost treats a negative Pi-reported total as unknown',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:null,piReported:{total:-1,available:true}}}));
+ assert.equal(h.model.cost.available,false);
+});
+test('Compact cost treats an absent Pi-reported cost as unknown',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:false}}}));
+ assert.equal(h.model.cost.available,false);
+});
+test('Compact cost keeps the legacy estimated amount alongside the compact amount',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:2,piReported:{total:3,available:true}}}));
+ assert.equal(h.model.cost.estimatedUsd,2);
+});
+test('Compact cost unknown reason names the missing upstream billing',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:null,piReported:{total:null,available:false}}}));
+ assert.match(String(h.model.cost.unknownReason),/upstream billing/i);
+});
+test('Compact cost unknown reason names the missing Pi pricing',()=>{
+ const h=compactHandoff(handoffResult({cost:{billedUsd:null,estimatedUsd:null,piReported:{total:null,available:false}}}));
+ assert.match(String(h.model.cost.unknownReason),/Pi pricing/i);
+});
+test('Compact receipt exposes the input token count',()=>{
+ const h=compactHandoff(handoffResult());
+ assert.equal(h.model.input,11);
+});
+test('Compact receipt exposes the output token count',()=>{
+ const h=compactHandoff(handoffResult());
+ assert.equal(h.model.output,22);
+});
+test('Parser records the provider response id from an assistant message_end',()=>{
+ const r=parseReceipt(stream(assistant({responseId:'gen-abc'}),{type:'agent_settled'}));
+ assert.deepEqual(r.responseIds,['gen-abc']);
+});
+test('Parser dedupes repeated provider response ids',()=>{
+ const r=parseReceipt(stream(assistant({responseId:'gen-abc'}),assistant({responseId:'gen-abc'}),{type:'agent_settled'}));
+ assert.equal(r.responseIds.length,1);
+});
+test('Compact handoff exposes the captured provider response ids',()=>{
+ const h=compactHandoff(handoffResult());
+ assert.deepEqual(h.model.responseIds,['gen-abc']);
+});
+test('Compact cost of a legacy result without cost data is unknown',()=>{
+ const h=compactHandoff({id:'old',status:'ready_for_review',artifactDir:'/a',receipt:{usage:{}}});
+ assert.equal(h.model.cost.available,false);
+});
+test('Compact cost falls back to the raw receipt cost when no projection exists',()=>{
+ const h=compactHandoff({id:'old',status:'ready_for_review',artifactDir:'/a',receipt:{usage:{cost:{total:0,available:true}}}});
+ assert.equal(h.model.cost.source,'pi_reported');
 });
 
 test('Cancellation completes kill escalation before returning handback',async()=>{

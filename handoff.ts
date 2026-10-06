@@ -42,15 +42,30 @@ export type CompactHandoff = {
   observed: { provider: string; model: string }[];
   observedUnknown: boolean;
   tokens: number;
+  input: number;
+  output: number;
   cacheRead: number;
   cacheWrite: number;
   usageAvailable: boolean;
+  /** Provider response IDs preserved by Pi (OpenRouter generation IDs). The
+   * handle for obtaining authoritative provider billing. When the task opts in
+   * to bounded billing capture the worker fetches the matching generation and
+   * sets `cost.billedUsd`. */
+  responseIds: string[];
   cost: {
-   estimatedUsd: number | null;
-   billedUsd: null;
-   piReportedTotal: number | null;
+   /** One compact amount chosen by preference: authoritative captured provider
+    * billing, then a finite Pi-reported total, then a configured estimate. */
+   amountUsd: number | null;
+   /** Which source produced `amountUsd`; `pi_reported` is a Pi catalog estimate,
+    * never a provider bill. */
+   source: 'provider' | 'pi_reported' | 'estimate' | null;
    available: boolean;
+   estimatedUsd: number | null;
+   billedUsd: number | null;
+   piReportedTotal: number | null;
    unknownReason?: string;
+   /** Concise reason an opted-in authoritative provider bill is unavailable. */
+   billingReason?: string;
   };
  };
  runtime: {
@@ -128,6 +143,49 @@ export function isSuccessOutcome(outcome: string | null | undefined): boolean {
  return outcome === 'ready_for_review' || outcome === 'simulation_passed';
 }
 
+/** A finite, nonnegative USD amount, else null (unknown). */
+function finiteUsd(v: any): number | null {
+ return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** One compact, truthfully-labelled cost. Prefer an authoritative captured
+ * provider bill, then a finite Pi-reported total (including a reported zero),
+ * then an independently configured pricing estimate. Pi's catalog cost is never
+ * labelled as provider billing. Legacy fields stay present for compatibility. */
+export function compactCost(r: any): CompactHandoff['model']['cost'] {
+ const providerUsd = finiteUsd(r?.cost?.billedUsd);
+ // `cost.piReported` is the projected copy; fall back to the raw receipt so a
+ // result written before the cost projection still reports a finite Pi total.
+ const piReported = r?.cost?.piReported ?? r?.receipt?.usage?.cost;
+ const piTotal = r?.cost?.piReportedTotal ?? piReported?.total ?? null;
+ const piUsd = piReported?.available === true ? finiteUsd(piTotal) : null;
+ const estimateUsd = finiteUsd(r?.cost?.estimatedUsd);
+
+ let amountUsd: number | null = null;
+ let source: 'provider' | 'pi_reported' | 'estimate' | null = null;
+ if (providerUsd !== null) { amountUsd = providerUsd; source = 'provider'; }
+ else if (piUsd !== null) { amountUsd = piUsd; source = 'pi_reported'; }
+ else if (estimateUsd !== null) { amountUsd = estimateUsd; source = 'estimate'; }
+
+ const out: CompactHandoff['model']['cost'] = {
+  amountUsd,
+  source,
+  available: amountUsd !== null,
+  estimatedUsd: estimateUsd,
+  billedUsd: providerUsd,
+  piReportedTotal: typeof piTotal === 'number' ? piTotal : null,
+ };
+ if (r?.cost?.billingReason) out.billingReason = String(r.cost.billingReason);
+ if (amountUsd === null) {
+  const missing: string[] = [];
+  if (providerUsd === null) missing.push(r?.cost?.billingReason ? `missing upstream billing: ${r.cost.billingReason}` : 'missing upstream billing');
+  if (piUsd === null) missing.push('missing Pi pricing');
+  if (estimateUsd === null) missing.push(r?.cost?.unknownReason ? String(r.cost.unknownReason) : 'no configured pricing estimate');
+  out.unknownReason = missing.join('; ');
+ }
+ return out;
+}
+
 /** Build the compact handoff from a full worker result. */
 export function compactHandoff(result: any): CompactHandoff {
  const r = result || {};
@@ -136,13 +194,7 @@ export function compactHandoff(result: any): CompactHandoff {
  const changedFiles = (Array.isArray(evidenceChanged) ? evidenceChanged : [])
   .map((f: any) => (typeof f === 'string' ? f : f?.path))
   .filter((p: any) => typeof p === 'string');
- const estimatedUsd = r.cost?.estimatedUsd ?? null;
- const piTotal = r.cost?.piReported?.total ?? null;
- // A zero raw Pi catalog total is NOT a known charge: Pi can report
- // `available: true` with a zero total when no pricing catalog matched. Only a
- // real estimate, or a strictly positive Pi-reported total, is a known charge.
- const costAvailable = estimatedUsd !== null
-  || (r.cost?.piReported?.available === true && typeof piTotal === 'number' && piTotal > 0);
+ const cost = compactCost(r);
  const report = typeof r.analysis?.report === 'string' ? r.analysis.report : null;
  const analysis = r.analysis && typeof r.analysis === 'object' ? {
   workflow: String(r.analysis.workflow ?? ''),
@@ -180,16 +232,13 @@ export function compactHandoff(result: any): CompactHandoff {
    observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
    observedUnknown: r.receipt?.observedUnknown ?? true,
    tokens: r.receipt?.usage?.totalTokens ?? 0,
+   input: r.receipt?.usage?.input ?? 0,
+   output: r.receipt?.usage?.output ?? 0,
    cacheRead: r.receipt?.usage?.cacheRead ?? 0,
    cacheWrite: r.receipt?.usage?.cacheWrite ?? 0,
    usageAvailable: r.receipt?.usage?.available ?? false,
-   cost: {
-    estimatedUsd,
-    billedUsd: null,
-    piReportedTotal: piTotal,
-    available: costAvailable,
-    ...(r.cost?.unknownReason ? { unknownReason: String(r.cost.unknownReason) } : {}),
-   },
+   responseIds: Array.isArray(r.receipt?.responseIds) ? r.receipt.responseIds : [],
+   cost,
   },
   runtime: {
    state: r.runtime?.state ?? null,

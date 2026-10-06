@@ -7,6 +7,11 @@ import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, type IsolationMode, type LockHandle } from './isolation.ts';
 import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, DEFAULT_MAX_OUTPUT_BYTES, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
+import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
+
+// Re-export the billing surface so callers and tests have one entry point.
+export { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_MODES, BILLING_ENDPOINT, BILLING_MAX_TIMEOUT_MS, BILLING_DEFAULT_TIMEOUT_MS, BILLING_MAX_GENERATIONS } from './billing.ts';
+export type { BillingConfig, BillingCapture, BillingDeps, BillingFetch, BillingGeneration, BillingReceipt } from './billing.ts';
 
 // Re-export the evidence and isolation APIs so existing imports from worker.ts
 // keep working and callers have one entry point.
@@ -25,7 +30,7 @@ export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot
 export const TASK_FIELDS = [
  'id','deliverable','cwd','acceptance','checks','constraints',
  'provider','model','thinking','pricing','jev',
- 'workflow','isolation',
+ 'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
  'hopFrom','hopRevision','hopContext',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs',
@@ -103,6 +108,7 @@ export function validate(t: any) {
   }
  }
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
+ if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
@@ -141,6 +147,15 @@ export type Receipt = {
  sessionId:string | null;
  observed:ObservedPair[];
  observedUnknown:boolean;
+ /** Provider response IDs Pi preserved on assistant `message_end` records
+  * (for OpenRouter these are `gen-...` generation IDs). They are the handle for
+  * obtaining authoritative provider billing. Deduped for display; the full
+  * per-generation list (including a null id) is in `generations`. */
+ responseIds:string[];
+ /** Every assistant `message_end` in stream order with its provider, model and
+  * preserved response id (null when Pi reported none). Used to decide whether
+  * an opt-in OpenRouter billing lookup can account for the whole run. */
+ generations:{ provider:string; model:string; responseId:string|null }[];
  usage:Usage;
  assistantMessages:number;
  messageEnds:number;
@@ -198,6 +213,8 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   sessionId:null,
   observed:[],
   observedUnknown:true,
+  responseIds:[],
+  generations:[],
   usage:emptyUsage(),
   assistantMessages:0,
   messageEnds:0,
@@ -233,6 +250,9 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   const model = typeof m.model === 'string' && m.model.trim() ? m.model : 'unknown';
   const key = `${provider}\u0000${model}`;
   if (!seen.has(key)) { seen.add(key); receipt.observed.push({provider,model}); }
+  const responseId = typeof m.responseId === 'string' && m.responseId.trim() ? m.responseId.trim() : null;
+  receipt.generations.push({ provider, model, responseId });
+  if (responseId && !receipt.responseIds.includes(responseId)) receipt.responseIds.push(responseId);
   if (typeof m.stopReason === 'string') {
    receipt.stopReasons.push(m.stopReason);
    if (m.stopReason === 'error' || m.stopReason === 'length') receipt.errored = true;
@@ -253,6 +273,8 @@ export function mockReceipt(requested:{provider?:string;model?:string} = {}):Rec
   sessionId:null,
   observed:[],
   observedUnknown:true,
+  responseIds:[],
+  generations:[],
   usage:emptyUsage(),
   assistantMessages:0,
   messageEnds:0,
@@ -275,11 +297,12 @@ export function receiptValid(r:Receipt) {
 // ---------------------------------------------------------------------------
 // Estimated execution cost
 //
-// Pi's `usage.cost` is a catalog estimate reported by Pi, not a bill. This
-// worker never observes actual billing, so `billedUsd` is always null. A
-// separate estimate is computed only from independently observed token usage
-// and explicit per-million-token task pricing; absent verified pricing the
-// estimate is unknown, never a free zero.
+// Pi's `usage.cost` is a catalog estimate reported by Pi, not a bill. When a
+// task opts in to bounded OpenRouter billing capture, the authoritative summed
+// `total_cost` is merged into `billedUsd`; otherwise it stays null. A separate
+// estimate is computed only from independently observed token usage and explicit
+// per-million-token task pricing; absent verified pricing the estimate is
+// unknown, never a free zero.
 // ---------------------------------------------------------------------------
 
 export const PRICING_RATES = ['input','output','cacheRead','cacheWrite'] as const;
@@ -290,8 +313,11 @@ export type CostEstimate = {
  estimatedUsd:number|null;
  pricingSource:string|null;
  pricingDate:string|null;
- /** Always null: actual billing is never observed by this worker. */
- billedUsd:null;
+ /** Authoritative captured provider bill (finite nonnegative USD), else null.
+  * Never carries a Pi catalog estimate. */
+ billedUsd:number|null;
+ /** Concise, non-sensitive reason the authoritative bill is unavailable. */
+ billingReason?:string;
  /** Raw Pi catalog cost, kept separate from the estimate. */
  piReported:Usage['cost'];
  /** Why the estimate is unknown, when it is. */
@@ -318,8 +344,10 @@ export function validatePricing(p:any):void {
  * task pricing (USD per million tokens). Reasoning is excluded because Pi
  * already includes it in output tokens. The estimate is unknown (null) when
  * pricing is absent, usage is unavailable, the observed model is unknown or
- * multiple, or a nonzero usage bucket lacks a rate. */
-export function estimateCost(receipt:Receipt, pricing:any):CostEstimate {
+ * multiple, or a nonzero usage bucket lacks a rate. An optional captured
+ * billing result only sets `billedUsd`/`billingReason`; it never changes the
+ * estimate and is never promoted from the estimate. */
+export function estimateCost(receipt:Receipt, pricing:any, billing?:BillingCapture|null):CostEstimate {
  const out:CostEstimate = {
   estimatedUsd:null,
   pricingSource: pricing && typeof pricing.source === 'string' ? pricing.source : null,
@@ -327,11 +355,14 @@ export function estimateCost(receipt:Receipt, pricing:any):CostEstimate {
   billedUsd:null,
   piReported: receipt.usage.cost,
  };
- if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) return {...out, unknownReason:'no verified task pricing supplied'};
- if (!receipt.usage.available) return {...out, unknownReason:'usage unavailable'};
- if (receipt.observed.length > 1) return {...out, unknownReason:'multiple observed models'};
+ if (billing && typeof billing.billedUsd === 'number' && Number.isFinite(billing.billedUsd) && billing.billedUsd >= 0) out.billedUsd = billing.billedUsd;
+ else if (billing?.reason) out.billingReason = billing.reason;
+ const finish=(o:CostEstimate)=>{ if (out.billedUsd !== null) o.billedUsd = out.billedUsd; else if (out.billingReason) o.billingReason = out.billingReason; return o; };
+ if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) return finish({...out, unknownReason:'no verified task pricing supplied'});
+ if (!receipt.usage.available) return finish({...out, unknownReason:'usage unavailable'});
+ if (receipt.observed.length > 1) return finish({...out, unknownReason:'multiple observed models'});
  const only = receipt.observed[0];
- if (!only || only.provider === 'unknown' || only.model === 'unknown') return {...out, unknownReason:'observed model unknown'};
+ if (!only || only.provider === 'unknown' || only.model === 'unknown') return finish({...out, unknownReason:'observed model unknown'});
  const buckets:[PricingRate,number][] = [
   ['input', receipt.usage.input],
   ['output', receipt.usage.output],
@@ -342,12 +373,12 @@ export function estimateCost(receipt:Receipt, pricing:any):CostEstimate {
  for (const [key, tokens] of buckets) {
   const rate = pricing[key];
   if (tokens > 0 && (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0)) {
-   return {...out, unknownReason:`missing pricing.${key} for nonzero usage`};
+   return finish({...out, unknownReason:`missing pricing.${key} for nonzero usage`});
   }
   const r = typeof rate === 'number' && Number.isFinite(rate) ? rate : 0;
   total += (tokens / 1e6) * r;
  }
- return {...out, estimatedUsd:total};
+ return finish({...out, estimatedUsd:total});
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1045,25 @@ async function loadPiSdk():Promise<any> {
  throw Error(`Pi SDK could not be loaded. Set PI_SDK_MODULE to the installed SDK entry point. Last error: ${msg(lastErr)}`);
 }
 
+/** Resolve an OpenRouter API key without ever logging it. Prefers the
+ * environment, then the installed Pi SDK's AuthStorage (`readStoredCredential`),
+ * then a direct read of Pi's `auth.json`. The caller bounds this by the billing
+ * deadline, so a slow SDK import cannot outlive the run. The key value never
+ * leaves this function except as the return value. */
+export async function resolveOpenRouterKey():Promise<string|null> {
+ const fromEnv = resolveApiKeyFromEnvironment(process.env);
+ if (fromEnv) return fromEnv;
+ try {
+  const sdk = await loadPiSdk();
+  const cred:any = sdk?.readStoredCredential?.('openrouter');
+  if (cred && typeof cred === 'object') {
+   if ((cred.type === 'api_key' || cred.type === 'api') && typeof cred.key === 'string' && cred.key.trim()) return cred.key.trim();
+   if (cred.type === 'oauth' && typeof cred.access === 'string' && cred.access.trim()) return cred.access.trim();
+  }
+ } catch { /* fall back to reading the auth file directly */ }
+ return readOpenRouterAuthFile(openRouterAuthPath(process.env));
+}
+
 /** Build a live classifier backed by the installed Pi SDK. Uses
  * `modelRegistry.classify` with normal Pi AuthStorage; the classifier makes no
  * premium chat call. If the catalog lacks the entry, an explicit
@@ -1055,6 +1105,10 @@ export type GateDeps = {
  classifierTimeoutMs?:number;
  /** Override the worker output accumulation cap (bytes). */
  maxOutputBytes?:number;
+ /** Injectable billing fetch seam for offline authoritative-billing tests. */
+ billingFetch?:BillingFetch;
+ /** Injectable billing credential seam for offline tests. Never logs a key. */
+ billingResolveApiKey?:() => string | null | Promise<string | null>;
 };
 
 /** Reject `p` as soon as `signal` aborts, so an interrupted preflight/postflight
@@ -1493,8 +1547,25 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   else if (streamResult?.timedOut) heartbeat.setState('tool_timed_out',{timedOut:true, stopReason:'tool_timed_out'});
   else heartbeat.setState('failed',{stopReason:status});
 
+  // Optional bounded authoritative OpenRouter billing capture. It never changes
+  // the primary outcome; when billing is unavailable the concise reason is kept
+  // as a recorded limitation.
+  let billing:BillingCapture|undefined;
+  if (!mock && t.billing) {
+   const budgetMs = typeof t.billing.timeoutMs === 'number' ? t.billing.timeoutMs : BILLING_DEFAULT_TIMEOUT_MS;
+   try {
+    billing = await raceSignal(captureBilling(receipt, t.billing, { timeoutMs:budgetMs, deadlineAt }, {
+     fetch:deps.billingFetch,
+     resolveApiKey:deps.billingResolveApiKey ?? resolveOpenRouterKey,
+    }), signal);
+   } catch {
+    billing = { billedUsd:null, source:null, reason:'billing lookup interrupted', generationCount:0, capturedCount:0 };
+   }
+  }
+
   const runtime=heartbeat.snapshot();
-  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false};
+  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false};
+  if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount };
   result.sourceCwd=sourceCwd;
   result.executionCwd=executionCwd;
   result.isolation={ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) };
