@@ -556,16 +556,19 @@ interface MatrixOptions {
   hop?: string;
   plan?: string;
   session?: string;
+  model?: string;
 }
 
 const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca'];
-const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session'];
+const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model'];
 
 export const MATRIX_USAGE = [
   'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca [--source ...]',
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -575,7 +578,7 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     const arg = argv[i];
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
-    if (!VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix export: ${arg}`);
+    if (!VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix: ${arg}`);
     let value = eq === -1 ? undefined : arg.slice(eq + 1);
     if (value === undefined) value = argv[++i];
     if (value === undefined || value === '') throw new Error(`Option ${name} requires a value`);
@@ -592,6 +595,7 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     hop: values['--hop'],
     plan: values['--plan'],
     session: values['--session'],
+    model: values['--model'],
   };
 }
 
@@ -652,6 +656,22 @@ export async function main(argv: string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 0;
+  }
+  if (argv[0] === 'sync') {
+    try {
+      const options = parseMatrixArgs(argv.slice(1));
+      if (!options.hop) throw new Error('matrix sync requires --hop <hop.json>');
+      if (!options.model) throw new Error('matrix sync requires --model <modelId>');
+      const dimensions: MatrixDimension[] = [];
+      for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
+      const { syncDimensions } = await import('./matrix-sync.ts');
+      const result = await syncDimensions({ hopPath: options.hop, modelId: options.model, dimensions });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
   }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);
