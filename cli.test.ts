@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -220,4 +220,45 @@ test('junior init rejects another option as a missing skill-root value without w
   const dir = workdir();
   runJunior(['init', '--skill-root', '--force'], dir);
   assert.deepEqual(readdirSync(dir), []);
+});
+
+// --- B07 progress on stderr, --quiet, live status and help size ---------------
+
+function mockTask(dir: string): string {
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id: 'cli-mock',
+    deliverable: 'Mock handoff',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['mock'],
+    checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+  }));
+  return taskPath;
+}
+
+test('junior --help prints at most 12 lines', () => {
+  assert.ok(runJunior(['--help'], workdir()).stdout.trimEnd().split('\n').length <= 12);
+});
+
+test('junior handoff --mock prints a JSON receipt on stdout', () => {
+  const dir = workdir();
+  const res = runJunior(['handoff', mockTask(dir), '--mock'], dir);
+  assert.doesNotThrow(() => JSON.parse(res.stdout));
+});
+
+test('junior handoff --mock prefixes progress lines with junior: on stderr', () => {
+  const dir = workdir();
+  assert.match(runJunior(['handoff', mockTask(dir), '--mock'], dir).stderr, /^junior: /m);
+});
+
+test('junior handoff --mock --quiet writes nothing to stderr', () => {
+  const dir = workdir();
+  assert.equal(runJunior(['handoff', mockTask(dir), '--mock', '--quiet'], dir).stderr, '');
+});
+
+test('junior status --live prints the phase from runtime.json', () => {
+  const dir = workdir();
+  writeFileSync(join(dir, 'runtime.json'), JSON.stringify({ phase: 'worker', state: 'running', elapsedMs: 12, remainingMs: 34, currentTool: 'bash' }));
+  assert.equal(JSON.parse(runJunior(['status', dir, '--live'], dir).stdout).phase, 'worker');
 });

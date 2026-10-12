@@ -13,8 +13,9 @@
 // ---------------------------------------------------------------------------
 
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { run, validate, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, type InitOptions } from './setup.ts';
+import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
 import { inspectCompanions } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
@@ -65,16 +66,16 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--mock] [--full]' },
- qa: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior qa <task.json> [--mock] [--full]' },
- run: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior run <task.json> [--mock] [--full]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--mock] [--full] [--quiet]' },
+ qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
+ run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior run <task.json> [--mock] [--full] [--quiet]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
- status: { flags: ['--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior status <result.json> [--full]' },
+ status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online]' },
  update: {
@@ -231,6 +232,11 @@ async function main(argv: string[]): Promise<void> {
  }
  if (command === 'status') {
   const path = parsed.files[0];
+  if (parsed.flags.has('--live')) {
+   const snapshot = readRuntimeSnapshot(path);
+   console.log(JSON.stringify(snapshot, null, 2));
+   return;
+  }
   if (parsed.flags.has('--full')) {
    console.log(JSON.stringify(status(path), null, 2));
   } else {
@@ -246,12 +252,30 @@ async function main(argv: string[]): Promise<void> {
   const task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
+  if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
+  const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+  const slowMount = detectSlowMount(taskCwd);
+  if (slowMount) deps.progress?.(slowMount);
   const result = await run(task, mock, deps);
   console.log(JSON.stringify(parsed.flags.has('--full') ? result : compactHandoff(result), null, 2));
   if (!isSuccessOutcome(result.status)) process.exitCode = 1;
   return;
  }
  throw Error(usage());
+}
+
+/** Read the live runtime.json snapshot for an artifact directory (or a direct
+ * runtime.json path) without requiring result.json. */
+function readRuntimeSnapshot(path:string):any {
+ let raw:string;
+ try {
+  try { raw=readFileSync(join(path,'runtime.json'),'utf8'); }
+  catch { raw=readFileSync(path,'utf8'); }
+ } catch { throw Error(`Cannot read runtime snapshot: ${path}`); }
+ let snap:any;
+ try { snap=JSON.parse(raw); } catch { throw Error(`Invalid JSON in runtime snapshot: ${path}`); }
+ if (!snap || typeof snap !== 'object' || Array.isArray(snap)) throw Error('Malformed runtime snapshot: expected an object');
+ return { phase:snap.phase, state:snap.state, elapsedMs:snap.elapsedMs, remainingMs:snap.remainingMs, currentTool:snap.currentTool };
 }
 
 if (isDirectEntry(import.meta.url)) {

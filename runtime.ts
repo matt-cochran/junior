@@ -135,15 +135,25 @@ export type RuntimeSnapshot = {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
+/** Optional short, human-readable progress lines (one per phase change and a
+ * bounded heartbeat). The sink is best-effort: a throwing sink never aborts a
+ * run. */
+export type ProgressSink = (line: string) => void;
+
 /** Atomically-rewritten runtime.json heartbeat. `poll()` is cheap and is driven
  * by the streaming executor; it flips `running` to `quiet` after `quietMs` of
- * inactivity and writes at most every `heartbeatMs`. */
+ * inactivity and writes at most every `heartbeatMs`. When a progress sink is
+ * supplied it also emits a heartbeat line at most every `heartbeatMs` while
+ * the worker phase is active. */
 export class RuntimeHeartbeat {
  private snap: RuntimeSnapshot;
  private lastWriteAt = 0;
+ private lastProgressAt = 0;
  private readonly path: string;
- constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker') {
+ private readonly progress?: ProgressSink;
+ constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker', progress?: ProgressSink) {
   this.path = path;
+  this.progress = progress;
   this.snap = {
    state: 'starting', phase,
    startedAt: iso(startedAt), heartbeatAt: iso(startedAt), lastActivityAt: iso(startedAt),
@@ -183,12 +193,23 @@ export class RuntimeHeartbeat {
   this.snap.remainingMs = Math.max(0, Date.parse(this.snap.deadlineAt) - now);
   this.snap.currentTool = currentTool;
   this.snap.activeToolMs = activeToolMs;
+  this.emitHeartbeat(now, currentTool);
   if (this.snap.state === 'running' && now - Date.parse(this.snap.lastActivityAt) >= this.snap.quietMs) {
    this.snap.state = 'quiet';
    this.write(true);
    return;
   }
   this.write();
+ }
+ /** Emit at most one bounded heartbeat progress line per `heartbeatMs`, only
+  * while the worker phase is active. Best-effort: never throws. */
+ private emitHeartbeat(now: number, currentTool: string | null): void {
+  if (!this.progress || this.snap.phase !== 'worker') return;
+  if (now - this.lastProgressAt < this.snap.heartbeatMs) return;
+  this.lastProgressAt = now;
+  const elapsedSeconds = Math.max(0, Math.round((now - Date.parse(this.snap.startedAt)) / 1000));
+  try { this.progress(`heartbeat ${elapsedSeconds}s${currentTool ? ` tool=${currentTool}` : ''}`); }
+  catch { /* progress must never abort a run */ }
  }
 }
 

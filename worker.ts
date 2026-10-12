@@ -1281,6 +1281,10 @@ export type GateDeps = {
  billingFetch?:BillingFetch;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
+ /** Optional short progress sink: one line per phase change plus a bounded
+  * heartbeat while the worker runs. Best-effort; a throwing sink never aborts
+  * a run. */
+ progress?:(line:string)=>void;
 };
 
 /** Reject `p` as soon as `signal` aborts, so an interrupted preflight/postflight
@@ -1337,8 +1341,10 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // and is tightened by an inherited repair-lineage deadline when one exists.
  let deadlineAt=runStartedAt+settings.deadlineMs;
  const runtimePath=join(dir,'runtime.json');
- const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness');
+ const emit=(line:string)=>{ try { deps.progress?.(line); } catch { /* progress must never abort a run */ } };
+ const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness', deps.progress);
  heartbeat.begin();
+ emit('readiness');
  const remainingMs=()=>deadlineAt-Date.now();
  const outOfTime=()=>Date.now() >= deadlineAt;
  // The worker is stopped before the total deadline so the reserved budget is
@@ -1361,6 +1367,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // Every pre-worker refusal writes an inspectable result plus a runtime heartbeat.
  const blocked=(workerError:string, extra:any={})=>{
   heartbeat.setState('failed',{stopReason:'blocked', error:workerError});
+  emit('finished needs_review');
   const out:any={ id:t.id, simulated:mock, status:'needs_review', workerExitCode:null,
    workerError, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage, ...extra };
   writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
@@ -1445,6 +1452,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // Decide the execution checkout before any paid call. Worktree isolation
  // requires a clean source and refuses rather than silently omitting edits.
  heartbeat.update({phase:'isolation'});
+ emit('isolation');
  let executionCwd=sourceCwd;
  let worktreePath:string|undefined;
  if (isolation === 'worktree') {
@@ -1550,6 +1558,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
 
   // Preflight (readiness) gate runs before the worker. `auto` runs exactly one
   // extra Jev choice question inside this call.
+  emit('preflight');
   if (mode !== 'off' && classify && !outOfTime()) {
    jev!.attempted = true;
    try {
@@ -1606,6 +1615,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // Execute the worker. Live runs use the streaming async child lifecycle and
   // never spawnSync; the injected spawnPi seam remains for legacy offline tests.
   heartbeat.update({phase:'worker'});
+  emit('worker started');
   const eventsPath=join(dir,'events.jsonl');
   const logPath=join(dir,'worker.log');
   let stdout='', stderr='', legacyError:string|undefined;
@@ -1667,6 +1677,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     const rem=remainingMs();
     if (rem <= 0) { deadlineDuringChecks=true; break; }
     const c=t.checks[i];
+    emit(`check ${i+1}/${t.checks.length}`);
     const timeout=Math.max(1, Math.min(settings.checkTimeoutMs, settings.toolTimeoutMs, rem));
     const resolved=resolveCheckCwd(c.cwd, sourceCwd, executionCwd);
     if (resolved.error) {
@@ -1707,6 +1718,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // Postflight (completion) gate runs against the independent checks and the
   // complete bounded evidence.
   heartbeat.update({phase:'postflight'});
+  emit('postflight');
   if (mode !== 'off' && classify && workerRan && !stopped && !outOfTime()) {
    const git = deps.git ?? after;
    try {
@@ -1754,6 +1766,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    if (bad) { status = 'needs_review'; jev!.enforced = true; }
   }
 
+  emit(`finished ${status}`);
   // Finalize the shared runtime heartbeat with the terminal state.
   heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs())});
   if (status === 'ready_for_review' || status === 'simulation_passed') heartbeat.setState('ready_for_review',{stopReason:status==='simulation_passed'?'simulation_passed':'ready_for_review'});

@@ -15,8 +15,8 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS } from './worker.ts';
-import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
+import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
@@ -2524,4 +2524,39 @@ test('analysis report block requires quoting the cited span before a proven-here
 });
 test('The fmeca prompt tells the worker how to consult the TRIZ catalog without a paid call',()=>{
  assert.match(buildPrompt(task(),'fmeca'),/`triz catalog`/);
+});
+
+// --- B07 progress reporting, live status and slow-mount detection ---
+test('detectSlowMount flags a /mnt drive-letter checkout',()=>{
+ assert.ok(detectSlowMount('/mnt/c/repo',{readMounts:()=>''}));
+});
+test('detectSlowMount flags a 9p mounted checkout',()=>{
+ assert.ok(detectSlowMount('/mnt/shared/repo',{readMounts:()=>'//server /mnt/shared 9p rw 0 0\n'}));
+});
+test('detectSlowMount ignores a native home checkout',()=>{
+ assert.equal(detectSlowMount('/home/u/repo',{readMounts:()=>'//server /mnt/shared 9p rw 0 0\n'}),null);
+});
+test('doctor includes a slow-mount warning for a 9p checkout',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-slow-'));
+ const d=doctor(setupDeps(cwd,{readMounts:()=>`client ${cwd} 9p rw 0 0\n`}));
+ assert.equal(d.warnings.length,1);
+});
+test('RuntimeHeartbeat emits a heartbeat line through the progress sink',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-hb-'));
+ const lines:string[]=[];
+ const now=Date.now();
+ const hb=new RuntimeHeartbeat(join(dir,'runtime.json'),{...EXECUTION_DEFAULTS,heartbeatMs:1000},now,now+10000,'worker',(l)=>lines.push(l));
+ hb.begin();
+ hb.poll(now+1000,'bash',50);
+ assert.ok(lines.some((l)=>/^heartbeat \d+s tool=bash$/.test(l)));
+});
+test('Mock run reports the worker phase through the injected progress sink',async()=>{
+ const lines:string[]=[];
+ await run(task(),true,{progress:(l)=>lines.push(l)});
+ assert.ok(lines.some((l)=>/worker/.test(l)));
+});
+test('Mock run reports each check through the injected progress sink',async()=>{
+ const lines:string[]=[];
+ await run(task(),true,{progress:(l)=>lines.push(l)});
+ assert.ok(lines.some((l)=>/^check 1\/1\b/.test(l)));
 });

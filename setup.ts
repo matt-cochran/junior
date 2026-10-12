@@ -72,6 +72,9 @@ export type SetupDeps = {
  toolsRoot?:string;
  /** Injectable HTTP seam for the opt-in online credential check; tests never hit the network. */
  fetch?:FetchLike;
+ /** Injectable `/proc/mounts` reader for slow-mount detection; tests never read
+  * the host mount table. Defaults to the real file. */
+ readMounts?:()=>string;
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -355,6 +358,9 @@ export type DoctorCheck = { id:string; ok:boolean; detail:string };
 export type DoctorResult = {
  command:'doctor';
  ok:boolean;
+ /** Non-blocking advisories, such as running on a slow Windows-mounted
+  * checkout. They never change Pi execution readiness (`ok`). */
+ warnings:string[];
  node:{ version:string; supported:boolean; minimum:string };
  pi:PiCheck;
  credentials:CredentialCheck;
@@ -371,6 +377,35 @@ export type DoctorResult = {
  checks:DoctorCheck[];
  remediation:string[];
 };
+
+const slowMountWarning=(cwd:string,fstype:string,mountPoint:string):string=>
+ `Slow Windows-mounted checkout: ${cwd} is on a ${fstype} filesystem mounted at ${mountPoint}. Use a Linux-native path (for example under your home directory) for a worktree handoff to avoid slow file operations.`;
+
+/** Detect a checkout on a slow Windows-mounted filesystem. Returns a warning
+ * string when `cwd` is under `/mnt/<letter>/`, or when the deepest `/proc/mounts`
+ * mount point covering it reports a `9p` or `drvfs` filesystem; otherwise null.
+ * Mount parsing is injectable so tests never read the host mount table. */
+export function detectSlowMount(cwd:string, deps:SetupDeps = {}):string|null {
+ const normalized=String(cwd??'').replace(/\\/g,'/');
+ const drive=normalized.match(/^\/mnt\/([a-zA-Z])(?:\/|$)/);
+ if (drive) return slowMountWarning(cwd,'drvfs',`/mnt/${drive[1]}`);
+ let mounts='';
+ try { mounts=deps.readMounts ? deps.readMounts() : readText(deps,'/proc/mounts'); }
+ catch { return null; }
+ let best:string|null=null;
+ let bestType='';
+ for (const line of mounts.split('\n')) {
+  const parts=line.trim().split(/\s+/);
+  if (parts.length<3) continue;
+  const mountPoint=parts[1].replace(/\\040/g,' ');
+  const fstype=parts[2];
+  if (fstype!=='9p' && fstype!=='drvfs') continue;
+  const prefix=mountPoint.endsWith('/')?mountPoint:mountPoint+'/';
+  if (normalized!==mountPoint && !normalized.startsWith(prefix)) continue;
+  if (best===null || mountPoint.length>best.length) { best=mountPoint; bestType=fstype; }
+ }
+ return best===null ? null : slowMountWarning(cwd,bestType,best);
+}
 
 /** Read-only readiness check. No installation, config writes or paid calls. */
 export function doctor(deps:SetupDeps = {}):DoctorResult {
@@ -397,6 +432,10 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
   else remediation.push(`The ${provider} model catalog is missing or empty; run \`pi update --models\` to refresh it after \`/login\`.`);
  }
 
+ const warnings:string[]=[];
+ const slowMount=detectSlowMount(cwd,deps);
+ if (slowMount) warnings.push(slowMount);
+
  const checks:DoctorCheck[]=[
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
   { id:'pi', ok:pi.found && !!pi.version, detail:pi.found ? `${pi.executable} (${pi.version ?? 'version unknown'}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
@@ -407,7 +446,7 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  const retention=retainedWorktreeSummary(cwd);
  const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
+ return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
