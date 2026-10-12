@@ -23,6 +23,7 @@ function world(opts: {
   installed?: Record<string, string>;
   latest?: Record<string, string>;
   failInstall?: boolean;
+  help?: Record<string, string>;
 } = {}) {
   const installed = { ...(opts.installed ?? {}) };
   const latest = opts.latest ?? {};
@@ -47,7 +48,9 @@ function world(opts: {
         installed[pkg] = latest[pkg] ?? '9.9.9';
         return { status: 0, stdout: '' };
       }
-      const pkg = binToPkg[command.split('/').pop() as string];
+      const bin = command.split('/').pop() as string;
+      if (args[0] === '--help' && opts.help?.[bin] !== undefined) return { status: 0, stdout: opts.help[bin] };
+      const pkg = binToPkg[bin];
       if (pkg && args[0] === '--version') return { status: 0, stdout: `${command} ${installed[pkg]}\n` };
       return { status: 0, stdout: '{}' };
     },
@@ -58,9 +61,10 @@ function world(opts: {
 const FMECA = '@matthew-cochran/fmeca';
 const CPM = '@matthew-cochran/cpm';
 const JEV = '@jevitate/cli';
+const TRIZ = '@matthew-cochran/triz';
 
-test('the companion catalog covers fmeca, cpm and jevitate', () => {
-  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'jevitate']);
+test('the companion catalog covers fmeca, cpm, jevitate and triz', () => {
+  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'jevitate', 'triz']);
 });
 
 test('inspect reports a companion missing from PATH as not installed', () => {
@@ -102,15 +106,15 @@ test('install fetches a missing companion with npm argv at the latest tag', () =
 });
 
 test('install leaves an already-present companion alone when no update is requested', () => {
-  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0' } });
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' } });
   installCompanions(deps);
   assert.equal(calls.some((c) => c.command === 'npm' && c.args[0] === 'install'), false);
 });
 
 test('update reinstalls only companions behind the npm latest version', () => {
   const { deps, calls } = world({
-    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0' },
-    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [JEV]: '0.13.0' },
+    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
+    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
   });
   installCompanions(deps, { update: true });
   assert.deepEqual(calls.filter((c) => c.command === 'npm' && c.args[0] === 'install').map((c) => c.args[3]), [`${FMECA}@latest`]);
@@ -151,4 +155,20 @@ test('skill install is skipped entirely for target none', () => {
 test('skill install skips a companion that is not installed', () => {
   const { deps } = world({ installed: { [FMECA]: '0.1.0' } });
   assert.equal(installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' }).results.find((r) => r.id === 'cpm')?.status, 'skipped');
+});
+
+test('triz skill install is skipped when triz --help has no skills command', () => {
+  const { deps } = world({ installed: { [TRIZ]: '0.1.0' } });
+  const report = installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.equal(report.results.find((r) => r.id === 'triz')?.detail, 'triz does not ship agent skills yet');
+});
+
+test('triz skill install runs its skills installer when triz --help advertises one', () => {
+  const { deps, calls } = world({
+    installed: { [TRIZ]: '0.1.0' },
+    help: { triz: 'Usage: triz <command>\n  skills   manage agent skills\n' },
+  });
+  installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('triz') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'claude', '--project', '/repo']);
 });

@@ -2501,3 +2501,27 @@ test('Postflight state carries the acceptance text for object items',async()=>{
  await run(task(0,{acceptance:[{text:'object criterion text',when:'condition'}],jev:{mode:'shadow'}}),true,{classify:classifier});
  assert.deepEqual(postState.acceptance,['object criterion text']);
 });
+
+// --- Issue #23: evidence labels stop overstating certainty (offline) ---
+test('fmeca prompt requires quoting the cited span before a proven-here label',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'fmeca'}),'fmeca');
+ assert.ok(prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('evaluate prompt requires quoting the cited span before a proven-here label',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'evaluate'}),'evaluate');
+ assert.ok(prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('recon prompt labels an unquoted proven-here claim inferred',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'recon'}),'recon');
+ assert.ok(prompt.includes('inferred, not proven-here'));
+});
+test('test_first prompt omits the evidence-quote rule',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'test_first'}),'test_first');
+ assert.ok(!prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('analysis report block requires quoting the cited span before a proven-here label',()=>{
+ assert.ok(analysisReportBlock('/tmp/art/analysis-report.md').includes('quote the cited span (a few lines, with path:line)'));
+});
+test('The fmeca prompt tells the worker how to consult the TRIZ catalog without a paid call',()=>{
+ assert.match(buildPrompt(task(),'fmeca'),/`triz catalog`/);
+});

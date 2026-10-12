@@ -30,7 +30,9 @@ Keep strategic uncertainty and architecture decisions with the manager. Use
 `recon` when mechanisms are unknown and review its findings before authorizing
 implementation; use `test_first` for behavior changes, `checks_first` for
 setup/docs, and `fmeca`/`evaluate` for bounded analysis. Analysis workflows
-produce a report artifact and are not implementation. Jev is advisory.
+produce a report artifact and are not implementation. Analysis reports are leads
+to verify; treat a proven-here claim without a quoted span as inferred. Jev is
+advisory.
 
 Create a JSON contract in the target workspace:
 
@@ -159,8 +161,9 @@ managed binaries itself.
 
 `junior init` installs, by default: Pi, the checksum-verified managed
 FMECA/CPM/Crossmatrix binaries (`~/.junior/tools`, used by delegated runs), the
-npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm` and
-`@jevitate/cli`, and each companion's own agent skills for the selected targets
+npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm`,
+`@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
+for the selected targets
 (`--no-install` and `--no-companions` opt out). Prefer those skills for their
 domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm` for planning, and
 `jevitate-getting-started` as the entry point for browser testing, demos and CI
@@ -171,6 +174,20 @@ deliverable is verified in a real browser.
 `junior doctor` is read-only; it reports Pi, skills, managed tools and companion
 tools separately. `junior doctor --check-updates` also asks npm and GitHub for
 newer releases, and `junior update` adopts them and refreshes unmodified skills.
+
+## TRIZ
+
+Use TRIZ only for a real technical or physical contradiction, not as a general
+brainstorming step. The `triz` CLI is installed as a companion by `junior init`.
+
+- `triz catalog` lists the TRIZ principles offline.
+- `triz analyze <request.json> --out <result.json>` makes a paid Jev
+  classification call, so it needs explicit manager authorization. Add
+  `--offline <response.json>` to replay a recorded response without a call.
+- `triz inspect <result.json>` summarizes a saved result.
+
+Attach the saved result to the deliverable context so the decision and its
+evidence travel with the work.
 
 ## Idempotent shared manager instructions
 

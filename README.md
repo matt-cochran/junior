@@ -415,6 +415,7 @@ skills and MCP launchers for the manager's agent:
 | FMECA | `@matthew-cochran/fmeca` | `fmeca-mcp` | `fmeca-mcp skills install --target <t> --project <cwd>\|--user` |
 | CPM Planner | `@matthew-cochran/cpm` | `cpm` | `cpm skills install --target <t> --project <cwd>\|--user` |
 | jevitate | `@jevitate/cli` | `jevitate` | `jevitate init --skip-keys --skip-project --targets <ids>` |
+| TRIZ | `@matthew-cochran/triz` | `triz` | none yet |
 
 - A missing companion is installed with `npm install -g --prefer-online
   <pkg>@latest` (argv, no shell); an installed one is left alone unless you

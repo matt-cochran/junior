@@ -21,7 +21,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-export type CompanionId = 'fmeca' | 'cpm' | 'jevitate';
+export type CompanionId = 'fmeca' | 'cpm' | 'jevitate' | 'triz';
 export type SkillTarget = 'codex' | 'claude' | 'both' | 'none';
 export type SkillScope = 'project' | 'user';
 
@@ -41,6 +41,8 @@ export const COMPANIONS: readonly Companion[] = [
     mcpRegister: 'claude mcp add cpm-planner --scope user -- npx -y @matthew-cochran/cpm' },
   { id: 'jevitate', package: '@jevitate/cli', binary: 'jevitate', repo: 'https://github.com/matt-cochran/jevitate',
     mcpRegister: 'jevitate init --skip-keys (registers the jevitate MCP server)' },
+  { id: 'triz', package: '@matthew-cochran/triz', binary: 'triz', repo: 'https://github.com/matt-cochran/triz',
+    mcpRegister: 'none (CLI only)' },
 ];
 
 export const COMPANION_TIMEOUT_MS = 15_000;
@@ -174,6 +176,12 @@ export function installCompanionSkills(
   const results = COMPANIONS.map((c): CompanionSkillResult => {
     const executable = which(deps, c.binary);
     if (!executable) return { id: c.id, status: 'skipped', detail: `${c.binary} is not on PATH` };
+    if (c.id === 'triz') {
+      const help = run(deps, executable, ['--help'], COMPANION_TIMEOUT_MS, opts.cwd);
+      if (!/\bskills\b/.test(`${help.stdout ?? ''}\n${help.stderr ?? ''}`)) {
+        return { id: c.id, status: 'skipped', detail: 'triz does not ship agent skills yet' };
+      }
+    }
     const args = skillArgs(c.id, target, opts.scope, opts.cwd);
     const r = run(deps, executable, args, COMPANION_INSTALL_TIMEOUT_MS, opts.cwd);
     if (r.status !== 0) return { id: c.id, status: 'failed', command: [c.binary, ...args], detail: (r.error || r.stderr || `exited ${r.status}`).trim().slice(0, 500) };

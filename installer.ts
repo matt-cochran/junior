@@ -872,7 +872,7 @@ export async function syncHopWithTools(
 // ---------------------------------------------------------------------------
 
 export interface ToolUpdateStatus {
-  tool: ToolName;
+  tool: ToolName | 'triz';
   installed: string | null;
   latest: string | null;
   /** null when the latest release could not be resolved. */
@@ -888,7 +888,7 @@ function compareDotted(a: string, b: string): number {
 }
 
 /** Compare each managed tool's recorded version with its latest stable release. */
-export async function checkToolUpdates(deps: InstallerDeps = {}): Promise<{ tools: ToolUpdateStatus[]; outdated: ToolName[] }> {
+export async function checkToolUpdates(deps: InstallerDeps = {}): Promise<{ tools: ToolUpdateStatus[]; outdated: Array<ToolName | 'triz'> }> {
   const state = readInstallState(deps);
   const tools = await Promise.all(TOOL_NAMES.map(async (tool): Promise<ToolUpdateStatus> => {
     const installed = state.tools[tool]?.version ?? null;
@@ -899,6 +899,16 @@ export async function checkToolUpdates(deps: InstallerDeps = {}): Promise<{ tool
       return { tool, installed, latest: null, outdated: null, error: err instanceof Error ? err.message : String(err) };
     }
   }));
+  const optionalTriz = state.optional?.triz;
+  if (optionalTriz) {
+    const installed = optionalTriz.version ?? null;
+    try {
+      const latest = (await resolveLatestRelease(TRIZ_REPO, deps)).version;
+      tools.push({ tool: 'triz', installed, latest, outdated: installed ? compareDotted(installed, latest) < 0 : true });
+    } catch (err) {
+      tools.push({ tool: 'triz', installed, latest: null, outdated: null, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   return { tools, outdated: tools.filter((t) => t.outdated === true).map((t) => t.tool) };
 }
 

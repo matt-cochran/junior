@@ -172,7 +172,9 @@ async function main(argv: string[]): Promise<void> {
    const managed = await installer.checkToolUpdates();
    result.companions = inspectCompanions({}, { checkUpdates: true });
    result.updates = { managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
-   if (managed.outdated.length || result.updates.companions.length) result.updates.remediation = 'Run `junior update` to adopt the newer releases.';
+   if (managed.outdated.length || result.updates.companions.length) result.updates.remediation = managed.outdated.includes('triz')
+    ? 'Run `junior update --with-triz` to adopt the newer releases.'
+    : 'Run `junior update` to adopt the newer releases.';
   }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
