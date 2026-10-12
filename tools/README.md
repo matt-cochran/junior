@@ -161,7 +161,11 @@ and then fails with `LOCKED`. Malformed or schema-mismatched manifests fail with
 | --- | --- | --- | --- |
 | FMECA | `fmeca-state/` | `FMECA_STATE_DIR` | one JSONL event log per session: `fmeca-state/<session_id>.jsonl` |
 | CPM | `cpm-planner.db` | `CPM_PLANNER_DB` | SQLite database in WAL mode (`-shm`/`-wal` siblings) |
-| Crossmatrix | `crossmatrix-model.json` | — | wrapper-owned validated model JSON (see limitation) |
+| Crossmatrix (0.2.x) | `crossmatrix-model.json` | — | wrapper-owned validated model JSON (see below) |
+| Crossmatrix (0.3.0+) | `<project>/.crossmatrix/` | `CROSSMATRIX_DIR` | server-owned project store (see below) |
+
+`<project>` is the Git top-level of the hop file's directory, or the hop file's
+grandparent when the hop is not inside a Git repository.
 
 FMECA and CPM native state is **owned by the upstream servers**. This wrapper
 only points their env vars at paths anchored to the manifest folder and never
@@ -174,21 +178,44 @@ Each successful read exports the actual upstream result to
 reference with the SHA-256 of the stored bytes. Writes use `flag: "wx"`; an
 existing snapshot is hash-verified, never overwritten.
 
-## Crossmatrix limitation
+## Crossmatrix project store
 
-The current Crossmatrix MCP server holds its model **in memory** and its
-mutation ops are deferred (ADR-0004). Consequently:
+Crossmatrix's persistence model changed at 0.3.0.
 
-- Only **import** (`crossmatrix.command` with a full `request.model`) and the
-  **implemented queries** (`validate`, `describe`, `slice`, `trace`, `explain`,
-  `coverage`, `stale`, `conflicts`, `gaps.*`, `analyze.*`, `export.*`) work.
-  Unsupported mutation ops return `ok: true` with a deferred `note`; the wrapper
-  converts that into `unsupported: true` and a `review-unresolved` entry rather
-  than pretending the mutation happened.
-- To make queries survive across separate CLI invocations, the wrapper saves the
-  complete validated model to `crossmatrix-model.json` on a successful import
-  and **replays that import on each fresh server** before issuing a query
-  (replay request id `replay-<modelId>-<sha12>`).
+### 0.3.0+ servers (project store)
+
+When the configured Crossmatrix server is version `0.3.0` or newer (checked as a
+semver; an unparseable version is treated as legacy), `junior tools call`
+points the server at the project's committed store with `CROSSMATRIX_DIR`:
+
+- `<project>` is the Git top-level of the hop file's directory, or the hop
+  file's grandparent when the hop is not inside a Git repository.
+- The env var is only set when `<project>/.crossmatrix/` already exists. Without
+  that directory no Crossmatrix env is passed and the server keeps its default.
+- The server owns persistence: the wrapper does **not** replay the imported
+  model before a query and does **not** copy a successful import to the hop
+  native file. `native.crossmatrix` remains in the manifest for provenance.
+
+### 0.2.x servers (legacy replay)
+
+Older servers hold their model **in memory**, so the wrapper remains the durable
+owner:
+
+- On a successful import (`crossmatrix.command` with a full `request.model`) it
+  saves the complete validated model to `crossmatrix-model.json` next to the
+  hop.
+- On each later Crossmatrix call it **replays that import on the fresh server**
+  (request id `replay-<modelId>-<sha12>`) before issuing the real call, so
+  queries survive across separate CLI invocations.
+
+### Deferred mutations
+
+Crossmatrix mutation ops are deferred upstream (ADR-0004). Unsupported mutation
+ops return `ok: true` with a deferred `note`; the wrapper converts that into
+`unsupported: true` and a `review-unresolved` entry rather than pretending the
+mutation happened. The implemented queries (`validate`, `describe`, `slice`,
+`trace`, `explain`, `coverage`, `stale`, `conflicts`, `gaps.*`, `analyze.*`,
+`export.*`) work as reads.
 
 ## Library API (for embedding in Junior)
 

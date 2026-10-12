@@ -17,9 +17,11 @@
  * FMECA and CPM native state stays owned by the upstream MCP servers: this
  * wrapper only points `FMECA_STATE_DIR` / `CPM_PLANNER_DB` at paths anchored to
  * the manifest folder and never edits those stores directly (no SQLite surgery).
- * Crossmatrix's current MCP is in-memory, so this wrapper is the durable owner
- * of the imported model JSON: it saves the validated model and replays it on
- * every fresh server before a query.
+ * Crossmatrix's MCP is in-memory up to 0.2.x, so this wrapper is the durable
+ * owner of the imported model JSON: it saves the validated model and replays it
+ * on every fresh server before a query. Crossmatrix 0.3+ keeps the model in a
+ * committed `<project>/.crossmatrix` store instead, which the wrapper points at
+ * with `CROSSMATRIX_DIR`; it neither replays nor copies the model in that mode.
  *
  * ── No shell interpolation ──────────────────────────────────────────────────
  * MCP children are spawned with `spawn(command, args)` (never a shell), get a
@@ -29,7 +31,7 @@
  * Only Node builtins are used. No npm dependencies.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -698,11 +700,83 @@ function nativeAbsPath(hopPath: string, tool: ToolName, manifest: HopManifest): 
   return path.resolve(path.dirname(hopPath), rel);
 }
 
+/**
+ * Resolve the Git work-tree root for a directory. Prefers
+ * `git rev-parse --show-toplevel` (correct for linked worktrees and
+ * submodules) and falls back to the nearest ancestor containing a `.git`
+ * entry when Git is unavailable or the directory is not a repository.
+ */
+function gitTopLevel(startDir: string): string | null {
+  try {
+    const res = spawnSync("git", ["-C", startDir, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (res.status === 0) {
+      const out = (res.stdout ?? "").split("\n")[0].trim();
+      if (out) return path.resolve(out);
+    }
+  } catch {
+    /* fall through to the `.git` walk */
+  }
+  let dir = path.resolve(startDir);
+  while (true) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * The project directory that anchors the Crossmatrix store: the Git top-level
+ * of the hop file's directory, falling back to the hop file's grandparent when
+ * the hop is not inside a Git repository.
+ */
+function crossmatrixProjectDir(hopPath: string): string {
+  const hopDir = path.dirname(path.resolve(hopPath));
+  return gitTopLevel(hopDir) ?? path.dirname(hopDir);
+}
+
 export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
-  const abs = nativeAbsPath(hopPath, tool, manifest);
-  if (tool === "fmeca") return { FMECA_STATE_DIR: abs };
-  if (tool === "cpm") return { CPM_PLANNER_DB: abs };
-  return {};
+  if (tool === "fmeca") return { FMECA_STATE_DIR: nativeAbsPath(hopPath, tool, manifest) };
+  if (tool === "cpm") return { CPM_PLANNER_DB: nativeAbsPath(hopPath, tool, manifest) };
+  const store = path.join(crossmatrixProjectDir(hopPath), ".crossmatrix");
+  return fs.existsSync(store) ? { CROSSMATRIX_DIR: store } : {};
+}
+
+interface Semver {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: boolean;
+}
+
+/** Parse a full semantic version, or null when it is not well-formed. */
+function parseSemver(version: unknown): Semver | null {
+  if (typeof version !== "string") return null;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (!match) return null;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (![major, minor, patch].every(Number.isSafeInteger)) return null;
+  return { major, minor, patch, prerelease: match[4] !== undefined };
+}
+
+/**
+ * Whether the Crossmatrix server owns persistence through its 0.3.0+ project
+ * store (`<project>/.crossmatrix`) rather than the wrapper replaying a stored
+ * model on every call. Unparseable versions are treated as legacy. A 0.3.0
+ * prerelease sorts below the 0.3.0 release and is therefore legacy.
+ */
+export function crossmatrixUsesStore(hop: HopManifest): boolean {
+  const version = parseSemver(hop?.tools?.crossmatrix?.sourceVersion);
+  if (version === null) return false;
+  if (version.major !== 0) return version.major > 0;
+  if (version.minor !== 3) return version.minor > 3;
+  if (version.patch !== 0) return version.patch > 0;
+  return !version.prerelease;
 }
 
 function findNote(value: unknown): string | null {
@@ -786,6 +860,7 @@ function prepareCalls(
 ): McpCallSpec[] {
   const actual: McpCallSpec = { name: toolName, arguments: args ?? {} };
   if (tool !== "crossmatrix") return [actual];
+  if (crossmatrixUsesStore(hop)) return [actual];
   const isImport = toolName === "crossmatrix.command" && extractCrossmatrixModel(args) !== null;
   const native = hop.native.crossmatrix;
   const modelPath = nativeAbsPath(hopPath, "crossmatrix", hop);
@@ -860,7 +935,7 @@ export async function callHop(
         snapshot = writeSnapshot(hopPath, tool, toolName, revision, mcp.value);
         hop.snapshots.push(snapshot);
       }
-      if (tool === "crossmatrix" && toolName === "crossmatrix.command" && ok) {
+      if (tool === "crossmatrix" && toolName === "crossmatrix.command" && ok && !crossmatrixUsesStore(hop)) {
         persistCrossmatrixImport(hopPath, hop, request.arguments);
       }
 
