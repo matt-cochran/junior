@@ -17,8 +17,8 @@
 //     never registered here; jevitate's own init registers its MCP server.
 // ---------------------------------------------------------------------------
 
-import { existsSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 export type CompanionId = 'fmeca' | 'cpm' | 'jevitate' | 'triz';
@@ -53,7 +53,27 @@ export type CompanionDeps = {
   env?: NodeJS.ProcessEnv;
   exec?: (command: string, args: string[], options?: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string }) => ExecResult;
   exists?: (path: string) => boolean;
+  /** Version from the installed package.json, for a CLI without `--version`. */
+  packageVersion?: (executable: string, pkg: string) => string | null;
 };
+
+/** Walk up from the resolved CLI entry to the package.json named `pkg`. */
+function defaultPackageVersion(executable: string, pkg: string): string | null {
+  try {
+    let dir = dirname(realpathSync(executable));
+    for (let i = 0; i < 6; i++) {
+      const file = join(dir, 'package.json');
+      if (existsSync(file)) {
+        const j = JSON.parse(readFileSync(file, 'utf8'));
+        if (j?.name === pkg && typeof j.version === 'string') return j.version;
+      }
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  } catch { /* an unreadable install simply has no known version */ }
+  return null;
+}
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): ExecResult {
   const r = spawnSync(command, args, { encoding: 'utf8', timeout: options.timeout, env: options.env, cwd: options.cwd, shell: false });
@@ -111,7 +131,9 @@ export type CompanionsReport = { ready: boolean; checkedUpdates: boolean; compan
 export function inspectCompanions(deps: CompanionDeps = {}, opts: { checkUpdates?: boolean } = {}): CompanionsReport {
   const companions = COMPANIONS.map((c): CompanionStatus => {
     const executable = which(deps, c.binary);
-    const version = executable ? firstSemver(run(deps, executable, ['--version'], COMPANION_TIMEOUT_MS).stdout) : null;
+    const version = executable
+      ? firstSemver(run(deps, executable, ['--version'], COMPANION_TIMEOUT_MS).stdout) ?? (deps.packageVersion ?? defaultPackageVersion)(executable, c.package)
+      : null;
     const status: CompanionStatus = { id: c.id, package: c.package, installed: executable !== null, executable, version, mcpRegister: c.mcpRegister };
     if (opts.checkUpdates) {
       const latest = latestVersion(deps, c.package);

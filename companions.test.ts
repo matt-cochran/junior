@@ -172,3 +172,9 @@ test('triz skill install runs its skills installer when triz --help advertises o
   assert.deepEqual(calls.find((c) => c.command.endsWith('triz') && c.args[0] === 'skills')?.args,
     ['skills', 'install', '--target', 'claude', '--project', '/repo']);
 });
+
+test('inspect falls back to the installed package version when the CLI has no --version', () => {
+  const { deps } = world({ installed: { '@matthew-cochran/triz': '' } });
+  deps.packageVersion = (_executable: string, pkg: string) => (pkg === '@matthew-cochran/triz' ? '0.2.1' : null);
+  assert.equal(inspectCompanions(deps).companions.find((c) => c.id === 'triz')?.version, '0.2.1');
+});
