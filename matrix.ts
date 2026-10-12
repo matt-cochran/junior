@@ -143,9 +143,9 @@ function isTestPath(p: string): boolean {
 // File-driven dimensions (`code`, `tests`)
 // ---------------------------------------------------------------------------
 
-function fileMember(p: string, hash: string, type: 'file' | 'dir'): MatrixMember {
+function fileMember(p: string, hash: string, type: 'file' | 'dir', prefix = 'loc'): MatrixMember {
   return {
-    id: `loc:${p}`,
+    id: `${prefix}:${p}`,
     label: p,
     status: 'active',
     attributes: { path: p, parent: parentOf(p), type },
@@ -170,6 +170,9 @@ function fileDimension(
   kind: DimensionKind,
   files: MatrixFile[],
   selected: (p: string) => boolean,
+  // Member ids are unique across a whole Crossmatrix model, so each file
+  // dimension needs its own prefix (code `loc:`, tests `test:`).
+  prefix = 'loc',
 ): MatrixDimension {
   const fileHashes = new Map<string, string>();
   for (const entry of files) {
@@ -193,15 +196,15 @@ function fileDimension(
   );
   for (const dir of byDepth) {
     const children: Array<{ id: string; hash: string }> = [];
-    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: `loc:${p}`, hash });
-    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: `loc:${sub}`, hash: dirHashes.get(sub)! });
+    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: `${prefix}:${p}`, hash });
+    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: `${prefix}:${sub}`, hash: dirHashes.get(sub)! });
     children.sort((a, b) => a.id.localeCompare(b.id));
     dirHashes.set(dir, stableHash(children));
   }
 
   const members: MatrixMember[] = [];
-  for (const p of [...fileHashes.keys()].sort()) members.push(fileMember(p, fileHashes.get(p)!, 'file'));
-  for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir'));
+  for (const p of [...fileHashes.keys()].sort()) members.push(fileMember(p, fileHashes.get(p)!, 'file', prefix));
+  for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir', prefix));
 
   return { id, label, kind, order: 0, system: 'git', members };
 }
@@ -213,7 +216,7 @@ export function codeLocations(files: MatrixFile[]): MatrixDimension {
 
 /** Test artifacts: files matching `*.test.*`/`*.spec.*` or under test dirs. */
 export function tests(files: MatrixFile[]): MatrixDimension {
-  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath);
+  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath, 'test');
 }
 
 // ---------------------------------------------------------------------------

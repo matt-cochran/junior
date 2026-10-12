@@ -267,3 +267,9 @@ test('junior matrix export from the jevitate source writes a file', () => {
   });
   assert.equal(JSON.parse(result.stdout).written.length, 1);
 });
+
+test('test artifact member ids do not collide with code location ids', () => {
+  const files = [{ path: 'test/login.test.ts', content: 'x' }];
+  const codeIds = new Set(codeLocations(files).members.map((m) => m.id));
+  assert.equal(testsAdapter(files).members.some((m) => codeIds.has(m.id)), false);
+});

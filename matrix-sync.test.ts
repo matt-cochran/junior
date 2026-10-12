@@ -21,7 +21,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-matrix-sync-'));
 }
 
-function writeHop(dir: string, sourceVersion: string, log: string): string {
+function writeHop(dir: string, sourceVersion: string, log: string, extraEnv: Record<string, string> = {}): string {
   const hop = join(dir, 'hop.json');
   initHop(hop, {
     managedStatePath: join(dir, 'no-managed-tools.json'),
@@ -29,7 +29,7 @@ function writeHop(dir: string, sourceVersion: string, log: string): string {
       crossmatrix: {
         command: NODE,
         args: [FAKE],
-        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log },
+        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log, ...extraEnv },
         sourceVersion,
         sourceSha: '0'.repeat(64),
       },
@@ -60,7 +60,7 @@ test('syncDimensions opens the model before any dimension write', async () => {
   assert.equal(operations(log)[0].op.kind, 'model.open');
 });
 
-test('syncDimensions opens the model exactly once across dimensions', async () => {
+test('syncDimensions sends model.open in the same server session before every write', async () => {
   const dir = workdir();
   const log = join(dir, 'writes.log');
   const hop = writeHop(dir, '0.3.0', log);
@@ -69,8 +69,10 @@ test('syncDimensions opens the model exactly once across dimensions', async () =
     modelId: 'm1',
     dimensions: [...roster(), ...roster()],
   });
-  const opens = operations(log).filter((request) => request.op.kind === 'model.open');
-  assert.equal(opens.length, 1);
+  // A store-backed server holds the opened model per process and each call is
+  // a fresh process, so every write must directly follow a model.open.
+  const ops = operations(log).map((request) => request.op.kind);
+  assert.equal(ops.every((kind, i) => kind === 'model.open' || ops[i - 1] === 'model.open'), true);
 });
 
 // --- dimension.register before members.sync ---------------------------------
@@ -130,4 +132,16 @@ test('syncDimensions writes no request when the hop is too old', async () => {
   const hop = writeHop(dir, '0.2.1', log);
   await syncDimensions({ hopPath: hop, modelId: 'm1', dimensions: roster() }).catch(() => {});
   assert.equal(existsSync(log), false);
+});
+
+// --- server error surfacing --------------------------------------------------
+
+test('syncDimensions surfaces the server error code and message', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_ERROR: 'dimension.register' });
+  await assert.rejects(
+    syncDimensions({ hopPath: hop, modelId: 'm1', dimensions: roster() }),
+    /matrix sync dimension\.register failed: no_model: no model loaded/,
+  );
 });

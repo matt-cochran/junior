@@ -73,7 +73,7 @@ test('codemapInit declares the codemap scale before any relation', async () => {
   const log = join(dir, 'writes.log');
   const hop = writeHop(dir, '0.3.0', log);
   await codemapInit({ hopPath: hop, modelId: 'm1' });
-  assert.equal(operations(log)[0].op.kind, 'scale.declare');
+  assert.equal(operations(log).map((r) => r.request ?? r).filter((r) => r.op.kind !== 'model.open')[0].op.kind, 'scale.declare');
 });
 
 test('codemapInit declares the categorical codemap scale with implements above tests above touches', async () => {
@@ -213,7 +213,7 @@ test('codemapLink records observed high-confidence handoff evidence', async () =
     {
       provenanceClass: 'observed',
       confidence: 'high',
-      evidence: [{ kind: 'junior-handoff', id: 'J-test', status: 'ready_for_review', artifactDir: join(dir, '.delivery', 'J-test', '1') }],
+      evidence: [{ sourceRef: { system: 'junior', sourceType: 'handoff', sourceRef: 'junior-handoff:J-test', locator: join(dir, '.delivery', 'J-test', '1') }, locator: join(dir, '.delivery', 'J-test', '1'), excerpt: 'Junior handoff J-test (ready_for_review)' }],
       rationale: 'changed by Junior handoff J-test',
     },
   );
@@ -274,4 +274,24 @@ test('junior matrix link prints the requestIds it sent', () => {
     { encoding: 'utf8' },
   );
   assert.equal(JSON.parse(cli.stdout).requestIds.length, 2);
+});
+
+test('codemap link sends evidence in the Crossmatrix sourceRef/locator/excerpt shape', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.jsonl');
+  const hop = writeHop(dir, '0.3.0', log);
+  const result = resultFile(dir, ['src/a.ts']);
+  await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:cpm:d1' });
+  const observe = operations(log).map((line) => line.request ?? line).find((r) => r.op.kind === 'observe');
+  assert.deepEqual(Object.keys(observe.op.evidence[0]).sort(), ['excerpt', 'locator', 'sourceRef']);
+});
+
+test('codemap link adds the dimension prefix to a bare feature member id', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.jsonl');
+  const hop = writeHop(dir, '0.3.0', log);
+  const result = resultFile(dir, ['src/a.ts']);
+  await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:d1' });
+  const observe = operations(log).map((line) => line.request ?? line).find((r) => r.op.kind === 'observe');
+  assert.equal(observe.op.from, 'cpm:d1');
 });

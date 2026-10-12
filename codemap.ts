@@ -20,6 +20,7 @@ import { tests as testArtifacts } from './matrix.ts';
 import {
   CROSSMATRIX_WRITE_SCHEMA_VERSION,
   requestIdFor,
+  serverErrorDetail,
   type CommandRequest,
 } from './matrix-sync.ts';
 import { callHop, loadHop } from './tools/tools.ts';
@@ -124,9 +125,11 @@ async function send(
   const outcome = await call(hopPath, 'crossmatrix', {
     tool: 'crossmatrix.command',
     arguments: { request },
+    // Leave the automatic store-session open to the ad-hoc `tools call` path;
+    // codemap keeps its existing command sequence.
   });
   if (!outcome.ok) {
-    const detail = outcome.error?.message ?? outcome.note ?? 'unknown error';
+    const detail = serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error';
     throw new Error(`codemap ${request.op.kind} failed: ${detail}`);
   }
   return { requestId: request.requestId, kind: request.op.kind };
@@ -236,12 +239,19 @@ function isTestFile(p: string): boolean {
 }
 
 /** Split `<dimensionId>:<memberId>` on the first colon (member ids may contain colons). */
+/** Member id prefixes the matrix adapters use per dimension. */
+const MEMBER_PREFIX: Record<string, string> = { cpm: 'cpm', 'jevitate-jobs': 'job', 'jevitate-journeys': 'journey', fmeca: 'fm' };
+
 function parseFeature(feature: string): { dimensionId: string; memberId: string } {
   const separator = feature.indexOf(':');
   if (separator === -1) throw new Error(`invalid feature '${feature}': expected <dimensionId>:<memberId>`);
   const dimensionId = feature.slice(0, separator);
   const memberId = feature.slice(separator + 1);
   if (!dimensionId || !memberId) throw new Error(`invalid feature '${feature}': expected <dimensionId>:<memberId>`);
+  // The matrix adapters prefix member ids (cpm:<id>, job:<id>, journey:<id>);
+  // accept a bare id for those dimensions and add the prefix.
+  const prefix = MEMBER_PREFIX[dimensionId];
+  if (prefix && !memberId.startsWith(`${prefix}:`)) return { dimensionId, memberId: `${prefix}:${memberId}` };
   return { dimensionId, memberId };
 }
 
@@ -282,12 +292,17 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
             observation,
             provenanceClass: 'observed',
             confidence: 'high',
+            // Crossmatrix evidence items allow only sourceRef, locator and excerpt.
             evidence: [
               {
-                kind: 'junior-handoff',
-                id: resultId,
-                status: record.status,
-                artifactDir: record.artifactDir,
+                sourceRef: {
+                  system: 'junior',
+                  sourceType: 'handoff',
+                  sourceRef: `junior-handoff:${resultId}`,
+                  locator: String(record.artifactDir ?? ''),
+                },
+                locator: String(record.artifactDir ?? ''),
+                excerpt: `Junior handoff ${resultId} (${String(record.status ?? 'unknown')})`,
               },
             ],
             rationale: `changed by Junior handoff ${resultId}`,

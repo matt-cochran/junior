@@ -519,3 +519,82 @@ test("a 0.3.0 import does not persist the model to the hop native file", () => {
   runCli(["call", hop, "crossmatrix", req]);
   assert.equal(fs.existsSync(path.join(dir, "crossmatrix-model.json")), false);
 });
+
+// --- crossmatrix 0.3+ per-process model.open ----------------------------------
+//
+// A Crossmatrix 0.3+ server holds the opened model per process, so `tools call`
+// prepends model.open to every store-backed command that names a model. The
+// fake write log records both calls in order, proving the open ran in the same
+// server session before the real command.
+
+function storeHop(dir, log, sourceVersion) {
+  return initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix", {
+        sourceVersion,
+        env: { FAKE_MCP_MODE: "crossmatrix", FAKE_CROSSMATRIX_WRITES: log },
+      }),
+    },
+  });
+}
+
+function commandRequest(op) {
+  return {
+    tool: "crossmatrix.command",
+    arguments: {
+      request: {
+        schemaVersion: "0.3.0",
+        requestId: "r-1",
+        modelId: "m1",
+        actor: { actorType: "system", persona: "model_admin" },
+        op,
+      },
+    },
+  };
+}
+
+function readWrites(log) {
+  return fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test("a 0.3.0 store call opens the model before the command", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const ops = readWrites(log);
+  const at = ops.findIndex((entry) => entry.op.kind === "dimension.register");
+  assert.equal(ops[at - 1]?.op?.kind, "model.open");
+});
+
+test("a 0.3.0 model.open command is not preceded by a second open", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "model.open" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const opens = readWrites(log).filter((entry) => entry.op.kind === "model.open");
+  assert.equal(opens.length, 1);
+});
+
+test("a 0.2.1 hop sends no extra open before a command", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.2.1");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const opens = readWrites(log).filter((entry) => entry.op.kind === "model.open");
+  assert.equal(opens.length, 0);
+});
+
+test("a 0.3.0 store call reports the command's own result", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  const out = cliJson(runCli(["call", hop, "crossmatrix", req]));
+  assert.equal(out.result.op, "dimension.register");
+});

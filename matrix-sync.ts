@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto';
 import { buildDimensionSet, type MatrixDimension, type MatrixMember } from './matrix.ts';
-import { callHop, loadHop } from './tools/tools.ts';
+import { callHop, loadHop, type CallOutcome } from './tools/tools.ts';
 
 /** Schema version of the Crossmatrix write-API command envelope. */
 export const CROSSMATRIX_WRITE_SCHEMA_VERSION = '0.3.0';
@@ -116,6 +116,27 @@ function command(modelId: string, op: CommandRequest['op'], requestId: string): 
   };
 }
 
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The write API reports failures as `{ error: { code, message } }` inside the
+ * tool result (the wrapper already unwraps `structuredContent`). Surface that
+ * real upstream error instead of falling through to 'unknown error'.
+ */
+export function serverErrorDetail(outcome: CallOutcome): string | null {
+  const result = outcome.result;
+  if (isRecord(result) && isRecord(result.error)) {
+    const code = typeof result.error.code === 'string' ? result.error.code : '';
+    const message = typeof result.error.message === 'string' ? result.error.message : '';
+    if (code && message) return `${code}: ${message}`;
+    if (code) return code;
+    if (message) return message;
+  }
+  return null;
+}
+
 /** Send exactly one write command and surface upstream failures clearly. */
 async function send(
   call: typeof callHop,
@@ -125,9 +146,11 @@ async function send(
   const outcome = await call(options.hopPath, 'crossmatrix', {
     tool: 'crossmatrix.command',
     arguments: { request },
+    // `syncDimensions` already sequences its own `model.open`; leave the
+    // per-call store-session open to the ad-hoc `tools call` path.
   });
   if (!outcome.ok) {
-    const detail = outcome.error?.message ?? outcome.note ?? 'unknown error';
+    const detail = serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error';
     throw new Error(`matrix sync ${request.op.kind} failed: ${detail}`);
   }
 }

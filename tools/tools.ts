@@ -679,6 +679,13 @@ export interface CallRequest {
   arguments?: unknown;
   expectedRevision?: number;
   timeoutMs?: number;
+  /**
+   * Whether `callHop` should prepend a store-session `model.open` before a
+   * Crossmatrix 0.3+ command/query that names a model. Defaults to true so an
+   * ad-hoc `tools call` works against a fresh server. The wrapper's internal
+   * write flows set it false and keep their existing command sequences.
+   */
+  prependModelOpen?: boolean;
 }
 
 export interface CallOutcome {
@@ -845,6 +852,34 @@ function writeSnapshot(
 }
 
 /**
+ * The `model.open` call a Crossmatrix 0.3+ store-backed server needs in the
+ * same process before a command/query that names a model. Returns null when the
+ * call must not be preceded by an open: a non-command/query tool, a request
+ * without a non-empty modelId, or a `model.open` command itself.
+ */
+function storeOpenCall(toolName: string, args: unknown): McpCallSpec | null {
+  if (toolName !== "crossmatrix.command" && toolName !== "crossmatrix.query") return null;
+  if (!isRecord(args)) return null;
+  const request = args.request;
+  if (!isRecord(request)) return null;
+  const modelId = request.modelId;
+  if (typeof modelId !== "string" || modelId.length === 0) return null;
+  if (isRecord(request.op) && request.op.kind === "model.open") return null;
+  return {
+    name: "crossmatrix.command",
+    arguments: {
+      request: {
+        schemaVersion: "0.3.0",
+        requestId: `jr-open-${modelId}`,
+        modelId,
+        actor: { actorType: "system", persona: "model_admin" },
+        op: { kind: "model.open" },
+      },
+    },
+  };
+}
+
+/**
  * Build the ordered tools/call sequence for a request.
  *
  * Crossmatrix is in-memory upstream, so when a validated model has been stored
@@ -857,10 +892,15 @@ function prepareCalls(
   tool: ToolName,
   toolName: string,
   args: unknown,
+  prependModelOpen = true,
 ): McpCallSpec[] {
   const actual: McpCallSpec = { name: toolName, arguments: args ?? {} };
   if (tool !== "crossmatrix") return [actual];
-  if (crossmatrixUsesStore(hop)) return [actual];
+  if (crossmatrixUsesStore(hop)) {
+    if (!prependModelOpen) return [actual];
+    const open = storeOpenCall(toolName, args);
+    return open ? [open, actual] : [actual];
+  }
   const isImport = toolName === "crossmatrix.command" && extractCrossmatrixModel(args) !== null;
   const native = hop.native.crossmatrix;
   const modelPath = nativeAbsPath(hopPath, "crossmatrix", hop);
@@ -921,7 +961,14 @@ export async function callHop(
 
     let outcome: CallOutcome;
     try {
-      const calls = prepareCalls(hopPath, hop, tool, toolName, request.arguments);
+      const calls = prepareCalls(
+        hopPath,
+        hop,
+        tool,
+        toolName,
+        request.arguments,
+        request.prependModelOpen !== false,
+      );
       const mcp = await mcpCallSequence(
         { command: cfg.command, args: cfg.args, env, timeoutMs },
         calls,
