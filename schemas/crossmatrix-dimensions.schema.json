@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledge-framework.dev/schemas/crossmatrix-dimensions.schema.json",
+  "title": "CrossMatrixDimensions",
+  "description": "ADR-0004 DIMENSIONS layer: the axes + their members (rosters) — the ENTITIES being cross-referenced. FEDERATED: each domain system (e.g. a UX tool, a JTBD tool, an FMECA tool) owns its dimension's members; crossmatrix is never the source of truth for entities. A member's numeric `weight` is permitted ONLY with a `sourceRef.system` (a deterministic import, e.g. fmeca criticality); otherwise the LLM supplies a categorical `weightObservation`. Identified by stable id+version (`dimensionSetId`); a Configuration references it by `dimensionSetRef` (NOT a $ref). One Dimensions doc can be shared across many Configurations/aspects.",
+  "type": "object",
+  "required": ["schemaVersion", "dimensionSetId", "version", "dimensions"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "dimensionSetId": { "type": "string", "description": "Stable logical identifier for this entity set (with `version`). NOT a file path." },
+    "version": { "type": "string" },
+    "label": { "type": "string" },
+    "dimensions": { "type": "array", "items": { "$ref": "#/$defs/Dimension" } }
+  },
+  "$defs": {
+    "ProvenanceClass": { "type": "string", "enum": ["normative", "observed", "inferred"] },
+    "LifecycleStatus": { "type": "string", "enum": ["active", "deprecated"], "default": "active" },
+    "DimensionKind": {
+      "type": "string",
+      "description": "A TYPED DISPATCH discriminator (engine binds kind-capabilities: weight-source policy, valid relations/scales, routing). Affords/validates/routes; never imports domain ALGORITHMS.",
+      "enum": ["customer_requirement", "engineering_characteristic", "stakeholder_priority", "option", "criterion", "constraint", "implementation_asset", "test_artifact", "business_metric", "failure_mode", "jtbd_step", "context", "code_element"]
+    },
+    "SourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A VERIFIABLE pointer to the authoritative artifact (federation). `system` present => a deterministic import (a numeric weight is permitted). `contentHash` lets the engine re-hash and detect staleness.",
+      "properties": {
+        "system": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "sourceRef": { "type": "string" },
+        "locator": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "version": { "type": "string" },
+        "excerpt": { "type": "string" }
+      }
+    },
+    "Member": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "weightObservation": { "type": "string", "description": "LLM PATH: categorical importance/criticality token, resolved by the dimension's weightScale (declared in the Configuration's scales)." },
+        "weight": { "type": "number", "description": "DETERMINISTIC-IMPORT PATH ONLY: permitted iff sourceRef.system is set. LLM may not set this." },
+        "sourceRef": { "$ref": "#/$defs/SourceRef" },
+        "status": { "$ref": "#/$defs/LifecycleStatus" },
+        "supersededBy": { "type": "string" },
+        "attributes": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "Dimension": {
+      "type": "object",
+      "required": ["id", "order", "members"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "kind": { "$ref": "#/$defs/DimensionKind" },
+        "order": { "type": "integer", "minimum": 0 },
+        "system": { "type": "string", "description": "The federated owner system (e.g. fmeca | telemetry | research)." },
+        "weightSemantics": { "type": "string" },
+        "weightScale": { "type": "string", "description": "Scale id (declared in the Configuration) the member weightObservations resolve against." },
+        "members": { "type": "array", "items": { "$ref": "#/$defs/Member" } }
+      }
+    }
+  }
+}
