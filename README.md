@@ -153,11 +153,13 @@ deepseek/deepseek-v4.1-flash; an explicit task value always wins.
 
 ### Contract fields and unknown keys
 `validate` recognizes exactly the supported top-level fields (`id`,
-`deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `provider`, `model`,
-`thinking`, `pricing`, `billing`, `jev`, `workflow`, `isolation`, `resumeFrom`, `repairFrom`,
+`deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `context`,
+`provider`, `model`, `thinking`, `pricing`, `billing`, `jev`, `workflow`,
+`isolation`, `isolationSetup`, `resumeFrom`, `repairFrom`,
 `reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `hopFrom`, `hopRevision`,
-`hopContext`, `execution`, and the five execution settings directly:
-`deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`).
+`hopContext`, `execution`, and the six execution settings directly:
+`deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`,
+`checkReserveMs`).
 A misspelled or unsupported top-level key is rejected with `Unknown contract
 field: <key>` rather than silently ignored, and each check accepts only
 `command`, `args` and `cwd` (an unknown check key is rejected with `Unknown
@@ -179,6 +181,28 @@ real (symlink-resolved) target points outside is rejected before execution. If
 rejection reason and the command is not run; the worker never silently falls
 back to the checkout root. Every check result records the actual resolved `cwd`
 it ran in, so a manager can verify what was tested.
+
+### Contract code context (`context`)
+A contract may name excerpts for the worker and the Jev readiness gate to read
+without opening whole files:
+
+```json
+"context": [
+  { "path": "src/worker.ts", "start": 120, "end": 180 },
+  { "path": "README.md" }
+]
+```
+
+Each entry is `{ path, start?, end? }`. `path` is relative to the contract
+`cwd` and must stay inside it; `start`/`end` are 1-based inclusive line bounds
+(defaulting to the whole file). At most 20 entries are accepted; each excerpt
+is capped at 200 lines and 40000 characters in total, and a capped excerpt is
+marked `truncated`. Unknown entry fields, absolute or escaping paths, and
+non-positive or reversed bounds are rejected before any paid call. Resolution
+never throws: an unreadable file becomes an `error` entry and an `end` past the
+file length is clamped. Resolved excerpts are rendered in the worker prompt
+under `Code context` and passed to the preflight gate; they are excerpts, not
+the full files.
 
 ## Micro-deliverable stages
 This prototype was built as small, inspectable stages:
@@ -220,8 +244,8 @@ Both commands take no task file and are offline by default.
 
 ### `node worker.ts doctor`
 Read-only readiness check. It emits concise JSON and exits nonzero when a
-required prerequisite fails. It never installs anything, writes configuration,
-or makes a paid network call. Checks:
+required prerequisite fails. It never installs anything or writes
+configuration, and by default it makes no network call. Checks:
 
 - **Node**: the running version versus the supported minimum (`22.19.0`).
 - **Pi**: resolves `pi` on `PATH`, records the bounded `pi --version` output,
@@ -268,6 +292,24 @@ provider and leads with `/login` first and then `pi update --models`; an
 authenticated empty catalog suggests `pi update --models`; an authenticated
 populated catalog that lacks the configured model suggests starting `pi` and
 choosing with `/model`.
+
+The result includes a `warnings` array of non-blocking advisories that never
+change `ok`. A checkout on a slow Windows-mounted filesystem — a `/mnt/<letter>/`
+drive-letter path, or a path whose deepest `/proc/mounts` mount is `9p` or
+`drvfs` — adds a warning recommending a Linux-native path for a `worktree`
+handoff to avoid slow file operations.
+
+`--online` opts in to one read-only network request (`GET
+https://openrouter.ai/api/v1/key`) that asks OpenRouter whether the configured
+credential is valid and still has credit. It is free, never returns or prints
+the key, and is off by default, so plain `doctor` makes no network call. The
+result is added as `credentialsOnline` (`provider`, `valid`, `usage`, `limit`,
+`remaining`, `ready`, plus an `error` when the check is inconclusive).
+
+```bash
+junior doctor            # offline readiness, including any slow-mount warnings
+junior doctor --online   # also verify the OpenRouter credential and credit
+```
 
 ### `node worker.ts init`
 Idempotent project setup. It creates, only when absent:
@@ -441,9 +483,29 @@ downloaded) and reports `updates.managed.outdated` and `updates.companions`.
 only skill copies Junior or the tool itself wrote and you have not modified.
 
 ### Authentication and the paid smoke test
-Authenticate only through Pi itself: start `pi` and run `/login`, then choose a
-model with `/model`. The setup commands never collect, print, copy, or automate
-secrets, and they never read credential values for output.
+Authenticate through Pi itself: start `pi` and run `/login`, then choose a model
+with `/model`. For headless or scripted setups, `junior auth` stores a provider
+API key in Pi's `auth.json` without opening an interactive session. Either way
+the setup commands never print, copy, or read a credential value for output.
+
+`junior auth set <provider> [--verify]` reads the key from **stdin only** —
+never a command-line argument, so it cannot leak through a process listing or
+shell history — and writes an atomic replacement for `auth.json` in the Pi agent
+directory (`PI_CODING_AGENT_DIR`, else `$HOME/.pi/agent`). The file ends up mode
+`0600` and its directory mode `0700`; unrelated provider entries are preserved,
+and a malformed or non-object existing file is refused unchanged. `junior auth
+remove <provider>` deletes one entry and preserves the rest.
+
+```bash
+printf '%s' "$OPENROUTER_API_KEY" | junior auth set openrouter --verify
+junior auth remove openrouter
+```
+
+`--verify` applies to `set` and is opt-in and only meaningful for `openrouter`:
+it makes one read-only request to the key-status endpoint and reports `valid`,
+`usage`, `limit`, `remaining` and `ready`. For another provider it records
+`verified: null` with a clear reason instead of probing the wrong endpoint. The
+key itself is never returned or written to the result.
 
 The setup checks are free. A **paid smoke test is a separate, explicit opt-in**:
 run a live task without `--mock`, for example
@@ -727,6 +789,36 @@ This is **not a sandbox**: the worker runs with the same filesystem and network
 access as the caller; isolation only provides a separate checkout and a clean
 evidence baseline.
 
+### Provisioning a worktree (`isolationSetup`)
+A `worktree` run can provision gitignored dependencies (for example
+`node_modules` or a virtualenv) before any paid worker, classifier or check
+runs:
+
+```json
+"isolation": "worktree",
+"isolationSetup": {
+  "links": [{ "from": "node_modules", "to": "node_modules" }],
+  "copy": [".env.local"],
+  "commands": [{ "command": "npm", "args": ["run", "build"], "cwd": "." }]
+}
+```
+
+- `links` creates a symlink at `<worktree>/<to>` pointing at `<source>/<from>`.
+- `copy` recursively copies each relative path into the worktree, preserving
+  files, directories and symlinks.
+- `commands` runs each command with argv (no shell) from the given `cwd`
+  (relative to the worktree), bounded by the remaining wall deadline and
+  `checkTimeoutMs`.
+
+All paths must be relative and must not escape the checkout. `isolationSetup`
+is ignored when `isolation` is `none`; a contract value takes precedence over
+one in `delivery.config.json`. A malformed spec is rejected before any paid
+call. A failed link, copy or command stops provisioning at the first failure and
+ends the run with the terminal status `isolation_setup_failed` — never a check
+failure and never a half-provisioned worker start. The step log is written to
+`isolation-setup.log` in the artifact directory, and linked/copied paths are
+added to the local Git exclude so they do not appear in change evidence.
+
 ### Retained worktrees and `prune`
 Each `worktree` run retains its linked checkout at
 `.delivery/<id>/<timestamp>/worktree` for review, alongside the run's
@@ -809,6 +901,15 @@ rejects the task before any paid call.
 | `toolTimeoutMs` | 300000 | 1 .. 86400000 | per-tool watchdog limit |
 | `heartbeatMs` | 5000 | 1 .. 3600000 | heartbeat write interval |
 | `checkTimeoutMs` | 120000 | 1 .. 86400000 | per-check limit (also capped by `toolTimeoutMs` and the remaining deadline) |
+| `checkReserveMs` | `min(120000, deadlineMs * 0.2)` | 0 .. 86400000 | worker-phase budget reserved so checks still run (must be < `deadlineMs`) |
+
+`checkReserveMs` carves a reserve out of the total wall deadline for the
+contract's checks. The worker phase is stopped at `deadlineAt - checkReserveMs`,
+and the checks then run within the remaining budget, still bounded by the total
+wall deadline. A run stopped this way still records its check results and keeps
+the `deadline_exceeded` outcome — the reserve never turns a failed worker into a
+success. `runtime.json` and the compact handoff expose `checkReserveMs`
+alongside `deadlineMs`.
 
 The total wall deadline starts **before** readiness, isolation and the
 classifier, and covers checks, postflight and every attempt. Each phase uses the
@@ -880,6 +981,25 @@ The full receipt, events, evidence and runtime heartbeat stay in the artifact
 files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
 `result.json`) and are available through `status --full`.
 
+### Handoff progress and live status
+`junior handoff`, `junior run` and `junior qa` stream progress lines to
+**stderr**, each prefixed `junior: `, so stdout stays one JSON object. Progress
+follows the phases (`readiness`, `isolation`, `preflight`, `worker started`,
+each check, `postflight`, `finished <status>`), plus slow-mount advisories and
+periodic heartbeats. `--quiet` suppresses every progress line; it never changes
+the result on stdout.
+
+```bash
+junior handoff task.json --mock          # progress on stderr
+junior handoff task.json --mock --quiet  # nothing on stderr
+```
+
+`junior status <result.json|artifactDir> --live` prints a small live snapshot
+directly from the run's `runtime.json` (`phase`, `state`, `elapsedMs`,
+`remainingMs`, `currentTool`) without requiring `result.json` or executing
+anything. It also accepts a direct `runtime.json` path. A missing or malformed
+snapshot prints a concise error and exits nonzero.
+
 ### Prompt search restriction
 The common prompt restricts file reads and searches to the execution checkout
 and to context/dependency paths named in the task, and instructs the worker to
@@ -913,6 +1033,26 @@ make no premium chat call. If the local catalog lacks the entry, an explicit
   independent check results and bounded `git diff` evidence (capped output).
 - A classifier outage or an answer below the confidence threshold is
   `uncertain`; in `enforce` mode uncertainty marks the run `needs_review`.
+
+Acceptance entries are strings or `{ text, when }` objects. A conditional
+criterion is assessed in two steps: whether its `when` condition was actually
+exercised, then whether the criterion was met. If the condition was not
+exercised the criterion resolves to `not_applicable` and never counts as a gap
+or an uncertainty:
+
+```json
+"acceptance": [
+  "Every new file has a license header",
+  { "text": "Node 18 stays supported", "when": "the change targets Node 18" }
+]
+```
+
+Each criterion in the result's `jev.postflight.criteria` records `id`, `index`,
+`text`, `verdict` (`met`, `gap`, `uncertain` or `not_applicable`), `probability`
+(P(satisfied)) and, for a conditional criterion, its `when` and
+`conditionProbability`. `gapIds` and `uncertainIds` list only actionable
+criteria, so a `not_applicable` criterion never appears there. `validate`
+rejects an acceptance object with an empty `text` or `when`.
 
 The result's `jev` record holds the mode, classifier model and whether it was
 explicit, whether the gate ran, the preflight/postflight statuses, the raw
@@ -958,6 +1098,52 @@ Testing convention: all newly written or changed tests use atomic scenarios, dec
 
 `node junior.ts tools init hop.json config.json`, `tools call hop.json fmeca|cpm|crossmatrix request.json`, and `tools inspect hop.json` expose the same persistent Praxec adapter to managers and workers. See [tool configuration and native state](tools/README.md). Add `hopFrom` to a delivery contract to provide the latest integrity-checked snapshots to both Jev gates and the worker, without loading transcripts. Context is bounded to the latest snapshot per tool. State changes invalidate previous acceptance; workers never accept their own work. Manager acceptance is an explicit library operation, not authentication or a security boundary.
 
+### Reporting tool bugs upstream (`junior report-issue`)
+When a companion or managed tool misbehaves, draft an issue for its own
+repository instead of working around it silently:
+
+```bash
+junior report-issue cpm --title "plan.lint rejects a valid graph" \
+  --body-file notes.md --hop .delivery/setup/hop.json   # draft only
+junior report-issue cpm --title "plan.lint rejects a valid graph" \
+  --body-file notes.md --hop .delivery/setup/hop.json --file   # after approval
+```
+
+Tools map to `praxec/fmeca`, `praxec/cpm-planner`, `praxec/crossmatrix`,
+`matt-cochran/jevitate`, `matt-cochran/triz` and `matt-cochran/junior`. The draft
+holds your description, an Environment section (Junior and tool versions, OS,
+Node) and, with `--hop`, the tool's last ten evidence entries (never snapshot
+contents). Secrets (`sk-…`, GitHub tokens, `Bearer …`, `*KEY/TOKEN/SECRET=…`)
+are replaced with `[REDACTED]` and your home directory with `~`. Without
+`--file` nothing is filed: it prints the draft and the exact `gh issue create`
+argv. `--file` first searches open issues and refuses a same-title duplicate
+unless `--force`. Filing publishes the draft, so show it to the human first.
+
+### Registering the MCP servers (`junior mcp register`)
+`junior mcp register` derives the FMECA / CPM / Crossmatrix MCP servers from a
+HOP manifest (so their state env is anchored to the manifest folder) and
+registers them in an agent host:
+
+```bash
+junior mcp register --hop .delivery/setup/hop.json --target claude
+junior mcp register --hop .delivery/setup/hop.json --target cursor --project .
+junior mcp register --hop .delivery/setup/hop.json --target print
+junior mcp register --hop .delivery/setup/hop.json --target codex
+```
+
+- `claude` merges under `mcpServers` in `<project>/.mcp.json`.
+- `cursor` merges under `mcpServers` in `<project>/.cursor/mcp.json`.
+- `print` writes the MCP config JSON to stdout and nothing to disk.
+- `codex` writes a TOML `[mcp_servers.<name>]` snippet to stdout, since Codex
+  config is TOML and is never written automatically.
+
+`--project` selects the host directory (default: the current directory).
+Existing unrelated servers and top-level keys are preserved. A same-name entry
+whose content differs is reported as a conflict and left unchanged unless
+`--force` replaces it; `--dry-run` reports planned changes without writing. The
+JSON report lists `added`, `unchanged`, `conflicts` and `written`. `init` never
+registers MCP servers implicitly.
+
 Use `thinking: "low"` (the default) for bounded worker tasks; increase it explicitly for difficult deliverables. Output-limit termination is a failed receipt, even when existing checks pass. Newly written tests follow the shared atomic, declarative, one-behavioral-assertion convention.
 
 Optional QA: `node junior.ts qa qa-contract.json` (or a `handoff` contract with `workflow: "qa"`) requires `reviewFrom` pointing at a prior result. It starts a fresh reviewer session, reviews in place, saves an evidence-based report, and flags detected production edits. Missing reports cannot succeed. Review completion is not manager acceptance; repairs require a separate deliverable. A prompt restriction is not an OS sandbox. QA checks should be read-only; it has the same filesystem permissions as the executor.
@@ -968,4 +1154,24 @@ Private release repositories (including TRIZ) require `GH_TOKEN` or `GITHUB_TOKE
 
 ### Frontier-attention classification
 
-Jev preflight asks `requires_frontier` in the same classification call as readiness. The `attention` field in the compact handoff reports `frontier_required`, `delegate`, `clarify`, or `uncertain` with a target, reason and raw probability. Enforce mode stops frontier-required, missing or uncertain readiness before starting the worker; shadow mode records it and continues. Off remains the default. No frontier model is automatically called. Classification is advisory evidence, not a calibrated capability guarantee.
+Jev preflight asks `requires_frontier` in the same classification call as
+readiness. The compact handoff's `attention` field records the raw classifier
+evidence, not just a label:
+
+- `decision`: `frontier_required`, `delegate`, `clarify` or `uncertain`.
+- `target`: `frontier`, `commodity` or `manager`.
+- `trigger`: the readiness question that drove the decision —
+  `requires_frontier`, `contract_clear`, `blocking_assumptions` or `error`.
+- `probabilities`: the reported P(true) for each readiness question
+  (`requires_frontier`, `contract_clear`, `blocking_assumptions`), or `null`
+  when a question was unanswered.
+- `probability`: the driving question's P(true), or `null`.
+- `threshold`: the confidence threshold (`0.6`) at which a boolean answer
+  becomes a definitive verdict.
+- `reason`: a human-readable explanation naming the answer and its distance
+  from the threshold.
+
+Enforce mode stops frontier-required, missing or uncertain readiness before
+starting the worker; shadow mode records it and continues. Off remains the
+default. No frontier model is automatically called. Classification is advisory
+evidence, not a calibrated capability guarantee.
