@@ -29,9 +29,9 @@ function usage(): string {
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...            persistent FMECA / CPM / Crossmatrix handoff',
+  '  mcp     register --hop <hop.json> --target claude|cursor|print|codex [--project <dir>]',
   '  doctor  [--check-updates] [--online]     read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
-  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]',
-  '          remove inactive clean retained Junior worktrees',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained Junior worktrees',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
@@ -154,6 +154,7 @@ async function main(argv: string[]): Promise<void> {
  if (!command || command === '--help' || command === '-h' || command === 'help') { console.log(usage()); return; }
  if (command === '--version' || command === '-v' || command === 'version') { console.log(readPackageVersion(import.meta.url)); return; }
  if (command === 'tools') { const tools = await import('./tools/tools.ts'); process.exitCode = await tools.main(rest); return; }
+ if (command === 'mcp') { const mcp = await import('./mcp.ts'); process.exitCode = await mcp.main(rest); return; }
 
  const spec = COMMANDS[command];
  if (!spec) throw Error(usage());

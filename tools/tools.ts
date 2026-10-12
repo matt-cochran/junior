@@ -698,7 +698,7 @@ function nativeAbsPath(hopPath: string, tool: ToolName, manifest: HopManifest): 
   return path.resolve(path.dirname(hopPath), rel);
 }
 
-function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
+export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
   const abs = nativeAbsPath(hopPath, tool, manifest);
   if (tool === "fmeca") return { FMECA_STATE_DIR: abs };
   if (tool === "cpm") return { CPM_PLANNER_DB: abs };
