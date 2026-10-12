@@ -115,7 +115,7 @@ function taskFile(dir: string, over: any = {}): string {
 // --- package metadata -------------------------------------------------------
 
 test('The package is published under the scoped junior name', () => assert.equal(pkg.name, '@matthew-cochran/junior'));
-test('The package version is pinned to 0.1.0', () => assert.equal(pkg.version, '0.1.0'));
+test('The package version is pinned to 0.2.0', () => assert.equal(pkg.version, '0.2.0'));
 test('The package is not marked private', () => assert.notEqual(pkg.private, true));
 test('The package exposes the junior bin at the compiled entry', () => assert.equal(pkg.bin.junior, 'dist/junior.js'));
 test('The package supports Node 24 and newer', () => assert.equal(pkg.engines.node, '>=24'));
