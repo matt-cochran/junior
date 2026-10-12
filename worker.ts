@@ -174,11 +174,37 @@ export function codeContextBlock(entries:ResolvedContextEntry[]):string|null {
  return lines.join('\n');
 }
 
+/** The human-readable text of an acceptance entry: a plain string, or the
+ * `text` field of an object. */
+export function acceptanceText(item:any):string {
+ if (typeof item === 'string') return item;
+ if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.text === 'string') return item.text;
+ return '';
+}
+
+/** The optional condition under which an acceptance entry applies. */
+export function acceptanceWhen(item:any):string|undefined {
+ if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.when === 'string' && item.when.trim()) return item.when;
+ return undefined;
+}
+
+/** Acceptance texts for gate state and prompts; the text is used wherever a
+ * criterion is rendered, never the raw `{text, when}` object. */
+export function acceptanceTexts(acceptance:any):string[] {
+ return (Array.isArray(acceptance) ? acceptance : []).map(acceptanceText);
+}
+
 export function validate(t: any) {
  for (const k of ['id','deliverable','cwd']) if (typeof t[k] !== 'string' || !t[k].trim()) throw Error(`Missing ${k}`);
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
  if (t.thinking !== undefined && !['off','minimal','low','medium','high','xhigh','max'].includes(t.thinking)) throw Error('Invalid thinking level');
- if (!Array.isArray(t.acceptance) || !t.acceptance.length || t.acceptance.some((x:any)=>typeof x !== 'string' || !x.trim())) throw Error('Missing acceptance');
+ if (!Array.isArray(t.acceptance) || !t.acceptance.length) throw Error('Missing acceptance');
+ for (const a of t.acceptance) {
+  if (typeof a === 'string') { if (!a.trim()) throw Error('Missing acceptance'); continue; }
+  if (!a || typeof a !== 'object' || Array.isArray(a)) throw Error('Invalid acceptance (expected a string or { text, when })');
+  if (typeof a.text !== 'string' || !a.text.trim()) throw Error('Missing acceptance');
+  if (a.when !== undefined && (typeof a.when !== 'string' || !a.when.trim())) throw Error('Invalid acceptance.when (expected a non-empty string)');
+ }
  if (!Array.isArray(t.checks) || !t.checks.length) throw Error('Missing checks');
  for (const c of t.checks) {
   if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.command !== 'string' || !Array.isArray(c.args) || c.args.some((x:any)=>typeof x !== 'string')) throw Error('Invalid check');
@@ -938,8 +964,12 @@ export type JevPreflight = {
 
 export type JevCriterion = {
  id:string; index:number; text:string;
- verdict:'met'|'gap'|'uncertain';
+ /** Present only for a conditional criterion (`{ text, when }`). */
+ when?:string;
+ verdict:'met'|'gap'|'uncertain'|'not_applicable';
  probability:number|null;
+ /** Probability the `when` condition was exercised; null when not asked. */
+ conditionProbability?:number|null;
  answer?:GateAnswer;
 };
 
@@ -988,6 +1018,11 @@ function boolVerdict(a:GateAnswer):{verdict:'true'|'false'|'uncertain'; probabil
  if (p >= CONFIDENCE_THRESHOLD) return {verdict:'true',probability:p};
  if (p <= 1 - CONFIDENCE_THRESHOLD) return {verdict:'false',probability:p};
  return {verdict:'uncertain',probability:p};
+}
+
+/** The answer to a criterion's `${id}_when` condition sub-question. */
+function conditionAnswer(answers:Record<string,GateAnswer>, id:string):GateAnswer {
+ return answers[`${id}_when`];
 }
 
 /** Human-readable reason naming the contract_clear answer and its distance from
@@ -1045,7 +1080,7 @@ async function invokeClassifier(
 export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; timeoutMs?:number; context?:ResolvedContextEntry[] } = {}):Promise<JevPreflight> {
  const state = {
   deliverable: t.deliverable,
-  acceptance: t.acceptance,
+  acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
   constraints: Array.isArray(t.constraints) ? t.constraints : [],
   checks: (t.checks || []).map((c:any)=>({ command:c.command, args:c.args })),
@@ -1111,7 +1146,10 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
 /** Completion gate: is each acceptance criterion satisfied by independent
  * check results and bounded git diff evidence? */
 export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta):Promise<JevPostflight> {
- const criteria = (t.acceptance || []).map((text:string, index:number)=>({ id:`AC${index+1}`, index, text }));
+ const criteria:{id:string; index:number; text:string; when?:string}[] = (t.acceptance || []).map((item:any, index:number)=>{
+  const when=acceptanceWhen(item);
+  return when ? { id:`AC${index+1}`, index, text:acceptanceText(item), when } : { id:`AC${index+1}`, index, text:acceptanceText(item) };
+ });
  const questions:Record<string,GateQuestion> = {};
  for (const c of criteria) {
   questions[c.id] = {
@@ -1119,10 +1157,17 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
    instructions:`Acceptance criterion ${c.id}: "${c.text}". Is it satisfied, based only on the independent check results and the bounded git diff evidence?`,
    criteria:{ true:'Satisfied', false:'Not satisfied' },
   };
+  if (c.when) {
+   questions[`${c.id}_when`] = {
+    type:'bool',
+    instructions:`Acceptance criterion ${c.id} applies only when: "${c.when}". Was that condition exercised by this change, based only on the independent check results and the bounded git diff evidence?`,
+    criteria:{ true:'Condition exercised', false:'Condition not exercised' },
+   };
+  }
  }
  const state = {
   deliverable: t.deliverable,
-  acceptance: t.acceptance,
+  acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
   constraints: Array.isArray(t.constraints) ? t.constraints : [],
   checks: (checks || []).map((c:any)=>({ command:c.command, args:c.args, exitCode:c.exitCode, passed:c.exitCode === 0 })),
@@ -1135,9 +1180,15 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
  const usage = normalizeGateUsage(result?.usage);
  const out:JevCriterion[] = criteria.map((c)=>{
   const v = boolVerdict(answers[c.id]);
+  const condition = c.when ? boolVerdict(conditionAnswer(answers, c.id)) : null;
+  const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
+   ? 'not_applicable'
+   : v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain';
   return { id:c.id, index:c.index, text:c.text,
-   verdict: v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain',
-   probability: v.probability, answer: answers[c.id] };
+   ...(c.when ? { when:c.when } : {}),
+   verdict, probability: v.probability,
+   ...(condition ? { conditionProbability: condition.probability } : {}),
+   answer: answers[c.id] };
  });
  const gapIds = out.filter((c)=>c.verdict === 'gap').map((c)=>c.id);
  const uncertainIds = out.filter((c)=>c.verdict === 'uncertain').map((c)=>c.id);

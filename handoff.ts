@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
+import { CONFIDENCE_THRESHOLD } from './worker.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -119,6 +120,24 @@ export function stopReasonSummary(receipt: any): string[] {
  return seen;
 }
 
+/** Bound criterion text for a compact unresolved entry (80 chars, then an
+ * ellipsis), so a long criterion never floods the receipt. */
+function criterionLabel(text: unknown): string {
+ const s = typeof text === 'string' ? text : String(text ?? '');
+ return s.length > 80 ? `${s.slice(0, 80)}...` : s;
+}
+
+/** One self-explanatory unresolved acceptance entry: criterion id, verdict word,
+ * the criterion text and the classifier probability against the threshold. */
+function unresolvedCriterion(kind: 'gap' | 'uncertain', c: any): string {
+ const id = String(c?.id ?? 'AC?');
+ const p = c?.probability;
+ const reason = typeof p === 'number' && Number.isFinite(p)
+  ? `P(satisfied)=${p}, threshold ${CONFIDENCE_THRESHOLD}`
+  : `no classifier probability, threshold ${CONFIDENCE_THRESHOLD}`;
+ return `${id} ${kind}: "${criterionLabel(c?.text)}" (${reason})`;
+}
+
 /** Actionable, human-readable unresolved issues from an otherwise final result. */
 export function unresolvedIssues(result: any): string[] {
  const out: string[] = [];
@@ -127,8 +146,10 @@ export function unresolvedIssues(result: any): string[] {
   if (check.exitCode !== 0 || check.error || check.timedOut || check.outputTruncated) out.push(`check failed: ${[check.command, ...(check.args || [])].join(' ')}${check.error ? ': ' + check.error : ''}`);
  }
  const post = result?.jev?.postflight;
- if (post?.gapIds?.length) out.push(`acceptance gaps: ${post.gapIds.join(', ')}`);
- if (post?.uncertainIds?.length) out.push(`uncertain acceptance: ${post.uncertainIds.join(', ')}`);
+ const criteria = Array.isArray(post?.criteria) ? post.criteria : [];
+ const criterionById = new Map<string, any>(criteria.map((c: any) => [String(c?.id), c]));
+ for (const id of (Array.isArray(post?.gapIds) ? post.gapIds : [])) out.push(unresolvedCriterion('gap', criterionById.get(String(id)) ?? { id }));
+ for (const id of (Array.isArray(post?.uncertainIds) ? post.uncertainIds : [])) out.push(unresolvedCriterion('uncertain', criterionById.get(String(id)) ?? { id }));
  if (result?.receipt?.malformed) out.push(`malformed event lines: ${(result.receipt.malformedLines || []).join(', ')}`);
  if (result?.runtime?.timedOut) out.push('tool execution timed out');
  if (result?.runtime?.deadlineExceeded) out.push('total wall deadline exceeded');

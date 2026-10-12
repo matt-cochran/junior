@@ -2428,3 +2428,76 @@ test('The compact handoff reports the reserved check budget',()=>{
  const h=compactHandoff({runtime:{checkReserveMs:120000}});
  assert.equal(h.runtime.checkReserveMs,120000);
 });
+
+// --- Issue #17: self-explanatory unresolved acceptance and conditional criteria ---
+
+test('Unresolved uncertain acceptance names the criterion text and probability',async()=>{
+ const t=task(0,{acceptance:['Where a component lacks a data-testid the check must skip'],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.5)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],'AC1 uncertain: "Where a component lacks a data-testid the check must skip" (P(satisfied)=0.5, threshold 0.6)');
+});
+test('Unresolved acceptance gap names the criterion text and probability',async()=>{
+ const t=task(0,{acceptance:['Every path has a test'],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.1)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],'AC1 gap: "Every path has a test" (P(satisfied)=0.1, threshold 0.6)');
+});
+test('A long criterion text is truncated in the unresolved entry',async()=>{
+ const t=task(0,{acceptance:['x'.repeat(120)],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.1)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],`AC1 gap: "${'x'.repeat(80)}..." (P(satisfied)=0.1, threshold 0.6)`);
+});
+test('A conditional criterion whose condition was not exercised resolves not_applicable',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const r=await run(t,true,{classify:classifier});
+ assert.equal(r.jev.postflight.criteria[0].verdict,'not_applicable');
+});
+test('A not-applicable criterion does not appear in the unresolved receipt',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.deepEqual(h.unresolved,[]);
+});
+test('A not-applicable criterion does not block an enforce run',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'enforce'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const r=await run(t,true,{classify:classifier});
+ assert.equal(r.status,'simulation_passed');
+});
+test('A string-only acceptance contract keeps the existing met verdict',async()=>{
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95)});
+ const r=await run(task(0,{jev:{mode:'enforce'}}),true,{classify:classifier});
+ assert.equal(r.jev.postflight.criteria[0].verdict,'met');
+});
+test('validate accepts an object acceptance item with text and when',()=>{
+ assert.doesNotThrow(()=>validate({...task(),acceptance:[{text:'conditional criterion',when:'condition holds'}]}));
+});
+test('validate rejects an acceptance object with empty text',()=>{
+ assert.throws(()=>validate({...task(),acceptance:[{text:'   '}]}),/acceptance/i);
+});
+test('validate rejects an acceptance object with an empty when condition',()=>{
+ assert.throws(()=>validate({...task(),acceptance:[{text:'criterion',when:'   '}]}),/when/i);
+});
+test('Preflight state carries the acceptance text for object items',async()=>{
+ let preState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  if(Object.prototype.hasOwnProperty.call(questions,'contract_clear')) preState=state;
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ await run(task(0,{acceptance:[{text:'object criterion text',when:'condition'}],jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.deepEqual(preState.acceptance,['object criterion text']);
+});
+test('Postflight state carries the acceptance text for object items',async()=>{
+ let postState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  if(!Object.prototype.hasOwnProperty.call(questions,'contract_clear')) postState=state;
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ await run(task(0,{acceptance:[{text:'object criterion text',when:'condition'}],jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.deepEqual(postState.acceptance,['object criterion text']);
+});
