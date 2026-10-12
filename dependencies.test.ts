@@ -250,6 +250,83 @@ test('An explicit update re-downloads and adopts the current release', async () 
   assert.equal(newer.state.assetFetches, 1);
 });
 
+// --- update skips an already-current managed tool (issue #27) -----------------
+
+test('An explicit update of an unchanged managed tool performs no asset download', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const deps = baseDeps(server);
+  await installTools({ tools: ['fmeca'] }, deps);
+  await installTools({ tools: ['fmeca'], update: true }, deps);
+  assert.equal(server.state.assetFetches, 1);
+});
+
+test('An explicit update of an unchanged managed tool reports changed false', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const deps = baseDeps(server);
+  await installTools({ tools: ['fmeca'] }, deps);
+  const report = await installTools({ tools: ['fmeca'], update: true }, deps);
+  assert.equal(report.outcomes[0].changed, false);
+});
+
+test('An explicit update of an unchanged managed tool reinstalls a tampered binary', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const deps = baseDeps(server);
+  await installTools({ tools: ['fmeca'] }, deps);
+  const binaryPath = join(deps.installRoot, 'fmeca', 'fmeca-mcp');
+  writeFileSync(binaryPath, 'TAMPERED');
+  await installTools({ tools: ['fmeca'], update: true }, deps);
+  assert.equal(readFileSync(binaryPath, 'utf8'), 'BINARY');
+});
+
+test('An explicit update of a managed tool with a newer release installs it', async () => {
+  const first = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('ONE') }],
+  });
+  const deps = baseDeps(first);
+  await installTools({ tools: ['fmeca'] }, deps);
+  const newer = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    tag: 'v1.2.4',
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('TWO') }],
+  });
+  await installTools({ tools: ['fmeca'], update: true }, { ...deps, fetch: newer.fetch });
+  assert.equal(readFileSync(join(deps.installRoot, 'fmeca', 'fmeca-mcp'), 'utf8'), 'TWO');
+});
+
+test('An explicit update of an unchanged optional TRIZ install performs no asset download', async () => {
+  const fmeca = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const triz = releaseServer({
+    repo: 'matt-cochran/triz',
+    tag: 'v0.9.0',
+    assetName: 'triz-v0.9.0-node.tgz',
+    entries: [{ name: 'dist/triz.js', data: entryData('export default 1') }],
+  });
+  const fetch = async (url: string) => (url.includes('matt-cochran/triz') ? triz.fetch(url) : fmeca.fetch(url));
+  const deps = baseDeps(fmeca, { fetch, smokeTriz: async () => true });
+  await installTools({ tools: ['fmeca'], withTriz: true }, deps);
+  await installTools({ tools: ['fmeca'], withTriz: true, update: true }, deps);
+  assert.equal(triz.state.assetFetches, 1);
+});
+
 // --- failure modes ------------------------------------------------------------
 
 test('A checksum mismatch fails the install', async () => {

@@ -150,7 +150,8 @@ export function unresolvedIssues(result: any): string[] {
  const criterionById = new Map<string, any>(criteria.map((c: any) => [String(c?.id), c]));
  for (const id of (Array.isArray(post?.gapIds) ? post.gapIds : [])) out.push(unresolvedCriterion('gap', criterionById.get(String(id)) ?? { id }));
  for (const id of (Array.isArray(post?.uncertainIds) ? post.uncertainIds : [])) out.push(unresolvedCriterion('uncertain', criterionById.get(String(id)) ?? { id }));
- if (result?.receipt?.malformed) out.push(`malformed event lines: ${(result.receipt.malformedLines || []).join(', ')}`);
+ if (result?.outputTruncated || result?.receipt?.outputTruncated) out.push('worker output truncated at the cap');
+ else if (result?.receipt?.malformed) out.push(`malformed event lines: ${(result.receipt.malformedLines || []).join(', ')}`);
  if (result?.runtime?.timedOut) out.push('tool execution timed out');
  if (result?.runtime?.deadlineExceeded) out.push('total wall deadline exceeded');
  if (result?.runtime?.interrupted) out.push('run interrupted by signal');

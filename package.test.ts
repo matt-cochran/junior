@@ -89,6 +89,7 @@ function runBin(args: string[], opts: any = {}) {
       HOME: home,
       USERPROFILE: home,
       PI_CODING_AGENT_DIR: join(tmpRoot, 'agent'),
+      JUNIOR_NO_INSTALL: '1',
       ...(opts.env ?? {}),
     },
   });

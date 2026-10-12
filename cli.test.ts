@@ -20,11 +20,11 @@ const TOOLS = join(ROOT, 'tools', 'tools.ts');
 const NODE = process.execPath;
 
 function runJunior(args: string[], cwd: string) {
-  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8' });
+  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1' } });
 }
 
 function runTools(args: string[], cwd: string) {
-  return spawnSync(NODE, [TOOLS, ...args], { cwd, encoding: 'utf8' });
+  return spawnSync(NODE, [TOOLS, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1' } });
 }
 
 function workdir(): string {

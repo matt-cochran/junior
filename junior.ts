@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { run, validate, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
-import { inspectCompanions } from './companions.ts';
+import { inspectCompanions, installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
@@ -210,11 +210,15 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
   const result:any = init({}, opts);
   if (opts.install) {
-   const installer = await import('./installer.ts');
-   const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
-   result.tools = report;
-   // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
-   result.installSummary = summarizeInstall(result.install, report);
+   if (installationDisabled(process.env)) {
+    result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true };
+   } else {
+    const installer = await import('./installer.ts');
+    const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
+    result.tools = report;
+    // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
+    result.installSummary = summarizeInstall(result.install, report);
+   }
   }
   if (opts.companions !== false) {
    result.companions = setupCompanions({}, { target: opts.target, scope: opts.scope, install: opts.install, update: opts.update });

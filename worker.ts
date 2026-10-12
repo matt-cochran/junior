@@ -274,7 +274,12 @@ export type Receipt = {
  aborted:boolean;
  settled:boolean;
  malformed:boolean;
+ /** At most MALFORMED_LINE_LIMIT line numbers; `malformedCount` is the total. */
  malformedLines:number[];
+ /** Total malformed lines seen, even when `malformedLines` is capped. */
+ malformedCount:number;
+ /** True when a non-blank final line was cut by the output cap rather than malformed. */
+ truncatedTail?:boolean;
  /** True when the captured output hit the accumulation cap; the receipt cannot be complete. */
  outputTruncated?:boolean;
 };
@@ -313,10 +318,22 @@ function addUsage(total:Usage, u:any) {
  }
 }
 
+/** At most this many malformed line numbers are retained; the running total
+ * lives in `malformedCount` so a flood of bad lines cannot bloat the receipt. */
+export const MALFORMED_LINE_LIMIT = 20;
+
+function recordMalformed(receipt:Receipt, lineNumber:number):void {
+ receipt.malformedCount++;
+ if (receipt.malformedLines.length < MALFORMED_LINE_LIMIT) receipt.malformedLines.push(lineNumber);
+}
+
 /** Parse the `pi --mode json` JSONL event stream into a verifiable receipt.
  * Aggregation uses only authoritative assistant `message_end` records; turn_end,
- * agent_end and cumulative message_update usage are intentionally ignored. */
-export function parseReceipt(eventsText:string, requested:{provider?:string;model?:string} = {}):Receipt {
+ * agent_end and cumulative message_update usage are intentionally ignored.
+ * When the captured output was cut by the accumulation cap, a non-blank final
+ * line that is not valid JSON is reported as `truncatedTail`, not as a
+ * malformed line. */
+export function parseReceipt(eventsText:string, requested:{provider?:string;model?:string} = {}, opts:{outputTruncated?:boolean} = {}):Receipt {
  const receipt:Receipt = {
   source:'pi_message_end',
   requested:{provider:requested.provider || 'unknown', model:requested.model || 'unknown'},
@@ -334,18 +351,28 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   settled:false,
   malformed:false,
   malformedLines:[],
+  malformedCount:0,
+  truncatedTail:false,
+  outputTruncated:!!opts.outputTruncated,
  };
  const seen = new Set<string>();
  // Strict JSONL framing: split on LF only and strip an optional trailing CR.
  const lines = String(eventsText ?? '').split('\n');
+ // Locate the last non-blank line so a cap-cut final record can be recognized.
+ let lastContentIndex = -1;
+ for (let i=lines.length-1;i>=0;i--) { if (lines[i].trim()) { lastContentIndex=i; break; } }
  for (let i=0;i<lines.length;i++) {
   let raw = lines[i];
   if (raw.endsWith('\r')) raw = raw.slice(0,-1);
   if (!raw.trim()) continue;
   let ev:any;
   try { ev = JSON.parse(raw); }
-  catch { receipt.malformedLines.push(i+1); continue; }
-  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) { receipt.malformedLines.push(i+1); continue; }
+  catch {
+   if (opts.outputTruncated && i === lastContentIndex) { receipt.truncatedTail = true; continue; }
+   recordMalformed(receipt, i+1);
+   continue;
+  }
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) { recordMalformed(receipt, i+1); continue; }
   if (ev.type === 'session') {
    if (receipt.sessionId === null && typeof ev.id === 'string' && ev.id.trim()) receipt.sessionId = ev.id;
    continue;
@@ -370,7 +397,7 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   }
   addUsage(receipt.usage, m.usage);
  }
- receipt.malformed = receipt.malformedLines.length > 0;
+ receipt.malformed = receipt.malformedCount > 0;
  receipt.observedUnknown = receipt.observed.length === 0;
  return receipt;
 }
@@ -394,6 +421,8 @@ export function mockReceipt(requested:{provider?:string;model?:string} = {}):Rec
   settled:false,
   malformed:false,
   malformedLines:[],
+  malformedCount:0,
+  truncatedTail:false,
  };
 }
 
@@ -401,7 +430,7 @@ export function mockReceipt(requested:{provider?:string;model?:string} = {}):Rec
  * message completed, the assistant turns completed cleanly, and Pi reported
  * agent_settled. A settled stream with no assistant message is not a receipt. */
 export function receiptValid(r:Receipt) {
- return r.source === 'pi_message_end' && r.assistantMessages > 0 && !r.malformed && !r.errored && !r.aborted && r.settled && !r.outputTruncated;
+ return r.source === 'pi_message_end' && r.assistantMessages > 0 && !r.malformed && !r.errored && !r.aborted && r.settled && !r.outputTruncated && !r.truncatedTail;
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,7 +1684,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    workerStatus=streamResult.exitCode ?? 1;
    legacyError=streamResult.error;
   }
-  const receipt=mock ? mockReceipt(requested) : parseReceipt(stdout,requested);
+  const receipt=mock ? mockReceipt(requested) : parseReceipt(stdout,requested,{outputTruncated: !!streamResult?.outputTruncated});
   if (streamResult?.outputTruncated) receipt.outputTruncated = true;
   const receiptOk=mock || receiptValid(receipt);
 
@@ -1671,7 +1700,9 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // per-tool timeout or a fatal stream/persist error never does.
   const workerDeadlineStopped = !!streamResult && streamResult.deadlineExceeded && !streamResult.interrupted && !streamResult.timedOut
    && !streamResult.streamError && !streamResult.persistError;
-  const checksEligible = stopped ? workerDeadlineStopped : (workerStatus === 0 && receiptOk);
+  // A worker stopped at the output cap never runs its checks: the receipt is
+  // incomplete and the run is reported as output_truncated.
+  const checksEligible = !streamResult?.outputTruncated && (stopped ? workerDeadlineStopped : (workerStatus === 0 && receiptOk));
   if (checksEligible) {
    for (let i=0;i<t.checks.length;i++) {
     const rem=remainingMs();
@@ -1700,7 +1731,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   if (!workerError && streamResult?.timedOut) workerError='Tool execution exceeded the per-tool timeout; Pi process group was stopped.';
   if (!workerError && streamResult?.streamError) workerError=`Worker output stream failed: ${streamResult.streamError}`;
   if (!workerError && streamResult?.persistError) workerError=`Could not persist worker logs/events: ${streamResult.persistError}`;
-  if (!workerError && streamResult?.outputTruncated) workerError='Worker output exceeded the accumulation cap; the receipt is truncated and not complete.';
+  if (!workerError && streamResult?.outputTruncated) workerError='Worker output exceeded the accumulation cap; the worker was stopped.';
   if (!workerError && workerStatus !== 0) workerError=String(stderr).includes('No API key found for openrouter') ? 'OpenRouter authentication missing. Start pi and use /login to configure OpenRouter, then retry.' : 'Pi failed; inspect worker.log.';
   if (!workerError && !receiptOk) workerError = receipt.malformed ? 'Pi event stream contained malformed JSONL; inspect events.jsonl.' : receipt.errored || receipt.aborted ? 'Pi assistant message did not complete cleanly.' : receipt.assistantMessages === 0 ? 'Pi settled with no assistant messages.' : 'Pi never reported agent_settled; inspect events.jsonl.';
 
@@ -1734,6 +1765,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let status:string;
   if (streamResult?.interrupted || signal?.aborted) status='interrupted';
   else if (streamResult?.timedOut) status='worker_failed';
+  else if (streamResult?.outputTruncated) status='output_truncated';
   else if (streamResult?.deadlineExceeded || deadlineDuringChecks || outOfTime()) status='deadline_exceeded';
   else if (streamResult?.persistError || streamResult?.streamError) status='worker_failed';
   else if (workerStatus !== 0) status='worker_failed';

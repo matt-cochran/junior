@@ -178,3 +178,31 @@ test('inspect falls back to the installed package version when the CLI has no --
   deps.packageVersion = (_executable: string, pkg: string) => (pkg === '@matthew-cochran/triz' ? '0.2.1' : null);
   assert.equal(inspectCompanions(deps).companions.find((c) => c.id === 'triz')?.version, '0.2.1');
 });
+
+// --- JUNIOR_NO_INSTALL guard (issue #28) -------------------------------------
+
+test('installCompanions with JUNIOR_NO_INSTALL invokes no command', () => {
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0' } });
+  deps.env = { ...deps.env, JUNIOR_NO_INSTALL: '1' };
+  installCompanions(deps);
+  assert.equal(calls.length, 0);
+});
+
+test('installCompanions with JUNIOR_NO_INSTALL reports every companion skipped', () => {
+  const { deps } = world({ installed: { [FMECA]: '0.1.0' } });
+  deps.env = { ...deps.env, JUNIOR_NO_INSTALL: '1' };
+  assert.deepEqual(installCompanions(deps).outcomes.map((o) => o.status), COMPANIONS.map(() => 'skipped'));
+});
+
+test('installCompanionSkills with JUNIOR_NO_INSTALL invokes no command', () => {
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0' } });
+  deps.env = { ...deps.env, JUNIOR_NO_INSTALL: 'true' };
+  installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.equal(calls.length, 0);
+});
+
+test('installCompanionSkills with JUNIOR_NO_INSTALL reports every companion skipped', () => {
+  const { deps } = world({ installed: { [FMECA]: '0.1.0' } });
+  deps.env = { ...deps.env, JUNIOR_NO_INSTALL: '1' };
+  assert.deepEqual(installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' }).results.map((r) => r.status), COMPANIONS.map(() => 'skipped'));
+});
