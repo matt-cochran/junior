@@ -1,6 +1,8 @@
 ---
 name: junior
 description: Delegate a bounded coding deliverable to DeepSeek through the local Junior delivery worker (junior.ts handoff), then review its compact receipt and independent checks. Use when the user requests Junior or wants commodity-model execution under premium-model supervision.
+license: MIT
+compatibility: Requires Node 22.19+, git and the junior CLI (npm @matthew-cochran/junior); delegated runs need Pi with a provider credential.
 ---
 
 # Junior
@@ -110,12 +112,7 @@ expected `hopRevision`; verified snapshots go to both Jev and the executor. Stat
 mutations invalidate earlier manager acceptance. Keep contracts and tool calls
 scoped to one deliverable; the worker does not accept its own work.
 
-`junior doctor` is read-only and reports prebuilt tool integrations (version,
-provenance, path) separately from Pi execution/auth readiness. `junior init
---install` downloads checksum-verified prebuilt FMECA/CPM/Crossmatrix release
-binaries (no local Rust build); `--update` explicitly adopts a newer release and
-`--with-triz` adds the optional portable TRIZ CLI. Fresh-session `qa` remains an
-optional, report-only workflow.
+Fresh-session `qa` remains an optional, report-only workflow.
 
 All newly written or changed tests use atomic scenarios, declarative names, and exactly one behavioral assertion against a public outcome. Test the deliverable capability rather than private implementation details. Prefer focused tests, fewer boundary integrations, and essential end-to-end acceptance checks. Never bundle unrelated assertions to evade the rule.
 
@@ -124,3 +121,61 @@ All newly written or changed tests use atomic scenarios, declarative names, and 
 ## Frontier attention
 
 Use `jev.mode: enforce` when frontier suitability must block execution. The compact receipt's `attention` field reports the target, decision, reason and probability. `frontier_required` returns to the manager before the commodity worker starts in enforce mode; shadow remains advisory. Missing/uncertain classification is not a pass. No frontier model is called automatically. Review the classification and the contract before clarifying, re-scoping or taking over.
+
+## Manager loop with CPM and FMECA
+
+You (the frontier model) coordinate; commodity workers execute. Route every
+tool call through `node <cli> tools call /absolute/hop.json <fmeca|cpm|crossmatrix> request.json`
+so it is recorded as evidence (reads become immutable snapshots):
+
+1. Plan: `plan.submit` deliverables with `owned_files` and prerequisites;
+   `plan.lint`, `plan.simulate` and `plan.status` (critical path, ready set) are reads.
+2. Risk: an FMECA session (`session.open`, `append`), then `risk.next` and
+   `readiness.assess` before risky work.
+3. Lease: `plan.acquire_cohort` returns non-conflicting ready deliverables;
+   dispatch each as one Junior contract (pass `hopFrom` to share state).
+4. Review the receipt, diff and checks yourself, then `plan.mark_status`
+   complete (with `evidence`) or failed with a reason; repair at most once.
+5. Repeat until `plan.status` shows the plan complete.
+
+Neither tool needs registering as an MCP server for this loop; Junior spawns the
+managed binaries itself.
+
+## Companion tools and skills
+
+`junior init` installs, by default: Pi, the checksum-verified managed
+FMECA/CPM/Crossmatrix binaries (`~/.junior/tools`, used by delegated runs), the
+npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm` and
+`@jevitate/cli`, and each companion's own agent skills for the selected targets
+(`--no-install` and `--no-companions` opt out). Prefer those skills for their
+domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm` for planning, and
+`jevitate-getting-started` as the entry point for browser testing, demos and CI
+gates of web apps. A jevitate command with a pass/fail exit code (for example
+`jevitate check --suite <file>`) can be a contract `checks` entry so a commodity
+deliverable is verified in a real browser.
+
+`junior doctor` is read-only; it reports Pi, skills, managed tools and companion
+tools separately. `junior doctor --check-updates` also asks npm and GitHub for
+newer releases, and `junior update` adopts them and refreshes unmodified skills.
+
+## Idempotent shared manager instructions
+
+If you add Junior-specific instructions to `AGENTS.md`, `CLAUDE.md`, or another
+shared Markdown instruction file, place all of that content inside exactly one
+managed block:
+
+```markdown
+<junior>
+Use the installed Junior skill to delegate one bounded deliverable. Review its receipt and independent checks before accepting the work.
+</junior>
+```
+
+On first installation, append the block without replacing existing content. On
+reruns, replace the existing block in place rather than appending another.
+Preserve every byte outside the block. If the desired content already matches,
+leave the file unchanged. If tags are duplicated, nested, or unbalanced, stop and
+report the conflict instead of guessing or overwriting user instructions. Do not
+add Junior text outside the tags. Remove only the managed block when uninstalling
+an authorized integration. Junior init installs separate skill files; it does
+not itself add AGENTS.md or CLAUDE.md blocks (a companion installer such as
+jevitate's may add its own).

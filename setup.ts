@@ -19,6 +19,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
+import { inspectCompanions, installCompanions, installCompanionSkills,
+ type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 
@@ -294,6 +296,8 @@ export type DoctorResult = {
  model:ModelCheck;
  /** Skill readiness is reported separately; it does not change Pi execution readiness (`ok`). */
  skill:SkillReadiness;
+ /** npm companion tools (fmeca, cpm, jevitate); reported separately, never gating Pi readiness. */
+ companions:CompanionsReport;
  /** Prebuilt integration readiness is reported separately from Pi execution/auth readiness. */
  integrations:IntegrationsResult;
  integrationsReady:boolean;
@@ -337,7 +341,8 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  const skill=inspectSkill(deps);
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  const retention=retainedWorktreeSummary(cwd);
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
+ const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
+ return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
@@ -401,7 +406,8 @@ function generatedExcludePatterns(skill:SkillResult, created:string[]):string[] 
  if (created.includes('tasks/example-task.json')) patterns.push('/tasks/example-task.json');
  if (skill.scope === 'project') {
   for (const action of skill.actions) {
-   if (action.status !== 'created') continue;
+   // Junior wrote (or already matches) these copies; outdated or customized ones are the user's.
+   if (action.status === 'outdated' || action.status === 'customized') continue;
    const root=action.manager === 'codex' ? '.agents/skills' : '.claude/skills';
    patterns.push(`/${root}/junior/`, `/${root}/${SKILL_MANIFEST_FILENAME}`);
   }
@@ -505,7 +511,7 @@ export type SkillReadiness = {
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
 export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string };
-export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean };
+export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean };
 
 function sha256(text:string):string {
  return createHash('sha256').update(text).digest('hex');
@@ -629,10 +635,13 @@ function isSkillTarget(value:string|undefined):value is SkillTargetSelection {
 
 /** Parse the `init` flags shared by the `worker.ts` and `junior.ts` CLIs. */
 export function parseInitOptions(argv:string[]):InitOptions {
- const opts:InitOptions={};
+ // The CLI installs Pi, the managed tools and the companion tools by default.
+ const opts:InitOptions={ install:true };
  for (let i=0;i<argv.length;i++) {
   const a=argv[i];
   if (a === '--install') opts.install=true;
+  else if (a === '--no-install') opts.install=false;
+  else if (a === '--no-companions') opts.companions=false;
   else if (a === '--user') opts.scope='user';
   else if (a === '--project') opts.scope='project';
   else if (a === '--upgrade') opts.upgrade=true;
@@ -648,4 +657,46 @@ export function parseInitOptions(argv:string[]):InitOptions {
   else if (a.startsWith('--skill-root=')) opts.skillRoot=a.slice('--skill-root='.length);
  }
  return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Companion tools (fmeca, cpm, jevitate npm packages and their agent skills).
+//
+// Each companion's own installer writes its skills; Junior only orchestrates.
+// Paths that become untracked during the skill install are recorded as exact
+// local Git exclusions, exactly like Junior's own generated files, so a fresh
+// project stays ready for a `worktree` handoff. A tracked file an installer
+// edits (for example a shared AGENTS.md block) is reported, never hidden.
+// ---------------------------------------------------------------------------
+
+export type CompanionSetupResult = {
+ install:CompanionInstallReport | null;
+ skills:CompanionSkillReport;
+ excluded:string[];
+ modifiedTracked:string[];
+ ok:boolean;
+};
+
+function gitLines(cwd:string, args:string[]):string[] | null {
+ const r=spawnSync('git',args,{cwd,encoding:'utf8'});
+ if (r.error || r.status !== 0) return null;
+ return String(r.stdout||'').split('\n').map((l)=>l.trim()).filter(Boolean);
+}
+
+export function setupCompanions(
+ deps:SetupDeps,
+ opts:{ target?:SkillTargetSelection; scope?:SkillScope; install?:boolean; update?:boolean },
+):CompanionSetupResult {
+ const cwd=deps.cwd ?? process.cwd();
+ const cdeps={ env:deps.env, exists:deps.exists, exec:deps.exec };
+ const untracked=()=>gitLines(cwd,['ls-files','--others','--exclude-standard']);
+ const modified=()=>gitLines(cwd,['diff','--name-only']);
+ const beforeUntracked=new Set(untracked() ?? []);
+ const beforeModified=new Set(modified() ?? []);
+ const install=opts.install === false ? null : installCompanions(cdeps,{ update:opts.update });
+ const skills=installCompanionSkills(cdeps,{ target:opts.target ?? 'both', scope:opts.scope ?? 'project', cwd });
+ const created=(untracked() ?? []).filter((p)=>!beforeUntracked.has(p));
+ const excluded=created.length ? ensureLocalExcludes(cwd, created.map((p)=>`/${p}`)).added : [];
+ const modifiedTracked=(modified() ?? []).filter((p)=>!beforeModified.has(p));
+ return { install, skills, excluded, modifiedTracked, ok:(install ? install.ok : true) && skills.ok };
 }

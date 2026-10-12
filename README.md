@@ -4,7 +4,7 @@ Delegate one bounded deliverable to a capable commodity model (DeepSeek is the t
 
 ```bash
 node junior.ts init
-node junior.ts doctor
+node junior.ts doctor [--check-updates]
 node junior.ts prune --dry-run
 node junior.ts handoff /absolute/task.json
 node junior.ts status /absolute/result.json
@@ -30,7 +30,7 @@ node dist/junior.js --help
 npm test
 ```
 
-Use Node 24+ and Ubuntu WSL on Windows for worker execution. Native installed-CLI smoke tests cover Linux, macOS, and Windows on x64 and ARM64; process-group cancellation guarantees are tested on Linux. Provider credentials and optional planning tool releases are configured separately by `junior init --install` and `junior doctor`. Do not commit credentials, transcripts, or local task artifacts.
+Use Node 24+ and Ubuntu WSL on Windows for worker execution. Native installed-CLI smoke tests cover Linux, macOS, and Windows on x64 and ARM64; process-group cancellation guarantees are tested on Linux. Provider credentials and planning tools are configured by `junior init` and checked by `junior doctor`. Do not commit credentials, transcripts, or local task artifacts.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) to contribute, [SECURITY.md](SECURITY.md) for security reporting, and [SUPPORT.md](SUPPORT.md) for troubleshooting. The `tasks/D*` contracts are development history with local paths; adapt examples to your own workspace before executing them. Installation does not authorize paid model calls.
 
@@ -54,8 +54,10 @@ which prints that command's usage and exits zero without writing files,
 installing anything, or making a provider call (for example
 `junior init --help` and `junior tools init --help`). Unknown long and short
 options are rejected before any side effect, options that require a value must
-receive one, and excess positional arguments are refused. `init` is offline
-unless you pass `--install`, and `handoff ... --mock` makes no provider call.
+receive one, and excess positional arguments are refused. `init` installs Pi,
+the managed tools and the companion tools by default; `init --no-install
+--no-companions` is offline project setup only. `handoff ... --mock` makes no
+provider call.
 The legacy source entry points (`node junior.ts ...`, `node worker.ts ...`) are
 retained unchanged.
 
@@ -108,7 +110,7 @@ version; load nvm first, for example `nvm use 24`).
 
 node --test worker.test.ts
 node worker.ts doctor
-node worker.ts init [--install]
+node worker.ts init [--no-install]
 node worker.ts validate smoke.json
 node worker.ts run smoke.json --mock
 node worker.ts status .delivery/<id>/<timestamp>/result.json
@@ -120,7 +122,8 @@ node junior.ts status .delivery/<id>/<timestamp>/result.json
 node junior.ts status .delivery/<id>/<timestamp>/result.json --full
 node junior.ts doctor
 node junior.ts prune [--older-than 24h] [--keep-last 2] [--dry-run]
-node junior.ts init [--install]
+node junior.ts init [--no-install] [--no-companions]
+node junior.ts update
 node junior.ts validate smoke.json
 node junior.ts run smoke.json --mock
 
@@ -316,9 +319,9 @@ given. Junior records the hash it wrote in a `.junior-manifest.json` beside the
 installed skill; `--upgrade` only replaces a file whose current hash still
 matches that manifest, so a customization is never silently overwritten.
 
-#### `init --install`
-Installing Pi happens only through the explicit `--install` flag. Ordinary
-`init` never installs; it prints the instruction instead. `--install`:
+#### Installing Pi (`init`)
+`init` installs Pi when it is missing (opt out with `--no-install`; the older
+`--install` flag is still accepted). The Pi install:
 
 - Uses the pinned tested `@earendil-works/pi-coding-agent@1.0.3` release; preserves an existing working Pi installation. The local Pi
   `package.json` can also be inspected for version diagnosis (no floating install version).
@@ -338,8 +341,8 @@ present is not re-attempted, so the combined `attempted` is truthful about what
 actually ran, and the process exits nonzero only when an attempted install
 failed.
 
-#### Prebuilt release tools (`init --install`, `--update`, `--with-triz`)
-`init --install` also downloads checksum-verified **prebuilt** binaries for the
+#### Prebuilt release tools (`init`, `update`, `--with-triz`)
+`init` also downloads checksum-verified **prebuilt** binaries for the
 FMECA, CPM Planner and Crossmatrix MCP servers; no Rust, Cargo or Git local
 build is ever performed, and no shell installer is used. Releases come from the
 stable GitHub release API for `praxec/fmeca`, `praxec/cpm-planner` and
@@ -373,7 +376,7 @@ install deadline.
   extraction or probe preserves the previous working install.
 - The first explicit install resolves the current complete published release.
   Re-running is idempotent and does not re-download; a newer release is reported
-  but not adopted until `--update`. Installed version, repo, tag, source SHA,
+  but not adopted until `junior update` (or `init --update`). Installed version, repo, tag, source SHA,
   asset digest, binary digest and path are recorded in the managed user-state
   manifest and `.delivery/setup/hop.json`; existing project id, revision,
   acceptance, native paths and snapshots are preserved, and explicitly custom
@@ -396,8 +399,45 @@ install deadline.
   enough. A configured local path in `.delivery/setup/hop.json` is reported as
   usable **unverified** provenance when no managed install is present.
 
-Prerequisites for the prebuilt tools are Node, a system `tar`, and (`init
---install`) `npm` for Pi. Rust/Cargo and Git are **not** client requirements.
+Prerequisites for the prebuilt tools are Node, a system `tar`, and `npm` for Pi
+and the companion tools. Rust/Cargo and Git are **not** client requirements.
+
+A fresh `junior tools init` HOP points each tool at its managed binary and
+records the installed version when one is present (`JUNIOR_TOOLS_ROOT`
+overrides `~/.junior/tools`); otherwise it uses the bare command on `PATH`.
+
+#### Companion tools and skills
+`init` also installs the npm companion CLIs, which carry the tools' own agent
+skills and MCP launchers for the manager's agent:
+
+| Companion | npm package | CLI | Skills installed with |
+| --- | --- | --- | --- |
+| FMECA | `@matthew-cochran/fmeca` | `fmeca-mcp` | `fmeca-mcp skills install --target <t> --project <cwd>\|--user` |
+| CPM Planner | `@matthew-cochran/cpm` | `cpm` | `cpm skills install --target <t> --project <cwd>\|--user` |
+| jevitate | `@jevitate/cli` | `jevitate` | `jevitate init --skip-keys --skip-project --targets <ids>` |
+
+- A missing companion is installed with `npm install -g --prefer-online
+  <pkg>@latest` (argv, no shell); an installed one is left alone unless you
+  update. `--no-companions` skips companions entirely.
+- Skills go to the same `--target` and scope as Junior's own skill (`both` maps
+  to each tool's `all`/`claude-code,codex`). Each installer keeps files you
+  edited. jevitate's installer also writes its user-level Claude Code skills and
+  registers its MCP server; FMECA and CPM are not registered as MCP servers,
+  because delegated runs reach them through `junior tools call` (see
+  `doctor`'s `companions[].mcpRegister` for the one-line command if you want them
+  interactively).
+- Files that became untracked during the skill install are recorded as exact
+  local Git exclusions, like Junior's own generated files, so the checkout stays
+  ready for a `worktree` handoff. A tracked file an installer edits (for
+  example an `AGENTS.md` block) is listed in `companions.modifiedTracked` for
+  you to review and commit; it is never hidden.
+
+#### Keeping tools current
+`junior doctor --check-updates` compares the managed binaries with their latest
+GitHub releases and the companions with npm `latest` (read-only; nothing is
+downloaded) and reports `updates.managed.outdated` and `updates.companions`.
+`junior update` adopts every newer managed and companion release and replaces
+only skill copies Junior or the tool itself wrote and you have not modified.
 
 ### Authentication and the paid smoke test
 Authenticate only through Pi itself: start `pi` and run `/login`, then choose a

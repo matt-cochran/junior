@@ -14,7 +14,8 @@
 
 import { readFileSync } from 'node:fs';
 import { run, validate, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions, summarizeInstall } from './setup.ts';
+import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, type InitOptions } from './setup.ts';
+import { inspectCompanions } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
@@ -28,11 +29,11 @@ function usage(): string {
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...            persistent FMECA / CPM / Crossmatrix handoff',
-  '  doctor                                  read-only readiness check',
+  '  doctor  [--check-updates]               read-only readiness check (--check-updates asks npm/GitHub for newer tools)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]',
   '          remove inactive clean retained Junior worktrees',
-  '  init    [--install] [--target codex|claude|both|none] [--user]',
-  '          [--upgrade] [--force] [--skill-root DIR]   idempotent project setup + skill install',
+  '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
+  '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
 }
 
@@ -74,17 +75,24 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior status <result.json> [--full]' },
- doctor: { flags: [], valueFlags: [], min: 0, max: 0,
-  help: 'Usage: junior doctor' },
+ doctor: { flags: ['--check-updates'], valueFlags: [], min: 0, max: 0,
+  help: 'Usage: junior doctor [--check-updates]' },
+ update: {
+  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions'],
+  valueFlags: ['--target', '--skill-root', '--scope'],
+  min: 0,
+  max: 0,
+  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions]',
+ },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
  init: {
-  flags: ['--install', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
+  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
   help: [
-   'Usage: junior init [--install] [--target codex|claude|both|none] [--user] [--project]',
+   'Usage: junior init [--no-install] [--no-companions] [--target codex|claude|both|none] [--user] [--project]',
    '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz]',
   ].join('\n'),
  },
@@ -153,7 +161,14 @@ async function main(argv: string[]): Promise<void> {
  const parsed = parseCommand(command, spec, rest);
 
  if (command === 'doctor') {
-  const result = doctor();
+  const result:any = doctor();
+  if (parsed.flags.has('--check-updates')) {
+   const installer = await import('./installer.ts');
+   const managed = await installer.checkToolUpdates();
+   result.companions = inspectCompanions({}, { checkUpdates: true });
+   result.updates = { managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
+   if (managed.outdated.length || result.updates.companions.length) result.updates.remediation = 'Run `junior update` to adopt the newer releases.';
+  }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
   return;
@@ -176,12 +191,14 @@ async function main(argv: string[]): Promise<void> {
   console.log(JSON.stringify(result, null, 2));
   return;
  }
- if (command === 'init') {
+ if (command === 'init' || command === 'update') {
   const target = parsed.values['--target'];
   if (target !== undefined && !INIT_TARGETS.includes(target)) throw Error(`Invalid --target value: ${target}`);
   const scope = parsed.values['--scope'];
   if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
-  const opts = parseInitOptions(rest);
+  const opts:InitOptions = parseInitOptions(rest);
+  // `update` adopts newer releases and replaces only skills Junior itself wrote.
+  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
   const result:any = init({}, opts);
   if (opts.install) {
    const installer = await import('./installer.ts');
@@ -189,6 +206,11 @@ async function main(argv: string[]): Promise<void> {
    result.tools = report;
    // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
    result.installSummary = summarizeInstall(result.install, report);
+  }
+  if (opts.companions !== false) {
+   result.companions = setupCompanions({}, { target: opts.target, scope: opts.scope, install: opts.install, update: opts.update });
+   if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
+   if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
   }
   console.log(JSON.stringify(result, null, 2));
   if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;

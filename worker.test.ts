@@ -16,7 +16,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
  ToolWatchdog,EXECUTION_DEFAULTS } from './worker.ts';
-import { doctor,init,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
+import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
@@ -1064,7 +1064,7 @@ test('Parse init options maps --no-skill to no target',()=>{
 });
 test('junior.ts init --target=claude installs only the Claude project skill',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const home=mkdtempSync(join(tmpdir(),'delivery-home-'));
- spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent')}});
+ spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude','--no-install'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent')}});
  assert.equal(existsSync(claudeSkill(cwd)),true);
 });
 
@@ -2042,4 +2042,49 @@ test('A check cwd symlink pointing inside the workspace is allowed to run',async
  if(!makeDirLink(target,link)){t.skip('directory symlinks unavailable');return;}
  const r=await run(okTask(repo,{checks:[markerCheck(link)]}),true);
  assert.equal(existsSync(join(target,'marker.txt')),true);
+});
+
+// --- companion tools and default install (offline; injected seams, temporary Git repos) ---
+const tempGitRepo=()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-init-git-'));
+ spawnSync('git',['init','-q'],{cwd:dir});
+ return dir;
+};
+const localExclude=(dir:string)=>{try{return readFileSync(join(dir,'.git','info','exclude'),'utf8');}catch{return '';}};
+
+test('Parse init options installs tools by default',()=>{
+ assert.equal(parseInitOptions([]).install,true);
+});
+test('Parse init options --no-install opts out of every install',()=>{
+ assert.equal(parseInitOptions(['--no-install']).install,false);
+});
+test('Parse init options --no-companions skips the companion tools',()=>{
+ assert.equal(parseInitOptions(['--no-companions']).companions,false);
+});
+test('An upgraded project skill is recorded as a local Git exclusion',()=>{
+ const cwd=tempGitRepo(); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(join(cwd,'.git','info','exclude'),''); writeFileSync(src,'v2\n');
+ init(deps,{target:'codex',upgrade:true});
+ assert.match(localExclude(cwd),/^\/\.agents\/skills\/junior\/$/m);
+});
+test('Files a companion skill installer creates are recorded as local Git exclusions',()=>{
+ const cwd=tempGitRepo(); const bin=join(cwd,'.bin');
+ mkdirSync(join(cwd,'.agent'),{recursive:true}); writeFileSync(join(cwd,'.agent','notes.md'),'already untracked\n');
+ const exec=(cmd:string,args:string[])=>{
+  if (args[0]==='init') { mkdirSync(join(cwd,'.agent','skills','jevitate-explore'),{recursive:true}); writeFileSync(join(cwd,'.agent','skills','jevitate-explore','SKILL.md'),'x'); }
+  return {status:0,stdout:`${cmd} 1.0.0\n`};
+ };
+ setupCompanions({cwd,env:{PATH:bin},exists:(p:string)=>p===join(bin,'jevitate'),exec},{target:'claude',scope:'project'});
+ assert.match(localExclude(cwd),/^\/\.agent\/skills\/jevitate-explore\/SKILL\.md$/m);
+});
+test('A tracked file a companion installer edits is reported, not excluded',()=>{
+ const cwd=tempGitRepo(); const bin=join(cwd,'.bin');
+ writeFileSync(join(cwd,'AGENTS.md'),'mine\n'); spawnSync('git',['add','AGENTS.md'],{cwd}); spawnSync('git',['-c','user.email=t@e','-c','user.name=t','commit','-qm','a'],{cwd});
+ const exec=(cmd:string,args:string[])=>{ if (args[0]==='init') writeFileSync(join(cwd,'AGENTS.md'),'mine\n<jevitate/>\n'); return {status:0,stdout:`${cmd} 1.0.0\n`}; };
+ const r=setupCompanions({cwd,env:{PATH:bin},exists:(p:string)=>p===join(bin,'jevitate'),exec},{target:'claude',scope:'project'});
+ assert.deepEqual(r.modifiedTracked,['AGENTS.md']);
+});
+test('Doctor reports companion tools separately from Pi readiness',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.equal((doctor(setupDeps(cwd)) as any).companions.ready,false);
 });

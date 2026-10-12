@@ -202,18 +202,18 @@ test('The installed CLI reports doctor readiness in an external cwd', () => {
 });
 test('The installed CLI installs the packaged skill into the target checkout', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'junior', 'SKILL.md')));
 });
 test('The installed skill manifest points at the packaged CLI', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   const manifest = JSON.parse(readFileSync(join(dir, '.agents', 'skills', '.junior-manifest.json'), 'utf8'));
   assert.equal(manifest.skills.junior.cli, join(pkgDir, 'dist', 'junior.js'));
 });
 test('Installed init never writes into the installed package', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   assert.ok(!existsSync(join(pkgDir, 'dist', 'skills', '.junior-manifest.json')));
 });
 test('The installed CLI inspects shared tool state in an external cwd', () => {

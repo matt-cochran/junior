@@ -31,7 +31,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'update', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -144,17 +144,17 @@ test('junior init rejects excess positional arguments', () => {
 });
 
 test('junior init accepts the documented --no-skill option', () => {
-  assert.equal(runJunior(['init', '--no-skill'], workdir()).status, 0);
+  assert.equal(runJunior(['init', '--no-skill', '--no-install', '--no-companions'], workdir()).status, 0);
 });
 
 test('junior init accepts the documented --target option', () => {
-  assert.equal(runJunior(['init', '--target=codex'], workdir()).status, 0);
+  assert.equal(runJunior(['init', '--target=codex', '--no-install', '--no-companions'], workdir()).status, 0);
 });
 
 // --- subcommand strict flag parsing ----------------------------------------
 
-test('junior init reports an unattempted install summary by default', () => {
-  const out = JSON.parse(runJunior(['init'], workdir()).stdout);
+test('junior init --no-install reports an unattempted install summary', () => {
+  const out = JSON.parse(runJunior(['init', '--no-install', '--no-companions'], workdir()).stdout);
   assert.equal(out.installSummary.attempted, false);
 });
 
