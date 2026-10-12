@@ -109,8 +109,8 @@ command. The wrapper classifies them as:
 
 | Tool | Read tools snapshotted | Commands |
 | --- | --- | --- |
-| `fmeca` | `state.get`, `risk.next`, `readiness.assess`, `report.export`, `scoring.catalog`, `analyze` | `session.open`, `append`, … |
-| `cpm` | `plan.status` | `plan.submit`, `plan.acquire_cohort`, `plan.heartbeat`, `plan.mark_status`, `plan.force_release` |
+| `fmeca` | `state.get`, `risk.next`, `readiness.assess`, `report.export`, `scoring.catalog`, `analyze`, `session.list`, `actions.suggest`, `policy.list` | `session.open`, `append`, `vet`, … |
+| `cpm` | `plan.status`, `plan.get`, `plan.lint`, `plan.schedule`, `plan.simulate`, `plan.list`, `plan.compare`, `plan.ev`, `plan.review` | `plan.submit`, `plan.export`, `plan.snapshot`, `plan.baseline`, `plan.acquire_cohort`, `plan.heartbeat`, `plan.mark_status`, `plan.force_release` |
 | `crossmatrix` | `crossmatrix.query` | `crossmatrix.command` |
 
 The success envelope is JSON:

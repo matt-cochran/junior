@@ -868,6 +868,51 @@ export async function syncHopWithTools(
 }
 
 // ---------------------------------------------------------------------------
+// Update check (read-only: release metadata only, nothing is downloaded)
+// ---------------------------------------------------------------------------
+
+export interface ToolUpdateStatus {
+  tool: ToolName | 'triz';
+  installed: string | null;
+  latest: string | null;
+  /** null when the latest release could not be resolved. */
+  outdated: boolean | null;
+  error?: string;
+}
+
+function compareDotted(a: string, b: string): number {
+  const x = a.split(/[.-]/).slice(0, 3).map(Number);
+  const y = b.split(/[.-]/).slice(0, 3).map(Number);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0) ? -1 : 1;
+  return 0;
+}
+
+/** Compare each managed tool's recorded version with its latest stable release. */
+export async function checkToolUpdates(deps: InstallerDeps = {}): Promise<{ tools: ToolUpdateStatus[]; outdated: Array<ToolName | 'triz'> }> {
+  const state = readInstallState(deps);
+  const tools = await Promise.all(TOOL_NAMES.map(async (tool): Promise<ToolUpdateStatus> => {
+    const installed = state.tools[tool]?.version ?? null;
+    try {
+      const latest = (await resolveLatestRelease(TOOL_REPOS[tool].repo, deps)).version;
+      return { tool, installed, latest, outdated: installed ? compareDotted(installed, latest) < 0 : true };
+    } catch (err) {
+      return { tool, installed, latest: null, outdated: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }));
+  const optionalTriz = state.optional?.triz;
+  if (optionalTriz) {
+    const installed = optionalTriz.version ?? null;
+    try {
+      const latest = (await resolveLatestRelease(TRIZ_REPO, deps)).version;
+      tools.push({ tool: 'triz', installed, latest, outdated: installed ? compareDotted(installed, latest) < 0 : true });
+    } catch (err) {
+      tools.push({ tool: 'triz', installed, latest: null, outdated: null, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { tools, outdated: tools.filter((t) => t.outdated === true).map((t) => t.tool) };
+}
+
+// ---------------------------------------------------------------------------
 // Install orchestration
 // ---------------------------------------------------------------------------
 

@@ -5,7 +5,7 @@ import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
-import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, type IsolationMode, type LockHandle } from './isolation.ts';
+import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
 import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, DEFAULT_MAX_OUTPUT_BYTES, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
 import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
 
@@ -24,16 +24,16 @@ export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot
 
 /** Every top-level contract field the worker understands. A nested `execution`
  * object is also supported (its keys are validated by
- * resolveExecutionSettings), and its five runtime settings may also be given
+ * resolveExecutionSettings), and its six runtime settings may also be given
  * directly at the top level. Unknown fields are rejected so a typo or an
  * unsupported feature fails before any paid call instead of being ignored. */
 export const TASK_FIELDS = [
- 'id','deliverable','cwd','acceptance','checks','constraints',
+ 'id','deliverable','cwd','acceptance','checks','constraints','context',
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
  'hopFrom','hopRevision','hopContext',
- 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs',
+ 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','isolationSetup',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
@@ -92,11 +92,119 @@ export function resolveCheckCwd(cwd:unknown, sourceCwd:string, executionCwd:stri
  return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
 }
 
+export const CONTEXT_MAX_ENTRIES = 20;
+export const CONTEXT_MAX_LINES = 200;
+export const CONTEXT_MAX_CHARS = 40000;
+
+/** A contract `context` entry: a path relative to the contract cwd, with an
+ * optional 1-based inclusive line window. */
+export type ContextEntry = { path:string; start?:number; end?:number };
+/** A context entry resolved against the contract cwd. `text` holds the bounded
+ * excerpt; `error` is set instead when the file cannot be read; `truncated`
+ * marks an excerpt cut to the per-entry or total bound. */
+export type ResolvedContextEntry = { path:string; start?:number; end?:number; text?:string; error?:string; truncated?:boolean };
+
+/** Validate the contract `context` array shape before any paid call. Paths must
+ * be relative, stay inside the contract cwd, and use 1-based inclusive line
+ * bounds. */
+export function validateContext(context:unknown, cwd:string):void {
+ if (!Array.isArray(context)) throw Error('Invalid context (expected an array)');
+ if (context.length > CONTEXT_MAX_ENTRIES) throw Error(`Invalid context (at most ${CONTEXT_MAX_ENTRIES} context entries)`);
+ for (const e of context) {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) throw Error('Invalid context entry (expected an object)');
+  for (const k of Object.keys(e)) if (!['path','start','end'].includes(k)) throw Error(`Unknown context field: ${k}`);
+  if (typeof e.path !== 'string' || !e.path.trim()) throw Error('Invalid context.path (expected a non-empty string)');
+  if (isAbsolute(e.path)) throw Error('Invalid context.path (expected a relative path)');
+  const abs=resolve(resolve(cwd), e.path);
+  if (!withinWorkspace(resolve(cwd), abs)) throw Error(`Invalid context.path (outside the workspace): ${e.path}`);
+  if (e.start !== undefined && (typeof e.start !== 'number' || !Number.isInteger(e.start) || e.start < 1)) throw Error('Invalid context.start (expected a positive integer)');
+  if (e.end !== undefined && (typeof e.end !== 'number' || !Number.isInteger(e.end) || e.end < 1)) throw Error('Invalid context.end (expected a positive integer)');
+  if (e.start !== undefined && e.end !== undefined && e.start > e.end) throw Error('Invalid context range (context start must not exceed end)');
+ }
+}
+
+/** Resolve the contract `context` entries from the contract cwd into bounded
+ * excerpts. Never throws: an unreadable file yields an `error` entry, an
+ * out-of-range end is clamped to the file length, at most 200 lines per entry
+ * and 40000 characters in total are kept, and truncated entries are marked. */
+export function resolveContext(t:any):ResolvedContextEntry[] {
+ if (!Array.isArray(t?.context) || !t.context.length) return [];
+ const cwd=resolve(String(t.cwd ?? '.'));
+ const entries=t.context.slice(0, CONTEXT_MAX_ENTRIES);
+ let totalChars=0;
+ return entries.map((e:any):ResolvedContextEntry=>{
+  const rel=typeof e?.path==='string' ? e.path : '';
+  const abs=resolve(cwd, rel);
+  if (!rel || !withinWorkspace(cwd, abs)) return {path:rel,error:'outside the workspace'};
+  let raw:string;
+  try { raw=readFileSync(abs,'utf8'); }
+  catch(err) { return {path:rel,error:msg(err)}; }
+  const allLines=raw.split('\n');
+  if (allLines.length>1 && allLines[allLines.length-1]==='') allLines.pop();
+  const fileLength=allLines.length;
+  const start=Number.isInteger(e.start) && e.start>=1 ? e.start : 1;
+  let end=Number.isInteger(e.end) && e.end>=1 ? e.end : fileLength;
+  end=Math.min(end, fileLength);
+  let truncated=false;
+  const lineCap=start+CONTEXT_MAX_LINES-1;
+  if (end>lineCap) { end=lineCap; truncated=true; }
+  let text=end>=start ? allLines.slice(start-1,end).join('\n') : '';
+  if (totalChars+text.length>CONTEXT_MAX_CHARS) {
+   text=text.slice(0, Math.max(0, CONTEXT_MAX_CHARS-totalChars));
+   truncated=true;
+  }
+  totalChars+=text.length;
+  const out:ResolvedContextEntry={path:rel,start,end,text};
+  if (truncated) out.truncated=true;
+  return out;
+ });
+}
+
+/** Render resolved context entries as the worker prompt's `Code context`
+ * block, or null when there is no readable excerpt. */
+export function codeContextBlock(entries:ResolvedContextEntry[]):string|null {
+ const usable=(entries||[]).filter(e=>e && typeof e.text==='string');
+ if (!usable.length) return null;
+ const lines=['Code context (excerpts resolved from the contract cwd; not the full files):'];
+ for (const e of usable) {
+  const range=e.start!==undefined && e.end!==undefined ? ` lines ${e.start}-${e.end}` : '';
+  lines.push(`--- ${e.path}${range}${e.truncated?' (truncated)':''} ---`);
+  lines.push(e.text as string);
+ }
+ return lines.join('\n');
+}
+
+/** The human-readable text of an acceptance entry: a plain string, or the
+ * `text` field of an object. */
+export function acceptanceText(item:any):string {
+ if (typeof item === 'string') return item;
+ if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.text === 'string') return item.text;
+ return '';
+}
+
+/** The optional condition under which an acceptance entry applies. */
+export function acceptanceWhen(item:any):string|undefined {
+ if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.when === 'string' && item.when.trim()) return item.when;
+ return undefined;
+}
+
+/** Acceptance texts for gate state and prompts; the text is used wherever a
+ * criterion is rendered, never the raw `{text, when}` object. */
+export function acceptanceTexts(acceptance:any):string[] {
+ return (Array.isArray(acceptance) ? acceptance : []).map(acceptanceText);
+}
+
 export function validate(t: any) {
  for (const k of ['id','deliverable','cwd']) if (typeof t[k] !== 'string' || !t[k].trim()) throw Error(`Missing ${k}`);
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
  if (t.thinking !== undefined && !['off','minimal','low','medium','high','xhigh','max'].includes(t.thinking)) throw Error('Invalid thinking level');
- if (!Array.isArray(t.acceptance) || !t.acceptance.length || t.acceptance.some((x:any)=>typeof x !== 'string' || !x.trim())) throw Error('Missing acceptance');
+ if (!Array.isArray(t.acceptance) || !t.acceptance.length) throw Error('Missing acceptance');
+ for (const a of t.acceptance) {
+  if (typeof a === 'string') { if (!a.trim()) throw Error('Missing acceptance'); continue; }
+  if (!a || typeof a !== 'object' || Array.isArray(a)) throw Error('Invalid acceptance (expected a string or { text, when })');
+  if (typeof a.text !== 'string' || !a.text.trim()) throw Error('Missing acceptance');
+  if (a.when !== undefined && (typeof a.when !== 'string' || !a.when.trim())) throw Error('Invalid acceptance.when (expected a non-empty string)');
+ }
  if (!Array.isArray(t.checks) || !t.checks.length) throw Error('Missing checks');
  for (const c of t.checks) {
   if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.command !== 'string' || !Array.isArray(c.args) || c.args.some((x:any)=>typeof x !== 'string')) throw Error('Invalid check');
@@ -111,11 +219,13 @@ export function validate(t: any) {
  if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
+ if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
  if (t.repairFrom !== undefined && (typeof t.repairFrom !== 'string' || !t.repairFrom.trim())) throw Error('Invalid repairFrom (expected path to a prior result.json)');
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');
  if (t.maxRepairs !== undefined && (typeof t.maxRepairs !== 'number' || !Number.isInteger(t.maxRepairs) || t.maxRepairs < 0)) throw Error('Invalid maxRepairs (expected a nonnegative integer)');
  if (t.lineageDeadlineMs !== undefined && (typeof t.lineageDeadlineMs !== 'number' || !Number.isFinite(t.lineageDeadlineMs) || t.lineageDeadlineMs <= 0)) throw Error('Invalid lineageDeadlineMs (expected a finite positive number)');
+ if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
   if (!t.jev || typeof t.jev !== 'object' || Array.isArray(t.jev)) throw Error('Invalid jev config');
@@ -464,6 +574,7 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
  recon:[
   'Workflow (recon): inspect the repository and report findings before any change.',
   'Classify every finding as tested, inferred, or unknown, and state the evidence for it.',
+  'Evidence discipline: before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report; a claim whose span was not opened and quoted is labelled inferred, not proven-here. The report is a set of leads for the manager to verify, not findings.',
   'End with a recommended strategy for a follow-up run. The recommendation is not authorization to change production code.',
   'Keep experiments in the .delivery scratch directory and retain no production changes. This is an instruction, not a sandbox guarantee.',
  ].join('\n'),
@@ -478,9 +589,9 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
  fmeca:[
   'Workflow (fmeca): analysis-only qualitative risk review. Do not modify production code; removal or demotion of any component is a proposal only. This is an instruction to the worker, not a sandbox guarantee.',
   'Review failure modes across four domains: UX / user interaction, runtime behavior, technical architecture, and project / delivery design.',
-  'Evidence discipline: label every claim as tested/proven-here (cite the concrete file, function or test), adapted (a reasonable but unproven-here assumption) or speculation (unvalidated). Mark missing evidence as unknown; never fabricate specificity.',
+  'Evidence discipline: before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report; a claim whose span was not opened and quoted is labelled inferred, not proven-here. Label every claim as tested/proven-here (cite the concrete file, function or test), adapted (a reasonable but unproven-here assumption) or speculation (unvalidated). Mark missing evidence as unknown; never fabricate specificity. The report is a set of leads for the manager to verify, not findings.',
   'Bounds: at most 3 iterations and 8-15 highest-impact failure modes where the scope warrants; do not invent failure modes to meet a quota. Stop early when no meaningful Severity or Probability reduction is possible, a constraint would be violated, or the deadline is reached, and report the honest unresolved outcome.',
-  'Prioritize every High severity risk (including Low probability), then Medium. Mitigation order: prevention, then early detection, then fail-fast with actionable diagnostics. Use TRIZ only for a real trade-off and select one practical resolution principle.',
+  'Prioritize every High severity risk (including Low probability), then Medium. Mitigation order: prevention, then early detection, then fail-fast with actionable diagnostics. Use TRIZ only for a real trade-off and select one practical resolution principle. If the `triz` CLI is on PATH, `triz catalog` lists the principles offline; `triz analyze` is a paid classification call, so do not run it unless the contract authorizes it, and otherwise state the contradiction for the manager.',
   'For every failure mode include: domain, failure mode, cause, effect, qualitative Severity and Probability (Low/Medium/High), mitigation, justification for why it reduces risk, production observability (the metric/log/trace that reveals the failure), and residual Severity and Probability.',
   'Separate existing verified controls from proposed mitigation and state residual risk as conditional (what must hold). Proposing a fix does not eliminate a risk: keep the residual score unless the control is verified in this run. Preserve essential capabilities and explicit user constraints.',
  ].join('\n'),
@@ -489,7 +600,7 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
   'Phase 1 - architecture validity (before risk review): for each major component record purpose, classification (Essential, Useful, Speculative or Unjustified), justification, a simpler alternative, the risk if removed, and evidence level (tested/proven-here, adapted or speculation). Propose a revised architecture (retained, simplified, removed, demoted); removal and demotion are proposals only.',
   'Phase 2 - risk review: apply the fmeca discipline across UX / user interaction, runtime behavior, technical architecture and project / delivery design. For every failure mode include domain, failure mode, cause, effect, qualitative Severity and Probability (Low/Medium/High), mitigation, justification, production observability, and residual Severity and Probability. Separate existing verified controls from proposed mitigation and state residual risk as conditional. Proposing a fix does not eliminate a risk.',
   'Phase 3 - reality check: explicitly assess calibration risk (are confidence or scoring signals trustworthy, and how will they be validated), observability risk (can bad decisions, incorrect extraction, premature completion and policy regressions be detected in production), over-engineering risk (does complexity exceed demonstrated value; what is the simplest viable version) and incremental-delivery risk (can this be built in phases with clean migration and rollback).',
-  'Bounds and evidence discipline: at most 3 iterations and 8-15 highest-impact failure modes where the scope warrants; do not invent failure modes to meet a quota. Stop early on no improvement, a constraint violation or the deadline and report the honest unresolved outcome. Prioritize every High severity risk (including Low probability), then Medium; mitigation order prevention, then early detection, then fail-fast. Use TRIZ only for a real trade-off. Label evidence tested/proven-here (with concrete file/function/test), adapted or speculation; mark unknown rather than fabricate. Preserve essential capabilities and explicit user constraints.',
+  'Bounds and evidence discipline: at most 3 iterations and 8-15 highest-impact failure modes where the scope warrants; do not invent failure modes to meet a quota. Stop early on no improvement, a constraint violation or the deadline and report the honest unresolved outcome. Prioritize every High severity risk (including Low probability), then Medium; mitigation order prevention, then early detection, then fail-fast. Use TRIZ only for a real trade-off. If the `triz` CLI is on PATH, `triz catalog` lists the principles offline; `triz analyze` is a paid classification call, so do not run it unless the contract authorizes it, and otherwise state the contradiction for the manager. Before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report; a claim whose span was not opened and quoted is labelled inferred, not proven-here. Label evidence tested/proven-here (with concrete file/function/test), adapted or speculation; mark unknown rather than fabricate. The report is a set of leads for the manager to verify, not findings. Preserve essential capabilities and explicit user constraints.',
  ].join('\n'),
  qa:[
   'Workflow (qa): report-only independent review of a prior deliverable. Do not modify production code, commit, push, repair, or start nested workers or paid calls. This is an instruction to the worker, not a sandbox guarantee.',
@@ -742,7 +853,7 @@ export function analysisReportBlock(reportPath:string):string {
  return [
   `Analysis report requirement: write the complete analysis report to this exact artifact path: ${reportPath}`,
   'Save the report there before finishing. The handback is needs_review until that file exists; a missing report is never reported as completion.',
-  'The report must, for every risk, state the domain, failure mode, cause, effect, qualitative Severity and Probability, mitigation and its justification, production observability, and residual Severity and Probability; label each claim tested/proven-here, adapted or speculation; separate existing verified controls from proposed mitigation; state residual risk as conditional; and never declare a risk eliminated merely by proposing a fix.',
+  'The report must, for every risk, state the domain, failure mode, cause, effect, qualitative Severity and Probability, mitigation and its justification, production observability, and residual Severity and Probability; before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report, and label a claim whose span was not opened and quoted as inferred, not proven-here; label each claim tested/proven-here, adapted or speculation; separate existing verified controls from proposed mitigation; state residual risk as conditional; and never declare a risk eliminated merely by proposing a fix. The report is a set of leads for the manager to verify, not findings.',
   'This is an instruction to the worker, not a sandbox guarantee.',
  ].join('\n');
 }
@@ -750,7 +861,7 @@ export function analysisReportBlock(reportPath:string):string {
 /** Build the fixed prompt blocks for a workflow. The only variable content is
  * the task contract JSON, the deterministic report path and (for qa) the
  * grounded review context; no Jev-generated prose is inserted. */
-export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null):{ common:string; workflow:string; resume:string|null; report:string|null; review:string|null } {
+export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null):{ common:string; workflow:string; resume:string|null; report:string|null; review:string|null; context:string|null } {
  let resumeBlock:string|null=null;
  if (resume) {
   resumeBlock=[
@@ -761,14 +872,16 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
  }
  const reportBlock = reportPath ? (workflow === 'qa' ? qaReportBlock(reportPath) : analysisReportBlock(reportPath)) : null;
  const reviewBlock = reviewContext ? reviewContext : null;
- return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock};
+ const contextBlock = codeContext ? codeContextBlock(codeContext) : null;
+ return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock, context:contextBlock};
 }
 
-export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null):string {
- const parts=promptParts(workflow, resume, reportPath, reviewContext);
+export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null):string {
+ const parts=promptParts(workflow, resume, reportPath, reviewContext, codeContext);
  const blocks=[parts.common, parts.workflow];
  if (parts.report) blocks.push(parts.report);
  if (parts.review) blocks.push(parts.review);
+ if (parts.context) blocks.push(parts.context);
  if (parts.resume) blocks.push(parts.resume);
  blocks.push(`Task contract (JSON):\n${JSON.stringify(t)}`);
  return blocks.join('\n\n');
@@ -826,7 +939,18 @@ export type GateUsage = {
  cost:{ total:number; available:boolean };
 };
 
-export type JevAttention = { target:'commodity'|'frontier'|'manager'; decision:'delegate'|'frontier_required'|'uncertain'|'clarify'; reason:string; probability:number|null };
+export type JevAttention = {
+ target:'commodity'|'frontier'|'manager';
+ decision:'delegate'|'frontier_required'|'uncertain'|'clarify';
+ /** The classifier question whose answer drove this decision. */
+ trigger:'requires_frontier'|'contract_clear'|'blocking_assumptions'|'error';
+ /** Confidence threshold at which a bool answer becomes a definitive verdict. */
+ threshold:number;
+ /** Reported P(true) for each readiness question, or null when unanswered. */
+ probabilities:{ requires_frontier:number|null; contract_clear:number|null; blocking_assumptions:number|null };
+ reason:string;
+ probability:number|null;
+};
 
 export type JevPreflight = {
  attention:JevAttention;
@@ -841,8 +965,12 @@ export type JevPreflight = {
 
 export type JevCriterion = {
  id:string; index:number; text:string;
- verdict:'met'|'gap'|'uncertain';
+ /** Present only for a conditional criterion (`{ text, when }`). */
+ when?:string;
+ verdict:'met'|'gap'|'uncertain'|'not_applicable';
  probability:number|null;
+ /** Probability the `when` condition was exercised; null when not asked. */
+ conditionProbability?:number|null;
  answer?:GateAnswer;
 };
 
@@ -893,6 +1021,28 @@ function boolVerdict(a:GateAnswer):{verdict:'true'|'false'|'uncertain'; probabil
  return {verdict:'uncertain',probability:p};
 }
 
+/** The answer to a criterion's `${id}_when` condition sub-question. */
+function conditionAnswer(answers:Record<string,GateAnswer>, id:string):GateAnswer {
+ return answers[`${id}_when`];
+}
+
+/** Human-readable reason naming the contract_clear answer and its distance from
+ * the real threshold. */
+function contractClarifyReason(p:number|null):string {
+ return p === null
+  ? 'contract not judged clear: no classifier probability'
+  : `contract not judged clear: P(contract_clear)=${p} < ${CONFIDENCE_THRESHOLD}`;
+}
+
+/** Human-readable reason for a blocking-assumptions clarify, distinguishing a
+ * positive detection from an answer that merely failed to rule assumptions out. */
+function assumptionClarifyReason(v:{verdict:'true'|'false'|'uncertain'; probability:number|null}):string {
+ if (v.probability === null) return 'blocking assumptions not ruled out: no classifier probability';
+ return v.verdict === 'true'
+  ? `blocking assumption detected: P(blocking_assumptions)=${v.probability} >= ${CONFIDENCE_THRESHOLD}`
+  : `blocking assumptions not ruled out: P(blocking_assumptions)=${v.probability} > ${1-CONFIDENCE_THRESHOLD}`;
+}
+
 /** Upper bound for a single classifier answer; a hung classifier cannot stall
  * a run indefinitely. Aborts the request and rejects the race. */
 export const CLASSIFIER_TIMEOUT_MS = 45000;
@@ -928,13 +1078,14 @@ async function invokeClassifier(
 }
 
 /** Readiness gate: is the contract clear and free of unresolved assumptions? */
-export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; timeoutMs?:number } = {}):Promise<JevPreflight> {
+export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; timeoutMs?:number; context?:ResolvedContextEntry[] } = {}):Promise<JevPreflight> {
  const state = {
   deliverable: t.deliverable,
-  acceptance: t.acceptance,
+  acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
   constraints: Array.isArray(t.constraints) ? t.constraints : [],
   checks: (t.checks || []).map((c:any)=>({ command:c.command, args:c.args })),
+  context: opts.context ?? resolveContext(t),
  };
  const questions:Record<string,GateQuestion> = {
   requires_frontier: {
@@ -949,7 +1100,7 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
   },
   blocking_assumptions: {
    type:'bool',
-   instructions:'Does the contract leave unresolved assumptions that could change the implementation or make acceptance unreliable?',
+   instructions:'Does the contract leave unresolved assumptions that could change the implementation or make acceptance unreliable that the independent checks and the provided code context would not catch? Treat an assumption those checks or excerpts already resolve as non-blocking.',
    criteria:{ true:'Unresolved assumptions present', false:'No unresolved assumptions' },
   },
  };
@@ -970,13 +1121,18 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
  const frontier = boolVerdict(answers.requires_frontier);
  const clear = boolVerdict(answers.contract_clear);
  const assumptions = boolVerdict(answers.blocking_assumptions);
- const attention:JevAttention = error || frontier.verdict === 'uncertain'
-  ? {target:'manager',decision:'uncertain',reason:error || 'Frontier suitability is uncertain or missing; manager assessment required.',probability:frontier.probability}
-  : frontier.verdict === 'true'
-   ? {target:'frontier',decision:'frontier_required',reason:'Jev recommends frontier attention for the task scope and decision requirements.',probability:frontier.probability}
-   : clear.verdict !== 'true' || assumptions.verdict !== 'false'
-    ? {target:'manager',decision:'clarify',reason:'Clarify the contract or unresolved assumptions before delegation.',probability:frontier.probability}
-    : {target:'commodity',decision:'delegate',reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability};
+ const probabilities = { requires_frontier:frontier.probability, contract_clear:clear.probability, blocking_assumptions:assumptions.probability };
+ const attention:JevAttention = error
+  ? {target:'manager',decision:'uncertain',trigger:'error',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:error,probability:frontier.probability}
+  : frontier.verdict === 'uncertain'
+   ? {target:'manager',decision:'uncertain',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Frontier suitability is uncertain or missing; manager assessment required.',probability:frontier.probability}
+   : frontier.verdict === 'true'
+    ? {target:'frontier',decision:'frontier_required',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Jev recommends frontier attention for the task scope and decision requirements.',probability:frontier.probability}
+    : clear.verdict !== 'true'
+     ? {target:'manager',decision:'clarify',trigger:'contract_clear',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:contractClarifyReason(clear.probability),probability:clear.probability}
+     : assumptions.verdict !== 'false'
+      ? {target:'manager',decision:'clarify',trigger:'blocking_assumptions',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:assumptionClarifyReason(assumptions),probability:assumptions.probability}
+      : {target:'commodity',decision:'delegate',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability};
  const base = { attention, answers, confidence, usage, reportedProvider:result?.provider, reportedModel:result?.model };
  // A gate error is not a pass or a definite block: it is uncertain.
  if (error) return { status:'uncertain', ...base, error };
@@ -991,7 +1147,10 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
 /** Completion gate: is each acceptance criterion satisfied by independent
  * check results and bounded git diff evidence? */
 export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta):Promise<JevPostflight> {
- const criteria = (t.acceptance || []).map((text:string, index:number)=>({ id:`AC${index+1}`, index, text }));
+ const criteria:{id:string; index:number; text:string; when?:string}[] = (t.acceptance || []).map((item:any, index:number)=>{
+  const when=acceptanceWhen(item);
+  return when ? { id:`AC${index+1}`, index, text:acceptanceText(item), when } : { id:`AC${index+1}`, index, text:acceptanceText(item) };
+ });
  const questions:Record<string,GateQuestion> = {};
  for (const c of criteria) {
   questions[c.id] = {
@@ -999,10 +1158,17 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
    instructions:`Acceptance criterion ${c.id}: "${c.text}". Is it satisfied, based only on the independent check results and the bounded git diff evidence?`,
    criteria:{ true:'Satisfied', false:'Not satisfied' },
   };
+  if (c.when) {
+   questions[`${c.id}_when`] = {
+    type:'bool',
+    instructions:`Acceptance criterion ${c.id} applies only when: "${c.when}". Was that condition exercised by this change, based only on the independent check results and the bounded git diff evidence?`,
+    criteria:{ true:'Condition exercised', false:'Condition not exercised' },
+   };
+  }
  }
  const state = {
   deliverable: t.deliverable,
-  acceptance: t.acceptance,
+  acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
   constraints: Array.isArray(t.constraints) ? t.constraints : [],
   checks: (checks || []).map((c:any)=>({ command:c.command, args:c.args, exitCode:c.exitCode, passed:c.exitCode === 0 })),
@@ -1015,9 +1181,15 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
  const usage = normalizeGateUsage(result?.usage);
  const out:JevCriterion[] = criteria.map((c)=>{
   const v = boolVerdict(answers[c.id]);
+  const condition = c.when ? boolVerdict(conditionAnswer(answers, c.id)) : null;
+  const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
+   ? 'not_applicable'
+   : v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain';
   return { id:c.id, index:c.index, text:c.text,
-   verdict: v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain',
-   probability: v.probability, answer: answers[c.id] };
+   ...(c.when ? { when:c.when } : {}),
+   verdict, probability: v.probability,
+   ...(condition ? { conditionProbability: condition.probability } : {}),
+   answer: answers[c.id] };
  });
  const gapIds = out.filter((c)=>c.verdict === 'gap').map((c)=>c.id);
  const uncertainIds = out.filter((c)=>c.verdict === 'uncertain').map((c)=>c.id);
@@ -1109,6 +1281,10 @@ export type GateDeps = {
  billingFetch?:BillingFetch;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
+ /** Optional short progress sink: one line per phase change plus a bounded
+  * heartbeat while the worker runs. Best-effort; a throwing sink never aborts
+  * a run. */
+ progress?:(line:string)=>void;
 };
 
 /** Reject `p` as soon as `signal` aborts, so an interrupted preflight/postflight
@@ -1141,10 +1317,14 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  const runStartedAt=Date.now();
  const settings=resolveExecutionSettings(t);
  const sourceCwd=resolve(t.cwd);
+ const isolation=resolveIsolation(t).mode;
+ // Record Junior's own run-artifact tree in the repository-local exclude before
+ // the first artifact is written, so `.delivery/` never surfaces as a target
+ // change. A non-git cwd has nothing to touch and is left alone.
+ ensureLocalExcludes(sourceCwd, ['/.delivery/']);
  const stamp=String(Date.now());
  const dir=join(sourceCwd,'.delivery',t.id,stamp);
  mkdirSync(dir,{recursive:true});
- const isolation=resolveIsolation(t).mode;
  const defaults=loadDefaults(sourceCwd);
  const provider=typeof t.provider==='string' && t.provider.trim() ? t.provider : defaults.provider;
  const model=typeof t.model==='string' && t.model.trim() ? t.model : defaults.model;
@@ -1161,10 +1341,18 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // and is tightened by an inherited repair-lineage deadline when one exists.
  let deadlineAt=runStartedAt+settings.deadlineMs;
  const runtimePath=join(dir,'runtime.json');
- const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness');
+ const emit=(line:string)=>{ try { deps.progress?.(line); } catch { /* progress must never abort a run */ } };
+ const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness', deps.progress);
  heartbeat.begin();
+ emit('readiness');
  const remainingMs=()=>deadlineAt-Date.now();
  const outOfTime=()=>Date.now() >= deadlineAt;
+ // The worker is stopped before the total deadline so the reserved budget is
+ // available to the contract's checks, which remain bounded by the total wall
+ // deadline.
+ const workerDeadlineAt=()=>deadlineAt-settings.checkReserveMs;
+ const workerRemainingMs=()=>workerDeadlineAt()-Date.now();
+ const workerOutOfTime=()=>Date.now() >= workerDeadlineAt();
 
  let lineage:any={ rootId:t.id, repairs:0,
   maxRepairs: typeof t.maxRepairs==='number' ? t.maxRepairs : 1,
@@ -1179,6 +1367,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // Every pre-worker refusal writes an inspectable result plus a runtime heartbeat.
  const blocked=(workerError:string, extra:any={})=>{
   heartbeat.setState('failed',{stopReason:'blocked', error:workerError});
+  emit('finished needs_review');
   const out:any={ id:t.id, simulated:mock, status:'needs_review', workerExitCode:null,
    workerError, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage, ...extra };
   writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
@@ -1263,6 +1452,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // Decide the execution checkout before any paid call. Worktree isolation
  // requires a clean source and refuses rather than silently omitting edits.
  heartbeat.update({phase:'isolation'});
+ emit('isolation');
  let executionCwd=sourceCwd;
  let worktreePath:string|undefined;
  if (isolation === 'worktree') {
@@ -1287,6 +1477,29 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const compat=resumeExecutionCwd(prior, sourceCwd, 'none');
   if (compat.error) return blocked(`resumeFrom rejected: ${compat.error}`);
   executionCwd=compat.executionCwd!;
+ }
+
+ // Opt-in provisioning runs after the detached worktree exists and before any
+ // paid worker, classifier or independent check. It is ignored for isolation
+ // none, and any setup failure is its own terminal outcome, never a check
+ // failure, so Pi is not started against a half-provisioned checkout.
+ if (isolation === 'worktree') {
+  const rawSetup = t.isolationSetup !== undefined ? t.isolationSetup : configuredIsolationSetup(sourceCwd);
+  if (rawSetup !== undefined) {
+   const isolationSetupFailed=(error:string)=>{
+    heartbeat.setState('failed',{stopReason:'isolation_setup_failed', error});
+    const out:any={ id:t.id, simulated:mock, status:'isolation_setup_failed', workerExitCode:null,
+     workerError:error, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+     sourceCwd, executionCwd, isolation:{mode:isolation, ...(worktreePath?{worktree:worktreePath}:{})} };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   };
+   try { validateIsolationSetup(rawSetup); }
+   catch(e) { return isolationSetupFailed(`Invalid isolationSetup: ${msg(e)}`); }
+   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, executionCwd, dir, { deadlineAt, checkTimeoutMs:settings.checkTimeoutMs });
+   if (!provisioned.ok) return isolationSetupFailed(`isolationSetup failed: ${provisioned.error}`);
+   if (provisioned.excludePatterns.length) ensureLocalExcludes(executionCwd, provisioned.excludePatterns);
+  }
  }
 
  // Acquire advisory locks before any classifier or worker call. A held lock
@@ -1339,12 +1552,17 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    }
   }
 
+  // Resolve the contract code context once, before preflight, so the readiness
+  // classifier and the worker prompt see the same bounded excerpts.
+  const codeContext = resolveContext(t);
+
   // Preflight (readiness) gate runs before the worker. `auto` runs exactly one
   // extra Jev choice question inside this call.
+  emit('preflight');
   if (mode !== 'off' && classify && !outOfTime()) {
    jev!.attempted = true;
    try {
-    const preflight = await raceSignal(assessPreflight(t, classify, { workflowQuestion: explicitWorkflow === 'auto', timeoutMs: classifierBudget() }), signal);
+    const preflight = await raceSignal(assessPreflight(t, classify, { workflowQuestion: explicitWorkflow === 'auto', timeoutMs: classifierBudget(), context:codeContext }), signal);
     jev!.preflight = preflight;
     if (preflight.error) jev!.error = preflight.error;
    } catch (e) {
@@ -1390,20 +1608,21 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    return blockedResult;
   }
 
-  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext);
+  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext, codeContext);
   writeFileSync(join(dir,'prompt.txt'),prompt);
   if (reviewContext) writeFileSync(join(dir,REVIEW_CONTEXT_FILENAME),reviewContext);
 
   // Execute the worker. Live runs use the streaming async child lifecycle and
   // never spawnSync; the injected spawnPi seam remains for legacy offline tests.
   heartbeat.update({phase:'worker'});
+  emit('worker started');
   const eventsPath=join(dir,'events.jsonl');
   const logPath=join(dir,'worker.log');
   let stdout='', stderr='', legacyError:string|undefined;
   let workerStatus=0;
   let streamResult:WorkerStreamResult|undefined;
   const preInterrupt = !!signal?.aborted;
-  const preDeadline = !preInterrupt && outOfTime();
+  const preDeadline = !preInterrupt && workerOutOfTime();
   if (mock) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
@@ -1417,7 +1636,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     interrupted:preInterrupt, timedOut:false, deadlineExceeded:preDeadline, outputTruncated:false,
     stopReason: preInterrupt ? 'interrupted' : 'deadline_exceeded', runtime:heartbeat.snapshot() };
   } else if (deps.spawnPi) {
-   const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, remainingMs())));
+   const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
    const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432});
    stdout=r.stdout || ''; stderr=r.stderr || '';
    workerStatus=r.status ?? (r.error ? 1 : 0);
@@ -1429,7 +1648,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    streamResult = await executeWorkerStreaming({
     spawnChild, command:'pi',
     args:[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],
-    cwd:executionCwd, eventsPath, logPath, runtimePath, settings, deadlineAt,
+    cwd:executionCwd, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
     phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
    });
    stdout=streamResult.stdout; stderr=streamResult.stderr;
@@ -1447,11 +1666,18 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let interruptedDuringChecks=false;
   let deadlineDuringChecks=false;
   const stopped = !!streamResult && (streamResult.timedOut || streamResult.deadlineExceeded || streamResult.interrupted);
-  if (!stopped && workerStatus === 0 && receiptOk) {
+  // A worker stopped by its reserved worker deadline still runs the contract's
+  // checks (bounded by the remaining total wall deadline); an interruption, a
+  // per-tool timeout or a fatal stream/persist error never does.
+  const workerDeadlineStopped = !!streamResult && streamResult.deadlineExceeded && !streamResult.interrupted && !streamResult.timedOut
+   && !streamResult.streamError && !streamResult.persistError;
+  const checksEligible = stopped ? workerDeadlineStopped : (workerStatus === 0 && receiptOk);
+  if (checksEligible) {
    for (let i=0;i<t.checks.length;i++) {
     const rem=remainingMs();
     if (rem <= 0) { deadlineDuringChecks=true; break; }
     const c=t.checks[i];
+    emit(`check ${i+1}/${t.checks.length}`);
     const timeout=Math.max(1, Math.min(settings.checkTimeoutMs, settings.toolTimeoutMs, rem));
     const resolved=resolveCheckCwd(c.cwd, sourceCwd, executionCwd);
     if (resolved.error) {
@@ -1492,6 +1718,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // Postflight (completion) gate runs against the independent checks and the
   // complete bounded evidence.
   heartbeat.update({phase:'postflight'});
+  emit('postflight');
   if (mode !== 'off' && classify && workerRan && !stopped && !outOfTime()) {
    const git = deps.git ?? after;
    try {
@@ -1539,6 +1766,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    if (bad) { status = 'needs_review'; jev!.enforced = true; }
   }
 
+  emit(`finished ${status}`);
   // Finalize the shared runtime heartbeat with the terminal state.
   heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs())});
   if (status === 'ready_for_review' || status === 'simulation_passed') heartbeat.setState('ready_for_review',{stopReason:status==='simulation_passed'?'simulation_passed':'ready_for_review'});

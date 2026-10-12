@@ -20,6 +20,8 @@ import {
   SUPPORTED_MATRIX,
   parseReleaseManifest,
   resolveLatestRelease,
+  checkToolUpdates,
+  TRIZ_REPO,
 } from './installer.ts';
 import { doctor, summarizeInstall, DEFAULT_MODEL, PI_PACKAGE } from './setup.ts';
 
@@ -1057,4 +1059,50 @@ test('Install summary reports a combined failure when a tools attempt fails', ()
 test('Install summary reports no attempt for a Pi-only setup without installing', () => {
  const summary = summarizeInstall(undefined, null);
  assert.equal(summary.attempted, false);
+});
+
+// --- managed tool update check (offline; injected release resolver) ---
+
+function managedStateWith(versions: Record<string, string>) {
+  const root = tmp('junior-updates-');
+  const tools: Record<string, unknown> = {};
+  for (const [tool, version] of Object.entries(versions)) tools[tool] = { repo: TOOL_REPOS[tool as 'fmeca'].repo, tag: `v${version}`, version, path: join(root, tool) };
+  writeFileSync(join(root, 'installed.json'), JSON.stringify({ schemaVersion: 1, tools }));
+  return { installRoot: root, statePath: join(root, 'installed.json') };
+}
+const releaseAt = (version: string) => async (repo: string) => ({ repo, tag: `v${version}`, version, assets: [] });
+
+test('update check flags a managed tool behind its latest GitHub release', async () => {
+  const report = await checkToolUpdates({ ...managedStateWith({ fmeca: '0.0.2' }), resolveRelease: releaseAt('0.2.0') });
+  assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.outdated, true);
+});
+
+test('update check reports a managed tool at the latest release as current', async () => {
+  const report = await checkToolUpdates({ ...managedStateWith({ cpm: '0.2.2' }), resolveRelease: releaseAt('0.2.2') });
+  assert.equal(report.tools.find((t) => t.tool === 'cpm')?.outdated, false);
+});
+
+test('update check leaves outdated unknown when the release lookup fails', async () => {
+  const report = await checkToolUpdates({ ...managedStateWith({ fmeca: '0.0.2' }), resolveRelease: async () => { throw new Error('offline'); } });
+  assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.outdated, null);
+});
+
+test('update check reports the optional managed TRIZ install as tool triz', async () => {
+  const root = tmp('junior-updates-');
+  writeFileSync(join(root, 'installed.json'), JSON.stringify({
+    schemaVersion: 1,
+    tools: {},
+    optional: { triz: { repo: TRIZ_REPO, tag: 'v0.8.0', version: '0.8.0', path: join(root, 'triz', 'dist', 'triz.js') } },
+  }));
+  const report = await checkToolUpdates({ installRoot: root, statePath: join(root, 'installed.json'), resolveRelease: releaseAt('0.9.0') });
+  assert.equal(report.tools.find((t) => t.tool === 'triz')?.outdated, true);
+});
+
+test('update check lists an outdated optional TRIZ among the outdated tools', async () => {
+  const deps = managedStateWith({});
+  const state = JSON.parse(readFileSync(deps.statePath, 'utf8'));
+  state.optional = { triz: { repo: 'matt-cochran/triz', tag: 'v0.1.0', version: '0.1.0', path: join(deps.installRoot, 'triz.js') } };
+  writeFileSync(deps.statePath, JSON.stringify(state));
+  const report = await checkToolUpdates({ ...deps, resolveRelease: releaseAt('0.2.1') });
+  assert.ok(report.outdated.includes('triz'));
 });

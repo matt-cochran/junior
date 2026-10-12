@@ -28,6 +28,9 @@ export type ExecutionSettings = {
  toolTimeoutMs: number;
  heartbeatMs: number;
  checkTimeoutMs: number;
+ /** Budget carved out of the total wall deadline so the contract's checks can
+  * still run after the worker phase is stopped. Must be less than deadlineMs. */
+ checkReserveMs: number;
 };
 
 export const EXECUTION_DEFAULTS: ExecutionSettings = {
@@ -36,6 +39,7 @@ export const EXECUTION_DEFAULTS: ExecutionSettings = {
  toolTimeoutMs: 300000,
  heartbeatMs: 5000,
  checkTimeoutMs: 120000,
+ checkReserveMs: 120000,
 };
 
 /** Positive finite bounds. Values outside a bound are rejected, not coerced. */
@@ -45,6 +49,7 @@ export const EXECUTION_BOUNDS: Record<keyof ExecutionSettings, { min: number; ma
  toolTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
  heartbeatMs: { min: 1, max: 60 * 60 * 1000 },
  checkTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
+ checkReserveMs: { min: 0, max: 24 * 60 * 60 * 1000 },
 };
 
 export const EXECUTION_FIELDS = Object.keys(EXECUTION_DEFAULTS) as (keyof ExecutionSettings)[];
@@ -63,6 +68,9 @@ export function resolveExecutionSettings(t: any): ExecutionSettings {
  const src = settingsSource(t);
  const out: any = { ...EXECUTION_DEFAULTS };
  for (const key of EXECUTION_FIELDS) {
+  // checkReserveMs default depends on the resolved deadlineMs, so it is
+  // resolved after the deadline is known.
+  if (key === 'checkReserveMs') continue;
   const v = src?.[key];
   if (v === undefined || v === null) continue;
   const bound = EXECUTION_BOUNDS[key];
@@ -71,6 +79,17 @@ export function resolveExecutionSettings(t: any): ExecutionSettings {
   }
   out[key] = v;
  }
+ const reserve = src?.checkReserveMs;
+ if (reserve === undefined || reserve === null) {
+  out.checkReserveMs = Math.min(120000, out.deadlineMs * 0.2);
+ } else {
+  const bound = EXECUTION_BOUNDS.checkReserveMs;
+  if (typeof reserve !== 'number' || !Number.isFinite(reserve) || reserve < bound.min || reserve > bound.max) {
+   throw Error(`Invalid execution.checkReserveMs (expected a finite number in [${bound.min}, ${bound.max}])`);
+  }
+  out.checkReserveMs = reserve;
+ }
+ if (!(out.checkReserveMs < out.deadlineMs)) throw Error('Invalid execution.checkReserveMs (expected less than deadlineMs)');
  return out as ExecutionSettings;
 }
 
@@ -102,6 +121,7 @@ export type RuntimeSnapshot = {
  toolTimeoutMs: number;
  heartbeatMs: number;
  checkTimeoutMs: number;
+ checkReserveMs: number;
  currentTool: string | null;
  activeToolMs: number | null;
  exitCode: number | null;
@@ -115,21 +135,32 @@ export type RuntimeSnapshot = {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
+/** Optional short, human-readable progress lines (one per phase change and a
+ * bounded heartbeat). The sink is best-effort: a throwing sink never aborts a
+ * run. */
+export type ProgressSink = (line: string) => void;
+
 /** Atomically-rewritten runtime.json heartbeat. `poll()` is cheap and is driven
  * by the streaming executor; it flips `running` to `quiet` after `quietMs` of
- * inactivity and writes at most every `heartbeatMs`. */
+ * inactivity and writes at most every `heartbeatMs`. When a progress sink is
+ * supplied it also emits a heartbeat line at most every `heartbeatMs` while
+ * the worker phase is active. */
 export class RuntimeHeartbeat {
  private snap: RuntimeSnapshot;
  private lastWriteAt = 0;
+ private lastProgressAt = 0;
  private readonly path: string;
- constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker') {
+ private readonly progress?: ProgressSink;
+ constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker', progress?: ProgressSink) {
   this.path = path;
+  this.progress = progress;
   this.snap = {
    state: 'starting', phase,
    startedAt: iso(startedAt), heartbeatAt: iso(startedAt), lastActivityAt: iso(startedAt),
    elapsedMs: 0, remainingMs: Math.max(0, deadlineAt - startedAt), deadlineAt: iso(deadlineAt),
    deadlineMs: settings.deadlineMs, quietMs: settings.quietMs, toolTimeoutMs: settings.toolTimeoutMs,
    heartbeatMs: settings.heartbeatMs, checkTimeoutMs: settings.checkTimeoutMs,
+   checkReserveMs: settings.checkReserveMs,
    currentTool: null, activeToolMs: null, exitCode: null, signal: null, stopReason: null,
    interrupted: false, timedOut: false, deadlineExceeded: false,
   };
@@ -162,12 +193,23 @@ export class RuntimeHeartbeat {
   this.snap.remainingMs = Math.max(0, Date.parse(this.snap.deadlineAt) - now);
   this.snap.currentTool = currentTool;
   this.snap.activeToolMs = activeToolMs;
+  this.emitHeartbeat(now, currentTool);
   if (this.snap.state === 'running' && now - Date.parse(this.snap.lastActivityAt) >= this.snap.quietMs) {
    this.snap.state = 'quiet';
    this.write(true);
    return;
   }
   this.write();
+ }
+ /** Emit at most one bounded heartbeat progress line per `heartbeatMs`, only
+  * while the worker phase is active. Best-effort: never throws. */
+ private emitHeartbeat(now: number, currentTool: string | null): void {
+  if (!this.progress || this.snap.phase !== 'worker') return;
+  if (now - this.lastProgressAt < this.snap.heartbeatMs) return;
+  this.lastProgressAt = now;
+  const elapsedSeconds = Math.max(0, Math.round((now - Date.parse(this.snap.startedAt)) / 1000));
+  try { this.progress(`heartbeat ${elapsedSeconds}s${currentTool ? ` tool=${currentTool}` : ''}`); }
+  catch { /* progress must never abort a run */ }
  }
 }
 

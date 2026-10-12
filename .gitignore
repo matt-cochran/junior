@@ -4,3 +4,6 @@ node_modules/
 dist/
 *.tgz
 *:Zone.Identifier
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { initHop as initHopManifest, isReadTool } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -57,6 +58,8 @@ function runCli(args, timeout = 30000) {
   return spawnSync(NODE, [TOOLS, ...args], {
     encoding: "utf8",
     timeout,
+    // Keep the CLI independent of the developer's real managed install.
+    env: { ...process.env, JUNIOR_TOOLS_ROOT: path.join(os.tmpdir(), "junior-no-managed-tools") },
   });
 }
 
@@ -277,4 +280,115 @@ test("inspect lists the snapshots recorded by prior reads", () => {
   runCli(["call", hop, "fmeca", req]);
   const out = cliJson(runCli(["inspect", hop]));
   assert.equal(out.snapshots.length, 1);
+});
+
+// --- read vs command classification ------------------------------------------
+//
+// `isReadTool` is the exported classifier `callHop` uses to decide whether a
+// successful result is exported as an immutable snapshot. These tests pin the
+// newer FMECA/CPM query tools as reads and keep the write tools as commands.
+
+test("cpm plan.get is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.get"), true);
+});
+
+test("cpm plan.lint is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.lint"), true);
+});
+
+test("cpm plan.schedule is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.schedule"), true);
+});
+
+test("cpm plan.simulate is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.simulate"), true);
+});
+
+test("cpm plan.list is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.list"), true);
+});
+
+test("cpm plan.compare is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.compare"), true);
+});
+
+test("cpm plan.ev is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.ev"), true);
+});
+
+test("cpm plan.review is classified as a read", () => {
+  assert.equal(isReadTool("cpm", "plan.review"), true);
+});
+
+test("cpm plan.export is classified as a command", () => {
+  assert.equal(isReadTool("cpm", "plan.export"), false);
+});
+
+test("cpm plan.snapshot is classified as a command", () => {
+  assert.equal(isReadTool("cpm", "plan.snapshot"), false);
+});
+
+test("cpm plan.baseline is classified as a command", () => {
+  assert.equal(isReadTool("cpm", "plan.baseline"), false);
+});
+
+test("cpm plan.submit is classified as a command", () => {
+  assert.equal(isReadTool("cpm", "plan.submit"), false);
+});
+
+test("fmeca session.list is classified as a read", () => {
+  assert.equal(isReadTool("fmeca", "session.list"), true);
+});
+
+test("fmeca actions.suggest is classified as a read", () => {
+  assert.equal(isReadTool("fmeca", "actions.suggest"), true);
+});
+
+test("fmeca policy.list is classified as a read", () => {
+  assert.equal(isReadTool("fmeca", "policy.list"), true);
+});
+
+test("fmeca append is classified as a command", () => {
+  assert.equal(isReadTool("fmeca", "append"), false);
+});
+
+test("fmeca vet is classified as a command", () => {
+  assert.equal(isReadTool("fmeca", "vet"), false);
+});
+
+// --- managed tool defaults ----------------------------------------------------
+//
+// A fresh HOP points at Junior's managed, checksum-verified binaries when they
+// are installed, and records their real version instead of a built-in pin.
+
+function managedState(dir) {
+  const bin = path.join(dir, "fmeca-mcp");
+  fs.writeFileSync(bin, "");
+  const statePath = path.join(dir, "installed.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    schemaVersion: 1,
+    tools: { fmeca: { version: "0.2.0", sourceSha: "a".repeat(40), path: bin } },
+  }));
+  return { bin, statePath };
+}
+
+test("init defaults a tool to its managed binary when one is installed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-managed-"));
+  const { bin, statePath } = managedState(dir);
+  const hop = initHopManifest(path.join(dir, "hop.json"), { managedStatePath: statePath });
+  assert.equal(hop.tools.fmeca.command, bin);
+});
+
+test("init records the managed binary's installed version", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-managed-"));
+  const { statePath } = managedState(dir);
+  const hop = initHopManifest(path.join(dir, "hop.json"), { managedStatePath: statePath });
+  assert.equal(hop.tools.fmeca.sourceVersion, "0.2.0");
+});
+
+test("init keeps the PATH command for a tool with no managed install", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-managed-"));
+  const { statePath } = managedState(dir);
+  const hop = initHopManifest(path.join(dir, "hop.json"), { managedStatePath: statePath });
+  assert.equal(hop.tools.cpm.command, "cpm-planner");
 });

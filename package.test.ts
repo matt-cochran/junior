@@ -115,7 +115,7 @@ function taskFile(dir: string, over: any = {}): string {
 // --- package metadata -------------------------------------------------------
 
 test('The package is published under the scoped junior name', () => assert.equal(pkg.name, '@matthew-cochran/junior'));
-test('The package version is pinned to 0.1.0', () => assert.equal(pkg.version, '0.1.0'));
+test('The package version is pinned to 0.2.0', () => assert.equal(pkg.version, '0.2.0'));
 test('The package is not marked private', () => assert.notEqual(pkg.private, true));
 test('The package exposes the junior bin at the compiled entry', () => assert.equal(pkg.bin.junior, 'dist/junior.js'));
 test('The package supports Node 24 and newer', () => assert.equal(pkg.engines.node, '>=24'));
@@ -202,18 +202,18 @@ test('The installed CLI reports doctor readiness in an external cwd', () => {
 });
 test('The installed CLI installs the packaged skill into the target checkout', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'junior', 'SKILL.md')));
 });
 test('The installed skill manifest points at the packaged CLI', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   const manifest = JSON.parse(readFileSync(join(dir, '.agents', 'skills', '.junior-manifest.json'), 'utf8'));
   assert.equal(manifest.skills.junior.cli, join(pkgDir, 'dist', 'junior.js'));
 });
 test('Installed init never writes into the installed package', () => {
   const dir = workdir();
-  runBin(['init', '--target=codex'], { cwd: dir });
+  runBin(['init', '--target=codex', '--no-install', '--no-companions'], { cwd: dir });
   assert.ok(!existsSync(join(pkgDir, 'dist', 'skills', '.junior-manifest.json')));
 });
 test('The installed CLI inspects shared tool state in an external cwd', () => {

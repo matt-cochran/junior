@@ -19,6 +19,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
+import { inspectCompanions, installCompanions, installCompanionSkills,
+ type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 
@@ -68,6 +70,11 @@ export type SetupDeps = {
  skillSource?:string;
  /** Managed prebuilt-tool root; tests inject a fixture instead of the user home. */
  toolsRoot?:string;
+ /** Injectable HTTP seam for the opt-in online credential check; tests never hit the network. */
+ fetch?:FetchLike;
+ /** Injectable `/proc/mounts` reader for slow-mount detection; tests never read
+  * the host mount table. Defaults to the real file. */
+ readMounts?:()=>string;
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -216,6 +223,69 @@ export function checkCredentials(provider:string, deps:SetupDeps = {}):Credentia
  return { provider, present, sources, providers:[...new Set(providers)] };
 }
 
+export const OPENROUTER_KEY_URL = 'https://openrouter.ai/api/v1/key';
+
+/** Minimal HTTP response shape the online credential check depends on. */
+export type FetchResponse = { status:number; json:()=>Promise<any> };
+/** Injectable fetch seam. The default is the runtime `fetch`; tests inject a stub. */
+export type FetchLike = (url:string, init:{ headers:Record<string,string> })=>Promise<FetchResponse>;
+
+export type OnlineCredentialCheck = {
+ provider:string;
+ /** `true`/`false` only when the provider answered; `null` when the check was inconclusive. */
+ valid:boolean|null;
+ usage:number|null;
+ limit:number|null;
+ remaining:number|null;
+ ready:boolean;
+ error?:string;
+};
+
+/** Read the provider's usable credential value for an outbound header. This is
+ * the same auth.json/env lookup `checkCredentials` uses, but it is never
+ * returned or logged; only its presence reaches the caller. */
+function readProviderKey(provider:string, deps:SetupDeps):string|null {
+ const authPath=join(agentDir(deps),'auth.json');
+ if (exists(deps,authPath)) {
+  try {
+   const j=JSON.parse(readText(deps,authPath));
+   const c:any=j?.[provider];
+   if (c && typeof c==='object') {
+    if (['api_key','api'].includes(c.type) && typeof c.key==='string' && c.key.trim()) return c.key.trim();
+    if (c.type==='oauth' && typeof c.access==='string' && c.access.trim()) return c.access.trim();
+   }
+  } catch { /* an unreadable auth file is simply no credential */ }
+ }
+ const env=deps.env ?? process.env;
+ const envVar=provider==='openrouter' ? 'OPENROUTER_API_KEY' : provider==='deepseek' ? 'DEEPSEEK_API_KEY' : null;
+ if (envVar && typeof env[envVar]==='string' && env[envVar]!.trim()) return env[envVar]!.trim();
+ return null;
+}
+
+/** Opt-in online check: ask the provider whether the local credential is valid
+ * and still has credit. Never returns or prints the credential value. */
+export async function checkCredentialsOnline(deps:SetupDeps = {}):Promise<OnlineCredentialCheck> {
+ const provider=DEFAULT_PROVIDER;
+ const base:OnlineCredentialCheck={ provider, valid:null, usage:null, limit:null, remaining:null, ready:false };
+ const key=readProviderKey(provider,deps);
+ if (!key) return { ...base, error:`no ${provider} credential present` };
+ const doFetch=deps.fetch ?? (globalThis.fetch as unknown as FetchLike | undefined);
+ if (typeof doFetch !== 'function') return { ...base, error:'fetch is unavailable in this runtime' };
+ let res:FetchResponse;
+ try {
+  res=await doFetch(OPENROUTER_KEY_URL,{ headers:{ Authorization:`Bearer ${key}` } });
+ } catch { return { ...base, error:`could not reach ${provider}` }; }
+ if (res?.status===401 || res?.status===403) return { ...base, valid:false, error:`${provider} rejected the credential (HTTP ${res.status})` };
+ if (!res || typeof res.status!=='number' || res.status<200 || res.status>=300) return { ...base, error:`${provider} key check failed (HTTP ${res?.status ?? 'unknown'})` };
+ let data:any;
+ try { data=(await res.json())?.data ?? {}; } catch { return { ...base, error:`${provider} returned an unreadable response` }; }
+ const usage=typeof data.usage==='number' ? data.usage : 0;
+ const limit=typeof data.limit==='number' ? data.limit : null;
+ const remaining=limit===null ? null : limit-usage;
+ const ready=limit===null || (remaining as number)>0;
+ return { provider, valid:true, usage, limit, remaining, ready };
+}
+
 export type ModelStoreStatus = 'missing' | 'empty' | 'populated';
 export type ModelCheck = {
  provider:string;
@@ -288,12 +358,17 @@ export type DoctorCheck = { id:string; ok:boolean; detail:string };
 export type DoctorResult = {
  command:'doctor';
  ok:boolean;
+ /** Non-blocking advisories, such as running on a slow Windows-mounted
+  * checkout. They never change Pi execution readiness (`ok`). */
+ warnings:string[];
  node:{ version:string; supported:boolean; minimum:string };
  pi:PiCheck;
  credentials:CredentialCheck;
  model:ModelCheck;
  /** Skill readiness is reported separately; it does not change Pi execution readiness (`ok`). */
  skill:SkillReadiness;
+ /** npm companion tools (fmeca, cpm, jevitate); reported separately, never gating Pi readiness. */
+ companions:CompanionsReport;
  /** Prebuilt integration readiness is reported separately from Pi execution/auth readiness. */
  integrations:IntegrationsResult;
  integrationsReady:boolean;
@@ -302,6 +377,35 @@ export type DoctorResult = {
  checks:DoctorCheck[];
  remediation:string[];
 };
+
+const slowMountWarning=(cwd:string,fstype:string,mountPoint:string):string=>
+ `Slow Windows-mounted checkout: ${cwd} is on a ${fstype} filesystem mounted at ${mountPoint}. Use a Linux-native path (for example under your home directory) for a worktree handoff to avoid slow file operations.`;
+
+/** Detect a checkout on a slow Windows-mounted filesystem. Returns a warning
+ * string when `cwd` is under `/mnt/<letter>/`, or when the deepest `/proc/mounts`
+ * mount point covering it reports a `9p` or `drvfs` filesystem; otherwise null.
+ * Mount parsing is injectable so tests never read the host mount table. */
+export function detectSlowMount(cwd:string, deps:SetupDeps = {}):string|null {
+ const normalized=String(cwd??'').replace(/\\/g,'/');
+ const drive=normalized.match(/^\/mnt\/([a-zA-Z])(?:\/|$)/);
+ if (drive) return slowMountWarning(cwd,'drvfs',`/mnt/${drive[1]}`);
+ let mounts='';
+ try { mounts=deps.readMounts ? deps.readMounts() : readText(deps,'/proc/mounts'); }
+ catch { return null; }
+ let best:string|null=null;
+ let bestType='';
+ for (const line of mounts.split('\n')) {
+  const parts=line.trim().split(/\s+/);
+  if (parts.length<3) continue;
+  const mountPoint=parts[1].replace(/\\040/g,' ');
+  const fstype=parts[2];
+  if (fstype!=='9p' && fstype!=='drvfs') continue;
+  const prefix=mountPoint.endsWith('/')?mountPoint:mountPoint+'/';
+  if (normalized!==mountPoint && !normalized.startsWith(prefix)) continue;
+  if (best===null || mountPoint.length>best.length) { best=mountPoint; bestType=fstype; }
+ }
+ return best===null ? null : slowMountWarning(cwd,bestType,best);
+}
 
 /** Read-only readiness check. No installation, config writes or paid calls. */
 export function doctor(deps:SetupDeps = {}):DoctorResult {
@@ -328,6 +432,10 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
   else remediation.push(`The ${provider} model catalog is missing or empty; run \`pi update --models\` to refresh it after \`/login\`.`);
  }
 
+ const warnings:string[]=[];
+ const slowMount=detectSlowMount(cwd,deps);
+ if (slowMount) warnings.push(slowMount);
+
  const checks:DoctorCheck[]=[
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
   { id:'pi', ok:pi.found && !!pi.version, detail:pi.found ? `${pi.executable} (${pi.version ?? 'version unknown'}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
@@ -337,7 +445,8 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  const skill=inspectSkill(deps);
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  const retention=retainedWorktreeSummary(cwd);
- return { command:'doctor', ok:checks.every((c)=>c.ok), node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
+ const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
+ return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
@@ -401,7 +510,8 @@ function generatedExcludePatterns(skill:SkillResult, created:string[]):string[] 
  if (created.includes('tasks/example-task.json')) patterns.push('/tasks/example-task.json');
  if (skill.scope === 'project') {
   for (const action of skill.actions) {
-   if (action.status !== 'created') continue;
+   // Junior wrote (or already matches) these copies; outdated or customized ones are the user's.
+   if (action.status === 'outdated' || action.status === 'customized') continue;
    const root=action.manager === 'codex' ? '.agents/skills' : '.claude/skills';
    patterns.push(`/${root}/junior/`, `/${root}/${SKILL_MANIFEST_FILENAME}`);
   }
@@ -505,7 +615,7 @@ export type SkillReadiness = {
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
 export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string };
-export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean };
+export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean };
 
 function sha256(text:string):string {
  return createHash('sha256').update(text).digest('hex');
@@ -629,10 +739,13 @@ function isSkillTarget(value:string|undefined):value is SkillTargetSelection {
 
 /** Parse the `init` flags shared by the `worker.ts` and `junior.ts` CLIs. */
 export function parseInitOptions(argv:string[]):InitOptions {
- const opts:InitOptions={};
+ // The CLI installs Pi, the managed tools and the companion tools by default.
+ const opts:InitOptions={ install:true };
  for (let i=0;i<argv.length;i++) {
   const a=argv[i];
   if (a === '--install') opts.install=true;
+  else if (a === '--no-install') opts.install=false;
+  else if (a === '--no-companions') opts.companions=false;
   else if (a === '--user') opts.scope='user';
   else if (a === '--project') opts.scope='project';
   else if (a === '--upgrade') opts.upgrade=true;
@@ -648,4 +761,46 @@ export function parseInitOptions(argv:string[]):InitOptions {
   else if (a.startsWith('--skill-root=')) opts.skillRoot=a.slice('--skill-root='.length);
  }
  return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Companion tools (fmeca, cpm, jevitate npm packages and their agent skills).
+//
+// Each companion's own installer writes its skills; Junior only orchestrates.
+// Paths that become untracked during the skill install are recorded as exact
+// local Git exclusions, exactly like Junior's own generated files, so a fresh
+// project stays ready for a `worktree` handoff. A tracked file an installer
+// edits (for example a shared AGENTS.md block) is reported, never hidden.
+// ---------------------------------------------------------------------------
+
+export type CompanionSetupResult = {
+ install:CompanionInstallReport | null;
+ skills:CompanionSkillReport;
+ excluded:string[];
+ modifiedTracked:string[];
+ ok:boolean;
+};
+
+function gitLines(cwd:string, args:string[]):string[] | null {
+ const r=spawnSync('git',args,{cwd,encoding:'utf8'});
+ if (r.error || r.status !== 0) return null;
+ return String(r.stdout||'').split('\n').map((l)=>l.trim()).filter(Boolean);
+}
+
+export function setupCompanions(
+ deps:SetupDeps,
+ opts:{ target?:SkillTargetSelection; scope?:SkillScope; install?:boolean; update?:boolean },
+):CompanionSetupResult {
+ const cwd=deps.cwd ?? process.cwd();
+ const cdeps={ env:deps.env, exists:deps.exists, exec:deps.exec };
+ const untracked=()=>gitLines(cwd,['ls-files','--others','--exclude-standard']);
+ const modified=()=>gitLines(cwd,['diff','--name-only']);
+ const beforeUntracked=new Set(untracked() ?? []);
+ const beforeModified=new Set(modified() ?? []);
+ const install=opts.install === false ? null : installCompanions(cdeps,{ update:opts.update });
+ const skills=installCompanionSkills(cdeps,{ target:opts.target ?? 'both', scope:opts.scope ?? 'project', cwd });
+ const created=(untracked() ?? []).filter((p)=>!beforeUntracked.has(p));
+ const excluded=created.length ? ensureLocalExcludes(cwd, created.map((p)=>`/${p}`)).added : [];
+ const modifiedTracked=(modified() ?? []).filter((p)=>!beforeModified.has(p));
+ return { install, skills, excluded, modifiedTracked, ok:(install ? install.ok : true) && skills.ok };
 }

@@ -13,8 +13,10 @@
 // ---------------------------------------------------------------------------
 
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { run, validate, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions, summarizeInstall } from './setup.ts';
+import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
+import { inspectCompanions } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
@@ -27,12 +29,12 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
-  '  tools init|call|inspect ...            persistent FMECA / CPM / Crossmatrix handoff',
-  '  doctor                                  read-only readiness check',
-  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]',
-  '          remove inactive clean retained Junior worktrees',
-  '  init    [--install] [--target codex|claude|both|none] [--user]',
-  '          [--upgrade] [--force] [--skill-root DIR]   idempotent project setup + skill install',
+  '  tools init|call|inspect ...; mcp register --hop <hop.json> --target claude|cursor|print|codex; report-issue <tool> --title <t> [--file]',
+  '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
+  '  doctor  [--check-updates] [--online]     read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained Junior worktrees',
+  '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
+  '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
 }
 
@@ -64,27 +66,34 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--mock] [--full]' },
- qa: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior qa <task.json> [--mock] [--full]' },
- run: { flags: ['--mock', '--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior run <task.json> [--mock] [--full]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--mock] [--full] [--quiet]' },
+ qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
+ run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior run <task.json> [--mock] [--full] [--quiet]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
- status: { flags: ['--full'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior status <result.json> [--full]' },
- doctor: { flags: [], valueFlags: [], min: 0, max: 0,
-  help: 'Usage: junior doctor' },
+ status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
+ doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
+  help: 'Usage: junior doctor [--check-updates] [--online]' },
+ update: {
+  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions'],
+  valueFlags: ['--target', '--skill-root', '--scope'],
+  min: 0,
+  max: 0,
+  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions]',
+ },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
  init: {
-  flags: ['--install', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
+  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
   help: [
-   'Usage: junior init [--install] [--target codex|claude|both|none] [--user] [--project]',
+   'Usage: junior init [--no-install] [--no-companions] [--target codex|claude|both|none] [--user] [--project]',
    '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz]',
   ].join('\n'),
  },
@@ -146,6 +155,9 @@ async function main(argv: string[]): Promise<void> {
  if (!command || command === '--help' || command === '-h' || command === 'help') { console.log(usage()); return; }
  if (command === '--version' || command === '-v' || command === 'version') { console.log(readPackageVersion(import.meta.url)); return; }
  if (command === 'tools') { const tools = await import('./tools/tools.ts'); process.exitCode = await tools.main(rest); return; }
+ if (command === 'mcp') { const mcp = await import('./mcp.ts'); process.exitCode = await mcp.main(rest); return; }
+ if (command === 'auth') { const auth = await import('./auth.ts'); process.exitCode = await auth.main(rest); return; }
+ if (command === 'report-issue') { const reportIssue = await import('./report-issue.ts'); process.exitCode = await reportIssue.main(rest); return; }
 
  const spec = COMMANDS[command];
  if (!spec) throw Error(usage());
@@ -153,7 +165,19 @@ async function main(argv: string[]): Promise<void> {
  const parsed = parseCommand(command, spec, rest);
 
  if (command === 'doctor') {
-  const result = doctor();
+  const result:any = doctor();
+  if (parsed.flags.has('--online')) {
+   result.credentialsOnline = await checkCredentialsOnline();
+  }
+  if (parsed.flags.has('--check-updates')) {
+   const installer = await import('./installer.ts');
+   const managed = await installer.checkToolUpdates();
+   result.companions = inspectCompanions({}, { checkUpdates: true });
+   result.updates = { managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
+   if (managed.outdated.length || result.updates.companions.length) result.updates.remediation = managed.outdated.includes('triz')
+    ? 'Run `junior update --with-triz` to adopt the newer releases.'
+    : 'Run `junior update` to adopt the newer releases.';
+  }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
   return;
@@ -176,12 +200,14 @@ async function main(argv: string[]): Promise<void> {
   console.log(JSON.stringify(result, null, 2));
   return;
  }
- if (command === 'init') {
+ if (command === 'init' || command === 'update') {
   const target = parsed.values['--target'];
   if (target !== undefined && !INIT_TARGETS.includes(target)) throw Error(`Invalid --target value: ${target}`);
   const scope = parsed.values['--scope'];
   if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
-  const opts = parseInitOptions(rest);
+  const opts:InitOptions = parseInitOptions(rest);
+  // `update` adopts newer releases and replaces only skills Junior itself wrote.
+  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
   const result:any = init({}, opts);
   if (opts.install) {
    const installer = await import('./installer.ts');
@@ -189,6 +215,11 @@ async function main(argv: string[]): Promise<void> {
    result.tools = report;
    // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
    result.installSummary = summarizeInstall(result.install, report);
+  }
+  if (opts.companions !== false) {
+   result.companions = setupCompanions({}, { target: opts.target, scope: opts.scope, install: opts.install, update: opts.update });
+   if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
+   if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
   }
   console.log(JSON.stringify(result, null, 2));
   if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;
@@ -202,6 +233,11 @@ async function main(argv: string[]): Promise<void> {
  }
  if (command === 'status') {
   const path = parsed.files[0];
+  if (parsed.flags.has('--live')) {
+   const snapshot = readRuntimeSnapshot(path);
+   console.log(JSON.stringify(snapshot, null, 2));
+   return;
+  }
   if (parsed.flags.has('--full')) {
    console.log(JSON.stringify(status(path), null, 2));
   } else {
@@ -217,12 +253,30 @@ async function main(argv: string[]): Promise<void> {
   const task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
+  if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
+  const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+  const slowMount = detectSlowMount(taskCwd);
+  if (slowMount) deps.progress?.(slowMount);
   const result = await run(task, mock, deps);
   console.log(JSON.stringify(parsed.flags.has('--full') ? result : compactHandoff(result), null, 2));
   if (!isSuccessOutcome(result.status)) process.exitCode = 1;
   return;
  }
  throw Error(usage());
+}
+
+/** Read the live runtime.json snapshot for an artifact directory (or a direct
+ * runtime.json path) without requiring result.json. */
+function readRuntimeSnapshot(path:string):any {
+ let raw:string;
+ try {
+  try { raw=readFileSync(join(path,'runtime.json'),'utf8'); }
+  catch { raw=readFileSync(path,'utf8'); }
+ } catch { throw Error(`Cannot read runtime snapshot: ${path}`); }
+ let snap:any;
+ try { snap=JSON.parse(raw); } catch { throw Error(`Invalid JSON in runtime snapshot: ${path}`); }
+ if (!snap || typeof snap !== 'object' || Array.isArray(snap)) throw Error('Malformed runtime snapshot: expected an object');
+ return { phase:snap.phase, state:snap.state, elapsedMs:snap.elapsedMs, remainingMs:snap.remainingMs, currentTool:snap.currentTool };
 }
 
 if (isDirectEntry(import.meta.url)) {

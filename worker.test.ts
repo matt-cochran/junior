@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
- jevMode,boundEvidence,boundedGitEvidence,resolveClassifierModel,
+ jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
  estimateCost,validatePricing,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
@@ -15,8 +15,8 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS } from './worker.ts';
-import { doctor,init,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
+import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
@@ -1064,7 +1064,7 @@ test('Parse init options maps --no-skill to no target',()=>{
 });
 test('junior.ts init --target=claude installs only the Claude project skill',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const home=mkdtempSync(join(tmpdir(),'delivery-home-'));
- spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent')}});
+ spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude','--no-install'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent')}});
  assert.equal(existsSync(claudeSkill(cwd)),true);
 });
 
@@ -2042,4 +2042,521 @@ test('A check cwd symlink pointing inside the workspace is allowed to run',async
  if(!makeDirLink(target,link)){t.skip('directory symlinks unavailable');return;}
  const r=await run(okTask(repo,{checks:[markerCheck(link)]}),true);
  assert.equal(existsSync(join(target,'marker.txt')),true);
+});
+
+// --- companion tools and default install (offline; injected seams, temporary Git repos) ---
+const tempGitRepo=()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-init-git-'));
+ spawnSync('git',['init','-q'],{cwd:dir});
+ return dir;
+};
+const localExclude=(dir:string)=>{try{return readFileSync(join(dir,'.git','info','exclude'),'utf8');}catch{return '';}};
+
+test('Parse init options installs tools by default',()=>{
+ assert.equal(parseInitOptions([]).install,true);
+});
+test('Parse init options --no-install opts out of every install',()=>{
+ assert.equal(parseInitOptions(['--no-install']).install,false);
+});
+test('Parse init options --no-companions skips the companion tools',()=>{
+ assert.equal(parseInitOptions(['--no-companions']).companions,false);
+});
+test('An upgraded project skill is recorded as a local Git exclusion',()=>{
+ const cwd=tempGitRepo(); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(join(cwd,'.git','info','exclude'),''); writeFileSync(src,'v2\n');
+ init(deps,{target:'codex',upgrade:true});
+ assert.match(localExclude(cwd),/^\/\.agents\/skills\/junior\/$/m);
+});
+test('Files a companion skill installer creates are recorded as local Git exclusions',()=>{
+ const cwd=tempGitRepo(); const bin=join(cwd,'.bin');
+ mkdirSync(join(cwd,'.agent'),{recursive:true}); writeFileSync(join(cwd,'.agent','notes.md'),'already untracked\n');
+ const exec=(cmd:string,args:string[])=>{
+  if (args[0]==='init') { mkdirSync(join(cwd,'.agent','skills','jevitate-explore'),{recursive:true}); writeFileSync(join(cwd,'.agent','skills','jevitate-explore','SKILL.md'),'x'); }
+  return {status:0,stdout:`${cmd} 1.0.0\n`};
+ };
+ setupCompanions({cwd,env:{PATH:bin},exists:(p:string)=>p===join(bin,'jevitate'),exec},{target:'claude',scope:'project'});
+ assert.match(localExclude(cwd),/^\/\.agent\/skills\/jevitate-explore\/SKILL\.md$/m);
+});
+test('A tracked file a companion installer edits is reported, not excluded',()=>{
+ const cwd=tempGitRepo(); const bin=join(cwd,'.bin');
+ writeFileSync(join(cwd,'AGENTS.md'),'mine\n'); spawnSync('git',['add','AGENTS.md'],{cwd}); spawnSync('git',['-c','user.email=t@e','-c','user.name=t','commit','-qm','a'],{cwd});
+ const exec=(cmd:string,args:string[])=>{ if (args[0]==='init') writeFileSync(join(cwd,'AGENTS.md'),'mine\n<jevitate/>\n'); return {status:0,stdout:`${cmd} 1.0.0\n`}; };
+ const r=setupCompanions({cwd,env:{PATH:bin},exists:(p:string)=>p===join(bin,'jevitate'),exec},{target:'claude',scope:'project'});
+ assert.deepEqual(r.modifiedTracked,['AGENTS.md']);
+});
+test('Doctor reports companion tools separately from Pi readiness',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.equal((doctor(setupDeps(cwd)) as any).companions.ready,false);
+});
+
+// --- Jev attention field resolution (issue #11/#18) ---
+test('Delegate attention names the frontier question as its trigger',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.equal(pre.attention.trigger,'requires_frontier');
+});
+test('Clarify attention from an unclear contract names the contract_clear question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.trigger,'contract_clear');
+});
+test('Clarify attention from an unclear contract carries the contract_clear probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.41),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.probability,0.41);
+});
+test('Clarify attention from a blocking assumption names the blocking_assumptions question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83)}));
+ assert.equal(pre.attention.trigger,'blocking_assumptions');
+});
+test('Clarify attention from a blocking assumption carries the blocking_assumptions probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83)}));
+ assert.equal(pre.attention.probability,0.83);
+});
+test('Attention reports every classifier question probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.deepEqual(pre.attention.probabilities,{requires_frontier:0.05,contract_clear:0.95,blocking_assumptions:0.05});
+});
+test('Attention reports the confidence threshold',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.equal(pre.attention.threshold,0.6);
+});
+test('Classifier failure marks the attention trigger as error',async()=>{
+ const pre=await assessPreflight(task(),outage);
+ assert.equal(pre.attention.trigger,'error');
+});
+test('Clarify reason cites the contract_clear probability against the real threshold',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.41),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.reason,'contract not judged clear: P(contract_clear)=0.41 < 0.6');
+});
+test('Compact receipt exposes the attention trigger',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.equal(compactHandoff(r).attention.trigger,'contract_clear');
+});
+
+// --- B01 run artifacts never appear as target-checkout changes (real Git fixtures) ---
+const artifactTask=(repo:any,extra:any={})=>({id:'b01',deliverable:'artifact isolation',cwd:repo.dir,acceptance:['checks pass'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],...extra});
+const deliveryPath=(p:string)=>p==='.delivery'||p.startsWith('.delivery/');
+
+test('An isolation none mock run reports no .delivery path in changedFiles',async()=>{
+ const repo=initRepo();
+ const r=await run(artifactTask(repo),true);
+ assert.equal(r.evidence.changedFiles.some((f:any)=>deliveryPath(f.path)),false);
+});
+
+test('An isolation none mock run reports no .delivery path in runChangedFiles',async()=>{
+ const repo=initRepo();
+ const r=await run(artifactTask(repo),true);
+ assert.equal(r.evidence.runChangedFiles.some((f:any)=>deliveryPath(f.path)),false);
+});
+
+test('An isolation none mock run leaves no .delivery entry in git status',async()=>{
+ const repo=initRepo();
+ await run(artifactTask(repo),true);
+ const status=spawnSync('git',['status','--porcelain'],{cwd:repo.dir,encoding:'utf8'}).stdout;
+ assert.equal(status.includes('.delivery'),false);
+});
+
+test('An isolation none run records the run-artifact tree in the repository-local exclude',async()=>{
+ const repo=initRepo();
+ await run(artifactTask(repo),true);
+ assert.match(readFileSync(join(repo.dir,'.git','info','exclude'),'utf8'),/^\/\.delivery\/$/m);
+});
+
+test('A mock run in a non-git cwd completes without a repository-local exclude',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-nogit-'));
+ const r=await run({id:'b01',deliverable:'artifact isolation',cwd,acceptance:['checks pass'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]},true);
+ assert.equal(r.status,'simulation_passed');
+});
+
+// --- B09 opt-in online credential check (injected fetch; never real network) ---
+const onlineAgent=(cwd:string,key:string)=>{const agent=writeAgent(cwd,{auth:{openrouter:{type:'api',key}}});return {agent};};
+
+test('Online credential check reports a funded openrouter key as ready',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-funded');
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:2,limit:10}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.ready,true);
+});
+test('Online credential check marks a rejected openrouter key as invalid',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-rejected');
+ const fetch=async()=>({status:401,json:async()=>({})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.valid,false);
+});
+test('Online credential check reports an exhausted openrouter key as not ready',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-exhausted');
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:10,limit:10}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.ready,false);
+});
+test('Online credential check never serializes the provider key',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const key='sk-or-super-secret-online';
+ const {agent}=onlineAgent(cwd,key);
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:0,limit:5}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.ok(!JSON.stringify(r).includes(key));
+});
+test('Online credential check sends the bearer key to the openrouter key endpoint',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-wire');
+ let captured:any;
+ const fetch=async(url:string,init:any)=>{captured={url,headers:init.headers};return {status:200,json:async()=>({data:{usage:0,limit:5}})};};
+ await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.deepEqual(captured,{url:'https://openrouter.ai/api/v1/key',headers:{Authorization:'Bearer sk-or-wire'}});
+});
+test('Offline doctor performs no online credential request',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const bin=withPiDir(cwd); const {agent}=onlineAgent(cwd,'sk-or-offline');
+ let calls=0;
+ const fetch=async()=>{calls++;return {status:200,json:async()=>({data:{}})};};
+ doctor(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(calls,0);
+});
+test('Evidence collected from a subdirectory cwd still reports a change elsewhere in the repository',()=>{
+ const repo=gitRepo(); mkdirSync(join(repo.dir,'pkg')); commitFile(repo,'pkg/a.txt','a\n'); commitFile(repo,'shared.txt','s\n');
+ writeFileSync(join(repo.dir,'shared.txt'),'changed\n');
+ assert.equal(collectGitEvidence(join(repo.dir,'pkg')).changedFiles.some((f:any)=>f.path==='shared.txt'),true);
+});
+
+// --- B05 verified code context for the Jev readiness preflight ---
+test('validate accepts a well-formed context entry',()=>{
+ const t=task(0,{context:[{path:'src/a.ts',start:2,end:9}]});
+ assert.doesNotThrow(()=>validate(t));
+});
+test('validate rejects a non-array context',()=>{
+ assert.throws(()=>validate(task(0,{context:'src/a.ts'})),/context \(expected an array\)/);
+});
+test('validate rejects an absolute context path',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:join(tmpdir(),'a.ts')}]})),/context\.path \(expected a relative path\)/);
+});
+test('validate rejects a context path escaping cwd via dotdot',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'../outside.ts'}]})),/context\.path \(outside the workspace\)/);
+});
+test('validate rejects a context start that is not a positive integer',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'a.ts',start:0}]})),/context\.start \(expected a positive integer\)/);
+});
+test('validate rejects a context range whose start exceeds its end',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'a.ts',start:5,end:2}]})),/context start must not exceed end/);
+});
+test('validate rejects more than twenty context entries',()=>{
+ const context=Array.from({length:21},(_,i)=>({path:`f${i}.ts`}));
+ assert.throws(()=>validate(task(0,{context})),/at most 20 context entries/);
+});
+test('validate rejects a non-string context path',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:7}]})),/context\.path \(expected a non-empty string\)/);
+});
+
+const capturePreflight=async(t:any)=>{ let seen:any; const classifier:any=async({state}:any)=>{seen=state;return {stopReason:'stop',answers:JEVPASS};}; await assessPreflight(t,classifier); return seen; };
+const contextdir=(name:string,body:string)=>{const dir=mkdtempSync(join(tmpdir(),'delivery-ctx-'));writeFileSync(join(dir,name),body);return dir;};
+
+test('Classifier state carries the resolved excerpt text for a context entry',async()=>{
+ const dir=contextdir('a.ts','line one\nline two\nline three\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'a.ts'}]}));
+ assert.match(seen.context[0].text,/line two/);
+});
+test('An out-of-range context end is clamped to the file length',async()=>{
+ const dir=contextdir('a.ts','a\nb\nc\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'a.ts',start:1,end:99}]}));
+ assert.equal(seen.context[0].end,3);
+});
+test('An unreadable context path yields a classifier error entry',async()=>{
+ const dir=contextdir('present.ts','x\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'missing.ts'}]}));
+ assert.ok(seen.context[0].error);
+});
+test('Blocking assumptions instructions name the independent checks',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.match(questions.blocking_assumptions.instructions,/independent checks/);
+});
+test('Blocking assumptions instructions name the provided code context',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.match(questions.blocking_assumptions.instructions,/code context/);
+});
+test('Worker prompt includes a Code context heading for a contract context entry',async()=>{
+ const dir=contextdir('a.ts','alpha\n');
+ const r=await run(task(0,{cwd:dir,workflow:'test_first',context:[{path:'a.ts'}]}),true);
+ assert.match(readFileSync(join(r.artifactDir,'prompt.txt'),'utf8'),/Code context/);
+});
+test('Worker prompt includes the resolved context excerpt text',async()=>{
+ const dir=contextdir('a.ts','alpha\n');
+ const r=await run(task(0,{cwd:dir,workflow:'test_first',context:[{path:'a.ts'}]}),true);
+ assert.match(readFileSync(join(r.artifactDir,'prompt.txt'),'utf8'),/alpha/);
+});
+test('A context entry longer than 200 lines keeps exactly 200 lines',async()=>{
+ const dir=contextdir('big.ts',Array.from({length:250},(_,i)=>`line ${i+1}`).join('\n')+'\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'big.ts'}]}));
+ assert.equal(seen.context[0].text.split('\n').length,200);
+});
+test('A context entry cut to the line cap is marked truncated',async()=>{
+ const dir=contextdir('big.ts',Array.from({length:250},(_,i)=>`line ${i+1}`).join('\n')+'\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'big.ts'}]}));
+ assert.equal(seen.context[0].truncated,true);
+});
+test('Total resolved context text never exceeds 40000 characters',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-ctx-'));
+ for(let i=0;i<5;i++) writeFileSync(join(dir,`f${i}.ts`),Array.from({length:200},()=>'x'.repeat(80)).join('\n')+'\n');
+ const context=Array.from({length:5},(_,i)=>({path:`f${i}.ts`}));
+ const seen=await capturePreflight(task(0,{cwd:dir,context}));
+ assert.ok(seen.context.reduce((n:number,e:any)=>n+(e.text?.length??0),0)<=40000);
+});
+
+// --- B06 opt-in isolation setup (links, copies, setup commands) ---
+const linkRepo=()=>{
+ const repo=gitRepo();
+ commitFile(repo,'.gitignore','.delivery/\ndeps/\n');
+ mkdirSync(join(repo.dir,'deps'),{recursive:true});
+ writeFileSync(join(repo.dir,'deps','secret.txt'),'s\n');
+ return repo;
+};
+
+test('validate accepts a well-formed isolationSetup',()=>{
+ assert.doesNotThrow(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'a',to:'b'}],copy:['c'],commands:[{command:'node',args:['x'],cwd:'d'}]}}));
+});
+
+test('validate rejects an absolute isolationSetup link path',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'/etc/passwd',to:'deps'}]}}),/Invalid isolationSetup/);
+});
+
+test('validate rejects an isolationSetup link that escapes via dot-dot',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'..',to:'deps'}]}}),/Invalid isolationSetup/);
+});
+
+test('validate rejects a malformed isolationSetup command entry',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{commands:[{command:''}]}}),/Invalid isolationSetup/);
+});
+
+test('isolationSetup links a gitignored dependency dir so a check can read through it',async()=>{
+ const repo=linkRepo();
+ const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('deps/secret.txt')"]}];
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{links:[{from:'deps',to:'deps'}]},checks}),true);
+ assert.equal(r.checks[0].exitCode,0);
+});
+
+test('a linked isolationSetup path is absent from run change evidence',async()=>{
+ const repo=linkRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{links:[{from:'deps',to:'deps'}]}}),true);
+ assert.ok(!r.evidence.runChangedFiles.some((f:any)=>f.path==='deps'||f.path.startsWith('deps/')));
+});
+
+test('a failing isolationSetup command ends the run as isolation_setup_failed',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),true);
+ assert.equal(r.status,'isolation_setup_failed');
+});
+
+test('Pi is not started when isolationSetup fails',async()=>{
+ const repo=gitRepo();
+ let spawned=false;
+ await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ assert.equal(spawned,false);
+});
+
+test('isolationSetup writes its command output to isolation-setup.log',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e',"console.log('setup-output-marker')"]}]}}),true);
+ assert.match(readFileSync(join(r.artifactDir,'isolation-setup.log'),'utf8'),/setup-output-marker/);
+});
+
+test('isolationSetup is ignored when isolation is none',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'none',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),true);
+ assert.equal(r.status,'simulation_passed');
+});
+
+test('delivery.config.json isolationSetup provisions the worktree',async()=>{
+ const repo=gitRepo();
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
+ const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('setup-marker.txt')"]}];
+ const r=await run(okTask(repo,{isolation:'worktree',checks}),true);
+ assert.equal(r.checks[0].exitCode,0);
+});
+
+test('a contract isolationSetup takes precedence over delivery.config.json',async()=>{
+ const repo=gitRepo();
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
+ const isolationSetup={commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('contract-marker.txt','1')"]}]};
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup}),true);
+ assert.equal(r.status,'simulation_passed');
+});
+// --- Issue #22: reserved check budget after the worker deadline (offline) ---
+test('Check reserve defaults to the smaller of 120s and 20% of the deadline',()=>{
+ assert.equal(resolveExecutionSettings({execution:{deadlineMs:1000}}).checkReserveMs,200);
+});
+test('Check reserve is capped at 120s for long deadlines',()=>{
+ assert.equal(resolveExecutionSettings({execution:{deadlineMs:600000}}).checkReserveMs,120000);
+});
+test('A check reserve at least the deadline is rejected',()=>{
+ assert.throws(()=>validate(task(0,{execution:{deadlineMs:1000,checkReserveMs:1000}})),/checkReserveMs/);
+});
+test('A worker stopped by its reserved deadline still records check results',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'reserve-checks',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const r=await run(t,false,{spawnChild:()=>fake.child});
+ assert.equal(r.checks.length,1);
+});
+test('A worker stopped by its reserved deadline keeps the run deadline_exceeded',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'reserve-status',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const r=await run(t,false,{spawnChild:()=>fake.child});
+ assert.equal(r.status,'deadline_exceeded');
+});
+test('An interrupted run still records no checks',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const controller=new AbortController();
+ const t=okTask(repo,{id:'reserve-interrupt',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,signal:controller.signal});
+ await delay(60);
+ controller.abort();
+ const r=await p;
+ assert.equal(r.checks.length,0);
+});
+test('The compact handoff reports the total wall deadline',()=>{
+ const h=compactHandoff({runtime:{deadlineMs:600000}});
+ assert.equal(h.runtime.deadlineMs,600000);
+});
+test('The compact handoff reports the reserved check budget',()=>{
+ const h=compactHandoff({runtime:{checkReserveMs:120000}});
+ assert.equal(h.runtime.checkReserveMs,120000);
+});
+
+// --- Issue #17: self-explanatory unresolved acceptance and conditional criteria ---
+
+test('Unresolved uncertain acceptance names the criterion text and probability',async()=>{
+ const t=task(0,{acceptance:['Where a component lacks a data-testid the check must skip'],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.5)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],'AC1 uncertain: "Where a component lacks a data-testid the check must skip" (P(satisfied)=0.5, threshold 0.6)');
+});
+test('Unresolved acceptance gap names the criterion text and probability',async()=>{
+ const t=task(0,{acceptance:['Every path has a test'],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.1)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],'AC1 gap: "Every path has a test" (P(satisfied)=0.1, threshold 0.6)');
+});
+test('A long criterion text is truncated in the unresolved entry',async()=>{
+ const t=task(0,{acceptance:['x'.repeat(120)],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.1)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.equal(h.unresolved[0],`AC1 gap: "${'x'.repeat(80)}..." (P(satisfied)=0.1, threshold 0.6)`);
+});
+test('A conditional criterion whose condition was not exercised resolves not_applicable',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const r=await run(t,true,{classify:classifier});
+ assert.equal(r.jev.postflight.criteria[0].verdict,'not_applicable');
+});
+test('A not-applicable criterion does not appear in the unresolved receipt',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'shadow'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const h=compactHandoff(await run(t,true,{classify:classifier}));
+ assert.deepEqual(h.unresolved,[]);
+});
+test('A not-applicable criterion does not block an enforce run',async()=>{
+ const t=task(0,{acceptance:[{text:'Applies only to Node 18',when:'the change targets Node 18'}],jev:{mode:'enforce'}});
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95),AC1_when:bool(0.05)});
+ const r=await run(t,true,{classify:classifier});
+ assert.equal(r.status,'simulation_passed');
+});
+test('A string-only acceptance contract keeps the existing met verdict',async()=>{
+ const classifier=gateClassifier(JEVPASS,{AC1:bool(0.95)});
+ const r=await run(task(0,{jev:{mode:'enforce'}}),true,{classify:classifier});
+ assert.equal(r.jev.postflight.criteria[0].verdict,'met');
+});
+test('validate accepts an object acceptance item with text and when',()=>{
+ assert.doesNotThrow(()=>validate({...task(),acceptance:[{text:'conditional criterion',when:'condition holds'}]}));
+});
+test('validate rejects an acceptance object with empty text',()=>{
+ assert.throws(()=>validate({...task(),acceptance:[{text:'   '}]}),/acceptance/i);
+});
+test('validate rejects an acceptance object with an empty when condition',()=>{
+ assert.throws(()=>validate({...task(),acceptance:[{text:'criterion',when:'   '}]}),/when/i);
+});
+test('Preflight state carries the acceptance text for object items',async()=>{
+ let preState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  if(Object.prototype.hasOwnProperty.call(questions,'contract_clear')) preState=state;
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ await run(task(0,{acceptance:[{text:'object criterion text',when:'condition'}],jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.deepEqual(preState.acceptance,['object criterion text']);
+});
+test('Postflight state carries the acceptance text for object items',async()=>{
+ let postState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  if(!Object.prototype.hasOwnProperty.call(questions,'contract_clear')) postState=state;
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ await run(task(0,{acceptance:[{text:'object criterion text',when:'condition'}],jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.deepEqual(postState.acceptance,['object criterion text']);
+});
+
+// --- Issue #23: evidence labels stop overstating certainty (offline) ---
+test('fmeca prompt requires quoting the cited span before a proven-here label',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'fmeca'}),'fmeca');
+ assert.ok(prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('evaluate prompt requires quoting the cited span before a proven-here label',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'evaluate'}),'evaluate');
+ assert.ok(prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('recon prompt labels an unquoted proven-here claim inferred',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'recon'}),'recon');
+ assert.ok(prompt.includes('inferred, not proven-here'));
+});
+test('test_first prompt omits the evidence-quote rule',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'test_first'}),'test_first');
+ assert.ok(!prompt.includes('quote the cited span (a few lines, with path:line)'));
+});
+test('analysis report block requires quoting the cited span before a proven-here label',()=>{
+ assert.ok(analysisReportBlock('/tmp/art/analysis-report.md').includes('quote the cited span (a few lines, with path:line)'));
+});
+test('The fmeca prompt tells the worker how to consult the TRIZ catalog without a paid call',()=>{
+ assert.match(buildPrompt(task(),'fmeca'),/`triz catalog`/);
+});
+
+// --- B07 progress reporting, live status and slow-mount detection ---
+test('detectSlowMount flags a /mnt drive-letter checkout',()=>{
+ assert.ok(detectSlowMount('/mnt/c/repo',{readMounts:()=>''}));
+});
+test('detectSlowMount flags a 9p mounted checkout',()=>{
+ assert.ok(detectSlowMount('/mnt/shared/repo',{readMounts:()=>'//server /mnt/shared 9p rw 0 0\n'}));
+});
+test('detectSlowMount ignores a native home checkout',()=>{
+ assert.equal(detectSlowMount('/home/u/repo',{readMounts:()=>'//server /mnt/shared 9p rw 0 0\n'}),null);
+});
+test('doctor includes a slow-mount warning for a 9p checkout',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-slow-'));
+ const d=doctor(setupDeps(cwd,{readMounts:()=>`client ${cwd} 9p rw 0 0\n`}));
+ assert.equal(d.warnings.length,1);
+});
+test('RuntimeHeartbeat emits a heartbeat line through the progress sink',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-hb-'));
+ const lines:string[]=[];
+ const now=Date.now();
+ const hb=new RuntimeHeartbeat(join(dir,'runtime.json'),{...EXECUTION_DEFAULTS,heartbeatMs:1000},now,now+10000,'worker',(l)=>lines.push(l));
+ hb.begin();
+ hb.poll(now+1000,'bash',50);
+ assert.ok(lines.some((l)=>/^heartbeat \d+s tool=bash$/.test(l)));
+});
+test('Mock run reports the worker phase through the injected progress sink',async()=>{
+ const lines:string[]=[];
+ await run(task(),true,{progress:(l)=>lines.push(l)});
+ assert.ok(lines.some((l)=>/worker/.test(l)));
+});
+test('Mock run reports each check through the injected progress sink',async()=>{
+ const lines:string[]=[];
+ await run(task(),true,{progress:(l)=>lines.push(l)});
+ assert.ok(lines.some((l)=>/^check 1\/1\b/.test(l)));
 });

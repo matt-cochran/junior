@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,7 +31,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'update', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -144,17 +144,17 @@ test('junior init rejects excess positional arguments', () => {
 });
 
 test('junior init accepts the documented --no-skill option', () => {
-  assert.equal(runJunior(['init', '--no-skill'], workdir()).status, 0);
+  assert.equal(runJunior(['init', '--no-skill', '--no-install', '--no-companions'], workdir()).status, 0);
 });
 
 test('junior init accepts the documented --target option', () => {
-  assert.equal(runJunior(['init', '--target=codex'], workdir()).status, 0);
+  assert.equal(runJunior(['init', '--target=codex', '--no-install', '--no-companions'], workdir()).status, 0);
 });
 
 // --- subcommand strict flag parsing ----------------------------------------
 
-test('junior init reports an unattempted install summary by default', () => {
-  const out = JSON.parse(runJunior(['init'], workdir()).stdout);
+test('junior init --no-install reports an unattempted install summary', () => {
+  const out = JSON.parse(runJunior(['init', '--no-install', '--no-companions'], workdir()).stdout);
   assert.equal(out.installSummary.attempted, false);
 });
 
@@ -220,4 +220,45 @@ test('junior init rejects another option as a missing skill-root value without w
   const dir = workdir();
   runJunior(['init', '--skill-root', '--force'], dir);
   assert.deepEqual(readdirSync(dir), []);
+});
+
+// --- B07 progress on stderr, --quiet, live status and help size ---------------
+
+function mockTask(dir: string): string {
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id: 'cli-mock',
+    deliverable: 'Mock handoff',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['mock'],
+    checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+  }));
+  return taskPath;
+}
+
+test('junior --help prints at most 12 lines', () => {
+  assert.ok(runJunior(['--help'], workdir()).stdout.trimEnd().split('\n').length <= 12);
+});
+
+test('junior handoff --mock prints a JSON receipt on stdout', () => {
+  const dir = workdir();
+  const res = runJunior(['handoff', mockTask(dir), '--mock'], dir);
+  assert.doesNotThrow(() => JSON.parse(res.stdout));
+});
+
+test('junior handoff --mock prefixes progress lines with junior: on stderr', () => {
+  const dir = workdir();
+  assert.match(runJunior(['handoff', mockTask(dir), '--mock'], dir).stderr, /^junior: /m);
+});
+
+test('junior handoff --mock --quiet writes nothing to stderr', () => {
+  const dir = workdir();
+  assert.equal(runJunior(['handoff', mockTask(dir), '--mock', '--quiet'], dir).stderr, '');
+});
+
+test('junior status --live prints the phase from runtime.json', () => {
+  const dir = workdir();
+  writeFileSync(join(dir, 'runtime.json'), JSON.stringify({ phase: 'worker', state: 'running', elapsedMs: 12, remainingMs: 34, currentTool: 'bash' }));
+  assert.equal(JSON.parse(runJunior(['status', dir, '--live'], dir).stdout).phase, 'worker');
 });

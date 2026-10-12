@@ -159,7 +159,8 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
-// Versions read from each repository's Cargo.toml at the pinned SHA (see README).
+// Fallback provenance when no managed install is recorded: versions read from
+// each repository's Cargo.toml at the pinned SHA (see README).
 const KNOWN_SOURCE: Record<ToolName, { version: string; sha: string }> = {
   fmeca: { version: "0.0.1", sha: "8f7fbfd7718707be35e443fa0a4a37370ee3e8a4" },
   cpm: { version: "0.0.2", sha: "12c8f9acc0fbd7c13b13fc3c3b50134afcffce89" },
@@ -187,10 +188,31 @@ const READ_TOOLS: Record<ToolName, ReadonlySet<string>> = {
     "report.export",
     "scoring.catalog",
     "analyze",
+    "session.list",
+    "actions.suggest",
+    "policy.list",
   ]),
-  cpm: new Set(["plan.status"]),
+  cpm: new Set([
+    "plan.status",
+    "plan.get",
+    "plan.lint",
+    "plan.schedule",
+    "plan.simulate",
+    "plan.list",
+    "plan.compare",
+    "plan.ev",
+    "plan.review",
+  ]),
   crossmatrix: new Set(["crossmatrix.query"]),
 };
+
+/**
+ * Classify an upstream tool call as a snapshot `read` or a state-mutating
+ * `command`. Only successful reads are exported as immutable snapshots.
+ */
+export function isReadTool(tool: ToolName, toolName: string): boolean {
+  return READ_TOOLS[tool].has(toolName);
+}
 
 // ---------------------------------------------------------------------------
 // Small utilities
@@ -361,6 +383,35 @@ export interface InitOptions {
   lockTimeoutMs?: number;
   tools?: Partial<Record<ToolName, Partial<ToolConfig>>>;
   overwrite?: boolean;
+  /** Junior's managed install state (`~/.junior/tools/installed.json`). A tool
+   * installed there defaults to that binary and its recorded version. */
+  managedStatePath?: string;
+}
+
+/** Default managed install state, honoring `JUNIOR_TOOLS_ROOT`. */
+export function defaultManagedStatePath(env: NodeJS.ProcessEnv = process.env): string {
+  const root = env.JUNIOR_TOOLS_ROOT || path.join(env.HOME ?? env.USERPROFILE ?? ".", ".junior", "tools");
+  return path.join(root, "installed.json");
+}
+
+/** Managed binaries that are recorded and still present; unreadable state yields none. */
+function readManagedTools(statePath: string | undefined): Partial<Record<ToolName, { path: string; version: string; sourceSha: string }>> {
+  if (!statePath) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  } catch {
+    return {};
+  }
+  const out: Partial<Record<ToolName, { path: string; version: string; sourceSha: string }>> = {};
+  const entries = isRecord(parsed) && isRecord(parsed.tools) ? parsed.tools : {};
+  for (const tool of TOOL_NAMES) {
+    const e = entries[tool];
+    if (isRecord(e) && typeof e.path === "string" && typeof e.version === "string" && fs.existsSync(e.path)) {
+      out[tool] = { path: e.path, version: e.version, sourceSha: typeof e.sourceSha === "string" ? e.sourceSha : "" };
+    }
+  }
+  return out;
 }
 
 /** Create a fresh HOP manifest (schemaVersion 1). */
@@ -372,11 +423,13 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
 
   const tools = {} as Record<ToolName, ToolConfig>;
   const native = {} as Record<ToolName, NativeStateRef>;
+  const managed = readManagedTools(options.managedStatePath);
   for (const tool of TOOL_NAMES) {
     const override = options.tools?.[tool] ?? {};
-    const known = KNOWN_SOURCE[tool];
+    const installed = managed[tool];
+    const known = installed ? { version: installed.version, sha: installed.sourceSha } : KNOWN_SOURCE[tool];
     tools[tool] = {
-      command: override.command ?? DEFAULT_COMMAND[tool],
+      command: override.command ?? installed?.path ?? DEFAULT_COMMAND[tool],
       args: override.args ?? [],
       env: override.env ?? {},
       sourceVersion: override.sourceVersion ?? known.version,
@@ -645,7 +698,7 @@ function nativeAbsPath(hopPath: string, tool: ToolName, manifest: HopManifest): 
   return path.resolve(path.dirname(hopPath), rel);
 }
 
-function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
+export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
   const abs = nativeAbsPath(hopPath, tool, manifest);
   if (tool === "fmeca") return { FMECA_STATE_DIR: abs };
   if (tool === "cpm") return { CPM_PLANNER_DB: abs };
@@ -785,7 +838,7 @@ export async function callHop(
       );
     }
 
-    const kind: CallKind = READ_TOOLS[tool].has(toolName) ? "read" : "command";
+    const kind: CallKind = isReadTool(tool, toolName) ? "read" : "command";
     const revision = hop.revision + 1;
     const cfg = hop.tools[tool];
     const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
@@ -1011,7 +1064,7 @@ function parseInitConfig(configPath: string | undefined): InitOptions {
 async function cliInit(args: string[]): Promise<HopManifest> {
   const [hopPath, configPath] = args;
   if (!hopPath) throw new HopError("USAGE", "usage: tools.ts init <hop.json> [config.json]");
-  return initHop(hopPath, parseInitConfig(configPath));
+  return initHop(hopPath, { managedStatePath: defaultManagedStatePath(), ...parseInitConfig(configPath) });
 }
 
 async function cliCall(args: string[]): Promise<CallOutcome> {
