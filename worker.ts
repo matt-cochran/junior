@@ -5,7 +5,7 @@ import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
-import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, type IsolationMode, type LockHandle } from './isolation.ts';
+import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
 import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, DEFAULT_MAX_OUTPUT_BYTES, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
 import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
 
@@ -24,7 +24,7 @@ export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot
 
 /** Every top-level contract field the worker understands. A nested `execution`
  * object is also supported (its keys are validated by
- * resolveExecutionSettings), and its five runtime settings may also be given
+ * resolveExecutionSettings), and its six runtime settings may also be given
  * directly at the top level. Unknown fields are rejected so a typo or an
  * unsupported feature fails before any paid call instead of being ignored. */
 export const TASK_FIELDS = [
@@ -33,7 +33,7 @@ export const TASK_FIELDS = [
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
  'hopFrom','hopRevision','hopContext',
- 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs',
+ 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','isolationSetup',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
@@ -193,6 +193,7 @@ export function validate(t: any) {
  if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
+ if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
  if (t.repairFrom !== undefined && (typeof t.repairFrom !== 'string' || !t.repairFrom.trim())) throw Error('Invalid repairFrom (expected path to a prior result.json)');
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');
@@ -1288,6 +1289,12 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  heartbeat.begin();
  const remainingMs=()=>deadlineAt-Date.now();
  const outOfTime=()=>Date.now() >= deadlineAt;
+ // The worker is stopped before the total deadline so the reserved budget is
+ // available to the contract's checks, which remain bounded by the total wall
+ // deadline.
+ const workerDeadlineAt=()=>deadlineAt-settings.checkReserveMs;
+ const workerRemainingMs=()=>workerDeadlineAt()-Date.now();
+ const workerOutOfTime=()=>Date.now() >= workerDeadlineAt();
 
  let lineage:any={ rootId:t.id, repairs:0,
   maxRepairs: typeof t.maxRepairs==='number' ? t.maxRepairs : 1,
@@ -1412,6 +1419,29 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   executionCwd=compat.executionCwd!;
  }
 
+ // Opt-in provisioning runs after the detached worktree exists and before any
+ // paid worker, classifier or independent check. It is ignored for isolation
+ // none, and any setup failure is its own terminal outcome, never a check
+ // failure, so Pi is not started against a half-provisioned checkout.
+ if (isolation === 'worktree') {
+  const rawSetup = t.isolationSetup !== undefined ? t.isolationSetup : configuredIsolationSetup(sourceCwd);
+  if (rawSetup !== undefined) {
+   const isolationSetupFailed=(error:string)=>{
+    heartbeat.setState('failed',{stopReason:'isolation_setup_failed', error});
+    const out:any={ id:t.id, simulated:mock, status:'isolation_setup_failed', workerExitCode:null,
+     workerError:error, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+     sourceCwd, executionCwd, isolation:{mode:isolation, ...(worktreePath?{worktree:worktreePath}:{})} };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   };
+   try { validateIsolationSetup(rawSetup); }
+   catch(e) { return isolationSetupFailed(`Invalid isolationSetup: ${msg(e)}`); }
+   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, executionCwd, dir, { deadlineAt, checkTimeoutMs:settings.checkTimeoutMs });
+   if (!provisioned.ok) return isolationSetupFailed(`isolationSetup failed: ${provisioned.error}`);
+   if (provisioned.excludePatterns.length) ensureLocalExcludes(executionCwd, provisioned.excludePatterns);
+  }
+ }
+
  // Acquire advisory locks before any classifier or worker call. A held lock
  // fails fast; every lock we acquire is released in the finally below.
  const locks:LockHandle[]=[];
@@ -1530,7 +1560,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let workerStatus=0;
   let streamResult:WorkerStreamResult|undefined;
   const preInterrupt = !!signal?.aborted;
-  const preDeadline = !preInterrupt && outOfTime();
+  const preDeadline = !preInterrupt && workerOutOfTime();
   if (mock) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
@@ -1544,7 +1574,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     interrupted:preInterrupt, timedOut:false, deadlineExceeded:preDeadline, outputTruncated:false,
     stopReason: preInterrupt ? 'interrupted' : 'deadline_exceeded', runtime:heartbeat.snapshot() };
   } else if (deps.spawnPi) {
-   const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, remainingMs())));
+   const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
    const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432});
    stdout=r.stdout || ''; stderr=r.stderr || '';
    workerStatus=r.status ?? (r.error ? 1 : 0);
@@ -1556,7 +1586,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    streamResult = await executeWorkerStreaming({
     spawnChild, command:'pi',
     args:[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],
-    cwd:executionCwd, eventsPath, logPath, runtimePath, settings, deadlineAt,
+    cwd:executionCwd, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
     phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
    });
    stdout=streamResult.stdout; stderr=streamResult.stderr;
@@ -1574,7 +1604,13 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let interruptedDuringChecks=false;
   let deadlineDuringChecks=false;
   const stopped = !!streamResult && (streamResult.timedOut || streamResult.deadlineExceeded || streamResult.interrupted);
-  if (!stopped && workerStatus === 0 && receiptOk) {
+  // A worker stopped by its reserved worker deadline still runs the contract's
+  // checks (bounded by the remaining total wall deadline); an interruption, a
+  // per-tool timeout or a fatal stream/persist error never does.
+  const workerDeadlineStopped = !!streamResult && streamResult.deadlineExceeded && !streamResult.interrupted && !streamResult.timedOut
+   && !streamResult.streamError && !streamResult.persistError;
+  const checksEligible = stopped ? workerDeadlineStopped : (workerStatus === 0 && receiptOk);
+  if (checksEligible) {
    for (let i=0;i<t.checks.length;i++) {
     const rem=remainingMs();
     if (rem <= 0) { deadlineDuringChecks=true; break; }

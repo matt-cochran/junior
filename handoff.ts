@@ -73,6 +73,7 @@ export type CompactHandoff = {
   stopReason: string | null;
   elapsedMs: number | null;
   deadlineMs: number | null;
+  checkReserveMs: number | null;
   quietMs: number | null;
   toolTimeoutMs: number | null;
   heartbeatMs: number | null;
@@ -245,6 +246,7 @@ export function compactHandoff(result: any): CompactHandoff {
    stopReason: r.runtime?.stopReason ?? null,
    elapsedMs: r.runtime?.elapsedMs ?? null,
    deadlineMs: r.runtime?.deadlineMs ?? null,
+   checkReserveMs: r.runtime?.checkReserveMs ?? null,
    quietMs: r.runtime?.quietMs ?? null,
    toolTimeoutMs: r.runtime?.toolTimeoutMs ?? null,
    heartbeatMs: r.runtime?.heartbeatMs ?? null,

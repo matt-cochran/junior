@@ -2306,3 +2306,125 @@ test('Total resolved context text never exceeds 40000 characters',async()=>{
  const seen=await capturePreflight(task(0,{cwd:dir,context}));
  assert.ok(seen.context.reduce((n:number,e:any)=>n+(e.text?.length??0),0)<=40000);
 });
+
+// --- B06 opt-in isolation setup (links, copies, setup commands) ---
+const linkRepo=()=>{
+ const repo=gitRepo();
+ commitFile(repo,'.gitignore','.delivery/\ndeps/\n');
+ mkdirSync(join(repo.dir,'deps'),{recursive:true});
+ writeFileSync(join(repo.dir,'deps','secret.txt'),'s\n');
+ return repo;
+};
+
+test('validate accepts a well-formed isolationSetup',()=>{
+ assert.doesNotThrow(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'a',to:'b'}],copy:['c'],commands:[{command:'node',args:['x'],cwd:'d'}]}}));
+});
+
+test('validate rejects an absolute isolationSetup link path',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'/etc/passwd',to:'deps'}]}}),/Invalid isolationSetup/);
+});
+
+test('validate rejects an isolationSetup link that escapes via dot-dot',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{links:[{from:'..',to:'deps'}]}}),/Invalid isolationSetup/);
+});
+
+test('validate rejects a malformed isolationSetup command entry',()=>{
+ assert.throws(()=>validate({...task(),isolation:'worktree',isolationSetup:{commands:[{command:''}]}}),/Invalid isolationSetup/);
+});
+
+test('isolationSetup links a gitignored dependency dir so a check can read through it',async()=>{
+ const repo=linkRepo();
+ const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('deps/secret.txt')"]}];
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{links:[{from:'deps',to:'deps'}]},checks}),true);
+ assert.equal(r.checks[0].exitCode,0);
+});
+
+test('a linked isolationSetup path is absent from run change evidence',async()=>{
+ const repo=linkRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{links:[{from:'deps',to:'deps'}]}}),true);
+ assert.ok(!r.evidence.runChangedFiles.some((f:any)=>f.path==='deps'||f.path.startsWith('deps/')));
+});
+
+test('a failing isolationSetup command ends the run as isolation_setup_failed',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),true);
+ assert.equal(r.status,'isolation_setup_failed');
+});
+
+test('Pi is not started when isolationSetup fails',async()=>{
+ const repo=gitRepo();
+ let spawned=false;
+ await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ assert.equal(spawned,false);
+});
+
+test('isolationSetup writes its command output to isolation-setup.log',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e',"console.log('setup-output-marker')"]}]}}),true);
+ assert.match(readFileSync(join(r.artifactDir,'isolation-setup.log'),'utf8'),/setup-output-marker/);
+});
+
+test('isolationSetup is ignored when isolation is none',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'none',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),true);
+ assert.equal(r.status,'simulation_passed');
+});
+
+test('delivery.config.json isolationSetup provisions the worktree',async()=>{
+ const repo=gitRepo();
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
+ const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('setup-marker.txt')"]}];
+ const r=await run(okTask(repo,{isolation:'worktree',checks}),true);
+ assert.equal(r.checks[0].exitCode,0);
+});
+
+test('a contract isolationSetup takes precedence over delivery.config.json',async()=>{
+ const repo=gitRepo();
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
+ const isolationSetup={commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('contract-marker.txt','1')"]}]};
+ const r=await run(okTask(repo,{isolation:'worktree',isolationSetup}),true);
+ assert.equal(r.status,'simulation_passed');
+});
+// --- Issue #22: reserved check budget after the worker deadline (offline) ---
+test('Check reserve defaults to the smaller of 120s and 20% of the deadline',()=>{
+ assert.equal(resolveExecutionSettings({execution:{deadlineMs:1000}}).checkReserveMs,200);
+});
+test('Check reserve is capped at 120s for long deadlines',()=>{
+ assert.equal(resolveExecutionSettings({execution:{deadlineMs:600000}}).checkReserveMs,120000);
+});
+test('A check reserve at least the deadline is rejected',()=>{
+ assert.throws(()=>validate(task(0,{execution:{deadlineMs:1000,checkReserveMs:1000}})),/checkReserveMs/);
+});
+test('A worker stopped by its reserved deadline still records check results',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'reserve-checks',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const r=await run(t,false,{spawnChild:()=>fake.child});
+ assert.equal(r.checks.length,1);
+});
+test('A worker stopped by its reserved deadline keeps the run deadline_exceeded',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'reserve-status',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const r=await run(t,false,{spawnChild:()=>fake.child});
+ assert.equal(r.status,'deadline_exceeded');
+});
+test('An interrupted run still records no checks',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const controller=new AbortController();
+ const t=okTask(repo,{id:'reserve-interrupt',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,signal:controller.signal});
+ await delay(60);
+ controller.abort();
+ const r=await p;
+ assert.equal(r.checks.length,0);
+});
+test('The compact handoff reports the total wall deadline',()=>{
+ const h=compactHandoff({runtime:{deadlineMs:600000}});
+ assert.equal(h.runtime.deadlineMs,600000);
+});
+test('The compact handoff reports the reserved check budget',()=>{
+ const h=compactHandoff({runtime:{checkReserveMs:120000}});
+ assert.equal(h.runtime.checkReserveMs,120000);
+});

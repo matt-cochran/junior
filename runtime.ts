@@ -28,6 +28,9 @@ export type ExecutionSettings = {
  toolTimeoutMs: number;
  heartbeatMs: number;
  checkTimeoutMs: number;
+ /** Budget carved out of the total wall deadline so the contract's checks can
+  * still run after the worker phase is stopped. Must be less than deadlineMs. */
+ checkReserveMs: number;
 };
 
 export const EXECUTION_DEFAULTS: ExecutionSettings = {
@@ -36,6 +39,7 @@ export const EXECUTION_DEFAULTS: ExecutionSettings = {
  toolTimeoutMs: 300000,
  heartbeatMs: 5000,
  checkTimeoutMs: 120000,
+ checkReserveMs: 120000,
 };
 
 /** Positive finite bounds. Values outside a bound are rejected, not coerced. */
@@ -45,6 +49,7 @@ export const EXECUTION_BOUNDS: Record<keyof ExecutionSettings, { min: number; ma
  toolTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
  heartbeatMs: { min: 1, max: 60 * 60 * 1000 },
  checkTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
+ checkReserveMs: { min: 0, max: 24 * 60 * 60 * 1000 },
 };
 
 export const EXECUTION_FIELDS = Object.keys(EXECUTION_DEFAULTS) as (keyof ExecutionSettings)[];
@@ -63,6 +68,9 @@ export function resolveExecutionSettings(t: any): ExecutionSettings {
  const src = settingsSource(t);
  const out: any = { ...EXECUTION_DEFAULTS };
  for (const key of EXECUTION_FIELDS) {
+  // checkReserveMs default depends on the resolved deadlineMs, so it is
+  // resolved after the deadline is known.
+  if (key === 'checkReserveMs') continue;
   const v = src?.[key];
   if (v === undefined || v === null) continue;
   const bound = EXECUTION_BOUNDS[key];
@@ -71,6 +79,17 @@ export function resolveExecutionSettings(t: any): ExecutionSettings {
   }
   out[key] = v;
  }
+ const reserve = src?.checkReserveMs;
+ if (reserve === undefined || reserve === null) {
+  out.checkReserveMs = Math.min(120000, out.deadlineMs * 0.2);
+ } else {
+  const bound = EXECUTION_BOUNDS.checkReserveMs;
+  if (typeof reserve !== 'number' || !Number.isFinite(reserve) || reserve < bound.min || reserve > bound.max) {
+   throw Error(`Invalid execution.checkReserveMs (expected a finite number in [${bound.min}, ${bound.max}])`);
+  }
+  out.checkReserveMs = reserve;
+ }
+ if (!(out.checkReserveMs < out.deadlineMs)) throw Error('Invalid execution.checkReserveMs (expected less than deadlineMs)');
  return out as ExecutionSettings;
 }
 
@@ -102,6 +121,7 @@ export type RuntimeSnapshot = {
  toolTimeoutMs: number;
  heartbeatMs: number;
  checkTimeoutMs: number;
+ checkReserveMs: number;
  currentTool: string | null;
  activeToolMs: number | null;
  exitCode: number | null;
@@ -130,6 +150,7 @@ export class RuntimeHeartbeat {
    elapsedMs: 0, remainingMs: Math.max(0, deadlineAt - startedAt), deadlineAt: iso(deadlineAt),
    deadlineMs: settings.deadlineMs, quietMs: settings.quietMs, toolTimeoutMs: settings.toolTimeoutMs,
    heartbeatMs: settings.heartbeatMs, checkTimeoutMs: settings.checkTimeoutMs,
+   checkReserveMs: settings.checkReserveMs,
    currentTool: null, activeToolMs: null, exitCode: null, signal: null, stopReason: null,
    interrupted: false, timedOut: false, deadlineExceeded: false,
   };

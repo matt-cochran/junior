@@ -11,8 +11,8 @@
 // is reported with an actionable diagnostic and never auto-deleted.
 // ---------------------------------------------------------------------------
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { join, resolve, dirname, isAbsolute } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync, readdirSync, statSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs';
+import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
@@ -68,13 +68,16 @@ export const JUNIOR_EXCLUDE_HEADER = '# junior-generated (local, not committed)'
  * duplicated. Outside a Git checkout there is nothing to do. This is a local
  * exclusion only; it never edits a tracked `.gitignore` or a user's rules. */
 export function ensureLocalExcludes(cwd: string, patterns: string[]): { path: string | null; added: string[]; error?: string } {
- const gd = git(cwd, ['rev-parse', '--git-dir']);
+ // `--git-path info/exclude` resolves the shared common git dir for a linked
+ // worktree (where `--git-dir` points at `.git/worktrees/<name>` and its own
+ // `info/exclude` is never read by Git). A plain checkout resolves the same
+ // `.git/info/exclude` as before.
+ const gd = git(cwd, ['rev-parse', '--git-path', 'info/exclude']);
  if (gd.error) return { path: null, added: [], error: gd.error.message };
  if (gd.status !== 0) return { path: null, added: [] };
  const raw = (gd.stdout || '').trim();
  if (!raw) return { path: null, added: [] };
- const gitDir = isAbsolute(raw) ? raw : resolve(cwd, raw);
- const excludePath = join(gitDir, 'info', 'exclude');
+ const excludePath = isAbsolute(raw) ? raw : resolve(cwd, raw);
  let existing = '';
  try { existing = readFileSync(excludePath, 'utf8'); } catch { /* an absent exclude file is the normal case */ }
  const lines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
@@ -89,6 +92,183 @@ export function ensureLocalExcludes(cwd: string, patterns: string[]): { path: st
   return { path: excludePath, added: [], error: e?.message || String(e) };
  }
  return { path: excludePath, added: wanted };
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in isolation setup: links, copies and setup commands.
+//
+// `isolationSetup` lets a repo with gitignored dependencies (node_modules,
+// virtualenvs, build caches) provision the detached worktree before any paid
+// worker or independent check runs. It is ignored when `isolation` is `none`.
+// ---------------------------------------------------------------------------
+
+export type IsolationSetupLink = { from: string; to: string };
+export type IsolationSetupCommand = { command: string; args?: string[]; cwd?: string };
+export type IsolationSetup = {
+ links?: IsolationSetupLink[];
+ copy?: string[];
+ commands?: IsolationSetupCommand[];
+};
+
+const SETUP_FIELDS = ['links', 'copy', 'commands'] as const;
+const LINK_FIELDS = ['from', 'to'] as const;
+const COMMAND_FIELDS = ['command', 'args', 'cwd'] as const;
+
+/** A relative, non-empty path that does not escape its base via `..`. The base
+ * is implicit here (source or worktree), so an absolute path or any `..`
+ * segment is rejected before it can reach the filesystem. */
+function relativeSetupPath(v: unknown): v is string {
+ if (typeof v !== 'string' || !v.trim()) return false;
+ if (isAbsolute(v)) return false;
+ return !v.replace(/\\/g, '/').split('/').includes('..');
+}
+
+/** Validate the contract `isolationSetup` shape before any paid call. Throws
+ * with an actionable message; malformed entries are never coerced. */
+export function validateIsolationSetup(setup: unknown): void {
+ if (setup === undefined || setup === null) return;
+ if (typeof setup !== 'object' || Array.isArray(setup)) throw Error('Invalid isolationSetup (expected an object)');
+ for (const k of Object.keys(setup as any)) if (!(SETUP_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup field: ${k}`);
+ const s = setup as IsolationSetup;
+ if (s.links !== undefined) {
+  if (!Array.isArray(s.links)) throw Error('Invalid isolationSetup.links (expected an array)');
+  for (const l of s.links) {
+   if (!l || typeof l !== 'object' || Array.isArray(l)) throw Error('Invalid isolationSetup.links entry (expected an object)');
+   for (const k of Object.keys(l)) if (!(LINK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.links field: ${k}`);
+   if (!relativeSetupPath((l as any).from)) throw Error('Invalid isolationSetup.links.from (expected a relative path)');
+   if (!relativeSetupPath((l as any).to)) throw Error('Invalid isolationSetup.links.to (expected a relative path)');
+  }
+ }
+ if (s.copy !== undefined) {
+  if (!Array.isArray(s.copy)) throw Error('Invalid isolationSetup.copy (expected an array)');
+  for (const p of s.copy) if (!relativeSetupPath(p)) throw Error('Invalid isolationSetup.copy entry (expected a relative path)');
+ }
+ if (s.commands !== undefined) {
+  if (!Array.isArray(s.commands)) throw Error('Invalid isolationSetup.commands (expected an array)');
+  for (const c of s.commands) {
+   if (!c || typeof c !== 'object' || Array.isArray(c)) throw Error('Invalid isolationSetup.commands entry (expected an object)');
+   for (const k of Object.keys(c)) if (!(COMMAND_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.commands field: ${k}`);
+   if (typeof (c as any).command !== 'string' || !(c as any).command.trim()) throw Error('Invalid isolationSetup.commands.command (expected a non-empty string)');
+   if ((c as any).args !== undefined && (!Array.isArray((c as any).args) || (c as any).args.some((a: any) => typeof a !== 'string'))) throw Error('Invalid isolationSetup.commands.args (expected an array of strings)');
+   if ((c as any).cwd !== undefined && !relativeSetupPath((c as any).cwd)) throw Error('Invalid isolationSetup.commands.cwd (expected a relative path)');
+  }
+ }
+}
+
+/** Read the project `isolationSetup` value from delivery.config.json. Returns
+ * undefined when the file is absent, unreadable or carries no such key. The
+ * contract field, when present, takes precedence over this. */
+export function configuredIsolationSetup(cwd: string): unknown {
+ try {
+  const j = JSON.parse(readFileSync(join(cwd, 'delivery.config.json'), 'utf8'));
+  return j?.isolationSetup;
+ } catch { return undefined; }
+}
+
+export type IsolationSetupStep = { kind: 'link' | 'copy' | 'command'; target: string; ok: boolean; output?: string; error?: string };
+export type IsolationSetupResult = { ok: boolean; error?: string; steps: IsolationSetupStep[]; logPath: string | null; excludePatterns: string[] };
+
+/** Recursively copy a file, directory or symlink, preserving relative shape. */
+function copyRecursive(src: string, dest: string): void {
+ const st = lstatSync(src);
+ if (st.isSymbolicLink()) {
+  mkdirSync(dirname(dest), { recursive: true });
+  symlinkSync(readlinkSync(src), dest);
+ } else if (st.isDirectory()) {
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src)) copyRecursive(join(src, entry), join(dest, entry));
+ } else {
+  mkdirSync(dirname(dest), { recursive: true });
+  copyFileSync(src, dest);
+ }
+}
+
+/** Provision an isolated worktree from an `isolationSetup` spec. Every link is
+ * a symlink at `<worktree>/<to>` pointing at `<source>/<from>`, every copy keeps
+ * its relative path, and every command runs with argv (no shell) inside
+ * `<worktree>/<cwd>` bounded by the remaining wall deadline and the per-tool
+ * timeout. Output is written to `isolation-setup.log` in the artifact dir. The
+ * returned `excludePatterns` are the linked/copied paths to add to the local
+ * exclude before change evidence is collected. A failure stops at the first
+ * failing step and is reported, never silently skipped. */
+export function provisionIsolationSetup(
+ setup: IsolationSetup,
+ sourceCwd: string,
+ worktreeCwd: string,
+ artifactDir: string,
+ opts: { deadlineAt: number; checkTimeoutMs: number },
+): IsolationSetupResult {
+ const steps: IsolationSetupStep[] = [];
+ const lines: string[] = [];
+ const excludePatterns: string[] = [];
+ const logPath = artifactDir ? join(artifactDir, 'isolation-setup.log') : null;
+ const finish = (error?: string): IsolationSetupResult => {
+  if (logPath) { try { writeFileSync(logPath, `${lines.join('\n')}\n`); } catch { /* the log is best effort */ } }
+  return { ok: !error, ...(error ? { error } : {}), steps, logPath, excludePatterns };
+ };
+
+ for (const link of setup.links ?? []) {
+  const source = join(sourceCwd, link.from);
+  const target = join(worktreeCwd, link.to);
+  try {
+   if (!existsSync(source)) throw Error(`source does not exist: ${source}`);
+   mkdirSync(dirname(target), { recursive: true });
+   symlinkSync(source, target, statSync(source).isDirectory() ? 'dir' : 'file');
+   excludePatterns.push(`/${link.to}`);
+   steps.push({ kind: 'link', target: link.to, ok: true });
+   lines.push(`link ${link.to} -> ${source}`);
+  } catch (e: any) {
+   const message = e?.message || String(e);
+   steps.push({ kind: 'link', target: link.to, ok: false, error: message });
+   lines.push(`link ${link.to} FAILED: ${message}`);
+   return finish(`link ${link.to}: ${message}`);
+  }
+ }
+
+ for (const rel of setup.copy ?? []) {
+  const source = join(sourceCwd, rel);
+  const target = join(worktreeCwd, rel);
+  try {
+   if (!existsSync(source)) throw Error(`source does not exist: ${source}`);
+   copyRecursive(source, target);
+   excludePatterns.push(`/${rel}`);
+   steps.push({ kind: 'copy', target: rel, ok: true });
+   lines.push(`copy ${rel} <- ${source}`);
+  } catch (e: any) {
+   const message = e?.message || String(e);
+   steps.push({ kind: 'copy', target: rel, ok: false, error: message });
+   lines.push(`copy ${rel} FAILED: ${message}`);
+   return finish(`copy ${rel}: ${message}`);
+  }
+ }
+
+ for (const cmd of setup.commands ?? []) {
+  const cwd = join(worktreeCwd, cmd.cwd ?? '.');
+  const remaining = opts.deadlineAt - Date.now();
+  if (remaining <= 0) {
+   steps.push({ kind: 'command', target: cmd.command, ok: false, error: 'wall deadline exceeded before setup command' });
+   lines.push(`command ${cmd.command} SKIPPED: wall deadline exceeded`);
+   return finish('wall deadline exceeded before setup command');
+  }
+  const timeout = Math.max(1, Math.min(opts.checkTimeoutMs > 0 ? opts.checkTimeoutMs : remaining, remaining));
+  const r = spawnSync(cmd.command, cmd.args ?? [], { cwd, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
+  const output = `${r.stdout || ''}${r.stderr || ''}`;
+  if (output) lines.push(`command ${[cmd.command, ...(cmd.args ?? [])].join(' ')} output:\n${output}`);
+  if (r.error) {
+   steps.push({ kind: 'command', target: cmd.command, ok: false, error: r.error.message, output });
+   lines.push(`command ${cmd.command} FAILED: ${r.error.message}`);
+   return finish(`command ${cmd.command}: ${r.error.message}`);
+  }
+  if (r.status !== 0) {
+   steps.push({ kind: 'command', target: cmd.command, ok: false, error: `exit ${r.status}`, output });
+   lines.push(`command ${cmd.command} FAILED: exit ${r.status}`);
+   return finish(`command ${cmd.command} exited ${r.status}`);
+  }
+  steps.push({ kind: 'command', target: cmd.command, ok: true, output });
+  lines.push(`command ${cmd.command} ok`);
+ }
+
+ return finish();
 }
 
 /** Remove a registered linked worktree and deregister it. Uses no `--force`, so

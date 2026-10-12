@@ -75,6 +75,15 @@ manual commit or stash.
   checkout and runs Pi and checks there; the source index is never edited
   implicitly. Worktree isolation refuses a dirty source, so commit or review
   your work first, or pass `isolation: "none"` explicitly.
+- Repos with gitignored dependencies can opt into provisioning with
+  `isolationSetup` (or the same key in `delivery.config.json`; the contract
+  wins). Each `links` entry creates a symlink in the worktree pointing at the
+  source path, each `copy` entry copies the relative path, and each `commands`
+  entry runs with argv (no shell) bounded by the remaining deadline and
+  `checkTimeoutMs`. Setup output goes to `isolation-setup.log`; a failure ends
+  the run as `isolation_setup_failed` before Pi starts, and linked or copied
+  paths are excluded from change evidence. `isolationSetup` is ignored when
+  isolation is `none`.
 - A run is bounded by a total wall deadline and a tool watchdog; the `quiet`
   setting only reports a no-output interval and is **not** a hard deadline. The
   process group is cancelled on interrupt and execution/session locks are
