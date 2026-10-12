@@ -52,7 +52,10 @@ Create a JSON contract in the target workspace:
 
 `cwd` is where edits and checks run; task paths passed to the CLI should be
 absolute. `isolation` defaults to `worktree` for `handoff`; pass `"none"` to run
-in place. Contract scope is instruction, not a sandbox guarantee.
+in place. To ground the readiness classifier and worker in existing code, add a
+`context` array of `{path, start?, end?}` entries (relative to `cwd`, 1-based
+inclusive lines) for bounded excerpts. Contract scope is instruction, not a
+sandbox guarantee.
 
 ```bash
 node <cli> validate /absolute/task.json

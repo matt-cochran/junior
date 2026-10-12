@@ -2220,3 +2220,89 @@ test('Evidence collected from a subdirectory cwd still reports a change elsewher
  writeFileSync(join(repo.dir,'shared.txt'),'changed\n');
  assert.equal(collectGitEvidence(join(repo.dir,'pkg')).changedFiles.some((f:any)=>f.path==='shared.txt'),true);
 });
+
+// --- B05 verified code context for the Jev readiness preflight ---
+test('validate accepts a well-formed context entry',()=>{
+ const t=task(0,{context:[{path:'src/a.ts',start:2,end:9}]});
+ assert.doesNotThrow(()=>validate(t));
+});
+test('validate rejects a non-array context',()=>{
+ assert.throws(()=>validate(task(0,{context:'src/a.ts'})),/context \(expected an array\)/);
+});
+test('validate rejects an absolute context path',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:join(tmpdir(),'a.ts')}]})),/context\.path \(expected a relative path\)/);
+});
+test('validate rejects a context path escaping cwd via dotdot',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'../outside.ts'}]})),/context\.path \(outside the workspace\)/);
+});
+test('validate rejects a context start that is not a positive integer',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'a.ts',start:0}]})),/context\.start \(expected a positive integer\)/);
+});
+test('validate rejects a context range whose start exceeds its end',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:'a.ts',start:5,end:2}]})),/context start must not exceed end/);
+});
+test('validate rejects more than twenty context entries',()=>{
+ const context=Array.from({length:21},(_,i)=>({path:`f${i}.ts`}));
+ assert.throws(()=>validate(task(0,{context})),/at most 20 context entries/);
+});
+test('validate rejects a non-string context path',()=>{
+ assert.throws(()=>validate(task(0,{context:[{path:7}]})),/context\.path \(expected a non-empty string\)/);
+});
+
+const capturePreflight=async(t:any)=>{ let seen:any; const classifier:any=async({state}:any)=>{seen=state;return {stopReason:'stop',answers:JEVPASS};}; await assessPreflight(t,classifier); return seen; };
+const contextdir=(name:string,body:string)=>{const dir=mkdtempSync(join(tmpdir(),'delivery-ctx-'));writeFileSync(join(dir,name),body);return dir;};
+
+test('Classifier state carries the resolved excerpt text for a context entry',async()=>{
+ const dir=contextdir('a.ts','line one\nline two\nline three\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'a.ts'}]}));
+ assert.match(seen.context[0].text,/line two/);
+});
+test('An out-of-range context end is clamped to the file length',async()=>{
+ const dir=contextdir('a.ts','a\nb\nc\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'a.ts',start:1,end:99}]}));
+ assert.equal(seen.context[0].end,3);
+});
+test('An unreadable context path yields a classifier error entry',async()=>{
+ const dir=contextdir('present.ts','x\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'missing.ts'}]}));
+ assert.ok(seen.context[0].error);
+});
+test('Blocking assumptions instructions name the independent checks',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.match(questions.blocking_assumptions.instructions,/independent checks/);
+});
+test('Blocking assumptions instructions name the provided code context',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.match(questions.blocking_assumptions.instructions,/code context/);
+});
+test('Worker prompt includes a Code context heading for a contract context entry',async()=>{
+ const dir=contextdir('a.ts','alpha\n');
+ const r=await run(task(0,{cwd:dir,workflow:'test_first',context:[{path:'a.ts'}]}),true);
+ assert.match(readFileSync(join(r.artifactDir,'prompt.txt'),'utf8'),/Code context/);
+});
+test('Worker prompt includes the resolved context excerpt text',async()=>{
+ const dir=contextdir('a.ts','alpha\n');
+ const r=await run(task(0,{cwd:dir,workflow:'test_first',context:[{path:'a.ts'}]}),true);
+ assert.match(readFileSync(join(r.artifactDir,'prompt.txt'),'utf8'),/alpha/);
+});
+test('A context entry longer than 200 lines keeps exactly 200 lines',async()=>{
+ const dir=contextdir('big.ts',Array.from({length:250},(_,i)=>`line ${i+1}`).join('\n')+'\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'big.ts'}]}));
+ assert.equal(seen.context[0].text.split('\n').length,200);
+});
+test('A context entry cut to the line cap is marked truncated',async()=>{
+ const dir=contextdir('big.ts',Array.from({length:250},(_,i)=>`line ${i+1}`).join('\n')+'\n');
+ const seen=await capturePreflight(task(0,{cwd:dir,context:[{path:'big.ts'}]}));
+ assert.equal(seen.context[0].truncated,true);
+});
+test('Total resolved context text never exceeds 40000 characters',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-ctx-'));
+ for(let i=0;i<5;i++) writeFileSync(join(dir,`f${i}.ts`),Array.from({length:200},()=>'x'.repeat(80)).join('\n')+'\n');
+ const context=Array.from({length:5},(_,i)=>({path:`f${i}.ts`}));
+ const seen=await capturePreflight(task(0,{cwd:dir,context}));
+ assert.ok(seen.context.reduce((n:number,e:any)=>n+(e.text?.length??0),0)<=40000);
+});

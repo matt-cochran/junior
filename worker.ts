@@ -28,7 +28,7 @@ export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot
  * directly at the top level. Unknown fields are rejected so a typo or an
  * unsupported feature fails before any paid call instead of being ignored. */
 export const TASK_FIELDS = [
- 'id','deliverable','cwd','acceptance','checks','constraints',
+ 'id','deliverable','cwd','acceptance','checks','constraints','context',
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
@@ -92,6 +92,88 @@ export function resolveCheckCwd(cwd:unknown, sourceCwd:string, executionCwd:stri
  return {error:`Invalid check.cwd (outside the workspace): ${raw}`};
 }
 
+export const CONTEXT_MAX_ENTRIES = 20;
+export const CONTEXT_MAX_LINES = 200;
+export const CONTEXT_MAX_CHARS = 40000;
+
+/** A contract `context` entry: a path relative to the contract cwd, with an
+ * optional 1-based inclusive line window. */
+export type ContextEntry = { path:string; start?:number; end?:number };
+/** A context entry resolved against the contract cwd. `text` holds the bounded
+ * excerpt; `error` is set instead when the file cannot be read; `truncated`
+ * marks an excerpt cut to the per-entry or total bound. */
+export type ResolvedContextEntry = { path:string; start?:number; end?:number; text?:string; error?:string; truncated?:boolean };
+
+/** Validate the contract `context` array shape before any paid call. Paths must
+ * be relative, stay inside the contract cwd, and use 1-based inclusive line
+ * bounds. */
+export function validateContext(context:unknown, cwd:string):void {
+ if (!Array.isArray(context)) throw Error('Invalid context (expected an array)');
+ if (context.length > CONTEXT_MAX_ENTRIES) throw Error(`Invalid context (at most ${CONTEXT_MAX_ENTRIES} context entries)`);
+ for (const e of context) {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) throw Error('Invalid context entry (expected an object)');
+  for (const k of Object.keys(e)) if (!['path','start','end'].includes(k)) throw Error(`Unknown context field: ${k}`);
+  if (typeof e.path !== 'string' || !e.path.trim()) throw Error('Invalid context.path (expected a non-empty string)');
+  if (isAbsolute(e.path)) throw Error('Invalid context.path (expected a relative path)');
+  const abs=resolve(resolve(cwd), e.path);
+  if (!withinWorkspace(resolve(cwd), abs)) throw Error(`Invalid context.path (outside the workspace): ${e.path}`);
+  if (e.start !== undefined && (typeof e.start !== 'number' || !Number.isInteger(e.start) || e.start < 1)) throw Error('Invalid context.start (expected a positive integer)');
+  if (e.end !== undefined && (typeof e.end !== 'number' || !Number.isInteger(e.end) || e.end < 1)) throw Error('Invalid context.end (expected a positive integer)');
+  if (e.start !== undefined && e.end !== undefined && e.start > e.end) throw Error('Invalid context range (context start must not exceed end)');
+ }
+}
+
+/** Resolve the contract `context` entries from the contract cwd into bounded
+ * excerpts. Never throws: an unreadable file yields an `error` entry, an
+ * out-of-range end is clamped to the file length, at most 200 lines per entry
+ * and 40000 characters in total are kept, and truncated entries are marked. */
+export function resolveContext(t:any):ResolvedContextEntry[] {
+ if (!Array.isArray(t?.context) || !t.context.length) return [];
+ const cwd=resolve(String(t.cwd ?? '.'));
+ const entries=t.context.slice(0, CONTEXT_MAX_ENTRIES);
+ let totalChars=0;
+ return entries.map((e:any):ResolvedContextEntry=>{
+  const rel=typeof e?.path==='string' ? e.path : '';
+  const abs=resolve(cwd, rel);
+  if (!rel || !withinWorkspace(cwd, abs)) return {path:rel,error:'outside the workspace'};
+  let raw:string;
+  try { raw=readFileSync(abs,'utf8'); }
+  catch(err) { return {path:rel,error:msg(err)}; }
+  const allLines=raw.split('\n');
+  if (allLines.length>1 && allLines[allLines.length-1]==='') allLines.pop();
+  const fileLength=allLines.length;
+  const start=Number.isInteger(e.start) && e.start>=1 ? e.start : 1;
+  let end=Number.isInteger(e.end) && e.end>=1 ? e.end : fileLength;
+  end=Math.min(end, fileLength);
+  let truncated=false;
+  const lineCap=start+CONTEXT_MAX_LINES-1;
+  if (end>lineCap) { end=lineCap; truncated=true; }
+  let text=end>=start ? allLines.slice(start-1,end).join('\n') : '';
+  if (totalChars+text.length>CONTEXT_MAX_CHARS) {
+   text=text.slice(0, Math.max(0, CONTEXT_MAX_CHARS-totalChars));
+   truncated=true;
+  }
+  totalChars+=text.length;
+  const out:ResolvedContextEntry={path:rel,start,end,text};
+  if (truncated) out.truncated=true;
+  return out;
+ });
+}
+
+/** Render resolved context entries as the worker prompt's `Code context`
+ * block, or null when there is no readable excerpt. */
+export function codeContextBlock(entries:ResolvedContextEntry[]):string|null {
+ const usable=(entries||[]).filter(e=>e && typeof e.text==='string');
+ if (!usable.length) return null;
+ const lines=['Code context (excerpts resolved from the contract cwd; not the full files):'];
+ for (const e of usable) {
+  const range=e.start!==undefined && e.end!==undefined ? ` lines ${e.start}-${e.end}` : '';
+  lines.push(`--- ${e.path}${range}${e.truncated?' (truncated)':''} ---`);
+  lines.push(e.text as string);
+ }
+ return lines.join('\n');
+}
+
 export function validate(t: any) {
  for (const k of ['id','deliverable','cwd']) if (typeof t[k] !== 'string' || !t[k].trim()) throw Error(`Missing ${k}`);
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
@@ -116,6 +198,7 @@ export function validate(t: any) {
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');
  if (t.maxRepairs !== undefined && (typeof t.maxRepairs !== 'number' || !Number.isInteger(t.maxRepairs) || t.maxRepairs < 0)) throw Error('Invalid maxRepairs (expected a nonnegative integer)');
  if (t.lineageDeadlineMs !== undefined && (typeof t.lineageDeadlineMs !== 'number' || !Number.isFinite(t.lineageDeadlineMs) || t.lineageDeadlineMs <= 0)) throw Error('Invalid lineageDeadlineMs (expected a finite positive number)');
+ if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
   if (!t.jev || typeof t.jev !== 'object' || Array.isArray(t.jev)) throw Error('Invalid jev config');
@@ -750,7 +833,7 @@ export function analysisReportBlock(reportPath:string):string {
 /** Build the fixed prompt blocks for a workflow. The only variable content is
  * the task contract JSON, the deterministic report path and (for qa) the
  * grounded review context; no Jev-generated prose is inserted. */
-export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null):{ common:string; workflow:string; resume:string|null; report:string|null; review:string|null } {
+export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null):{ common:string; workflow:string; resume:string|null; report:string|null; review:string|null; context:string|null } {
  let resumeBlock:string|null=null;
  if (resume) {
   resumeBlock=[
@@ -761,14 +844,16 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
  }
  const reportBlock = reportPath ? (workflow === 'qa' ? qaReportBlock(reportPath) : analysisReportBlock(reportPath)) : null;
  const reviewBlock = reviewContext ? reviewContext : null;
- return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock};
+ const contextBlock = codeContext ? codeContextBlock(codeContext) : null;
+ return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock, context:contextBlock};
 }
 
-export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null):string {
- const parts=promptParts(workflow, resume, reportPath, reviewContext);
+export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null):string {
+ const parts=promptParts(workflow, resume, reportPath, reviewContext, codeContext);
  const blocks=[parts.common, parts.workflow];
  if (parts.report) blocks.push(parts.report);
  if (parts.review) blocks.push(parts.review);
+ if (parts.context) blocks.push(parts.context);
  if (parts.resume) blocks.push(parts.resume);
  blocks.push(`Task contract (JSON):\n${JSON.stringify(t)}`);
  return blocks.join('\n\n');
@@ -956,13 +1041,14 @@ async function invokeClassifier(
 }
 
 /** Readiness gate: is the contract clear and free of unresolved assumptions? */
-export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; timeoutMs?:number } = {}):Promise<JevPreflight> {
+export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; timeoutMs?:number; context?:ResolvedContextEntry[] } = {}):Promise<JevPreflight> {
  const state = {
   deliverable: t.deliverable,
   acceptance: t.acceptance,
   handoff: t.hopContext ?? null,
   constraints: Array.isArray(t.constraints) ? t.constraints : [],
   checks: (t.checks || []).map((c:any)=>({ command:c.command, args:c.args })),
+  context: opts.context ?? resolveContext(t),
  };
  const questions:Record<string,GateQuestion> = {
   requires_frontier: {
@@ -977,7 +1063,7 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
   },
   blocking_assumptions: {
    type:'bool',
-   instructions:'Does the contract leave unresolved assumptions that could change the implementation or make acceptance unreliable?',
+   instructions:'Does the contract leave unresolved assumptions that could change the implementation or make acceptance unreliable that the independent checks and the provided code context would not catch? Treat an assumption those checks or excerpts already resolve as non-blocking.',
    criteria:{ true:'Unresolved assumptions present', false:'No unresolved assumptions' },
   },
  };
@@ -1376,12 +1462,16 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    }
   }
 
+  // Resolve the contract code context once, before preflight, so the readiness
+  // classifier and the worker prompt see the same bounded excerpts.
+  const codeContext = resolveContext(t);
+
   // Preflight (readiness) gate runs before the worker. `auto` runs exactly one
   // extra Jev choice question inside this call.
   if (mode !== 'off' && classify && !outOfTime()) {
    jev!.attempted = true;
    try {
-    const preflight = await raceSignal(assessPreflight(t, classify, { workflowQuestion: explicitWorkflow === 'auto', timeoutMs: classifierBudget() }), signal);
+    const preflight = await raceSignal(assessPreflight(t, classify, { workflowQuestion: explicitWorkflow === 'auto', timeoutMs: classifierBudget(), context:codeContext }), signal);
     jev!.preflight = preflight;
     if (preflight.error) jev!.error = preflight.error;
    } catch (e) {
@@ -1427,7 +1517,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    return blockedResult;
   }
 
-  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext);
+  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext, codeContext);
   writeFileSync(join(dir,'prompt.txt'),prompt);
   if (reviewContext) writeFileSync(join(dir,REVIEW_CONTEXT_FILENAME),reviewContext);
 
