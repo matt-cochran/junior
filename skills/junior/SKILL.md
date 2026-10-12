@@ -175,6 +175,16 @@ deliverable is verified in a real browser.
 tools separately. `junior doctor --check-updates` also asks npm and GitHub for
 newer releases, and `junior update` adopts them and refreshes unmodified skills.
 
+## Report tool issues upstream
+
+When a companion or managed tool misbehaves, draft an upstream issue with
+`node <cli> report-issue <tool> --title "<title>" [--body-file <draft.md>] [--hop <hop.json>]`,
+show the draft to the human, and add `--file` only after explicit approval.
+Without `--file` nothing is filed; the draft includes a redacted description,
+an Environment section and (with `--hop`) the last ten evidence entries for that
+tool. `--file` checks for an open same-title issue first and `--force` is the
+only thing that overrides it.
+
 ## TRIZ
 
 Use TRIZ only for a real technical or physical contradiction, not as a general
