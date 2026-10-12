@@ -70,6 +70,8 @@ export type SetupDeps = {
  skillSource?:string;
  /** Managed prebuilt-tool root; tests inject a fixture instead of the user home. */
  toolsRoot?:string;
+ /** Injectable HTTP seam for the opt-in online credential check; tests never hit the network. */
+ fetch?:FetchLike;
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -216,6 +218,69 @@ export function checkCredentials(provider:string, deps:SetupDeps = {}):Credentia
  }
  const present=providers.includes(provider);
  return { provider, present, sources, providers:[...new Set(providers)] };
+}
+
+export const OPENROUTER_KEY_URL = 'https://openrouter.ai/api/v1/key';
+
+/** Minimal HTTP response shape the online credential check depends on. */
+export type FetchResponse = { status:number; json:()=>Promise<any> };
+/** Injectable fetch seam. The default is the runtime `fetch`; tests inject a stub. */
+export type FetchLike = (url:string, init:{ headers:Record<string,string> })=>Promise<FetchResponse>;
+
+export type OnlineCredentialCheck = {
+ provider:string;
+ /** `true`/`false` only when the provider answered; `null` when the check was inconclusive. */
+ valid:boolean|null;
+ usage:number|null;
+ limit:number|null;
+ remaining:number|null;
+ ready:boolean;
+ error?:string;
+};
+
+/** Read the provider's usable credential value for an outbound header. This is
+ * the same auth.json/env lookup `checkCredentials` uses, but it is never
+ * returned or logged; only its presence reaches the caller. */
+function readProviderKey(provider:string, deps:SetupDeps):string|null {
+ const authPath=join(agentDir(deps),'auth.json');
+ if (exists(deps,authPath)) {
+  try {
+   const j=JSON.parse(readText(deps,authPath));
+   const c:any=j?.[provider];
+   if (c && typeof c==='object') {
+    if (['api_key','api'].includes(c.type) && typeof c.key==='string' && c.key.trim()) return c.key.trim();
+    if (c.type==='oauth' && typeof c.access==='string' && c.access.trim()) return c.access.trim();
+   }
+  } catch { /* an unreadable auth file is simply no credential */ }
+ }
+ const env=deps.env ?? process.env;
+ const envVar=provider==='openrouter' ? 'OPENROUTER_API_KEY' : provider==='deepseek' ? 'DEEPSEEK_API_KEY' : null;
+ if (envVar && typeof env[envVar]==='string' && env[envVar]!.trim()) return env[envVar]!.trim();
+ return null;
+}
+
+/** Opt-in online check: ask the provider whether the local credential is valid
+ * and still has credit. Never returns or prints the credential value. */
+export async function checkCredentialsOnline(deps:SetupDeps = {}):Promise<OnlineCredentialCheck> {
+ const provider=DEFAULT_PROVIDER;
+ const base:OnlineCredentialCheck={ provider, valid:null, usage:null, limit:null, remaining:null, ready:false };
+ const key=readProviderKey(provider,deps);
+ if (!key) return { ...base, error:`no ${provider} credential present` };
+ const doFetch=deps.fetch ?? (globalThis.fetch as unknown as FetchLike | undefined);
+ if (typeof doFetch !== 'function') return { ...base, error:'fetch is unavailable in this runtime' };
+ let res:FetchResponse;
+ try {
+  res=await doFetch(OPENROUTER_KEY_URL,{ headers:{ Authorization:`Bearer ${key}` } });
+ } catch { return { ...base, error:`could not reach ${provider}` }; }
+ if (res?.status===401 || res?.status===403) return { ...base, valid:false, error:`${provider} rejected the credential (HTTP ${res.status})` };
+ if (!res || typeof res.status!=='number' || res.status<200 || res.status>=300) return { ...base, error:`${provider} key check failed (HTTP ${res?.status ?? 'unknown'})` };
+ let data:any;
+ try { data=(await res.json())?.data ?? {}; } catch { return { ...base, error:`${provider} returned an unreadable response` }; }
+ const usage=typeof data.usage==='number' ? data.usage : 0;
+ const limit=typeof data.limit==='number' ? data.limit : null;
+ const remaining=limit===null ? null : limit-usage;
+ const ready=limit===null || (remaining as number)>0;
+ return { provider, valid:true, usage, limit, remaining, ready };
 }
 
 export type ModelStoreStatus = 'missing' | 'empty' | 'populated';

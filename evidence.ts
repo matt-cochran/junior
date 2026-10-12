@@ -189,6 +189,11 @@ function inspectUntracked(cwd: string, rel: string, maxBytes: number): GitFileCh
 
 export type CollectOptions = { maxChars?: number; maxFiles?: number; maxUntrackedBytes?: number; timeoutMs?: number };
 
+/** Git pathspec that removes Junior's own run-artifact tree from every
+ * evidence query. A target checkout's `.delivery/` output is never reported as
+ * a change even when the repository-local exclude has not (yet) been written. */
+const EXCLUDE_DELIVERY_PATHSPEC = ':(exclude).delivery';
+
 /** Collect complete bounded evidence for a checkout. Returns `unavailable`
  * when the directory is not a Git work tree or git fails. */
 export function collectGitEvidence(cwd: string, opts: CollectOptions = {}): GitEvidence {
@@ -207,10 +212,12 @@ export function collectGitEvidence(cwd: string, opts: CollectOptions = {}): GitE
  const headRes = run(['rev-parse', 'HEAD']);
  const head = headRes.status === 0 ? (headRes.stdout || '').trim() : null;
 
- const statRes = run(['diff', 'HEAD', '--stat']);
- const diffRes = run(['diff', 'HEAD']);
- const nameRes = run(['diff', '--name-status', '-z', '-M', 'HEAD']);
- const untrackedRes = run(['ls-files', '--others', '--exclude-standard', '-z']);
+ // `:/` keeps diffs repository-wide (as without a pathspec) even from a
+ // subdirectory cwd; only the cwd's own `.delivery/` tree is removed.
+ const statRes = run(['diff', 'HEAD', '--stat', '--', ':/', EXCLUDE_DELIVERY_PATHSPEC]);
+ const diffRes = run(['diff', 'HEAD', '--', ':/', EXCLUDE_DELIVERY_PATHSPEC]);
+ const nameRes = run(['diff', '--name-status', '-z', '-M', 'HEAD', '--', ':/', EXCLUDE_DELIVERY_PATHSPEC]);
+ const untrackedRes = run(['ls-files', '--others', '--exclude-standard', '-z', '--', '.', EXCLUDE_DELIVERY_PATHSPEC]);
  const gitError = statRes.error?.message || diffRes.error?.message || nameRes.error?.message || untrackedRes.error?.message;
  if (gitError || statRes.status !== 0 || diffRes.status !== 0 || nameRes.status !== 0 || untrackedRes.status !== 0) {
   const ev = boundEvidence(statRes.stdout || '', diffRes.stdout || '', maxChars, gitError || 'git diff unavailable');

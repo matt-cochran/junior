@@ -5,7 +5,7 @@ import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
-import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, type IsolationMode, type LockHandle } from './isolation.ts';
+import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, type IsolationMode, type LockHandle } from './isolation.ts';
 import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, DEFAULT_MAX_OUTPUT_BYTES, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
 import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
 
@@ -826,7 +826,18 @@ export type GateUsage = {
  cost:{ total:number; available:boolean };
 };
 
-export type JevAttention = { target:'commodity'|'frontier'|'manager'; decision:'delegate'|'frontier_required'|'uncertain'|'clarify'; reason:string; probability:number|null };
+export type JevAttention = {
+ target:'commodity'|'frontier'|'manager';
+ decision:'delegate'|'frontier_required'|'uncertain'|'clarify';
+ /** The classifier question whose answer drove this decision. */
+ trigger:'requires_frontier'|'contract_clear'|'blocking_assumptions'|'error';
+ /** Confidence threshold at which a bool answer becomes a definitive verdict. */
+ threshold:number;
+ /** Reported P(true) for each readiness question, or null when unanswered. */
+ probabilities:{ requires_frontier:number|null; contract_clear:number|null; blocking_assumptions:number|null };
+ reason:string;
+ probability:number|null;
+};
 
 export type JevPreflight = {
  attention:JevAttention;
@@ -891,6 +902,23 @@ function boolVerdict(a:GateAnswer):{verdict:'true'|'false'|'uncertain'; probabil
  if (p >= CONFIDENCE_THRESHOLD) return {verdict:'true',probability:p};
  if (p <= 1 - CONFIDENCE_THRESHOLD) return {verdict:'false',probability:p};
  return {verdict:'uncertain',probability:p};
+}
+
+/** Human-readable reason naming the contract_clear answer and its distance from
+ * the real threshold. */
+function contractClarifyReason(p:number|null):string {
+ return p === null
+  ? 'contract not judged clear: no classifier probability'
+  : `contract not judged clear: P(contract_clear)=${p} < ${CONFIDENCE_THRESHOLD}`;
+}
+
+/** Human-readable reason for a blocking-assumptions clarify, distinguishing a
+ * positive detection from an answer that merely failed to rule assumptions out. */
+function assumptionClarifyReason(v:{verdict:'true'|'false'|'uncertain'; probability:number|null}):string {
+ if (v.probability === null) return 'blocking assumptions not ruled out: no classifier probability';
+ return v.verdict === 'true'
+  ? `blocking assumption detected: P(blocking_assumptions)=${v.probability} >= ${CONFIDENCE_THRESHOLD}`
+  : `blocking assumptions not ruled out: P(blocking_assumptions)=${v.probability} > ${1-CONFIDENCE_THRESHOLD}`;
 }
 
 /** Upper bound for a single classifier answer; a hung classifier cannot stall
@@ -970,13 +998,18 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
  const frontier = boolVerdict(answers.requires_frontier);
  const clear = boolVerdict(answers.contract_clear);
  const assumptions = boolVerdict(answers.blocking_assumptions);
- const attention:JevAttention = error || frontier.verdict === 'uncertain'
-  ? {target:'manager',decision:'uncertain',reason:error || 'Frontier suitability is uncertain or missing; manager assessment required.',probability:frontier.probability}
-  : frontier.verdict === 'true'
-   ? {target:'frontier',decision:'frontier_required',reason:'Jev recommends frontier attention for the task scope and decision requirements.',probability:frontier.probability}
-   : clear.verdict !== 'true' || assumptions.verdict !== 'false'
-    ? {target:'manager',decision:'clarify',reason:'Clarify the contract or unresolved assumptions before delegation.',probability:frontier.probability}
-    : {target:'commodity',decision:'delegate',reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability};
+ const probabilities = { requires_frontier:frontier.probability, contract_clear:clear.probability, blocking_assumptions:assumptions.probability };
+ const attention:JevAttention = error
+  ? {target:'manager',decision:'uncertain',trigger:'error',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:error,probability:frontier.probability}
+  : frontier.verdict === 'uncertain'
+   ? {target:'manager',decision:'uncertain',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Frontier suitability is uncertain or missing; manager assessment required.',probability:frontier.probability}
+   : frontier.verdict === 'true'
+    ? {target:'frontier',decision:'frontier_required',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Jev recommends frontier attention for the task scope and decision requirements.',probability:frontier.probability}
+    : clear.verdict !== 'true'
+     ? {target:'manager',decision:'clarify',trigger:'contract_clear',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:contractClarifyReason(clear.probability),probability:clear.probability}
+     : assumptions.verdict !== 'false'
+      ? {target:'manager',decision:'clarify',trigger:'blocking_assumptions',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:assumptionClarifyReason(assumptions),probability:assumptions.probability}
+      : {target:'commodity',decision:'delegate',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability};
  const base = { attention, answers, confidence, usage, reportedProvider:result?.provider, reportedModel:result?.model };
  // A gate error is not a pass or a definite block: it is uncertain.
  if (error) return { status:'uncertain', ...base, error };
@@ -1141,10 +1174,14 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  const runStartedAt=Date.now();
  const settings=resolveExecutionSettings(t);
  const sourceCwd=resolve(t.cwd);
+ const isolation=resolveIsolation(t).mode;
+ // Record Junior's own run-artifact tree in the repository-local exclude before
+ // the first artifact is written, so `.delivery/` never surfaces as a target
+ // change. A non-git cwd has nothing to touch and is left alone.
+ ensureLocalExcludes(sourceCwd, ['/.delivery/']);
  const stamp=String(Date.now());
  const dir=join(sourceCwd,'.delivery',t.id,stamp);
  mkdirSync(dir,{recursive:true});
- const isolation=resolveIsolation(t).mode;
  const defaults=loadDefaults(sourceCwd);
  const provider=typeof t.provider==='string' && t.provider.trim() ? t.provider : defaults.provider;
  const model=typeof t.model==='string' && t.model.trim() ? t.model : defaults.model;

@@ -14,7 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { run, validate, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, type InitOptions } from './setup.ts';
+import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, type InitOptions } from './setup.ts';
 import { inspectCompanions } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
@@ -29,7 +29,7 @@ function usage(): string {
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...            persistent FMECA / CPM / Crossmatrix handoff',
-  '  doctor  [--check-updates]               read-only readiness check (--check-updates asks npm/GitHub for newer tools)',
+  '  doctor  [--check-updates] [--online]     read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]',
   '          remove inactive clean retained Junior worktrees',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
@@ -75,8 +75,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior status <result.json> [--full]' },
- doctor: { flags: ['--check-updates'], valueFlags: [], min: 0, max: 0,
-  help: 'Usage: junior doctor [--check-updates]' },
+ doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
+  help: 'Usage: junior doctor [--check-updates] [--online]' },
  update: {
   flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -162,6 +162,9 @@ async function main(argv: string[]): Promise<void> {
 
  if (command === 'doctor') {
   const result:any = doctor();
+  if (parsed.flags.has('--online')) {
+   result.credentialsOnline = await checkCredentialsOnline();
+  }
   if (parsed.flags.has('--check-updates')) {
    const installer = await import('./installer.ts');
    const managed = await installer.checkToolUpdates();

@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
- jevMode,boundEvidence,boundedGitEvidence,resolveClassifierModel,
+ jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
  estimateCost,validatePricing,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
@@ -16,7 +16,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
  ToolWatchdog,EXECUTION_DEFAULTS } from './worker.ts';
-import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
+import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
@@ -2087,4 +2087,136 @@ test('A tracked file a companion installer edits is reported, not excluded',()=>
 test('Doctor reports companion tools separately from Pi readiness',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
  assert.equal((doctor(setupDeps(cwd)) as any).companions.ready,false);
+});
+
+// --- Jev attention field resolution (issue #11/#18) ---
+test('Delegate attention names the frontier question as its trigger',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.equal(pre.attention.trigger,'requires_frontier');
+});
+test('Clarify attention from an unclear contract names the contract_clear question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.trigger,'contract_clear');
+});
+test('Clarify attention from an unclear contract carries the contract_clear probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.41),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.probability,0.41);
+});
+test('Clarify attention from a blocking assumption names the blocking_assumptions question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83)}));
+ assert.equal(pre.attention.trigger,'blocking_assumptions');
+});
+test('Clarify attention from a blocking assumption carries the blocking_assumptions probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83)}));
+ assert.equal(pre.attention.probability,0.83);
+});
+test('Attention reports every classifier question probability',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.deepEqual(pre.attention.probabilities,{requires_frontier:0.05,contract_clear:0.95,blocking_assumptions:0.05});
+});
+test('Attention reports the confidence threshold',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.equal(pre.attention.threshold,0.6);
+});
+test('Classifier failure marks the attention trigger as error',async()=>{
+ const pre=await assessPreflight(task(),outage);
+ assert.equal(pre.attention.trigger,'error');
+});
+test('Clarify reason cites the contract_clear probability against the real threshold',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.41),blocking_assumptions:bool(0.05)}));
+ assert.equal(pre.attention.reason,'contract not judged clear: P(contract_clear)=0.41 < 0.6');
+});
+test('Compact receipt exposes the attention trigger',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.equal(compactHandoff(r).attention.trigger,'contract_clear');
+});
+
+// --- B01 run artifacts never appear as target-checkout changes (real Git fixtures) ---
+const artifactTask=(repo:any,extra:any={})=>({id:'b01',deliverable:'artifact isolation',cwd:repo.dir,acceptance:['checks pass'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],...extra});
+const deliveryPath=(p:string)=>p==='.delivery'||p.startsWith('.delivery/');
+
+test('An isolation none mock run reports no .delivery path in changedFiles',async()=>{
+ const repo=initRepo();
+ const r=await run(artifactTask(repo),true);
+ assert.equal(r.evidence.changedFiles.some((f:any)=>deliveryPath(f.path)),false);
+});
+
+test('An isolation none mock run reports no .delivery path in runChangedFiles',async()=>{
+ const repo=initRepo();
+ const r=await run(artifactTask(repo),true);
+ assert.equal(r.evidence.runChangedFiles.some((f:any)=>deliveryPath(f.path)),false);
+});
+
+test('An isolation none mock run leaves no .delivery entry in git status',async()=>{
+ const repo=initRepo();
+ await run(artifactTask(repo),true);
+ const status=spawnSync('git',['status','--porcelain'],{cwd:repo.dir,encoding:'utf8'}).stdout;
+ assert.equal(status.includes('.delivery'),false);
+});
+
+test('An isolation none run records the run-artifact tree in the repository-local exclude',async()=>{
+ const repo=initRepo();
+ await run(artifactTask(repo),true);
+ assert.match(readFileSync(join(repo.dir,'.git','info','exclude'),'utf8'),/^\/\.delivery\/$/m);
+});
+
+test('A mock run in a non-git cwd completes without a repository-local exclude',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-nogit-'));
+ const r=await run({id:'b01',deliverable:'artifact isolation',cwd,acceptance:['checks pass'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]},true);
+ assert.equal(r.status,'simulation_passed');
+});
+
+// --- B09 opt-in online credential check (injected fetch; never real network) ---
+const onlineAgent=(cwd:string,key:string)=>{const agent=writeAgent(cwd,{auth:{openrouter:{type:'api',key}}});return {agent};};
+
+test('Online credential check reports a funded openrouter key as ready',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-funded');
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:2,limit:10}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.ready,true);
+});
+test('Online credential check marks a rejected openrouter key as invalid',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-rejected');
+ const fetch=async()=>({status:401,json:async()=>({})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.valid,false);
+});
+test('Online credential check reports an exhausted openrouter key as not ready',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-exhausted');
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:10,limit:10}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(r.ready,false);
+});
+test('Online credential check never serializes the provider key',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const key='sk-or-super-secret-online';
+ const {agent}=onlineAgent(cwd,key);
+ const fetch=async()=>({status:200,json:async()=>({data:{usage:0,limit:5}})});
+ const r=await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.ok(!JSON.stringify(r).includes(key));
+});
+test('Online credential check sends the bearer key to the openrouter key endpoint',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const {agent}=onlineAgent(cwd,'sk-or-wire');
+ let captured:any;
+ const fetch=async(url:string,init:any)=>{captured={url,headers:init.headers};return {status:200,json:async()=>({data:{usage:0,limit:5}})};};
+ await checkCredentialsOnline(setupDeps(cwd,{env:{PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.deepEqual(captured,{url:'https://openrouter.ai/api/v1/key',headers:{Authorization:'Bearer sk-or-wire'}});
+});
+test('Offline doctor performs no online credential request',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-online-'));
+ const bin=withPiDir(cwd); const {agent}=onlineAgent(cwd,'sk-or-offline');
+ let calls=0;
+ const fetch=async()=>{calls++;return {status:200,json:async()=>({data:{}})};};
+ doctor(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent},fetch}));
+ assert.equal(calls,0);
+});
+test('Evidence collected from a subdirectory cwd still reports a change elsewhere in the repository',()=>{
+ const repo=gitRepo(); mkdirSync(join(repo.dir,'pkg')); commitFile(repo,'pkg/a.txt','a\n'); commitFile(repo,'shared.txt','s\n');
+ writeFileSync(join(repo.dir,'shared.txt'),'changed\n');
+ assert.equal(collectGitEvidence(join(repo.dir,'pkg')).changedFiles.some((f:any)=>f.path==='shared.txt'),true);
 });

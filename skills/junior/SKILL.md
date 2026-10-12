@@ -120,7 +120,9 @@ All newly written or changed tests use atomic scenarios, declarative names, and 
 
 ## Frontier attention
 
-Use `jev.mode: enforce` when frontier suitability must block execution. The compact receipt's `attention` field reports the target, decision, reason and probability. `frontier_required` returns to the manager before the commodity worker starts in enforce mode; shadow remains advisory. Missing/uncertain classification is not a pass. No frontier model is called automatically. Review the classification and the contract before clarifying, re-scoping or taking over.
+Use `jev.mode: enforce` when frontier suitability must block execution. The compact receipt's `attention` field reports the target, decision, `trigger` (the question behind the decision), `reason`, `probability`, per-question `probabilities` and the `threshold` (`0.6`).
+For a clarify, `probability` is the P(true) of the triggering question (`contract_clear` when not judged clear, else `blocking_assumptions`), and the reason cites it against the threshold (`>=` for a detected blocking assumption, `<` for a contract not judged clear).
+`frontier_required` returns to the manager before the commodity worker starts in enforce mode; shadow remains advisory. Missing/uncertain classification is not a pass. No frontier model is called automatically. Review the classification and the contract before clarifying, re-scoping or taking over.
 
 ## Manager loop with CPM and FMECA
 
