@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
-import { inspectCompanions, installCompanions, installCompanionSkills,
+import { inspectCompanions, installCompanions, installCompanionSkills, installationDisabled,
  type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
@@ -482,7 +482,7 @@ export type InitResult = {
  skill:SkillResult;
  /** Exact Junior-owned paths newly added to the repository-local exclude file. */
  excluded:string[];
- install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; error?:string };
+ install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
  instructions:string[];
@@ -551,7 +551,9 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(skill, created)).added;
  let readiness=doctor(deps);
  let install:InitResult['install'];
- if (opts.install && readiness.pi.found && readiness.pi.version) {
+ if (opts.install && installationDisabled(deps.env)) {
+  install={ requested:true, attempted:false, ok:true, skipped:'JUNIOR_NO_INSTALL' };
+ } else if (opts.install && readiness.pi.found && readiness.pi.version) {
   install={requested:true,attempted:false,ok:true};
  } else if (opts.install) {
   if (!tested) {

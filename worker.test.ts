@@ -1064,7 +1064,7 @@ test('Parse init options maps --no-skill to no target',()=>{
 });
 test('junior.ts init --target=claude installs only the Claude project skill',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const home=mkdtempSync(join(tmpdir(),'delivery-home-'));
- spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude','--no-install'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent')}});
+ spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init','--target=claude','--no-install'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:home,PI_CODING_AGENT_DIR:join(home,'agent'),JUNIOR_NO_INSTALL:'1'}});
  assert.equal(existsSync(claudeSkill(cwd)),true);
 });
 
@@ -1636,7 +1636,7 @@ test('junior.ts handoff defaults to worktree isolation and prints compact JSON',
  const cfg=mkdtempSync(join(tmpdir(),'junior-cfg-'));
  const taskPath=join(cfg,'task.json');
  writeFileSync(taskPath,JSON.stringify({id:'junior-h',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
- const r=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8'});
+ const r=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(r.status,0,r.stderr);
  const o=JSON.parse(r.stdout);
  assert.equal(o.id,'junior-h');
@@ -1645,7 +1645,7 @@ test('junior.ts handoff defaults to worktree isolation and prints compact JSON',
  assert.ok(o.artifacts.result && existsSync(o.artifacts.result));
 
  writeFileSync(taskPath,JSON.stringify({id:'junior-none',deliverable:'x',cwd:repo.dir,acceptance:['ok'],isolation:'none',checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
- const r2=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8'});
+ const r2=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(r2.status,0,r2.stderr);
  assert.equal(JSON.parse(r2.stdout).execution.isolation,'none');
 });
@@ -1655,16 +1655,16 @@ test('junior.ts validate and status --full use the existing worker structures',(
  const cfg=mkdtempSync(join(tmpdir(),'junior-cfg-'));
  const taskPath=join(cfg,'t.json');
  writeFileSync(taskPath,JSON.stringify({id:'su',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
- const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8'});
+ const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(v.status,0,v.stderr);
  assert.equal(JSON.parse(v.stdout).valid,true);
- const rr=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock','--full'],{encoding:'utf8'});
+ const rr=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock','--full'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(rr.status,0,rr.stderr);
  const full=JSON.parse(rr.stdout);
  assert.equal(full.status,'simulation_passed');
  assert.ok(full.receipt && full.runtime && full.lineage);
  const resultFile=join(full.artifactDir,'result.json');
- const statusOut=spawnSync(process.execPath,['junior.ts','status',resultFile,'--full'],{encoding:'utf8'});
+ const statusOut=spawnSync(process.execPath,['junior.ts','status',resultFile,'--full'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(statusOut.status,0,statusOut.stderr);
  assert.equal(JSON.parse(statusOut.stdout).outcome,'simulation_passed');
 });
@@ -1762,7 +1762,7 @@ test('Unbounded worker output is capped and classified as truncated, not a valid
  const r=await p;
  assert.equal(r.outputTruncated,true,'truncation must be surfaced explicitly');
  assert.notEqual(r.status,'ready_for_review');
- assert.match(String(r.workerError),/truncat/i);
+ assert.match(String(r.workerError),/accumulation cap; the worker was stopped/i);
  assert.ok(existsSync(join(r.artifactDir,'evidence.json')));
 });
 
@@ -2559,4 +2559,138 @@ test('Mock run reports each check through the injected progress sink',async()=>{
  const lines:string[]=[];
  await run(task(),true,{progress:(l)=>lines.push(l)});
  assert.ok(lines.some((l)=>/^check 1\/1\b/.test(l)));
+});
+
+// --- JUNIOR_NO_INSTALL guard (issue #28) -------------------------------------
+
+test('Init with JUNIOR_NO_INSTALL and a missing Pi invokes no exec',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-noinstall-'));
+ const calls:any[]=[];
+ const deps=setupDeps(cwd,{env:{JUNIOR_NO_INSTALL:'1'},exec:(cmd:string,args:string[],opts:any)=>{calls.push({cmd,args,opts});return okExec(cmd,args);}});
+ init(deps,{install:true});
+ assert.equal(calls.length,0);
+});
+test('Init with JUNIOR_NO_INSTALL reports the Pi install as skipped',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-noinstall-'));
+ const deps=setupDeps(cwd,{env:{JUNIOR_NO_INSTALL:'1'}});
+ const r:any=init(deps,{install:true});
+ assert.equal(r.install.skipped,'JUNIOR_NO_INSTALL');
+});
+test('junior init spawned with JUNIOR_NO_INSTALL and an empty PATH exits successfully',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-noinstall-'));
+ const r=spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent'),JUNIOR_NO_INSTALL:'1'}});
+ assert.equal(r.status,0,r.stderr);
+});
+test('junior init spawned with JUNIOR_NO_INSTALL reports an unattempted install summary',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-noinstall-'));
+ const r=spawnSync(process.execPath,[join(process.cwd(),'junior.ts'),'init'],{encoding:'utf8',cwd,env:{...process.env,PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent'),JUNIOR_NO_INSTALL:'1'}});
+ assert.equal(JSON.parse(r.stdout).installSummary.attempted,false);
+});
+
+// --- P03: worker output accumulation cap stops the worker and is reported once ---
+test('Streaming worker past the output cap reports an output_truncated stop reason',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-cap-'));
+ const fake=makeFakeChild();
+ const p=executeWorkerStreaming({
+  spawnChild:()=>fake.child,command:'pi',args:[],cwd:dir,
+  eventsPath:join(dir,'events.jsonl'),logPath:join(dir,'worker.log'),runtimePath:join(dir,'runtime.json'),
+  settings:{...EXECUTION_DEFAULTS,quietMs:100000,heartbeatMs:20},deadlineAt:Date.now()+10000,maxOutputBytes:128,
+ });
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const res=await p;
+ assert.equal(res.stopReason,'output_truncated');
+});
+test('Streaming worker past the output cap stops the child',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-cap-'));
+ const fake=makeFakeChild();
+ const p=executeWorkerStreaming({
+  spawnChild:()=>fake.child,command:'pi',args:[],cwd:dir,
+  eventsPath:join(dir,'events.jsonl'),logPath:join(dir,'worker.log'),runtimePath:join(dir,'runtime.json'),
+  settings:{...EXECUTION_DEFAULTS,quietMs:100000,heartbeatMs:20},deadlineAt:Date.now()+10000,maxOutputBytes:128,
+ });
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ await p;
+ assert.equal(fake.state.killed,true);
+});
+test('A worker run past the output cap reports status output_truncated',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'cap-status',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,maxOutputBytes:128});
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const r=await p;
+ assert.equal(r.status,'output_truncated');
+});
+test('A worker run past the output cap reports the output cap error message',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'cap-error',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,maxOutputBytes:128});
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const r=await p;
+ assert.equal(r.workerError,'Worker output exceeded the accumulation cap; the worker was stopped.');
+});
+test('A worker run past the output cap does not run contract checks',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'cap-checks',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,maxOutputBytes:128});
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const r=await p;
+ assert.equal(r.checks.length,0);
+});
+test('A cut final event line under truncation is not counted as malformed',()=>{
+ const r=parseReceipt('{"type":"session","id":"s"}\n{"type":"message_end"',{},{outputTruncated:true});
+ assert.deepEqual(r.malformedLines,[]);
+});
+test('A cut final event line under truncation is reported as a truncated tail',()=>{
+ const r=parseReceipt('{"type":"session","id":"s"}\n{"type":"message_end"',{},{outputTruncated:true});
+ assert.equal(r.truncatedTail,true);
+});
+test('Malformed line numbers are capped at twenty entries',()=>{
+ const bad=Array.from({length:30},(_,i)=>`{bad${i}`).join('\n')+'\n';
+ const r=parseReceipt(bad);
+ assert.equal(r.malformedLines.length,20);
+});
+test('Malformed count still totals every malformed line',()=>{
+ const bad=Array.from({length:30},(_,i)=>`{bad${i}`).join('\n')+'\n';
+ const r=parseReceipt(bad);
+ assert.equal(r.malformedCount,30);
+});
+test('A compact handoff of a truncated worker lists one output truncation entry',()=>{
+ const malformedLines=Array.from({length:2000},(_,i)=>i+1);
+ const receipt:any={source:'pi_message_end',outputTruncated:true,malformed:true,malformedLines,malformedCount:2000,truncatedTail:true};
+ const h=compactHandoff({id:'cap',status:'output_truncated',receipt,checks:[]});
+ assert.ok(h.unresolved.includes('worker output truncated at the cap'));
+});
+test('A compact handoff of a truncated worker omits the malformed line list',()=>{
+ const malformedLines=Array.from({length:2000},(_,i)=>i+1);
+ const receipt:any={source:'pi_message_end',outputTruncated:true,malformed:true,malformedLines,malformedCount:2000,truncatedTail:true};
+ const h=compactHandoff({id:'cap',status:'output_truncated',receipt,checks:[]});
+ assert.equal(h.unresolved.filter((u:string)=>/malformed event lines/.test(u)).length,0);
+});
+test('A worker run past the output cap reports runtime stop reason output_truncated',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'cap-stop-reason',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,maxOutputBytes:128});
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const r=await p;
+ assert.equal(r.runtime.stopReason,'output_truncated');
+});
+test('A worker run past the output cap marks the receipt truncated tail',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'cap-tail',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ const p=run(t,false,{spawnChild:()=>fake.child,maxOutputBytes:128});
+ fake.emitRaw('x'.repeat(200000));
+ fake.end(0);
+ const r=await p;
+ assert.equal(r.receipt.truncatedTail,true);
 });

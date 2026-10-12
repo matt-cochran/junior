@@ -48,6 +48,14 @@ export const COMPANIONS: readonly Companion[] = [
 export const COMPANION_TIMEOUT_MS = 15_000;
 export const COMPANION_INSTALL_TIMEOUT_MS = 300_000;
 
+/** True when JUNIOR_NO_INSTALL is set to `1` or `true`, disabling every
+ * companion installer. Reads the injected environment when one exists,
+ * otherwise the process environment. */
+export function installationDisabled(env: NodeJS.ProcessEnv | undefined = process.env): boolean {
+  const value = (env ?? process.env).JUNIOR_NO_INSTALL;
+  return value === '1' || value === 'true';
+}
+
 export type ExecResult = { status: number | null; stdout?: string; stderr?: string; error?: string };
 export type CompanionDeps = {
   env?: NodeJS.ProcessEnv;
@@ -152,15 +160,19 @@ export function inspectCompanions(deps: CompanionDeps = {}, opts: { checkUpdates
 
 export type CompanionInstallOutcome = {
   id: CompanionId;
-  status: 'installed' | 'updated' | 'current' | 'failed';
+  status: 'installed' | 'updated' | 'current' | 'failed' | 'skipped';
   command?: string[];
   version?: string | null;
+  detail?: string;
   error?: string;
 };
 export type CompanionInstallReport = { ok: boolean; outcomes: CompanionInstallOutcome[] };
 
 /** Install missing companions; with `update`, also reinstall ones behind npm latest. */
 export function installCompanions(deps: CompanionDeps = {}, opts: { update?: boolean } = {}): CompanionInstallReport {
+  if (installationDisabled(deps.env)) {
+    return { ok: true, outcomes: COMPANIONS.map((c): CompanionInstallOutcome => ({ id: c.id, status: 'skipped', detail: 'JUNIOR_NO_INSTALL' })) };
+  }
   const before = inspectCompanions(deps, { checkUpdates: !!opts.update });
   const outcomes = before.companions.map((s): CompanionInstallOutcome => {
     const needed = !s.installed || (opts.update && s.outdated === true);
@@ -194,6 +206,9 @@ export function installCompanionSkills(
   opts: { target: SkillTarget; scope: SkillScope; cwd: string },
 ): CompanionSkillReport {
   if (opts.target === 'none') return { ok: true, results: [] };
+  if (installationDisabled(deps.env)) {
+    return { ok: true, results: COMPANIONS.map((c): CompanionSkillResult => ({ id: c.id, status: 'skipped', detail: 'JUNIOR_NO_INSTALL' })) };
+  }
   const target = opts.target;
   const results = COMPANIONS.map((c): CompanionSkillResult => {
     const executable = which(deps, c.binary);

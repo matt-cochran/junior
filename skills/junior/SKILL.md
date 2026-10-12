@@ -69,7 +69,9 @@ for an offline simulation with no provider spend. `doctor` is a read-only
 readiness check; `init` is idempotent project setup. `init` records exact local
 Git exclusions (`.git/info/exclude`) for the files it generates and `.delivery/`,
 so a fresh project is immediately ready for a `worktree` handoff without a
-manual commit or stash.
+manual commit or stash. Set `JUNIOR_NO_INSTALL=1` (or `true`) to make `init`
+and `update` skip the Pi, managed-tool and companion installers entirely and
+report them as skipped.
 
 ## Runtime and isolation guarantees
 

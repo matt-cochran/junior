@@ -294,7 +294,7 @@ export const KILL_GRACE_MS = 2000;
  * exhaustion from a runaway process. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-type StreamStopReason = 'tool_timeout' | 'deadline' | 'interrupt' | 'startup_error' | 'stream_error' | 'output_limit';
+type StreamStopReason = 'tool_timeout' | 'deadline' | 'interrupt' | 'startup_error' | 'stream_error' | 'output_truncated';
 
 export type WorkerStreamResult = {
  stdout: string;
@@ -405,7 +405,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   else if (stopReason === 'tool_timeout') heartbeat.setState('tool_timed_out', { timedOut: true, stopReason: 'tool_timed_out', exitCode, signal: exitSignal });
   else if (stopReason === 'startup_error') heartbeat.setState('failed', { error: startupError, stopReason: 'failed', exitCode, signal: exitSignal });
   else if (stopReason === 'stream_error') heartbeat.setState('failed', { error: streamError, stopReason: 'failed', exitCode, signal: exitSignal });
-  else if (stopReason === 'output_limit') heartbeat.setState('failed', { stopReason: 'failed', exitCode, signal: exitSignal });
+  else if (stopReason === 'output_truncated') heartbeat.setState('failed', { stopReason: 'output_truncated', outputTruncated: true, exitCode, signal: exitSignal });
   else heartbeat.setState(exitCode === 0 ? 'running' : 'failed', { stopReason: exitCode === 0 ? 'completed' : 'failed', exitCode, signal: exitSignal });
   const runtime = heartbeat.snapshot();
   const reason = runtime.stopReason ?? (exitCode === 0 ? 'completed' : 'failed');
@@ -445,12 +445,16 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  // Append up to the cap and report the accepted (possibly truncated) text.
  function pushOutput(kind: 'stdout' | 'stderr', text: string): string {
   const current = kind === 'stdout' ? stdout : stderr;
-  if (current.length >= maxOutputBytes) { outputTruncated = true; return ''; }
+  if (current.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return ''; }
   const remaining = maxOutputBytes - current.length;
   let accepted = text;
   if (accepted.length > remaining) { accepted = accepted.slice(0, remaining); outputTruncated = true; }
   if (kind === 'stdout') stdout += accepted; else stderr += accepted;
   append(kind === 'stdout' ? eventsPath : logPath, accepted);
+  // The cap is a stop condition, not just a display bound: once output is
+  // truncated the process group is torn down exactly like a wall-deadline
+  // breach, so a runaway child cannot keep producing after the cap.
+  if (outputTruncated) requestStop('output_truncated');
   return accepted;
  }
 
@@ -581,11 +585,12 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
  function push(kind: 'stdout' | 'stderr', chunk: any): void {
   const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
   const current = kind === 'stdout' ? stdout : stderr;
-  if (current.length >= maxOutputBytes) { outputTruncated = true; return; }
+  if (current.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
   const remaining = maxOutputBytes - current.length;
   let accepted = text;
   if (accepted.length > remaining) { accepted = accepted.slice(0, remaining); outputTruncated = true; }
   if (kind === 'stdout') stdout += accepted; else stderr += accepted;
+  if (outputTruncated) requestStop('output_truncated');
  }
 
  function finalize(): void {
@@ -600,7 +605,8 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
   resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error, interrupted, timedOut, deadlineExceeded, outputTruncated });
  }
 
- function requestStop(reason: 'timeout' | 'deadline' | 'interrupt'): void {
+ function requestStop(reason: 'timeout' | 'deadline' | 'interrupt' | 'output_truncated'): void {
+  if (finished) return;
   if (reason === 'timeout') timedOut = true;
   else if (reason === 'deadline') deadlineExceeded = true;
   else if (reason === 'interrupt') interrupted = true;

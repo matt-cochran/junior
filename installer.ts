@@ -969,10 +969,10 @@ async function installTriz(
   const destPath = path.join(trizDir, "dist", "triz.js");
   const packagePath = path.join(trizDir, "package.json");
   const working = !!(existing && fs.existsSync(destPath));
+  if (existing && existing.tag === release.tag && verifyManagedFile(destPath, existing.binaryDigest, false).verified) {
+    return { status: "current", changed: false, version: existing.version, tag: existing.tag, path: destPath };
+  }
   if (!opts.update && working) {
-    if (existing!.tag === release.tag) {
-      return { status: "current", changed: false, version: existing!.version, tag: existing!.tag, path: destPath };
-    }
     return { status: "update-available", changed: false, version: existing!.version, tag: existing!.tag, path: destPath };
   }
   const asset = release.assets.find((a) => a.name === assetName);
@@ -1084,7 +1084,7 @@ async function installOne(
   const destDir = path.join(installRoot, tool);
   const destPath = path.join(destDir, binaryFileName(tool, target));
 
-  if (!opts.update && existing && existing.tag === release.tag && fs.existsSync(destPath)) {
+  if (existing && existing.tag === release.tag && verifyManagedFile(destPath, existing.binaryDigest, true).verified) {
     return { tool, status: "current", changed: false, version: existing.version, tag: existing.tag, path: destPath };
   }
   if (!opts.update && existing && existing.tag !== release.tag && fs.existsSync(destPath)) {
