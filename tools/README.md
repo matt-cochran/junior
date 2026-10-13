@@ -48,8 +48,11 @@ successful commands exit `0`.
 
 ## Config file (input to `init`)
 
-`config.json` is optional. Omitted fields fall back to the built-in defaults and
-the pinned source metadata.
+`config.json` is optional. Omitted fields fall back to the built-in defaults. For
+provenance, without a config override `init` records the version and source SHA
+of Junior's managed install (`~/.junior/tools/installed.json`) when the tool's
+command is that managed binary; otherwise it falls back to the last-known
+release table.
 
 ```json
 {
@@ -61,22 +64,22 @@ the pinned source metadata.
       "command": "/opt/praxec/bin/fmeca-mcp",
       "args": [],
       "env": {},
-      "sourceVersion": "0.0.1",
-      "sourceSha": "8f7fbfd7718707be35e443fa0a4a37370ee3e8a4"
+      "sourceVersion": "0.2.0",
+      "sourceSha": "83d16022ff03fa6725c5ed517ea75caa5bce8694"
     },
     "cpm": {
       "command": "/opt/praxec/bin/cpm-planner",
       "args": [],
       "env": {},
-      "sourceVersion": "0.0.2",
-      "sourceSha": "12c8f9acc0fbd7c13b13fc3c3b50134afcffce89"
+      "sourceVersion": "0.2.2",
+      "sourceSha": "1fdd3afbce3302d5aad19895bddc26eb54fd7aea"
     },
     "crossmatrix": {
       "command": "/opt/praxec/bin/crossmatrix-mcp",
       "args": [],
       "env": {},
-      "sourceVersion": "0.2.0",
-      "sourceSha": "aef46ffb8cf10801c237c49f79bd0829543c7c2d"
+      "sourceVersion": "0.3.0",
+      "sourceSha": "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef"
     }
   }
 }
@@ -109,9 +112,14 @@ command. The wrapper classifies them as:
 
 | Tool | Read tools snapshotted | Commands |
 | --- | --- | --- |
-| `fmeca` | `state.get`, `risk.next`, `readiness.assess`, `report.export`, `scoring.catalog`, `analyze`, `session.list`, `actions.suggest`, `policy.list` | `session.open`, `append`, `vet`, … |
+| `fmeca` | `state.get`, `risk.next`, `readiness.assess`, `report.export`, `scoring.catalog`, `analyze`, `session.list`, `actions.suggest`, `policy.list`, `vet` | `session.open`, `append`, … |
 | `cpm` | `plan.status`, `plan.get`, `plan.lint`, `plan.schedule`, `plan.simulate`, `plan.list`, `plan.compare`, `plan.ev`, `plan.review` | `plan.submit`, `plan.export`, `plan.snapshot`, `plan.baseline`, `plan.acquire_cohort`, `plan.heartbeat`, `plan.mark_status`, `plan.force_release` |
 | `crossmatrix` | `crossmatrix.query` | `crossmatrix.command` |
+
+`vet` and `plan.review` are advisory, paid, nondeterministic model calls that
+never change plan or analysis state, so they are snapshotted as reads and do not
+invalidate manager acceptance; `plan.schedule`, `plan.simulate`, and `plan.lint`
+persist nothing, while `plan.export` writes files and stays a command.
 
 The success envelope is JSON:
 
@@ -196,7 +204,7 @@ points the server at the project's committed store with `CROSSMATRIX_DIR`:
   model before a query and does **not** copy a successful import to the hop
   native file. `native.crossmatrix` remains in the manifest for provenance.
 
-### 0.2.x servers (legacy replay)
+### 0.2.x servers (legacy replay, older than 0.3.0)
 
 Older servers hold their model **in memory**, so the wrapper remains the durable
 owner:
@@ -208,14 +216,39 @@ owner:
   (request id `replay-<modelId>-<sha12>`) before issuing the real call, so
   queries survive across separate CLI invocations.
 
-### Deferred mutations
+### 0.3.0 requests
 
-Crossmatrix mutation ops are deferred upstream (ADR-0004). Unsupported mutation
-ops return `ok: true` with a deferred `note`; the wrapper converts that into
-`unsupported: true` and a `review-unresolved` entry rather than pretending the
-mutation happened. The implemented queries (`validate`, `describe`, `slice`,
-`trace`, `explain`, `coverage`, `stale`, `conflicts`, `gaps.*`, `analyze.*`,
-`export.*`) work as reads.
+A read names the model and a `query.kind`:
+
+```json
+{"tool":"crossmatrix.query","arguments":{"request":{"modelId":"checkout","query":{"kind":"model.status"}}}}
+```
+
+A write names the model, an `expectedVersion`, an actor, and an `op`:
+
+```json
+{"tool":"crossmatrix.command","arguments":{"request":{"schemaVersion":"0.3.0","requestId":"obs-0007","modelId":"checkout","expectedVersion":6,"actor":{"actorType":"llm","persona":"observer"},"op":{"kind":"observe","relationId":"rel_need_char","from":"need_fast","to":"char_latency","observation":"strong","provenanceClass":"inferred","evidence":[{"sourceRef":{"sourceRef":"docs/perf.md","locator":"L10-L24"}}]}}}}
+```
+
+Before any command or query that names a `modelId`, the wrapper prepends a
+`model.open` command in the same server process.
+
+0.3.0 query kinds: `model.status`, `describe`, `slice`, `trace`, `explain`,
+`coverage`, `gaps.orphans`, `gaps.next`, `stale`, `conflicts`,
+`analyze.marginalize`, `analyze.contract`, `analyze.findings`, `validate`,
+`report`, `export`.
+
+0.3.0 command op kinds: `model.open`, `model.status`, `dimension.register`,
+`scale.declare`, `relation.declare`, `contraction.declare`, `members.sync`,
+`observe`, `member.propose`, `evidence.attach`, `deprecate`.
+
+A query without `query.kind` (for example `{"op":"validate"}` or
+`{"query":"validate"}`) or a command without `op` comes back upstream as `ok`
+with a "not supported" note, which the wrapper reports as `unsupported: true`
+with a `review-unresolved` entry. On 0.2.x servers mutation ops are deferred
+upstream (ADR-0004) and return `ok: true` with a deferred note, which the wrapper
+likewise converts into `unsupported: true` and a `review-unresolved` entry; that
+deferred-note behaviour applies only to servers older than 0.3.0.
 
 ## Library API (for embedding in Junior)
 
@@ -243,25 +276,26 @@ wall-clock timeout, whole-process-group kill).
 
 ## Building the MCP servers
 
-The manifest records `sourceVersion` + `sourceSha` for provenance. Build each
-binary from its upstream checkout at the pinned SHA. These are ordinary
-`cargo build` steps; no installs, credentials, paid calls, or network APIs are
-used by this project.
+`junior init` normally installs checksum-verified release binaries, so building
+from source is only needed for development. The manifest records
+`sourceVersion` + `sourceSha` for provenance; build each binary from its upstream
+checkout at the recorded SHA. These are ordinary `cargo build` steps; no
+installs, credentials, paid calls, or network APIs are used by this project.
 
 ```bash
-# FMECA -> target/release/fmeca-mcp   (package version 0.0.1)
+# FMECA -> target/release/fmeca-mcp   (package version 0.2.0, tag v0.2.0)
 git clone https://github.com/praxec/fmeca && cd fmeca
-git checkout 8f7fbfd7718707be35e443fa0a4a37370ee3e8a4
+git checkout 83d16022ff03fa6725c5ed517ea75caa5bce8694
 cargo build --release -p fmeca-mcp
 
-# CPM Planner -> target/release/cpm-planner   (package version 0.0.2)
+# CPM Planner -> target/release/cpm-planner   (package version 0.2.2, tag v0.2.2)
 git clone https://github.com/praxec/cpm-planner && cd cpm-planner
-git checkout 12c8f9acc0fbd7c13b13fc3c3b50134afcffce89
+git checkout 1fdd3afbce3302d5aad19895bddc26eb54fd7aea
 cargo build --release
 
-# Crossmatrix -> target/release/crossmatrix-mcp   (package version 0.2.0)
+# Crossmatrix -> target/release/crossmatrix-mcp   (package version 0.3.0, tag v0.3.0)
 # (from the crossmatrix checkout)
-git checkout aef46ffb8cf10801c237c49f79bd0829543c7c2d
+git checkout ef0fda63f362ceeaa91f15b032ddbd721f5d29ef
 cargo build --release -p crossmatrix-mcp
 ```
 
