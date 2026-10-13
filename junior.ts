@@ -79,7 +79,7 @@ const COMMANDS: Record<string, CommandSpec> = {
  doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online]' },
  update: {
-  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions'],
+  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
@@ -172,12 +172,16 @@ async function main(argv: string[]): Promise<void> {
   }
   if (parsed.flags.has('--check-updates')) {
    const installer = await import('./installer.ts');
+   const selfUpdate = await import('./self-update.ts');
    const managed = await installer.checkToolUpdates();
    result.companions = inspectCompanions({}, { checkUpdates: true });
-   result.updates = { managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
-   if (managed.outdated.length || result.updates.companions.length) result.updates.remediation = managed.outdated.includes('triz')
+   result.updates = { junior: selfUpdate.checkSelfUpdate({ moduleUrl: import.meta.url }), managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
+   const remediation: string[] = [];
+   if (result.updates.junior.outdated === true) remediation.push('Run `junior update` to adopt the newer Junior release.');
+   if (managed.outdated.length || result.updates.companions.length) remediation.push(managed.outdated.includes('triz')
     ? 'Run `junior update --with-triz` to adopt the newer releases.'
-    : 'Run `junior update` to adopt the newer releases.';
+    : 'Run `junior update` to adopt the newer releases.');
+   if (remediation.length) result.updates.remediation = remediation.join(' ');
   }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
@@ -209,7 +213,16 @@ async function main(argv: string[]): Promise<void> {
   const opts:InitOptions = parseInitOptions(rest);
   // `update` adopts newer releases and replaces only skills Junior itself wrote.
   if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
+  // Adopt a newer Junior first, so the new release's own update logic runs.
+  let self: any | undefined;
+  if (command === 'update') {
+   const selfUpdate = await import('./self-update.ts');
+   const outcome = selfUpdate.selfUpdate({ argv: rest, deps: { moduleUrl: import.meta.url } });
+   if (outcome.exitCode !== undefined) { process.exitCode = outcome.exitCode; return; }
+   self = outcome.self;
+  }
   const result:any = init({}, opts);
+  if (self) result.self = self;
   if (opts.install) {
    if (installationDisabled(process.env)) {
     result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true };

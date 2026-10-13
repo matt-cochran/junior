@@ -1228,7 +1228,7 @@ export async function installTools(
         outcomes.push({ tool, status: "failed", changed: false, error: message });
       }
     }
-    if (opts.withTriz) {
+    if (opts.withTriz || (opts.update && state.optional?.triz)) {
       try {
         triz = await installTriz(state, installRoot, opts, runDeps);
       } catch (err) {
