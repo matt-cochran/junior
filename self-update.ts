@@ -13,6 +13,7 @@
 // tries to update itself again (no loop).
 // ---------------------------------------------------------------------------
 
+import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -72,12 +73,13 @@ export interface SelfUpdateOutcome {
 
 function defaultExec(command: string, args: string[], options: ExecOptions = {}): ExecResult {
   const inherited = options.stdio === 'inherit';
-  const r = spawnSync(command, args, {
+  const spec = spawnSpec(command, args);
+  const r = spawnSync(spec.command, spec.args, {
     ...(inherited ? { stdio: 'inherit' as const } : { encoding: 'utf8' as const }),
     timeout: options.timeout,
     env: options.env,
     cwd: options.cwd,
-    shell: false,
+    shell: spec.shell,
   });
   return {
     status: r.status,

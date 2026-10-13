@@ -1183,3 +1183,31 @@ test('update check lists an outdated optional TRIZ among the outdated tools', as
   const report = await checkToolUpdates({ ...deps, resolveRelease: releaseAt('0.2.1') });
   assert.ok(report.outdated.includes('triz'));
 });
+
+function trizWithPackage(version: string, pkgVersion: string) {
+  const fmeca = releaseServer({ repo: TOOL_REPOS.fmeca.repo, assetName: fmecaAsset, entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }] });
+  const triz = releaseServer({
+    repo: 'matt-cochran/triz',
+    tag: `v${version}`,
+    assetName: `triz-v${version}-node.tgz`,
+    entries: [
+      { name: 'package/dist/triz.js', data: entryData('export default 1') },
+      { name: 'package/package.json', data: entryData(JSON.stringify({ name: '@matthew-cochran/triz', version: pkgVersion, bin: { triz: 'dist/triz.js' } })) },
+    ],
+  });
+  const fetch = async (url: string) => (url.includes('matt-cochran/triz') ? triz.fetch(url) : fmeca.fetch(url));
+  return baseDeps(fmeca, { fetch, smokeTriz: async () => true });
+}
+
+test('The TRIZ install keeps the release package name and version in its managed manifest', async () => {
+  const deps = trizWithPackage('0.9.0', '0.9.0');
+  await installTools({ tools: ['fmeca'], withTriz: true }, deps);
+  const manifest = JSON.parse(readFileSync(join(deps.installRoot, 'triz', 'package.json'), 'utf8'));
+  assert.deepEqual({ name: manifest.name, version: manifest.version, type: manifest.type }, { name: '@matthew-cochran/triz', version: '0.9.0', type: 'module' });
+});
+
+test('A TRIZ archive whose package.json version contradicts the release is refused', async () => {
+  const deps = trizWithPackage('0.9.0', '0.8.0');
+  const report = await installTools({ tools: ['fmeca'], withTriz: true }, deps);
+  assert.equal(report.triz?.status, 'failed');
+});

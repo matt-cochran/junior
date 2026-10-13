@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
-import { readPackageVersion } from './cli-entry.ts';
+import { readPackageVersion, spawnSpec } from './cli-entry.ts';
 import { loadHop } from './tools/tools.ts';
 
 export type ReportTool = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz' | 'junior';
@@ -97,12 +97,13 @@ const GH_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 15_000;
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): ExecResult {
-  const result = spawnSync(command, args, {
+  const spec = spawnSpec(command, args);
+  const result = spawnSync(spec.command, spec.args, {
     encoding: 'utf8',
     timeout: options.timeout,
     env: options.env,
     cwd: options.cwd,
-    shell: false,
+    shell: spec.shell,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message };
 }

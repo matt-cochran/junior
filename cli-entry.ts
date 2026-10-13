@@ -45,3 +45,16 @@ export function readPackageVersion(moduleUrl: string): string {
   }
   return '0.0.0';
 }
+
+/** How to spawn `command` with argv on `platform`. On Windows, npm and npx are
+ * `.cmd` shims, and companion CLIs installed by npm resolve to `.cmd` shims too;
+ * Node refuses to spawn a `.cmd`/`.bat` without a shell, so those run through
+ * the shell with every argument quoted when it contains spaces or quotes.
+ * Native executables and every other platform keep argv with no shell. */
+export function spawnSpec(command: string, args: string[], platform: NodeJS.Platform = process.platform): { command: string; args: string[]; shell: boolean } {
+  if (platform !== 'win32') return { command, args, shell: false };
+  const resolved = command === 'npm' || command === 'npx' ? `${command}.cmd` : command;
+  if (!/\.(cmd|bat)$/i.test(resolved)) return { command: resolved, args, shell: false };
+  const quote = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+  return { command: quote(resolved), args: args.map(quote), shell: true };
+}

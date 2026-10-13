@@ -17,6 +17,7 @@
 //     never registered here; jevitate's own init registers its MCP server.
 // ---------------------------------------------------------------------------
 
+import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -86,7 +87,8 @@ function defaultPackageVersion(executable: string, pkg: string): string | null {
 }
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): ExecResult {
-  const r = spawnSync(command, args, { encoding: 'utf8', timeout: options.timeout, env: options.env, cwd: options.cwd, shell: false });
+  const spec = spawnSpec(command, args);
+  const r = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: options.timeout, env: options.env, cwd: options.cwd, shell: spec.shell });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error?.message };
 }
 

@@ -177,7 +177,9 @@ async function main(argv: string[]): Promise<void> {
    result.companions = inspectCompanions({}, { checkUpdates: true });
    result.updates = { junior: selfUpdate.checkSelfUpdate({ moduleUrl: import.meta.url }), managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
    const remediation: string[] = [];
-   if (result.updates.junior.outdated === true) remediation.push('Run `junior update` to adopt the newer Junior release.');
+   if (result.updates.junior.outdated === true) remediation.push(result.updates.junior.kind === 'source'
+    ? 'This Junior runs from a source checkout; update it with `git pull` (junior update never touches a checkout).'
+    : 'Run `junior update` to adopt the newer Junior release.');
    if (managed.outdated.length || result.updates.companions.length) remediation.push(managed.outdated.includes('triz')
     ? 'Run `junior update --with-triz` to adopt the newer releases.'
     : 'Run `junior update` to adopt the newer releases.');

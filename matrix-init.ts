@@ -9,6 +9,7 @@
 // creates the store itself.
 // ---------------------------------------------------------------------------
 
+import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -43,7 +44,8 @@ function defaultManagedStatePath(): string {
 }
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv } = {}): ExecResult {
-  const r = spawnSync(command, args, { encoding: 'utf8', timeout: options.timeout, env: options.env, shell: false });
+  const spec = spawnSpec(command, args);
+  const r = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: options.timeout, env: options.env, shell: spec.shell });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error?.message };
 }
 

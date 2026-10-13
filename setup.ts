@@ -13,6 +13,7 @@
 // package.json for diagnostics.
 // ---------------------------------------------------------------------------
 
+import { spawnSpec } from './cli-entry.ts';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -194,7 +195,8 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
 
 function asSpawn(command:string, args:string[], options:any):ExecResult {
  // Kept behind the injectable seam; only `doctor`/`init --install` reach it.
- const r=spawnSync(command,args,{encoding:'utf8', ...options});
+ const spec=spawnSpec(command,args);
+ const r=spawnSync(spec.command,spec.args,{encoding:'utf8', ...options, shell:spec.shell});
  return { status:r.status, stdout:r.stdout || '', stderr:r.stderr || '', error:r.error?.message };
 }
 
