@@ -27,6 +27,10 @@ const U=(input:number,output:number,total:number)=>({input,output,cacheRead:0,ca
 const assistant=(over:any={})=>JSON.stringify({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,2,3),stopReason:'stop',...over}});
 const stream=(...records:any[])=>records.map((r:any)=>typeof r==='string'?r:JSON.stringify(r)).join('\n')+'\n';
 
+// The README documentation tests assert against the whole public documentation
+// set: the README front page plus every file under docs/.
+const documentation=()=>[readFileSync(join(process.cwd(),'README.md'),'utf8'),...readdirSync(join(process.cwd(),'docs')).filter((f)=>f.endsWith('.md')).map((f)=>readFileSync(join(process.cwd(),'docs',f),'utf8'))].join('\n');
+
 // --- offline Jev classifier mocks: no SDK load, no paid calls ---
 const bool=(p:number)=>({type:'bool',probability:p});
 const gateUsage={input:5,output:2,totalTokens:7,cost:{total:0.0002}};
@@ -810,7 +814,7 @@ test('CLI doctor needs no task file and exits nonzero when prerequisites fail',(
  assert.ok(Array.isArray(out.checks));
 });
 test('README documents WSL setup, commands, supported version, flags and paid-smoke opt-in',()=>{
- const md=readFileSync(join(process.cwd(),'README.md'),'utf8');
+ const md=documentation();
  assert.match(md,/doctor/);
  assert.match(md,/init --install/);
  assert.match(md,/\/login/);
@@ -1284,7 +1288,7 @@ test('Resume with worktree isolation reuses the prior execution checkout',async(
 });
 
 test('README documents isolation defaults, limitations, review workflow and evidence limits',()=>{
- const md=readFileSync(join(process.cwd(),'README.md'),'utf8');
+ const md=documentation();
  assert.match(md,/isolation/i);
  assert.match(md,/worktree/i);
  assert.match(md,/changedFiles|changed files/i);
@@ -1294,7 +1298,7 @@ test('README documents isolation defaults, limitations, review workflow and evid
 });
 
 test('README documents the fmeca/evaluate workflows, commands and report lifecycle',()=>{
- const md=readFileSync(join(process.cwd(),'README.md'),'utf8');
+ const md=documentation();
  assert.match(md,/fmeca/i);
  assert.match(md,/evaluate/i);
  assert.match(md,/analysis-report\.md/);
