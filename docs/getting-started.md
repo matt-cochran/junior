@@ -317,6 +317,19 @@ downloaded) and reports `updates.managed.outdated` and `updates.companions`.
 `junior update` adopts every newer managed and companion release and replaces
 only skill copies Junior or the tool itself wrote and you have not modified.
 
+`junior update` updates Junior itself first. When Junior is installed globally
+from npm and a newer `@matthew-cochran/junior` is published, it runs
+`npm install -g --prefer-online @matthew-cochran/junior@latest`, then re-runs
+the update as the new version (with `--no-self` and `JUNIOR_SELF_UPDATED`, so it
+cannot loop). The new release then updates the managed binaries (including an
+installed managed TRIZ), the companions and the skills, so one command
+brings everything current. The result reports `self` (`updated`, `current`,
+`skipped`, `failed` or `disabled`). A source checkout (`node junior.ts`) is
+never touched and is told to `git pull`. `--no-self` skips only this step,
+`JUNIOR_NO_INSTALL=1` disables every install, and a failed self-install still
+updates the tools with the current version. `doctor --check-updates` reports
+Junior's own version as `updates.junior`.
+
 #### Authentication and the paid smoke test
 Authenticate through Pi itself: start `pi` and run `/login`, then choose a model
 with `/model`. For headless or scripted setups, `junior auth` stores a provider

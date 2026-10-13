@@ -207,7 +207,8 @@ deliverable is verified in a real browser.
 
 `junior doctor` is read-only; it reports Pi, skills, managed tools and companion
 tools separately. `junior doctor --check-updates` also asks npm and GitHub for
-newer releases, and `junior update` adopts them and refreshes unmodified skills.
+newer releases (Junior's own included), and `junior update` updates Junior itself first, then adopts
+every newer tool and companion release and refreshes unmodified skills.
 
 ## Report tool issues upstream
 

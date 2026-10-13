@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-10-12
+
+### Added
+
+- `junior update` updates Junior itself from npm first, then re-runs as the
+  new version to update every managed binary, companion and skill;
+  `--no-self` skips it and source checkouts are never touched.
+- `junior doctor --check-updates` reports Junior's own version.
+- `junior update` refreshes an installed managed TRIZ without `--with-triz`.
+
+### Fixed
+
+- The managed TRIZ install keeps the release's package name and version, which
+  TRIZ 0.3+ needs at import time (`update --with-triz` failed on v0.3.0).
+- npm and npm-installed companion CLIs (`.cmd` shims) are spawned correctly on
+  Windows.
+
 ## [0.3.0] - 2026-10-12
 
 The Crossmatrix hub: Junior ties CPM, FMECA, jevitate, tests and code
@@ -63,7 +80,8 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[0.3.0]: https://github.com/matt-cochran/junior/compare/v0.2.1...HEAD
+[0.3.1]: https://github.com/matt-cochran/junior/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/matt-cochran/junior/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/matt-cochran/junior/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/matt-cochran/junior/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/matt-cochran/junior/releases/tag/v0.1.0
