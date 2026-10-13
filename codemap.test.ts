@@ -8,11 +8,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { initHop } from './tools/tools.ts';
-import { codemapInit, codemapLink } from './codemap.ts';
+import { codemapContext, codemapFiles, codemapInit, codemapLink, codemapStale } from './codemap.ts';
 
 const NODE = process.execPath;
 const JUNIOR = join(import.meta.dirname, 'junior.ts');
@@ -22,7 +23,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-codemap-'));
 }
 
-function writeHop(dir: string, sourceVersion: string, log: string): string {
+function writeHop(dir: string, sourceVersion: string, log: string, extraEnv: Record<string, string> = {}): string {
   const hop = join(dir, 'hop.json');
   initHop(hop, {
     managedStatePath: join(dir, 'no-managed-tools.json'),
@@ -30,13 +31,46 @@ function writeHop(dir: string, sourceVersion: string, log: string): string {
       crossmatrix: {
         command: NODE,
         args: [FAKE],
-        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log },
+        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log, ...extraEnv },
         sourceVersion,
         sourceSha: '0'.repeat(64),
       },
     },
   });
   return hop;
+}
+
+/** Opt-in fake crossmatrix query results, keyed by query kind. */
+function queryResponses(dir: string, responses: Record<string, unknown>): string {
+  const target = join(dir, 'queries.json');
+  writeFileSync(target, JSON.stringify(responses));
+  return target;
+}
+
+/** A trace hop as the Crossmatrix 0.3 server reports it. */
+function hop(overrides: Record<string, unknown> = {}): any {
+  return {
+    dimension: 'code',
+    direction: 'out',
+    member: 'loc:src/a.ts',
+    observations: ['implements'],
+    relation: 'codemap-cpm',
+    relationType: 'implements',
+    ...overrides,
+  };
+}
+
+/** A temp git repository whose tracked files hold `contents`. */
+function gitRepo(contents: Record<string, string>): string {
+  const dir = workdir();
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  for (const [p, content] of Object.entries(contents)) {
+    const abs = join(dir, p);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+    spawnSync('git', ['add', p], { cwd: dir });
+  }
+  return dir;
 }
 
 function operations(log: string): any[] {
@@ -294,4 +328,217 @@ test('codemap link adds the dimension prefix to a bare feature member id', async
   await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:d1' });
   const observe = operations(log).map((line) => line.request ?? line).find((r) => r.op.kind === 'observe');
   assert.equal(observe.op.from, 'cpm:d1');
+});
+
+// --- codemapFiles / codemapContext -----------------------------------------
+
+test('codemapFiles lists implements observations before tests', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'loc:src/z.ts', observations: ['implements'], relation: 'codemap-cpm' }),
+        hop({ member: 'loc:src/a.test.ts', observations: ['tests'], relation: 'codemap-cpm' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.deepEqual(files.map((entry) => entry.observation), ['implements', 'tests']);
+});
+
+test('codemapFiles follows nextCursor across two pages', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: [
+      { hops: [hop({ member: 'loc:src/b.ts' })], nextCursor: '1' },
+      { hops: [hop({ member: 'loc:src/a.ts' })], nextCursor: null },
+    ],
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.deepEqual(files.map((entry) => entry.path), ['src/a.ts', 'src/b.ts']);
+});
+
+test('codemapFiles ignores non-codemap relations and non-location members', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ relation: 'implements' }),
+        hop({ member: 'job:d1' }),
+        hop({ member: 'loc:src/a.ts' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.deepEqual(files.map((entry) => entry.path), ['src/a.ts']);
+});
+
+test('codemapContext caps entries at max', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'loc:src/a.ts' }),
+        hop({ member: 'loc:src/b.ts' }),
+        hop({ member: 'loc:src/c.ts' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const context = await codemapContext({ hopPath, modelId: 'm1', feature: 'cpm:d1', max: 2 });
+  assert.equal(context.length, 2);
+});
+
+test('codemapContext has no duplicate paths', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'loc:src/a.ts', observations: ['implements'] }),
+        hop({ member: 'loc:src/a.ts', observations: ['tests'], relation: 'codemap-cpm' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const context = await codemapContext({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.deepEqual(context.map((entry) => entry.path), ['src/a.ts']);
+});
+
+// --- codemapStale ----------------------------------------------------------
+
+test('codemapStale keys recomputed hashes by each member source reference', async () => {
+  const dir = gitRepo({ 'src/a.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const hopPath = writeHop(dir, '0.3.0', log);
+  const requests: any[] = [];
+  const deps = {
+    callHop: async (_hopPath: string, _tool: string, request: any) => {
+      requests.push(request);
+      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
+    },
+  };
+  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
+  const hashes = requests[0].arguments.request.query.hashes;
+  const expected = 'sha256:' + createHash('sha256').update('hello').digest('hex');
+  assert.equal(hashes['src/a.ts'], expected);
+});
+
+test('codemapStale returns the server changed members', async () => {
+  const dir = gitRepo({ 'src/a.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    stale: {
+      changed: [{ member: 'loc:src/a.ts' }],
+      affectedCells: [],
+      counts: { changed: 1, checked: 1, unchecked: 0 },
+      nextCursor: null,
+      cellsTruncated: false,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const result = await codemapStale({ hopPath, modelId: 'm1', dir });
+  assert.deepEqual(result.changed, [{ member: 'loc:src/a.ts' }]);
+});
+
+test('codemapFiles refuses a hop older than Crossmatrix 0.3.0', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hopPath = writeHop(dir, '0.2.1', log);
+  await assert.rejects(
+    codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' }),
+    /Crossmatrix 0\.3\.0 or newer \(hop records 0\.2\.1\)/,
+  );
+});
+
+test('codemapFiles sends the trace query keyed by the feature member', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hopPath = writeHop(dir, '0.3.0', log);
+  const requests: any[] = [];
+  const deps = {
+    callHop: async (_hopPath: string, _tool: string, request: any) => {
+      requests.push(request);
+      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { hops: [], nextCursor: null } };
+    },
+  };
+  await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1', deps: deps as any });
+  assert.deepEqual(requests[0].arguments.request.query, { kind: 'trace', member: 'cpm:d1' });
+});
+
+test('codemapContext skips directory paths', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [hop({ member: 'loc:src/' }), hop({ member: 'loc:src/a.ts' })],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const context = await codemapContext({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.deepEqual(context.map((entry) => entry.path), ['src/a.ts']);
+});
+
+// --- CLI read routes --------------------------------------------------------
+
+test('junior matrix files prints the feature code links', () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: { hops: [hop({ member: 'loc:src/a.ts' })], nextCursor: null },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const cli = spawnSync(NODE, [JUNIOR, 'matrix', 'files', '--hop', hopPath, '--model', 'm1', '--feature', 'cpm:d1'], {
+    encoding: 'utf8',
+  });
+  assert.deepEqual(JSON.parse(cli.stdout).map((entry: any) => entry.path), ['src/a.ts']);
+});
+
+test('junior matrix context caps printed paths at max', () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [hop({ member: 'loc:src/a.ts' }), hop({ member: 'loc:src/b.ts' })],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const cli = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'context', '--hop', hopPath, '--model', 'm1', '--feature', 'cpm:d1', '--max', '1'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(JSON.parse(cli.stdout).length, 1);
+});
+
+test('junior matrix stale prints the changed members', () => {
+  const dir = gitRepo({ 'src/a.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    stale: {
+      changed: [{ member: 'loc:src/a.ts' }],
+      affectedCells: [],
+      counts: { changed: 1, checked: 1, unchecked: 0 },
+      nextCursor: null,
+      cellsTruncated: false,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const cli = spawnSync(NODE, [JUNIOR, 'matrix', 'stale', '--hop', hopPath, '--model', 'm1', '--dir', dir], {
+    encoding: 'utf8',
+  });
+  assert.deepEqual(JSON.parse(cli.stdout).changed, [{ member: 'loc:src/a.ts' }]);
 });
