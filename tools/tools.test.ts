@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -391,4 +391,210 @@ test("init keeps the PATH command for a tool with no managed install", () => {
   const { statePath } = managedState(dir);
   const hop = initHopManifest(path.join(dir, "hop.json"), { managedStatePath: statePath });
   assert.equal(hop.tools.cpm.command, "cpm-planner");
+});
+
+// --- crossmatrix project store (0.3.0+) ---------------------------------------
+//
+// Crossmatrix 0.3+ keeps its validated model in a committed
+// `<project>/.crossmatrix` store. The wrapper points the server at that store
+// instead of replaying the imported model; 0.2.x keeps the legacy
+// wrapper-owned replay.
+
+function crossmatrixManifest(statePath = "crossmatrix-model.json") {
+  return { native: { crossmatrix: { statePath } } };
+}
+
+test("buildToolEnv points CROSSMATRIX_DIR at the git project's store", () => {
+  const root = tmpdir();
+  const project = path.join(root, "project");
+  const hopDir = path.join(project, "sub");
+  fs.mkdirSync(hopDir, { recursive: true });
+  fs.mkdirSync(path.join(project, ".git"));
+  fs.mkdirSync(path.join(project, ".crossmatrix"));
+  const env = buildToolEnv(path.join(hopDir, "hop.json"), "crossmatrix", crossmatrixManifest());
+  assert.deepEqual(env, { CROSSMATRIX_DIR: path.join(project, ".crossmatrix") });
+});
+
+test("buildToolEnv falls back to the hop file's grandparent outside a git repo", () => {
+  const root = tmpdir();
+  const project = path.join(root, "project");
+  const hopDir = path.join(project, "sub");
+  fs.mkdirSync(hopDir, { recursive: true });
+  fs.mkdirSync(path.join(project, ".crossmatrix"));
+  const env = buildToolEnv(path.join(hopDir, "hop.json"), "crossmatrix", crossmatrixManifest());
+  assert.deepEqual(env, { CROSSMATRIX_DIR: path.join(project, ".crossmatrix") });
+});
+
+test("buildToolEnv omits crossmatrix env when the project store is absent", () => {
+  const root = tmpdir();
+  const hopDir = path.join(root, "project", "sub");
+  fs.mkdirSync(hopDir, { recursive: true });
+  const env = buildToolEnv(path.join(hopDir, "hop.json"), "crossmatrix", crossmatrixManifest());
+  assert.deepEqual(env, {});
+});
+
+test("crossmatrixUsesStore is true for a 0.3.0 source version", () => {
+  assert.equal(crossmatrixUsesStore({ tools: { crossmatrix: { sourceVersion: "0.3.0" } } }), true);
+});
+
+test("crossmatrixUsesStore is false for a 0.2.1 source version", () => {
+  assert.equal(crossmatrixUsesStore({ tools: { crossmatrix: { sourceVersion: "0.2.1" } } }), false);
+});
+
+test("crossmatrixUsesStore is false for an unparseable source version", () => {
+  assert.equal(crossmatrixUsesStore({ tools: { crossmatrix: { sourceVersion: "not-a-version" } } }), false);
+});
+
+const STORED_MODEL = {
+  schemaVersion: "0.2.0",
+  modelId: "state_demo",
+  dimensions: [
+    { id: "d1", order: 0, members: [{ id: "a" }] },
+    { id: "d2", order: 1, members: [{ id: "x" }] },
+  ],
+  scales: [],
+  relations: [],
+};
+
+function crossmatrixHop(dir, sourceVersion, observed) {
+  const hop = initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix", {
+        sourceVersion,
+        env: { FAKE_MCP_MODE: "crossmatrix", FAKE_MCP_MODEL_FILE: observed },
+      }),
+    },
+  });
+  const serialized = JSON.stringify(STORED_MODEL);
+  fs.writeFileSync(path.join(dir, "crossmatrix-model.json"), serialized + "\n");
+  const manifest = JSON.parse(fs.readFileSync(hop, "utf8"));
+  manifest.native.crossmatrix = {
+    statePath: "crossmatrix-model.json",
+    modelId: STORED_MODEL.modelId,
+    modelSha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+  };
+  fs.writeFileSync(hop, JSON.stringify(manifest));
+  return hop;
+}
+
+test("a 0.3.0 hop sends no model replay before a crossmatrix query", () => {
+  const dir = tmpdir();
+  const observed = path.join(dir, "server-received-model.json");
+  const hop = crossmatrixHop(dir, "0.3.0", observed);
+  const req = writeJson(path.join(dir, "query.json"), {
+    tool: "crossmatrix.query",
+    arguments: { request: { requestId: "q1", query: { kind: "validate" } } },
+  });
+  runCli(["call", hop, "crossmatrix", req]);
+  assert.equal(fs.existsSync(observed), false);
+});
+
+test("a 0.2.1 hop still sends the model replay before a crossmatrix query", () => {
+  const dir = tmpdir();
+  const observed = path.join(dir, "server-received-model.json");
+  const hop = crossmatrixHop(dir, "0.2.1", observed);
+  const req = writeJson(path.join(dir, "query.json"), {
+    tool: "crossmatrix.query",
+    arguments: { request: { requestId: "q1", query: { kind: "validate" } } },
+  });
+  runCli(["call", hop, "crossmatrix", req]);
+  assert.equal(fs.existsSync(observed), true);
+});
+
+test("a 0.3.0 import does not persist the model to the hop native file", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix", { sourceVersion: "0.3.0" }),
+    },
+  });
+  const req = writeJson(path.join(dir, "import.json"), {
+    tool: "crossmatrix.command",
+    arguments: { request: { requestId: "import-1", modelId: "state_demo", model: STORED_MODEL } },
+  });
+  runCli(["call", hop, "crossmatrix", req]);
+  assert.equal(fs.existsSync(path.join(dir, "crossmatrix-model.json")), false);
+});
+
+// --- crossmatrix 0.3+ per-process model.open ----------------------------------
+//
+// A Crossmatrix 0.3+ server holds the opened model per process, so `tools call`
+// prepends model.open to every store-backed command that names a model. The
+// fake write log records both calls in order, proving the open ran in the same
+// server session before the real command.
+
+function storeHop(dir, log, sourceVersion) {
+  return initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix", {
+        sourceVersion,
+        env: { FAKE_MCP_MODE: "crossmatrix", FAKE_CROSSMATRIX_WRITES: log },
+      }),
+    },
+  });
+}
+
+function commandRequest(op) {
+  return {
+    tool: "crossmatrix.command",
+    arguments: {
+      request: {
+        schemaVersion: "0.3.0",
+        requestId: "r-1",
+        modelId: "m1",
+        actor: { actorType: "system", persona: "model_admin" },
+        op,
+      },
+    },
+  };
+}
+
+function readWrites(log) {
+  return fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test("a 0.3.0 store call opens the model before the command", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const ops = readWrites(log);
+  const at = ops.findIndex((entry) => entry.op.kind === "dimension.register");
+  assert.equal(ops[at - 1]?.op?.kind, "model.open");
+});
+
+test("a 0.3.0 model.open command is not preceded by a second open", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "model.open" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const opens = readWrites(log).filter((entry) => entry.op.kind === "model.open");
+  assert.equal(opens.length, 1);
+});
+
+test("a 0.2.1 hop sends no extra open before a command", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.2.1");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  runCli(["call", hop, "crossmatrix", req]);
+  const opens = readWrites(log).filter((entry) => entry.op.kind === "model.open");
+  assert.equal(opens.length, 0);
+});
+
+test("a 0.3.0 store call reports the command's own result", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "writes.log");
+  const hop = storeHop(dir, log, "0.3.0");
+  const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
+  const out = cliJson(runCli(["call", hop, "crossmatrix", req]));
+  assert.equal(out.result.op, "dimension.register");
 });

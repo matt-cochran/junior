@@ -143,9 +143,9 @@ function isTestPath(p: string): boolean {
 // File-driven dimensions (`code`, `tests`)
 // ---------------------------------------------------------------------------
 
-function fileMember(p: string, hash: string, type: 'file' | 'dir'): MatrixMember {
+function fileMember(p: string, hash: string, type: 'file' | 'dir', prefix = 'loc'): MatrixMember {
   return {
-    id: `loc:${p}`,
+    id: `${prefix}:${p}`,
     label: p,
     status: 'active',
     attributes: { path: p, parent: parentOf(p), type },
@@ -170,6 +170,9 @@ function fileDimension(
   kind: DimensionKind,
   files: MatrixFile[],
   selected: (p: string) => boolean,
+  // Member ids are unique across a whole Crossmatrix model, so each file
+  // dimension needs its own prefix (code `loc:`, tests `test:`).
+  prefix = 'loc',
 ): MatrixDimension {
   const fileHashes = new Map<string, string>();
   for (const entry of files) {
@@ -193,15 +196,15 @@ function fileDimension(
   );
   for (const dir of byDepth) {
     const children: Array<{ id: string; hash: string }> = [];
-    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: `loc:${p}`, hash });
-    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: `loc:${sub}`, hash: dirHashes.get(sub)! });
+    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: `${prefix}:${p}`, hash });
+    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: `${prefix}:${sub}`, hash: dirHashes.get(sub)! });
     children.sort((a, b) => a.id.localeCompare(b.id));
     dirHashes.set(dir, stableHash(children));
   }
 
   const members: MatrixMember[] = [];
-  for (const p of [...fileHashes.keys()].sort()) members.push(fileMember(p, fileHashes.get(p)!, 'file'));
-  for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir'));
+  for (const p of [...fileHashes.keys()].sort()) members.push(fileMember(p, fileHashes.get(p)!, 'file', prefix));
+  for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir', prefix));
 
   return { id, label, kind, order: 0, system: 'git', members };
 }
@@ -213,7 +216,7 @@ export function codeLocations(files: MatrixFile[]): MatrixDimension {
 
 /** Test artifacts: files matching `*.test.*`/`*.spec.*` or under test dirs. */
 export function tests(files: MatrixFile[]): MatrixDimension {
-  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath);
+  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath, 'test');
 }
 
 // ---------------------------------------------------------------------------
@@ -556,16 +559,21 @@ interface MatrixOptions {
   hop?: string;
   plan?: string;
   session?: string;
+  model?: string;
 }
 
 const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca'];
-const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session'];
+const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model'];
 
 export const MATRIX_USAGE = [
   'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca [--source ...]',
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
+  'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
+  'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -575,7 +583,7 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     const arg = argv[i];
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
-    if (!VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix export: ${arg}`);
+    if (!VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix: ${arg}`);
     let value = eq === -1 ? undefined : arg.slice(eq + 1);
     if (value === undefined) value = argv[++i];
     if (value === undefined || value === '') throw new Error(`Option ${name} requires a value`);
@@ -592,6 +600,46 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     hop: values['--hop'],
     plan: values['--plan'],
     session: values['--session'],
+    model: values['--model'],
+  };
+}
+
+interface CodemapOptions {
+  hop?: string;
+  model?: string;
+  result?: string;
+  feature?: string;
+  observation?: string;
+  featureDimensions: string[];
+}
+
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension'];
+const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
+
+function parseCodemapArgs(argv: string[]): CodemapOptions {
+  const featureDimensions: string[] = [];
+  const values: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const eq = arg.indexOf('=');
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    if (!CODEMAP_VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix codemap: ${arg}`);
+    let value = eq === -1 ? undefined : arg.slice(eq + 1);
+    if (value === undefined) value = argv[++i];
+    if (value === undefined || value === '') throw new Error(`Option ${name} requires a value`);
+    if (name === '--feature-dimension') featureDimensions.push(value);
+    else values[name] = value;
+  }
+  if (values['--observation'] !== undefined && !CODEMAP_OBSERVATIONS.includes(values['--observation'])) {
+    throw new Error(`Unknown observation: ${values['--observation']}`);
+  }
+  return {
+    hop: values['--hop'],
+    model: values['--model'],
+    result: values['--result'],
+    feature: values['--feature'],
+    observation: values['--observation'],
+    featureDimensions,
   };
 }
 
@@ -652,6 +700,63 @@ export async function main(argv: string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 0;
+  }
+  if (argv[0] === 'sync') {
+    try {
+      const options = parseMatrixArgs(argv.slice(1));
+      if (!options.hop) throw new Error('matrix sync requires --hop <hop.json>');
+      if (!options.model) throw new Error('matrix sync requires --model <modelId>');
+      const dimensions: MatrixDimension[] = [];
+      for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
+      const { syncDimensions } = await import('./matrix-sync.ts');
+      const result = await syncDimensions({ hopPath: options.hop, modelId: options.model, dimensions });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  if (argv[0] === 'codemap') {
+    try {
+      if (argv[1] !== 'init') throw new Error('Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]');
+      const options = parseCodemapArgs(argv.slice(2));
+      if (!options.hop) throw new Error('matrix codemap init requires --hop <hop.json>');
+      if (!options.model) throw new Error('matrix codemap init requires --model <modelId>');
+      const { codemapInit } = await import('./codemap.ts');
+      const result = await codemapInit({
+        hopPath: options.hop,
+        modelId: options.model,
+        featureDimensions: options.featureDimensions.length > 0 ? options.featureDimensions : undefined,
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  if (argv[0] === 'link') {
+    try {
+      const options = parseCodemapArgs(argv.slice(1));
+      if (!options.hop) throw new Error('matrix link requires --hop <hop.json>');
+      if (!options.model) throw new Error('matrix link requires --model <modelId>');
+      if (!options.result) throw new Error('matrix link requires --result <result.json>');
+      if (!options.feature) throw new Error('matrix link requires --feature <dimensionId>:<memberId>');
+      const { codemapLink } = await import('./codemap.ts');
+      const result = await codemapLink({
+        hopPath: options.hop,
+        modelId: options.model,
+        resultPath: options.result,
+        feature: options.feature,
+        observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
   }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);

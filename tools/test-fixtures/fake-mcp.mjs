@@ -18,6 +18,14 @@ import process from "node:process";
 
 const mode = process.env.FAKE_MCP_MODE || "echo";
 const modelFile = process.env.FAKE_MCP_MODEL_FILE;
+// Opt-in Crossmatrix 0.3+ write-API mode: when set, every
+// crossmatrix.command request is appended as one JSON line to this path and
+// succeeds. Unset (the default) keeps the emulated read-only behaviour.
+const writeLog = process.env.FAKE_CROSSMATRIX_WRITES;
+// Opt-in failure injection for write mode: when this value matches a request's
+// requestId or op.kind, that command answers with the real 0.3+ error envelope
+// `{ ok: false, error: { code, message } }` (isError: true). Unset = never fail.
+const errorOn = process.env.FAKE_CROSSMATRIX_ERROR;
 
 let model = null;
 if (modelFile && fs.existsSync(modelFile)) {
@@ -110,6 +118,32 @@ function handle(line) {
     if (mode === "crossmatrix") {
       if (name === "crossmatrix.command") {
         const req = args?.request ?? {};
+        if (writeLog) {
+          try {
+            fs.appendFileSync(writeLog, JSON.stringify(req) + "\n");
+          } catch {
+            /* ignore */
+          }
+          if (errorOn && (req?.requestId === errorOn || req?.op?.kind === errorOn)) {
+            send({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: structured({ ok: false, error: { code: "no_model", message: "no model loaded" } }, true),
+            });
+            return;
+          }
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: structured({
+              ok: true,
+              op: req?.op?.kind ?? "unknown",
+              validated: true,
+              links: ["query"],
+            }),
+          });
+          return;
+        }
         if (req.model !== undefined) {
           model = req.model;
           if (modelFile) {
