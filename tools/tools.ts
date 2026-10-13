@@ -161,12 +161,12 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
-// Fallback provenance when no managed install is recorded: versions read from
-// each repository's Cargo.toml at the pinned SHA (see README).
+// Fallback provenance when no managed install is recorded: the last-known
+// upstream releases (not a pin). These are updated as new releases ship.
 const KNOWN_SOURCE: Record<ToolName, { version: string; sha: string }> = {
-  fmeca: { version: "0.0.1", sha: "8f7fbfd7718707be35e443fa0a4a37370ee3e8a4" },
-  cpm: { version: "0.0.2", sha: "12c8f9acc0fbd7c13b13fc3c3b50134afcffce89" },
-  crossmatrix: { version: "0.2.0", sha: "aef46ffb8cf10801c237c49f79bd0829543c7c2d" },
+  fmeca: { version: "0.2.0", sha: "83d16022ff03fa6725c5ed517ea75caa5bce8694" },
+  cpm: { version: "0.2.2", sha: "1fdd3afbce3302d5aad19895bddc26eb54fd7aea" },
+  crossmatrix: { version: "0.3.0", sha: "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef" },
 };
 
 const DEFAULT_COMMAND: Record<ToolName, string> = {
@@ -193,6 +193,7 @@ const READ_TOOLS: Record<ToolName, ReadonlySet<string>> = {
     "session.list",
     "actions.suggest",
     "policy.list",
+    "vet",
   ]),
   cpm: new Set([
     "plan.status",
@@ -429,9 +430,13 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
   for (const tool of TOOL_NAMES) {
     const override = options.tools?.[tool] ?? {};
     const installed = managed[tool];
-    const known = installed ? { version: installed.version, sha: installed.sourceSha } : KNOWN_SOURCE[tool];
+    const command = override.command ?? installed?.path ?? DEFAULT_COMMAND[tool];
+    // A managed install's provenance only applies when the resolved command is
+    // that binary; an override pointing elsewhere uses the last-known release.
+    const usesManagedBinary = installed !== undefined && command === installed.path;
+    const known = usesManagedBinary ? { version: installed.version, sha: installed.sourceSha } : KNOWN_SOURCE[tool];
     tools[tool] = {
-      command: override.command ?? installed?.path ?? DEFAULT_COMMAND[tool],
+      command,
       args: override.args ?? [],
       env: override.env ?? {},
       sourceVersion: override.sourceVersion ?? known.version,

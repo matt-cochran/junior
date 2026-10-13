@@ -352,8 +352,8 @@ test("fmeca append is classified as a command", () => {
   assert.equal(isReadTool("fmeca", "append"), false);
 });
 
-test("fmeca vet is classified as a command", () => {
-  assert.equal(isReadTool("fmeca", "vet"), false);
+test("fmeca vet is classified as a read", () => {
+  assert.equal(isReadTool("fmeca", "vet"), true);
 });
 
 // --- managed tool defaults ----------------------------------------------------
@@ -391,6 +391,35 @@ test("init keeps the PATH command for a tool with no managed install", () => {
   const { statePath } = managedState(dir);
   const hop = initHopManifest(path.join(dir, "hop.json"), { managedStatePath: statePath });
   assert.equal(hop.tools.cpm.command, "cpm-planner");
+});
+
+// --- fallback provenance ------------------------------------------------------
+//
+// With no managed install recorded, a fresh HOP records the last-known upstream
+// release, not a built-in pin. A config command override that points away from
+// the managed binary also falls back to that release.
+
+test("init with no managed install state records crossmatrix sourceVersion 0.3.0", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
+  const hop = initHopManifest(path.join(dir, "hop.json"), {});
+  assert.equal(hop.tools.crossmatrix.sourceVersion, "0.3.0");
+});
+
+test("init with no managed install state records the cpm 0.2.2 source sha", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
+  const hop = initHopManifest(path.join(dir, "hop.json"), {});
+  assert.equal(hop.tools.cpm.sourceSha, "1fdd3afbce3302d5aad19895bddc26eb54fd7aea");
+});
+
+test("a config command override pointing away from the managed binary records the fallback source sha", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
+  const { statePath } = managedState(dir);
+  const otherBinary = path.join(dir, "other-fmeca-mcp");
+  const hop = initHopManifest(path.join(dir, "hop.json"), {
+    managedStatePath: statePath,
+    tools: { fmeca: { command: otherBinary } },
+  });
+  assert.equal(hop.tools.fmeca.sourceSha, "83d16022ff03fa6725c5ed517ea75caa5bce8694");
 });
 
 // --- crossmatrix project store (0.3.0+) ---------------------------------------
