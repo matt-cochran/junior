@@ -456,6 +456,7 @@ skills and MCP launchers for the manager's agent:
 | --- | --- | --- | --- |
 | FMECA | `@matthew-cochran/fmeca` | `fmeca-mcp` | `fmeca-mcp skills install --target <t> --project <cwd>\|--user` |
 | CPM Planner | `@matthew-cochran/cpm` | `cpm` | `cpm skills install --target <t> --project <cwd>\|--user` |
+| Crossmatrix | `@matthew-cochran/crossmatrix` | `crossmatrix-mcp` | `crossmatrix-mcp skills install --target <t> --project <cwd>\|--user` |
 | jevitate | `@jevitate/cli` | `jevitate` | `jevitate init --skip-keys --skip-project --targets <ids>` |
 | TRIZ | `@matthew-cochran/triz` | `triz` | none yet |
 
@@ -474,6 +475,11 @@ skills and MCP launchers for the manager's agent:
   ready for a `worktree` handoff. A tracked file an installer edits (for
   example an `AGENTS.md` block) is listed in `companions.modifiedTracked` for
   you to review and commit; it is never hidden.
+- `junior matrix init [--dir <project>]` creates the project's committed
+  `.crossmatrix/` store through the Crossmatrix 0.3.0+ `crossmatrix-mcp init`
+  command (PATH first, then the managed binary). `junior init` does not create
+  the store itself; it only suggests `junior matrix init` when `.crossmatrix/`
+  is absent.
 
 #### Keeping tools current
 `junior doctor --check-updates` compares the managed binaries with their latest

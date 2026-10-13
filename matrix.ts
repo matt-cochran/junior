@@ -576,6 +576,7 @@ export const MATRIX_USAGE = [
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
+  'Usage: junior matrix init [--dir <project>]',
   'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
   '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
   'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
@@ -723,6 +724,10 @@ export async function main(argv: string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 0;
+  }
+  if (argv[0] === 'init') {
+    const { runMatrixInit } = await import('./matrix-init.ts');
+    return runMatrixInit(argv.slice(1));
   }
   if (argv[0] === 'sync') {
     try {

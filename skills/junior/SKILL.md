@@ -164,7 +164,7 @@ managed binaries itself.
 `junior init` installs, by default: Pi, the checksum-verified managed
 FMECA/CPM/Crossmatrix binaries (`~/.junior/tools`, used by delegated runs), the
 npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm`,
-`@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
+`@matthew-cochran/crossmatrix`, `@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
 for the selected targets
 (`--no-install` and `--no-companions` opt out). Prefer those skills for their
 domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm` for planning, and

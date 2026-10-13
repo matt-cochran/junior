@@ -21,7 +21,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-export type CompanionId = 'fmeca' | 'cpm' | 'jevitate' | 'triz';
+export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz';
 export type SkillTarget = 'codex' | 'claude' | 'both' | 'none';
 export type SkillScope = 'project' | 'user';
 
@@ -39,6 +39,8 @@ export const COMPANIONS: readonly Companion[] = [
     mcpRegister: 'claude mcp add fmeca-mcp --scope user -- npx -y @matthew-cochran/fmeca' },
   { id: 'cpm', package: '@matthew-cochran/cpm', binary: 'cpm', repo: 'https://github.com/praxec/cpm-planner',
     mcpRegister: 'claude mcp add cpm-planner --scope user -- npx -y @matthew-cochran/cpm' },
+  { id: 'crossmatrix', package: '@matthew-cochran/crossmatrix', binary: 'crossmatrix-mcp', repo: 'https://github.com/praxec/crossmatrix',
+    mcpRegister: 'claude mcp add crossmatrix --scope user -- npx -y @matthew-cochran/crossmatrix' },
   { id: 'jevitate', package: '@jevitate/cli', binary: 'jevitate', repo: 'https://github.com/matt-cochran/jevitate',
     mcpRegister: 'jevitate init --skip-keys (registers the jevitate MCP server)' },
   { id: 'triz', package: '@matthew-cochran/triz', binary: 'triz', repo: 'https://github.com/matt-cochran/triz',
