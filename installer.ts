@@ -995,6 +995,28 @@ async function installTriz(
     const match = entries.find((e) => e.type === "-" && (e.name === "dist/triz.js" || e.name.endsWith("/dist/triz.js") || e.name === "triz.js"));
     if (!match) throw new InstallerError("MISSING_BINARY", `archive ${assetName} has no dist/triz.js entry`);
     const jsBytes = extractEntryToBuffer(archivePath, match.name, deps);
+    // TRIZ 0.3+ reads its own package.json (name, version) at import time, so
+    // the managed manifest carries the release's real identity, checked against
+    // the release, plus `type: module`. Older archives have no package.json.
+    const packageRoot = match.name.replace(/(^|\/)(dist\/)?triz\.js$/, "");
+    const pkgEntry = entries.find((e) => e.type === "-" && e.name === `${packageRoot}${packageRoot && !packageRoot.endsWith("/") ? "/" : ""}package.json`);
+    let manifest: Record<string, unknown> = { type: "module" };
+    if (pkgEntry) {
+      let pkg: any;
+      try {
+        pkg = JSON.parse(extractEntryToBuffer(archivePath, pkgEntry.name, deps).toString("utf8"));
+      } catch (err) {
+        throw new InstallerError("MALFORMED_MANIFEST", `archive ${assetName} has an unreadable package.json`, err);
+      }
+      if (pkg?.name !== undefined && pkg.name !== "@matthew-cochran/triz") {
+        throw new InstallerError("MALFORMED_MANIFEST", `archive ${assetName} package.json names ${String(pkg.name)}, not @matthew-cochran/triz`);
+      }
+      if (typeof pkg?.version !== "string" || pkg.version !== release.version) {
+        throw new InstallerError("MALFORMED_MANIFEST", `archive ${assetName} package.json version ${String(pkg?.version)} does not match release ${release.version}`);
+      }
+      manifest = { name: "@matthew-cochran/triz", version: pkg.version, type: "module" };
+    }
+    const manifestText = JSON.stringify(manifest, null, 2) + "\n";
 
     // Stage the candidate with a managed ESM manifest, then smoke it before
     // touching the working installation.
@@ -1002,14 +1024,14 @@ async function installTriz(
     const candidateJs = path.join(candidateDir, "dist", "triz.js");
     fs.mkdirSync(path.dirname(candidateJs), { recursive: true });
     fs.writeFileSync(candidateJs, jsBytes);
-    fs.writeFileSync(path.join(candidateDir, "package.json"), JSON.stringify({ type: "module" }, null, 2) + "\n");
+    fs.writeFileSync(path.join(candidateDir, "package.json"), manifestText);
     const smoke = deps.smokeTriz ?? ((p: string) => defaultTrizSmoke(p, deps));
     if (!(await smoke(candidateJs))) {
       throw new InstallerError("TRIZ_SMOKE_FAILED", `the extracted TRIZ entry ${assetName} failed its offline smoke test`);
     }
 
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    writeFileAtomic(packagePath, JSON.stringify({ type: "module" }, null, 2) + "\n");
+    writeFileAtomic(packagePath, manifestText);
     const backupPath = `${destPath}.bak`;
     const hadExisting = fs.existsSync(destPath);
     if (hadExisting) fs.renameSync(destPath, backupPath);
@@ -1228,7 +1250,7 @@ export async function installTools(
         outcomes.push({ tool, status: "failed", changed: false, error: message });
       }
     }
-    if (opts.withTriz) {
+    if (opts.withTriz || (opts.update && state.optional?.triz)) {
       try {
         triz = await installTriz(state, installRoot, opts, runDeps);
       } catch (err) {

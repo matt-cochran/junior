@@ -229,3 +229,23 @@ test('installCompanionSkills with JUNIOR_NO_INSTALL reports every companion skip
   deps.env = { ...deps.env, JUNIOR_NO_INSTALL: '1' };
   assert.deepEqual(installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' }).results.map((r) => r.status), COMPANIONS.map(() => 'skipped'));
 });
+
+// --- Windows command shims (pure; tested for every platform) ---
+import { spawnSpec } from './cli-entry.ts';
+
+test('spawnSpec runs npm through npm.cmd with a shell on Windows', () => {
+  assert.deepEqual(spawnSpec('npm', ['view', 'x'], 'win32'), { command: 'npm.cmd', args: ['view', 'x'], shell: true });
+});
+
+test('spawnSpec quotes a .cmd shim and its spaced arguments on Windows', () => {
+  assert.deepEqual(spawnSpec('C:\\Program Files\\nodejs\\fmeca-mcp.cmd', ['--project', 'C:\\my repo'], 'win32'),
+    { command: '"C:\\Program Files\\nodejs\\fmeca-mcp.cmd"', args: ['--project', '"C:\\my repo"'], shell: true });
+});
+
+test('spawnSpec leaves commands unchanged off Windows', () => {
+  assert.deepEqual(spawnSpec('npm', ['view', 'x'], 'linux'), { command: 'npm', args: ['view', 'x'], shell: false });
+});
+
+test('spawnSpec runs a native Windows executable without a shell', () => {
+  assert.deepEqual(spawnSpec('C:\\tools\\gh.exe', ['issue', 'list'], 'win32'), { command: 'C:\\tools\\gh.exe', args: ['issue', 'list'], shell: false });
+});
