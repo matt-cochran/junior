@@ -159,12 +159,44 @@ so it is recorded as evidence (reads become immutable snapshots):
 Neither tool needs registering as an MCP server for this loop; Junior spawns the
 managed binaries itself.
 
+## Crossmatrix hub and the code map
+
+Crossmatrix (0.3.0+) ties the other tools together in a committed
+`.crossmatrix/` store. Use it when work spans features, jobs, journeys, tests,
+risks and code, so the next session reads the relationships instead of
+rediscovering them. Every write is an observation (a scale token plus
+evidence), never a number you invent.
+
+1. Once per project: `node <cli> matrix init` creates `.crossmatrix/`; commit it.
+2. Federate the entities: `node <cli> matrix sync --hop <hop> --model <id>
+   --source code --source tests [--source cpm --plan <plan_id>]
+   [--source jevitate] [--source fmeca --session <id>]`. Re-run after changes;
+   an unchanged roster is a no-op.
+3. Map features to code: `node <cli> matrix codemap init --hop <hop> --model
+   <id>`, then after each accepted handoff `node <cli> matrix link --hop <hop>
+   --model <id> --result <result.json> --feature cpm:<deliverable>`.
+4. Before dispatching: `node <cli> matrix context --hop <hop> --model <id>
+   --feature <dim>:<member>` prints a contract `context` array, and `matrix
+   files` lists the linked files with their relation (implements, tests,
+   touches), which tells you the `owned_files` for cpm.
+5. After merges: `node <cli> matrix stale --hop <hop> --model <id>` lists the
+   changed files and the links to re-confirm; re-link or deprecate them.
+6. For analysis, use the Crossmatrix skills (`crossmatrix-hoq`,
+   `crossmatrix-jtbd`, `crossmatrix-test-coverage`, `crossmatrix-risk`,
+   `crossmatrix-prioritize`, `crossmatrix-review`) through `node <cli> tools
+   call <hop> crossmatrix`. Feed the results back: revise cpm priorities from
+   `crossmatrix-prioritize`, point fmeca at high-weight uncovered
+   requirements, and turn uncovered journeys into jevitate campaigns.
+
+AI assist (`assist.suggest`, `assist.members`) is opt-in and paid; its
+proposals do not count until a human or you confirm them with `observe`.
+
 ## Companion tools and skills
 
 `junior init` installs, by default: Pi, the checksum-verified managed
 FMECA/CPM/Crossmatrix binaries (`~/.junior/tools`, used by delegated runs), the
 npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm`,
-`@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
+`@matthew-cochran/crossmatrix`, `@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
 for the selected targets
 (`--no-install` and `--no-companions` opt out). Prefer those skills for their
 domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm` for planning, and

@@ -173,6 +173,10 @@ function fileDimension(
   // Member ids are unique across a whole Crossmatrix model, so each file
   // dimension needs its own prefix (code `loc:`, tests `test:`).
   prefix = 'loc',
+  // Directory members roll files up for the code map; a filtered dimension
+  // (tests) lists files only, so its directories never shadow the code
+  // dimension's under the same source key.
+  includeDirs = true,
 ): MatrixDimension {
   const fileHashes = new Map<string, string>();
   for (const entry of files) {
@@ -196,15 +200,17 @@ function fileDimension(
   );
   for (const dir of byDepth) {
     const children: Array<{ id: string; hash: string }> = [];
-    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: `${prefix}:${p}`, hash });
-    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: `${prefix}:${sub}`, hash: dirHashes.get(sub)! });
+    // Hash over child paths (not prefixed member ids) so a directory hashes the
+    // same in every file dimension that shares its source key.
+    for (const [p, hash] of fileHashes) if (parentOf(p) === dir) children.push({ id: p, hash });
+    for (const sub of dirs) if (sub !== dir && parentOf(sub) === dir) children.push({ id: sub, hash: dirHashes.get(sub)! });
     children.sort((a, b) => a.id.localeCompare(b.id));
     dirHashes.set(dir, stableHash(children));
   }
 
   const members: MatrixMember[] = [];
   for (const p of [...fileHashes.keys()].sort()) members.push(fileMember(p, fileHashes.get(p)!, 'file', prefix));
-  for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir', prefix));
+  if (includeDirs) for (const dir of [...dirs].sort()) members.push(fileMember(dir, dirHashes.get(dir)!, 'dir', prefix));
 
   return { id, label, kind, order: 0, system: 'git', members };
 }
@@ -216,7 +222,7 @@ export function codeLocations(files: MatrixFile[]): MatrixDimension {
 
 /** Test artifacts: files matching `*.test.*`/`*.spec.*` or under test dirs. */
 export function tests(files: MatrixFile[]): MatrixDimension {
-  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath, 'test');
+  return fileDimension('tests', 'Test artifacts', 'test_artifact', files, isTestPath, 'test', false);
 }
 
 // ---------------------------------------------------------------------------
@@ -570,10 +576,14 @@ export const MATRIX_USAGE = [
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
+  'Usage: junior matrix init [--dir <project>]',
   'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
   '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
   'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
   'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
+  'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
+  'Usage: junior matrix context --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId> [--max N]',
+  'Usage: junior matrix stale --hop <hop.json> --model <modelId> [--dir <project>]',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -611,9 +621,11 @@ interface CodemapOptions {
   feature?: string;
   observation?: string;
   featureDimensions: string[];
+  max?: number;
+  dir?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
 
 function parseCodemapArgs(argv: string[]): CodemapOptions {
@@ -640,7 +652,19 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     feature: values['--feature'],
     observation: values['--observation'],
     featureDimensions,
+    max: parseMax(values['--max']),
+    dir: values['--dir'],
   };
+}
+
+/** Parse an optional non-negative integer `--max`. */
+function parseMax(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`Option --max requires a non-negative integer, got: ${value}`);
+  }
+  return parsed;
 }
 
 function gitTrackedFiles(dir: string): MatrixFile[] {
@@ -701,6 +725,10 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 0;
   }
+  if (argv[0] === 'init') {
+    const { runMatrixInit } = await import('./matrix-init.ts');
+    return runMatrixInit(argv.slice(1));
+  }
   if (argv[0] === 'sync') {
     try {
       const options = parseMatrixArgs(argv.slice(1));
@@ -750,6 +778,45 @@ export async function main(argv: string[]): Promise<number> {
         resultPath: options.result,
         feature: options.feature,
         observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  if (argv[0] === 'files' || argv[0] === 'context' || argv[0] === 'stale') {
+    const subcommand = argv[0];
+    try {
+      const options = parseCodemapArgs(argv.slice(1));
+      if (!options.hop) throw new Error(`matrix ${subcommand} requires --hop <hop.json>`);
+      if (!options.model) throw new Error(`matrix ${subcommand} requires --model <modelId>`);
+      const codemap = await import('./codemap.ts');
+      if (subcommand === 'stale') {
+        const result = await codemap.codemapStale({
+          hopPath: options.hop,
+          modelId: options.model,
+          dir: options.dir ?? process.cwd(),
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
+      if (!options.feature) throw new Error(`matrix ${subcommand} requires --feature <dimensionId>:<memberId>`);
+      if (subcommand === 'files') {
+        const result = await codemap.codemapFiles({
+          hopPath: options.hop,
+          modelId: options.model,
+          feature: options.feature,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
+      const result = await codemap.codemapContext({
+        hopPath: options.hop,
+        modelId: options.model,
+        feature: options.feature,
+        max: options.max,
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;

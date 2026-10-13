@@ -273,3 +273,8 @@ test('test artifact member ids do not collide with code location ids', () => {
   const codeIds = new Set(codeLocations(files).members.map((m) => m.id));
   assert.equal(testsAdapter(files).members.some((m) => codeIds.has(m.id)), false);
 });
+
+test('the tests dimension lists test files without directory members', () => {
+  const files = [{ path: 'test/login.test.ts', content: 'x' }, { path: 'test/fixture.json', content: '{}' }];
+  assert.equal(testsAdapter(files).members.some((m) => m.attributes?.type === 'dir'), false);
+});

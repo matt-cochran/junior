@@ -16,7 +16,9 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
-import { tests as testArtifacts } from './matrix.ts';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { codeLocations, tests as testArtifacts, type MatrixFile } from './matrix.ts';
 import {
   CROSSMATRIX_WRITE_SCHEMA_VERSION,
   requestIdFor,
@@ -314,4 +316,205 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
   }
 
   return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent };
+}
+
+// ---------------------------------------------------------------------------
+// Code-map read side (Crossmatrix 0.3+).
+//
+// `codemapFiles` walks the feature member's outgoing `codemap-*` links to `loc:`
+// code members, following the server's `nextCursor` until exhausted.
+// `codemapContext` turns that list into a Junior contract `context` array, and
+// `codemapStale` recomputes the checkout's content hashes and asks the server
+// which synced members changed. Every query goes through the wrapper's
+// `crossmatrix.query`, which prepends the store-session `model.open` itself.
+// ---------------------------------------------------------------------------
+
+/** One feature-to-code link as returned by `codemapFiles`. */
+export interface CodemapFile {
+  path: string;
+  observation: CodemapObservation;
+  relation: string;
+}
+
+export interface CodemapFilesOptions {
+  hopPath: string;
+  modelId: string;
+  feature: string;
+  deps?: CodemapDeps;
+}
+
+export interface CodemapContextOptions extends CodemapFilesOptions {
+  /** Maximum context entries to emit; defaults to 20 (Junior's `CONTEXT_MAX_ENTRIES`). */
+  max?: number;
+}
+
+export interface CodemapStaleOptions {
+  hopPath: string;
+  modelId: string;
+  /** Project directory whose `git ls-files` roster is hashed. */
+  dir: string;
+  deps?: CodemapDeps;
+}
+
+export interface CodemapStaleResult {
+  changed: unknown[];
+  affectedCells: unknown[];
+}
+
+/** Rank order the context array follows: implements > tests > touches. */
+const OBSERVATION_RANK: Record<CodemapObservation, number> = {
+  implements: 9,
+  tests: 3,
+  touches: 1,
+};
+
+const LOC_PREFIX = 'loc:';
+
+interface CrossmatrixQuery {
+  kind: string;
+  [key: string]: unknown;
+}
+
+/** Run one `crossmatrix.query` and surface upstream failures clearly. */
+async function query(
+  call: typeof callHop,
+  hopPath: string,
+  modelId: string,
+  q: CrossmatrixQuery,
+): Promise<unknown> {
+  const outcome = await call(hopPath, 'crossmatrix', {
+    tool: 'crossmatrix.query',
+    arguments: {
+      request: {
+        schemaVersion: CROSSMATRIX_WRITE_SCHEMA_VERSION,
+        modelId,
+        query: q,
+      },
+    },
+  });
+  if (!outcome.ok) {
+    const detail = serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error';
+    throw new Error(`codemap ${q.kind} failed: ${detail}`);
+  }
+  return outcome.result;
+}
+
+/** A page's `nextCursor`, treating null/empty as exhausted. */
+function nextCursorOf(page: unknown): string | undefined {
+  if (!isRecord(page)) return undefined;
+  const next = page.nextCursor;
+  if (next === undefined || next === null || next === '') return undefined;
+  return String(next);
+}
+
+/** The first recognized observation token on a hop, if any. */
+function observationOf(hop: Record<string, any>): CodemapObservation | null {
+  const tokens = Array.isArray(hop.observations) ? hop.observations : [];
+  for (const token of tokens) if (OBSERVATIONS.includes(token)) return token;
+  return OBSERVATIONS.includes(hop.observation) ? hop.observation : null;
+}
+
+/** List the feature's outgoing `codemap-*` links to `loc:` code members. */
+export async function codemapFiles(options: CodemapFilesOptions): Promise<CodemapFile[]> {
+  const call = options.deps?.callHop ?? callHop;
+  const load = options.deps?.loadHop ?? loadHop;
+  assertWriteCapable(load, options.hopPath);
+  const { memberId } = parseFeature(options.feature);
+
+  const found: CodemapFile[] = [];
+  let cursor: string | undefined;
+  do {
+    const q: CrossmatrixQuery = { kind: 'trace', member: memberId };
+    if (cursor !== undefined) q.cursor = cursor;
+    const page = await query(call, options.hopPath, options.modelId, q);
+    const hops = isRecord(page) && Array.isArray(page.hops) ? page.hops : [];
+    for (const raw of hops) {
+      if (!isRecord(raw)) continue;
+      if (raw.direction !== 'out') continue;
+      if (typeof raw.relation !== 'string' || !raw.relation.startsWith('codemap-')) continue;
+      if (typeof raw.member !== 'string' || !raw.member.startsWith(LOC_PREFIX)) continue;
+      const observation = observationOf(raw);
+      if (observation === null) continue;
+      found.push({ path: raw.member.slice(LOC_PREFIX.length), observation, relation: raw.relation });
+    }
+    cursor = nextCursorOf(page);
+  } while (cursor !== undefined);
+
+  found.sort(
+    (a, b) =>
+      OBSERVATION_RANK[b.observation] - OBSERVATION_RANK[a.observation] ||
+      a.path.localeCompare(b.path),
+  );
+  return found;
+}
+
+/** A Junior contract `context` array: ranked, deduplicated paths capped at `max`. */
+export async function codemapContext(
+  options: CodemapContextOptions,
+): Promise<Array<{ path: string }>> {
+  const files = await codemapFiles(options);
+  const max = options.max ?? 20;
+  const seen = new Set<string>();
+  const context: Array<{ path: string }> = [];
+  for (const file of files) {
+    if (file.path.endsWith('/')) continue;
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+    context.push({ path: file.path });
+    if (context.length >= max) break;
+  }
+  return context;
+}
+
+/** Tracked files under `dir` with their bytes, as `matrix.ts`'s adapters expect. */
+function trackedFiles(dir: string): MatrixFile[] {
+  const listing = spawnSync('git', ['ls-files'], { cwd: dir, encoding: 'utf8' });
+  if (listing.status !== 0) {
+    throw new Error(`git ls-files failed in ${dir}: ${listing.stderr?.trim() ?? 'unknown error'}`);
+  }
+  const files: MatrixFile[] = [];
+  for (const line of listing.stdout.split('\n')) {
+    const p = line.trim();
+    if (!p) continue;
+    files.push({ path: p, content: fs.readFileSync(join(dir, p)) });
+  }
+  return files;
+}
+
+/**
+ * Report synced members whose content hash no longer matches the checkout.
+ * `readFiles` is never sent: Junior members carry `git` sourceRefs, not
+ * `file://` URIs, so only the explicit `hashes` map is meaningful.
+ */
+export async function codemapStale(options: CodemapStaleOptions): Promise<CodemapStaleResult> {
+  const call = options.deps?.callHop ?? callHop;
+  const load = options.deps?.loadHop ?? loadHop;
+  assertWriteCapable(load, options.hopPath);
+
+  const files = trackedFiles(options.dir);
+  const hashes: Record<string, string> = {};
+  for (const dimension of [codeLocations(files), testArtifacts(files)]) {
+    for (const member of dimension.members) {
+      // Crossmatrix keys `stale` hashes by the member's source reference (its
+      // uri, else sourceRef.sourceRef = the file path), not by member id.
+      const key = member.sourceRef?.sourceRef;
+      if (key && member.sourceRef?.contentHash) hashes[key] = member.sourceRef.contentHash;
+    }
+  }
+
+  const changed: unknown[] = [];
+  const affectedCells: unknown[] = [];
+  let cursor: string | undefined;
+  do {
+    const q: CrossmatrixQuery = { kind: 'stale', hashes };
+    if (cursor !== undefined) q.cursor = cursor;
+    const page = await query(call, options.hopPath, options.modelId, q);
+    if (isRecord(page)) {
+      if (Array.isArray(page.changed)) changed.push(...page.changed);
+      if (Array.isArray(page.affectedCells)) affectedCells.push(...page.affectedCells);
+    }
+    cursor = nextCursorOf(page);
+  } while (cursor !== undefined);
+
+  return { changed, affectedCells };
 }

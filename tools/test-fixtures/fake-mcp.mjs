@@ -26,6 +26,19 @@ const writeLog = process.env.FAKE_CROSSMATRIX_WRITES;
 // requestId or op.kind, that command answers with the real 0.3+ error envelope
 // `{ ok: false, error: { code, message } }` (isError: true). Unset = never fail.
 const errorOn = process.env.FAKE_CROSSMATRIX_ERROR;
+// Opt-in Crossmatrix query results: a JSON file mapping a query kind to the
+// result object to return. A value may be an array of pages selected by the
+// request's cursor so a client's nextCursor paging can be exercised. Unset
+// (the default) keeps the emulated read-only behaviour unchanged.
+const queryResponsesFile = process.env.FAKE_CROSSMATRIX_QUERY_RESPONSES;
+let queryResponses = null;
+if (queryResponsesFile && fs.existsSync(queryResponsesFile)) {
+  try {
+    queryResponses = JSON.parse(fs.readFileSync(queryResponsesFile, "utf8"));
+  } catch {
+    queryResponses = null;
+  }
+}
 
 let model = null;
 if (modelFile && fs.existsSync(modelFile)) {
@@ -179,6 +192,19 @@ function handle(line) {
       }
       if (name === "crossmatrix.query") {
         const kind = args?.request?.query?.kind ?? "";
+        if (queryResponses && Object.prototype.hasOwnProperty.call(queryResponses, kind)) {
+          let value = queryResponses[kind];
+          if (Array.isArray(value)) {
+            const rawCursor = args?.request?.query?.cursor;
+            const index =
+              rawCursor === undefined || rawCursor === null || rawCursor === ""
+                ? 0
+                : Number(rawCursor);
+            value = Number.isInteger(index) && index >= 0 && index < value.length ? value[index] : null;
+          }
+          send({ jsonrpc: "2.0", id: msg.id, result: structured(value) });
+          return;
+        }
         if (kind === "validate") {
           send({
             jsonrpc: "2.0",

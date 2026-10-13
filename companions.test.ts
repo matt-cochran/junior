@@ -1,5 +1,5 @@
-// Behavioral tests for companion tool management (fmeca, cpm, jevitate npm
-// packages and their agent skills).
+// Behavioral tests for companion tool management (fmeca, cpm, crossmatrix,
+// jevitate and triz npm packages and their agent skills).
 //
 // Every scenario is offline: npm, the companion CLIs and PATH are injected
 // through the exec/exists seams. Nothing is installed and no network request is
@@ -60,11 +60,22 @@ function world(opts: {
 
 const FMECA = '@matthew-cochran/fmeca';
 const CPM = '@matthew-cochran/cpm';
+const CROSSMATRIX = '@matthew-cochran/crossmatrix';
 const JEV = '@jevitate/cli';
 const TRIZ = '@matthew-cochran/triz';
 
-test('the companion catalog covers fmeca, cpm, jevitate and triz', () => {
-  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'jevitate', 'triz']);
+test('the companion catalog covers fmeca, cpm, crossmatrix, jevitate and triz', () => {
+  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'crossmatrix', 'jevitate', 'triz']);
+});
+
+test('the companion catalog describes crossmatrix with its npm package and MCP launcher', () => {
+  assert.deepEqual(COMPANIONS.find((c) => c.id === 'crossmatrix'), {
+    id: 'crossmatrix',
+    package: CROSSMATRIX,
+    binary: 'crossmatrix-mcp',
+    repo: 'https://github.com/praxec/crossmatrix',
+    mcpRegister: 'claude mcp add crossmatrix --scope user -- npx -y @matthew-cochran/crossmatrix',
+  });
 });
 
 test('inspect reports a companion missing from PATH as not installed', () => {
@@ -75,6 +86,11 @@ test('inspect reports a companion missing from PATH as not installed', () => {
 test('inspect reports the version printed by the companion CLI', () => {
   const { deps } = world({ installed: { [CPM]: '0.2.2' } });
   assert.equal(inspectCompanions(deps).companions.find((c) => c.id === 'cpm')?.version, '0.2.2');
+});
+
+test('inspect reads the crossmatrix version from its `--version` banner', () => {
+  const { deps } = world({ installed: { [CROSSMATRIX]: '0.3.0' } });
+  assert.equal(inspectCompanions(deps).companions.find((c) => c.id === 'crossmatrix')?.version, '0.3.0');
 });
 
 test('inspect is offline unless an update check is requested', () => {
@@ -99,22 +115,22 @@ test('readiness requires every companion to be installed', () => {
 });
 
 test('install fetches a missing companion with npm argv at the latest tag', () => {
-  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2' }, latest: { [JEV]: '0.13.0' } });
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0' }, latest: { [JEV]: '0.13.0' } });
   installCompanions(deps);
   assert.deepEqual(calls.find((c) => c.command === 'npm' && c.args[0] === 'install')?.args,
     ['install', '-g', '--prefer-online', `${JEV}@latest`]);
 });
 
 test('install leaves an already-present companion alone when no update is requested', () => {
-  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' } });
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' } });
   installCompanions(deps);
   assert.equal(calls.some((c) => c.command === 'npm' && c.args[0] === 'install'), false);
 });
 
 test('update reinstalls only companions behind the npm latest version', () => {
   const { deps, calls } = world({
-    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
-    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
+    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
+    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
   });
   installCompanions(deps, { update: true });
   assert.deepEqual(calls.filter((c) => c.command === 'npm' && c.args[0] === 'install').map((c) => c.args[3]), [`${FMECA}@latest`]);
@@ -137,6 +153,13 @@ test('cpm skills install targets both managers as one "all" install', () => {
   installCompanionSkills(deps, { target: 'both', scope: 'user', cwd: '/repo' });
   assert.deepEqual(calls.find((c) => c.command.endsWith('cpm') && c.args[0] === 'skills')?.args,
     ['skills', 'install', '--target', 'all', '--user']);
+});
+
+test('crossmatrix skills install targets both managers with the project directory', () => {
+  const { deps, calls } = world({ installed: { [CROSSMATRIX]: '0.3.0' } });
+  installCompanionSkills(deps, { target: 'both', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('crossmatrix-mcp') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'all', '--project', '/repo']);
 });
 
 test('jevitate skills install skips keys and project scaffolding and maps the targets', () => {

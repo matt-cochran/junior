@@ -570,6 +570,9 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
+ if (!exists(deps, join(cwd, '.crossmatrix'))) {
+  instructions.push('Create the project Crossmatrix store with `junior matrix init` and commit `.crossmatrix/`.');
+ }
  return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, install,
   installSummary:summarizeInstall(install,null), instructions };
 }
