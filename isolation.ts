@@ -65,33 +65,51 @@ export const JUNIOR_EXCLUDE_HEADER = '# junior-generated (local, not committed)'
 
 /** Append exact Junior-owned paths to the repository-local `.git/info/exclude`.
  * Existing content is preserved verbatim and already-present patterns are not
- * duplicated. Outside a Git checkout there is nothing to do. This is a local
- * exclusion only; it never edits a tracked `.gitignore` or a user's rules. */
-export function ensureLocalExcludes(cwd: string, patterns: string[]): { path: string | null; added: string[]; error?: string } {
+ * duplicated. After writing, every requested pattern is verified with
+ * `git check-ignore --no-index` (a directory pattern like `/.delivery/` is
+ * checked as `.delivery/`); a pattern Git does not apply is reported in
+ * `unapplied` with an error naming it and is never reported in `added`. Outside
+ * a Git checkout there is nothing to do. This is a local exclusion only; it
+ * never edits a tracked `.gitignore` or a user's rules. */
+export function ensureLocalExcludes(cwd: string, patterns: string[]): { path: string | null; added: string[]; unapplied: string[]; error?: string } {
  // `--git-path info/exclude` resolves the shared common git dir for a linked
  // worktree (where `--git-dir` points at `.git/worktrees/<name>` and its own
  // `info/exclude` is never read by Git). A plain checkout resolves the same
  // `.git/info/exclude` as before.
  const gd = git(cwd, ['rev-parse', '--git-path', 'info/exclude']);
- if (gd.error) return { path: null, added: [], error: gd.error.message };
- if (gd.status !== 0) return { path: null, added: [] };
+ if (gd.error) return { path: null, added: [], unapplied: [], error: gd.error.message };
+ if (gd.status !== 0) return { path: null, added: [], unapplied: [] };
  const raw = (gd.stdout || '').trim();
- if (!raw) return { path: null, added: [] };
+ if (!raw) return { path: null, added: [], unapplied: [] };
  const excludePath = isAbsolute(raw) ? raw : resolve(cwd, raw);
  let existing = '';
  try { existing = readFileSync(excludePath, 'utf8'); } catch { /* an absent exclude file is the normal case */ }
  const lines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
  const wanted = patterns.filter((p) => p && !lines.has(p));
- if (wanted.length === 0) return { path: excludePath, added: [] };
- const prefix = existing.length === 0 ? '' : existing.endsWith('\n') ? existing : `${existing}\n`;
- const header = lines.has(JUNIOR_EXCLUDE_HEADER) ? '' : `${JUNIOR_EXCLUDE_HEADER}\n`;
- try {
-  mkdirSync(dirname(excludePath), { recursive: true });
-  writeFileSync(excludePath, `${prefix}${header}${wanted.join('\n')}\n`);
- } catch (e: any) {
-  return { path: excludePath, added: [], error: e?.message || String(e) };
+ if (wanted.length > 0) {
+  const prefix = existing.length === 0 ? '' : existing.endsWith('\n') ? existing : `${existing}\n`;
+  const header = lines.has(JUNIOR_EXCLUDE_HEADER) ? '' : `${JUNIOR_EXCLUDE_HEADER}\n`;
+  try {
+   mkdirSync(dirname(excludePath), { recursive: true });
+   writeFileSync(excludePath, `${prefix}${header}${wanted.join('\n')}\n`);
+  } catch (e: any) {
+   return { path: excludePath, added: [], unapplied: [], error: e?.message || String(e) };
+  }
  }
- return { path: excludePath, added: wanted };
+ // Verify every requested pattern's path against the rules Git actually reads.
+ // A directory pattern keeps its trailing slash; only the leading slash is
+ // dropped so `git check-ignore` sees a repo-relative path.
+ const unapplied: string[] = [];
+ const applied = new Set<string>();
+ for (const p of patterns) {
+  if (!p) continue;
+  const r = git(cwd, ['check-ignore', '-q', '--no-index', p.replace(/^\//, '')]);
+  if (r.status === 0) applied.add(p);
+  else unapplied.push(p);
+ }
+ const added = wanted.filter((p) => applied.has(p));
+ if (unapplied.length > 0) return { path: excludePath, added, unapplied, error: `Git does not apply these exclude patterns: ${unapplied.join(', ')}` };
+ return { path: excludePath, added, unapplied };
 }
 
 // ---------------------------------------------------------------------------
