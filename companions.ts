@@ -21,6 +21,7 @@ import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz';
 export type SkillTarget = 'codex' | 'claude' | 'both' | 'none';
@@ -64,6 +65,8 @@ export type CompanionDeps = {
   env?: NodeJS.ProcessEnv;
   exec?: (command: string, args: string[], options?: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string }) => ExecResult;
   exists?: (path: string) => boolean;
+  /** Read seam for manifest/hash inspection; tests inject it instead of disk. */
+  readFile?: (path: string, encoding?: string) => string;
   /** Version from the installed package.json, for a CLI without `--version`. */
   packageVersion?: (executable: string, pkg: string) => string | null;
 };
@@ -229,4 +232,186 @@ export function installCompanionSkills(
     return { id: c.id, status: 'installed', command: [c.binary, ...args] };
   });
   return { ok: results.every((r) => r.status !== 'failed'), results };
+}
+
+// ---------------------------------------------------------------------------
+// Read-only companion agent-skill readiness (issue #39).
+//
+// `init` delegates skill installation to each companion's own installer. Doctor
+// must not run installers, so it reads the manifest each installer leaves
+// behind and compares the recorded hashes with what is on disk:
+//   • FMECA, CPM Planner, Crossmatrix and TRIZ write `<name>-skills.json`
+//     beside the skills, mapping root-relative paths to sha256 hashes.
+//   • jevitate writes its user-level Claude Code skills and records them in
+//     `~/.jevitate/skills-install-state.json`, keyed by absolute path.
+// Readiness never gates Pi execution readiness; each installed-but-unready
+// companion carries a complete Junior-owned command that installs its missing
+// skills. A companion whose CLI is not on PATH is reported `not_installed`
+// with no remediation and never makes the report `ok` false.
+// ---------------------------------------------------------------------------
+
+export type CompanionSkillStatus = 'present' | 'missing' | 'modified' | 'unknown' | 'not_installed';
+export type CompanionSkillCheck = {
+  id: CompanionId;
+  status: CompanionSkillStatus;
+  /** Manager targets whose skill roots were inspected. */
+  managers: Array<Exclude<SkillTarget, 'both' | 'none'>>;
+  /** Absolute skill roots inspected for this companion. */
+  roots: string[];
+  /** Complete Junior-owned command that installs the skills for the selected target/scope. */
+  remediation?: string;
+  detail?: string;
+};
+export type CompanionSkillsReport = {
+  ok: boolean;
+  target: SkillTarget;
+  scope: SkillScope;
+  skills: CompanionSkillCheck[];
+  remediation: string[];
+};
+
+type SkillManifest =
+  | { file: string; kind: 'files' }
+  | { file: string; kind: 'state'; dir: string };
+
+const SKILL_MANIFESTS: Partial<Record<CompanionId, SkillManifest>> = {
+  fmeca: { file: '.fmeca-mcp-skills.json', kind: 'files' },
+  cpm: { file: '.cpm-planner-skills.json', kind: 'files' },
+  crossmatrix: { file: '.crossmatrix-skills.json', kind: 'files' },
+  triz: { file: '.triz-skills.json', kind: 'files' },
+  jevitate: { file: 'skills-install-state.json', kind: 'state', dir: '.jevitate' },
+};
+
+type SkillProbe = 'present' | 'missing' | 'modified' | 'unknown';
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function readCompanionFile(deps: CompanionDeps, path: string): string {
+  return (deps.readFile ?? ((p: string) => readFileSync(p, 'utf8')))(path);
+}
+
+function companionExists(deps: CompanionDeps, path: string): boolean {
+  return (deps.exists ?? existsSync)(path);
+}
+
+/** Resolve the skill root a companion's installer targets for a manager and
+ * scope: Codex reads `.agents/skills`, Claude Code `.claude/skills`, under the
+ * project cwd (project scope) or the home directory (user scope). */
+function companionSkillRoot(
+  manager: 'codex' | 'claude',
+  scope: SkillScope,
+  cwd: string,
+  home: string,
+): string {
+  const base = scope === 'user' ? home : cwd;
+  return manager === 'codex' ? join(base, '.agents', 'skills') : join(base, '.claude', 'skills');
+}
+
+/** A `<name>-skills.json` manifest: `files` maps root-relative paths to hashes. */
+function probeBesideManifest(deps: CompanionDeps, root: string, manifestFile: string): SkillProbe {
+  const manifestPath = join(root, manifestFile);
+  if (!companionExists(deps, manifestPath)) return 'missing';
+  let files: unknown;
+  try {
+    files = (JSON.parse(readCompanionFile(deps, manifestPath)) as { files?: unknown })?.files;
+  } catch {
+    return 'unknown';
+  }
+  if (!files || typeof files !== 'object') return 'unknown';
+  const entries = Object.entries(files as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string');
+  if (!entries.length) return 'unknown';
+  let found = 0, absent = 0, mismatched = 0;
+  for (const [rel, hash] of entries) {
+    const path = join(root, rel);
+    if (!companionExists(deps, path)) { absent++; continue; }
+    found++;
+    if (sha256(readCompanionFile(deps, path)) !== hash) mismatched++;
+  }
+  if (!found) return 'missing';
+  return mismatched || absent ? 'modified' : 'present';
+}
+
+/** jevitate's install state: a flat map of absolute paths to hashes. Only the
+ * SKILL.md files under the inspected root count as agent skills. */
+function probeStateManifest(deps: CompanionDeps, manifestPath: string, root: string): SkillProbe {
+  if (!companionExists(deps, manifestPath)) return 'missing';
+  let state: unknown;
+  try {
+    state = JSON.parse(readCompanionFile(deps, manifestPath));
+  } catch {
+    return 'unknown';
+  }
+  if (!state || typeof state !== 'object') return 'unknown';
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  const entries = Object.entries(state as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[0].startsWith(prefix) && entry[0].endsWith('SKILL.md'));
+  if (!entries.length) return 'missing';
+  let found = 0, absent = 0, mismatched = 0;
+  for (const [path, hash] of entries) {
+    if (!companionExists(deps, path)) { absent++; continue; }
+    found++;
+    if (sha256(readCompanionFile(deps, path)) !== hash) mismatched++;
+  }
+  if (!found) return 'missing';
+  return mismatched || absent ? 'modified' : 'present';
+}
+
+/** A companion's selected managers agree only when every inspected root is
+ * present; a partial install reads as modified, and any undeterminable root
+ * wins over a definite status. */
+function aggregateProbe(statuses: SkillProbe[]): SkillProbe {
+  if (!statuses.length) return 'unknown';
+  if (statuses.every((s) => s === 'present')) return 'present';
+  if (statuses.every((s) => s === 'missing')) return 'missing';
+  if (statuses.some((s) => s === 'unknown')) return 'unknown';
+  return 'modified';
+}
+
+/** Read-only readiness for each companion's agent skills. Never installs and
+ * never writes; inspects the installer-written manifests and skill files. */
+export function inspectCompanionSkills(
+  deps: CompanionDeps = {},
+  opts: { target: SkillTarget; scope: SkillScope; cwd: string; home?: string },
+): CompanionSkillsReport {
+  const target = opts.target ?? 'both';
+  const scope = opts.scope ?? 'project';
+  const env = deps.env ?? process.env;
+  const home = opts.home ?? env.HOME ?? env.USERPROFILE ?? '';
+  if (target === 'none') return { ok: true, target, scope, skills: [], remediation: [] };
+  const managers: Array<'codex' | 'claude'> = target === 'both' ? ['codex', 'claude'] : [target];
+  const command = `junior init --target ${target}${scope === 'user' ? ' --user' : ' --project'}`;
+  const skills = COMPANIONS.map((c): CompanionSkillCheck => {
+    const executable = which(deps, c.binary);
+    if (!executable) {
+      return { id: c.id, status: 'not_installed', managers: [], roots: [], detail: `${c.binary} is not on PATH` };
+    }
+    const manifest = SKILL_MANIFESTS[c.id];
+    if (!manifest) {
+      return { id: c.id, status: 'unknown', managers: [], roots: [], remediation: command, detail: `${c.id} has no known agent-skill manifest` };
+    }
+    // jevitate's installer always writes Claude Code skills at user level and
+    // records them in its own state file; it has no Codex skill directory.
+    const probeManagers = c.id === 'jevitate' ? managers.filter((m) => m === 'claude') : managers;
+    const probes: SkillProbe[] = [];
+    const roots: string[] = [];
+    for (const manager of probeManagers) {
+      const root = c.id === 'jevitate'
+        ? join(home, '.claude', 'skills')
+        : companionSkillRoot(manager, scope, opts.cwd, home);
+      roots.push(root);
+      probes.push(manifest.kind === 'files'
+        ? probeBesideManifest(deps, root, manifest.file)
+        : probeStateManifest(deps, join(home, manifest.dir, manifest.file), root));
+    }
+    const status = aggregateProbe(probes);
+    const check: CompanionSkillCheck = { id: c.id, status, managers: probeManagers, roots };
+    if (status !== 'present') check.remediation = command;
+    if (status === 'unknown') check.detail = `${c.id} agent-skill state could not be determined`;
+    return check;
+  });
+  const unready = skills.filter((s) => s.status === 'missing' || s.status === 'modified' || s.status === 'unknown');
+  const remediation = unready.length ? [`Install missing companion agent skills with \`${command}\`.`] : [];
+  return { ok: !unready.length, target, scope, skills, remediation };
 }

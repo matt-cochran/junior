@@ -7,14 +7,19 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
 import {
   COMPANIONS,
+  inspectCompanionSkills,
   inspectCompanions,
   installCompanions,
   installCompanionSkills,
   type CompanionDeps,
 } from './companions.ts';
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, doctor } from './setup.ts';
 
 type Call = { command: string; args: string[] };
 
@@ -248,4 +253,142 @@ test('spawnSpec leaves commands unchanged off Windows', () => {
 
 test('spawnSpec runs a native Windows executable without a shell', () => {
   assert.deepEqual(spawnSpec('C:\\tools\\gh.exe', ['issue', 'list'], 'win32'), { command: 'C:\\tools\\gh.exe', args: ['issue', 'list'], shell: false });
+});
+
+// --- companion agent-skill readiness (issue #39, read-only) ------------------
+
+function sha256Text(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function projectDir(): string {
+  return mkdtempSync(join(tmpdir(), 'junior-cskills-'));
+}
+
+/** A deps seam where every companion binary is on PATH and skill files fall
+ * back to the real filesystem; HOME defaults to the project directory. */
+function installedDeps(cwd: string, home: string = cwd): CompanionDeps {
+  return {
+    env: { PATH: '/bin', HOME: home },
+    exists: (p: string) => COMPANIONS.some((c) => p === join('/bin', c.binary)) || existsSync(p),
+    readFile: (p: string, encoding?: string) => readFileSync(p, (encoding ?? 'utf8') as BufferEncoding),
+  };
+}
+
+/** Write a beside-the-skills manifest plus its recorded skill files under `root`. */
+function writeBesideManifest(root: string, manifestName: string, files: Record<string, string>): void {
+  for (const [rel, content] of Object.entries(files)) {
+    const path = join(root, rel);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content);
+  }
+  writeFileSync(join(root, manifestName), JSON.stringify({
+    schema: 1,
+    files: Object.fromEntries(Object.entries(files).map(([rel, content]) => [rel, sha256Text(content)])),
+  }));
+}
+
+test('inspectCompanionSkills reports a companion with no skill files as missing', () => {
+  const cwd = projectDir();
+  const report = inspectCompanionSkills(installedDeps(cwd), { target: 'claude', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.status, 'missing');
+});
+
+test('inspectCompanionSkills reports every installed companion as missing in an empty project', () => {
+  const cwd = projectDir();
+  const report = inspectCompanionSkills(installedDeps(cwd), { target: 'both', scope: 'project', cwd });
+  assert.deepEqual(report.skills.map((s) => s.status), COMPANIONS.map(() => 'missing'));
+});
+
+test('inspectCompanionSkills reports present when every recorded skill file matches its manifest hash', () => {
+  const cwd = projectDir();
+  writeBesideManifest(join(cwd, '.claude', 'skills'), '.cpm-planner-skills.json', { 'cpm-plan/SKILL.md': '# plan\n' });
+  const report = inspectCompanionSkills(installedDeps(cwd), { target: 'claude', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.status, 'present');
+});
+
+test('inspectCompanionSkills reports modified when a recorded skill file hash differs from the manifest', () => {
+  const cwd = projectDir();
+  writeBesideManifest(join(cwd, '.claude', 'skills'), '.cpm-planner-skills.json', { 'cpm-plan/SKILL.md': '# plan\n' });
+  writeFileSync(join(cwd, '.claude', 'skills', 'cpm-plan', 'SKILL.md'), '# edited\n');
+  const report = inspectCompanionSkills(installedDeps(cwd), { target: 'claude', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.status, 'modified');
+});
+
+test('inspectCompanionSkills gives a missing companion a complete junior init remediation command', () => {
+  const cwd = projectDir();
+  const report = inspectCompanionSkills(installedDeps(cwd), { target: 'claude', scope: 'project', cwd });
+  assert.match(report.skills.find((s) => s.id === 'cpm')?.remediation ?? '', /^junior init --target claude --project$/);
+});
+
+test('inspectCompanionSkills inspects user-scope skill roots under the home directory', () => {
+  const cwd = projectDir();
+  const home = projectDir();
+  writeBesideManifest(join(home, '.claude', 'skills'), '.cpm-planner-skills.json', { 'cpm-plan/SKILL.md': '# plan\n' });
+  const report = inspectCompanionSkills(installedDeps(cwd, home), { target: 'claude', scope: 'user', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.status, 'present');
+});
+
+test('inspectCompanionSkills inspects nothing for target none', () => {
+  assert.deepEqual(inspectCompanionSkills(installedDeps(projectDir()), { target: 'none', scope: 'project', cwd: projectDir() }).skills, []);
+});
+
+test('inspectCompanionSkills leaves the project directory unchanged', () => {
+  const cwd = projectDir();
+  writeBesideManifest(join(cwd, '.claude', 'skills'), '.cpm-planner-skills.json', { 'cpm-plan/SKILL.md': '# plan\n' });
+  const before = readdirSync(cwd, { recursive: true });
+  inspectCompanionSkills(installedDeps(cwd), { target: 'both', scope: 'project', cwd });
+  assert.deepEqual(readdirSync(cwd, { recursive: true }), before);
+});
+
+test('inspectCompanionSkills reports jevitate present in project scope from its user-level state file', () => {
+  const cwd = projectDir();
+  const home = projectDir();
+  const body = '# jevitate run journey\n';
+  const root = join(home, '.claude', 'skills');
+  const skill = join(root, 'jevitate-run-journey', 'SKILL.md');
+  mkdirSync(dirname(skill), { recursive: true });
+  writeFileSync(skill, body);
+  mkdirSync(join(home, '.jevitate'), { recursive: true });
+  writeFileSync(join(home, '.jevitate', 'skills-install-state.json'), JSON.stringify({ [skill]: sha256Text(body) }));
+  const report = inspectCompanionSkills(installedDeps(cwd, home), { target: 'both', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'jevitate')?.status, 'present');
+});
+
+test('inspectCompanionSkills reports a companion missing from PATH as not_installed', () => {
+  const cwd = projectDir();
+  const deps: CompanionDeps = { env: { PATH: '/bin', HOME: cwd }, exists: () => false };
+  const report = inspectCompanionSkills(deps, { target: 'claude', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.status, 'not_installed');
+});
+
+test('inspectCompanionSkills gives a not_installed companion no remediation command', () => {
+  const cwd = projectDir();
+  const deps: CompanionDeps = { env: { PATH: '/bin', HOME: cwd }, exists: () => false };
+  const report = inspectCompanionSkills(deps, { target: 'claude', scope: 'project', cwd });
+  assert.equal(report.skills.find((s) => s.id === 'cpm')?.remediation, undefined);
+});
+
+test('inspectCompanionSkills stays ok when every companion is not installed', () => {
+  const cwd = projectDir();
+  const deps: CompanionDeps = { env: { PATH: '/bin', HOME: cwd }, exists: () => false };
+  assert.equal(inspectCompanionSkills(deps, { target: 'claude', scope: 'project', cwd }).ok, true);
+});
+
+test('doctor does not change ok when companion skills are missing', () => {
+  const cwd = projectDir();
+  const modelPath = join(cwd, '.pi', 'agent', 'models-store.json');
+  const deps = {
+    cwd,
+    env: { PATH: '/bin', HOME: cwd, OPENROUTER_API_KEY: 'test-key' },
+    nodeVersion: '24.0.0',
+    execPath: '/bin/node',
+    exists: (p: string) => p === '/bin/pi' || p === modelPath || COMPANIONS.some((c) => p === join('/bin', c.binary)),
+    exec: () => ({ status: 0, stdout: '0.1.0' }),
+    readFile: (p: string) => p === modelPath
+      ? JSON.stringify({ [DEFAULT_PROVIDER]: { models: [{ id: DEFAULT_MODEL }] } })
+      : '',
+    readMounts: () => '',
+  };
+  assert.equal(doctor(deps).ok, true);
 });
