@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildMcpServers, toMcpConfig } from './mcp.ts';
+import { buildMcpServers, inspectMcpRegistration, toMcpConfig } from './mcp.ts';
 import { initHop } from './tools/tools.ts';
 
 const ROOT = import.meta.dirname;
@@ -267,4 +267,119 @@ test('junior init does not register an MCP config', () => {
   const dir = workdir();
   runJunior(['init', '--no-install', '--no-companions'], dir);
   assert.equal(existsSync(join(dir, '.mcp.json')), false);
+});
+
+// --- inspectMcpRegistration -------------------------------------------------
+
+const PROJ = '/virtual/project';
+const HOME = '/virtual/home';
+
+function fixtureReader(files: Record<string, string>) {
+  return {
+    readFile: (file: string): string => {
+      const content = files[file];
+      if (content === undefined) throw new Error(`ENOENT: ${file}`);
+      return content;
+    },
+    exists: (file: string): boolean => file in files,
+  };
+}
+
+function inspectClaude(files: Record<string, string>, hopPath?: string) {
+  return inspectMcpRegistration('claude', { cwd: PROJ, home: HOME, hopPath, ...fixtureReader(files) });
+}
+
+function statusOf(report: { servers: Array<{ name: string; status: string }> }, name: string): string | undefined {
+  return report.servers.find((server) => server.name === name)?.status;
+}
+
+test('inspect reports a server in the project .mcp.json as present', () => {
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectClaude({
+    [path]: JSON.stringify({ mcpServers: { 'cpm-planner': { command: 'x', args: [], env: {} } } }),
+  });
+  assert.equal(statusOf(report, 'cpm-planner'), 'present');
+});
+
+test('inspect labels a server found in the project .mcp.json with scope project', () => {
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectClaude({
+    [path]: JSON.stringify({ mcpServers: { 'cpm-planner': { command: 'x', args: [], env: {} } } }),
+  });
+  assert.equal(report.servers.find((server) => server.name === 'cpm-planner')?.scope, 'project');
+});
+
+test('inspect reports a server in ~/.claude.json local project scope as present', () => {
+  const path = join(HOME, '.claude.json');
+  const report = inspectClaude({
+    [path]: JSON.stringify({
+      projects: { [PROJ]: { mcpServers: { 'fmeca-mcp': { command: 'x', args: [], env: {} } } } },
+    }),
+  });
+  assert.equal(statusOf(report, 'fmeca-mcp'), 'present');
+});
+
+test('inspect labels a ~/.claude.json local project server with scope local', () => {
+  const path = join(HOME, '.claude.json');
+  const report = inspectClaude({
+    [path]: JSON.stringify({
+      projects: { [PROJ]: { mcpServers: { 'fmeca-mcp': { command: 'x', args: [], env: {} } } } },
+    }),
+  });
+  assert.equal(report.servers.find((server) => server.name === 'fmeca-mcp')?.scope, 'local');
+});
+
+test('inspect finds a Codex [mcp_servers.cpm-planner] table', () => {
+  const path = join(HOME, '.codex', 'config.toml');
+  const report = inspectMcpRegistration('codex', {
+    cwd: PROJ,
+    home: HOME,
+    ...fixtureReader({ [path]: '[mcp_servers.cpm-planner]\ncommand = "cpm-planner"\nargs = []\n' }),
+  });
+  assert.equal(statusOf(report, 'cpm-planner'), 'present');
+});
+
+test('inspect reports a server with a different command than the hop expects as differs', () => {
+  const dir = workdir();
+  const hopPath = makeHop(dir, { tools: { cpm: { command: 'expected-cpm', args: [] } } });
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectMcpRegistration('claude', {
+    cwd: PROJ,
+    home: HOME,
+    hopPath,
+    ...fixtureReader({ [path]: JSON.stringify({ mcpServers: { 'cpm-planner': { command: 'other-cpm', args: [], env: {} } } }) }),
+  });
+  assert.equal(statusOf(report, 'cpm-planner'), 'differs');
+});
+
+test('inspect reports unknown when a server config file cannot be parsed', () => {
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectClaude({ [path]: '{ this is not JSON' });
+  assert.equal(statusOf(report, 'fmeca-mcp'), 'unknown');
+});
+
+test('inspect never includes env values in the report', () => {
+  const path = join(PROJ, '.mcp.json');
+  const secret = 'super-secret-value';
+  const report = inspectClaude({
+    [path]: JSON.stringify({ mcpServers: { 'cpm-planner': { command: 'x', args: [], env: { TOKEN: secret } } } }),
+  });
+  assert.equal(JSON.stringify(report).includes(secret), false);
+});
+
+test('inspect marks an existing config location as exists', () => {
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectClaude({ [path]: '{}' });
+  assert.equal(report.configs.find((config) => config.path === path)?.exists, true);
+});
+
+test('inspect marks a parseable config location as parsed', () => {
+  const path = join(PROJ, '.mcp.json');
+  const report = inspectClaude({ [path]: '{}' });
+  assert.equal(report.configs.find((config) => config.path === path)?.parsed, true);
+});
+
+test('inspect expects the jevitate server without a hop manifest', () => {
+  const report = inspectClaude({});
+  assert.ok(report.servers.some((server) => server.name === 'jevitate'));
 });

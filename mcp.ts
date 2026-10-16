@@ -22,6 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { harnessMcpConfig, type Harness } from './harness.ts';
 import { buildToolEnv, loadHop, TOOL_NAMES, type ToolName } from './tools/tools.ts';
 
 /** Stable MCP server names, matching each tool's own launcher. */
@@ -67,6 +68,233 @@ export interface RegisterOptions {
   projectDir?: string;
   force?: boolean;
   dryRun?: boolean;
+}
+
+export type McpRegistrationStatus = 'present' | 'missing' | 'differs' | 'unknown';
+export type McpRegistrationScope = 'project' | 'user' | 'local';
+
+/** One expected server and where it was found, if anywhere. `detail` never
+ * carries env values or other secrets. */
+export interface InspectedMcpServer {
+  name: string;
+  status: McpRegistrationStatus;
+  location?: string;
+  scope?: McpRegistrationScope;
+  detail?: string;
+}
+
+/** One host config file the harness reads, with its parse outcome. */
+export interface InspectedMcpConfig {
+  path: string;
+  exists: boolean;
+  parsed: boolean;
+}
+
+export interface McpRegistrationInspection {
+  harness: Harness;
+  servers: InspectedMcpServer[];
+  configs: InspectedMcpConfig[];
+}
+
+/** Injected, read-only view of the filesystem the inspector observes. */
+export interface InspectMcpDeps {
+  cwd: string;
+  home: string;
+  hopPath?: string;
+  readFile: (path: string) => string;
+  exists: (path: string) => boolean;
+}
+
+/** A server entry reduced to the command (and args) the host recorded; env is dropped. */
+type RecordedServer = { command?: string; args?: string[] };
+
+/** Server tables read from a TOML config. */
+interface ParsedToml {
+  servers: Record<string, RecordedServer>;
+  parsed: boolean;
+}
+
+function isUnder(dir: string, target: string): boolean {
+  const prefix = dir.endsWith(path.sep) ? dir : dir + path.sep;
+  return target === dir || target.startsWith(prefix);
+}
+
+/** Reduce a `mcpServers` object to name → command only, never env. */
+function extractServers(value: unknown): Record<string, RecordedServer> | undefined {
+  if (!isRecord(value)) return undefined;
+  const servers: Record<string, RecordedServer> = {};
+  for (const [name, entry] of Object.entries(value)) {
+    servers[name] = isRecord(entry) && typeof entry.command === 'string' ? { command: entry.command } : {};
+  }
+  return servers;
+}
+
+function readTomlString(value: string): string | undefined {
+  if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"')) return undefined;
+  return value
+    .slice(1, -1)
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+function readTomlArray(value: string): string[] | undefined {
+  if (!value.startsWith('[') || !value.endsWith(']')) return undefined;
+  const inner = value.slice(1, -1).trim();
+  if (inner === '') return [];
+  const quoted = inner.match(/"(?:[^"\\]|\\.)*"/g);
+  if (!quoted || quoted.length === 0) return undefined;
+  const parsed = quoted.map((item) => readTomlString(item));
+  if (parsed.some((item) => item === undefined)) return undefined;
+  return parsed as string[];
+}
+
+/**
+ * Minimal TOML reader for Codex's `[mcp_servers.<name>]` tables: table headers
+ * plus the `command` and `args` keys. Nested `[...env]` tables are skipped so
+ * env values never enter the report. Anything outside that shape that looks
+ * like TOML is treated as unparseable.
+ */
+function parseTomlServerTables(text: string): ParsedToml {
+  const servers: Record<string, RecordedServer> = {};
+  let current: string | null = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      const name = header[1];
+      const rest = name.startsWith('mcp_servers.') ? name.slice('mcp_servers.'.length) : null;
+      if (rest && rest.length > 0 && !rest.includes('.')) {
+        current = rest;
+        if (!(current in servers)) servers[current] = {};
+      } else {
+        current = null;
+      }
+      continue;
+    }
+    const eq = line.indexOf('=');
+    if (eq === -1) return { servers, parsed: false };
+    if (current === null) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (key === 'command') {
+      const command = readTomlString(value);
+      if (command === undefined) return { servers, parsed: false };
+      servers[current].command = command;
+    } else if (key === 'args') {
+      const args = readTomlArray(value);
+      if (args === undefined) return { servers, parsed: false };
+      servers[current].args = args;
+    }
+  }
+  return { servers, parsed: true };
+}
+
+/**
+ * Read-only inspection of where the Junior MCP servers are registered for a
+ * harness. It never writes and never throws: an existing config that cannot be
+ * parsed is reported as unparseable and its servers become `unknown`.
+ */
+export function inspectMcpRegistration(harness: Harness, deps: InspectMcpDeps): McpRegistrationInspection {
+  const expected: Array<{ name: string; command?: string }> = [];
+  if (deps.hopPath) {
+    try {
+      for (const server of buildMcpServers(deps.hopPath)) {
+        expected.push({ name: server.name, command: server.command });
+      }
+    } catch {
+      // A hop that cannot be read still yields the known server names.
+    }
+  }
+  for (const name of [...Object.values(MCP_SERVER_NAMES), 'jevitate']) {
+    if (!expected.some((server) => server.name === name)) expected.push({ name });
+  }
+
+  const configs: InspectedMcpConfig[] = [];
+  const sources: Array<{ path: string; scope: McpRegistrationScope; servers: Record<string, RecordedServer> }> = [];
+  const parseFailures: string[] = [];
+  const claudeUserPath = path.join(deps.home, '.claude.json');
+
+  for (const location of harnessMcpConfig(harness, { cwd: deps.cwd, home: deps.home }).locations) {
+    if (!deps.exists(location.path)) {
+      configs.push({ path: location.path, exists: false, parsed: false });
+      continue;
+    }
+
+    let text: string;
+    try {
+      text = deps.readFile(location.path);
+    } catch {
+      configs.push({ path: location.path, exists: true, parsed: false });
+      parseFailures.push(location.path);
+      continue;
+    }
+
+    if (location.path.endsWith('.toml')) {
+      const result = parseTomlServerTables(text);
+      configs.push({ path: location.path, exists: true, parsed: result.parsed });
+      if (!result.parsed) {
+        parseFailures.push(location.path);
+        continue;
+      }
+      sources.push({ path: location.path, scope: 'user', servers: result.servers });
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    if (!isRecord(parsed)) {
+      configs.push({ path: location.path, exists: true, parsed: false });
+      parseFailures.push(location.path);
+      continue;
+    }
+    configs.push({ path: location.path, exists: true, parsed: true });
+
+    if (location.path === claudeUserPath) {
+      const userServers = extractServers(parsed.mcpServers);
+      if (userServers) sources.push({ path: location.path, scope: 'user', servers: userServers });
+      const projects = isRecord(parsed.projects) ? parsed.projects : undefined;
+      const local = projects && isRecord(projects[deps.cwd]) ? projects[deps.cwd] : undefined;
+      const localServers = local && isRecord(local.mcpServers) ? extractServers(local.mcpServers) : undefined;
+      if (localServers) sources.push({ path: location.path, scope: 'local', servers: localServers });
+      continue;
+    }
+
+    const servers = extractServers(parsed.mcpServers);
+    if (servers) {
+      sources.push({ path: location.path, scope: isUnder(deps.cwd, location.path) ? 'project' : 'user', servers });
+    }
+  }
+
+  const servers: InspectedMcpServer[] = expected.map((server) => {
+    for (const source of sources) {
+      if (!(server.name in source.servers)) continue;
+      const recorded = source.servers[server.name];
+      if (server.command !== undefined && recorded.command !== server.command) {
+        return {
+          name: server.name,
+          status: 'differs',
+          location: source.path,
+          scope: source.scope,
+          detail: 'command does not match the hop manifest',
+        };
+      }
+      return { name: server.name, status: 'present', location: source.path, scope: source.scope };
+    }
+    if (parseFailures.length > 0) {
+      return { name: server.name, status: 'unknown', detail: `${parseFailures[0]} could not be parsed` };
+    }
+    return { name: server.name, status: 'missing' };
+  });
+
+  return { harness, servers, configs };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
