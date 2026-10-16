@@ -970,6 +970,10 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
+  if (argv[0] === 'graph') {
+    const { runGraph } = await import('./context-graph.ts');
+    return runGraph(argv.slice(1));
+  }
   if (argv[0] === 'jtbd') {
     const { runJtbd } = await import('./jtbd-bridge.ts');
     return runJtbd(argv.slice(1));
