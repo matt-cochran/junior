@@ -257,14 +257,74 @@ function parseFeature(feature: string): { dimensionId: string; memberId: string 
   return { dimensionId, memberId };
 }
 
-/** Record each changed file as an `observe` link from the feature member. */
-export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapResult> {
+/** One Crossmatrix evidence item: only sourceRef, locator and excerpt are allowed. */
+export interface CodemapEvidence {
+  sourceRef: { system: string; sourceType: string; sourceRef: string; locator?: string };
+  locator: string;
+  excerpt: string;
+}
+
+export interface CodemapObserveOptions {
+  hopPath: string;
+  modelId: string;
+  /** `<dimensionId>:<memberId>` the observation starts from. */
+  feature: string;
+  /** Code location path (without the `loc:` prefix). */
+  path: string;
+  observation: CodemapObservation;
+  confidence: 'high' | 'medium' | 'low';
+  evidence: CodemapEvidence[];
+  rationale: string;
+  /** Stable content identity for the request id; defaults to the confidence. */
+  contentVersion?: string;
+  deps?: CodemapDeps;
+}
+
+/**
+ * Record one `observe` link from a feature member to a `loc:<path>` code
+ * location. Request ids are content-addressed over the relation, member, target,
+ * observation and `contentVersion`, so replaying the same observation is a
+ * no-op. Shared by `codemapLink` and the autopilot's `confirm`.
+ */
+export async function codemapObserve(options: CodemapObserveOptions): Promise<CodemapSent> {
   const call = options.deps?.callHop ?? callHop;
   const load = options.deps?.loadHop ?? loadHop;
   assertWriteCapable(load, options.hopPath);
+  if (!OBSERVATIONS.includes(options.observation)) {
+    throw new Error(`unknown codemap observation '${options.observation}'`);
+  }
 
   const { dimensionId, memberId } = parseFeature(options.feature);
   const relationId = `codemap-${dimensionId}`;
+  const to = `loc:${options.path}`;
+  const version = `${relationId}|${memberId}|${to}|${options.observation}|${options.contentVersion ?? options.confidence}`;
+  const requestId = requestIdFor(options.modelId, 'observe', relationId, version);
+  return send(
+    call,
+    options.hopPath,
+    command(
+      options.modelId,
+      {
+        kind: 'observe',
+        relationId,
+        from: memberId,
+        to,
+        observation: options.observation,
+        provenanceClass: 'observed',
+        confidence: options.confidence,
+        evidence: options.evidence,
+        rationale: options.rationale,
+      },
+      requestId,
+    ),
+  );
+}
+
+/** Record each changed file as an `observe` link from the feature member. */
+export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapResult> {
+  const load = options.deps?.loadHop ?? loadHop;
+  assertWriteCapable(load, options.hopPath);
+
   const result: unknown = JSON.parse(fs.readFileSync(options.resultPath, 'utf8'));
   const record = isRecord(result) ? result : {};
   const resultId = String(record.id ?? '');
@@ -277,41 +337,31 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
     if (!OBSERVATIONS.includes(observation)) {
       throw new Error(`unknown codemap observation '${observation}'`);
     }
-    const to = `loc:${path}`;
-    const version = `${relationId}|${memberId}|${to}|${observation}|${resultId}`;
-    const requestId = requestIdFor(options.modelId, 'observe', relationId, version);
     sent.push(
-      await send(
-        call,
-        options.hopPath,
-        command(
-          options.modelId,
+      await codemapObserve({
+        hopPath: options.hopPath,
+        modelId: options.modelId,
+        feature: options.feature,
+        path,
+        observation,
+        confidence: 'high',
+        contentVersion: resultId,
+        // Crossmatrix evidence items allow only sourceRef, locator and excerpt.
+        evidence: [
           {
-            kind: 'observe',
-            relationId,
-            from: memberId,
-            to,
-            observation,
-            provenanceClass: 'observed',
-            confidence: 'high',
-            // Crossmatrix evidence items allow only sourceRef, locator and excerpt.
-            evidence: [
-              {
-                sourceRef: {
-                  system: 'junior',
-                  sourceType: 'handoff',
-                  sourceRef: `junior-handoff:${resultId}`,
-                  locator: String(record.artifactDir ?? ''),
-                },
-                locator: String(record.artifactDir ?? ''),
-                excerpt: `Junior handoff ${resultId} (${String(record.status ?? 'unknown')})`,
-              },
-            ],
-            rationale: `changed by Junior handoff ${resultId}`,
+            sourceRef: {
+              system: 'junior',
+              sourceType: 'handoff',
+              sourceRef: `junior-handoff:${resultId}`,
+              locator: String(record.artifactDir ?? ''),
+            },
+            locator: String(record.artifactDir ?? ''),
+            excerpt: `Junior handoff ${resultId} (${String(record.status ?? 'unknown')})`,
           },
-          requestId,
-        ),
-      ),
+        ],
+        rationale: `changed by Junior handoff ${resultId}`,
+        deps: options.deps,
+      }),
     );
   }
 

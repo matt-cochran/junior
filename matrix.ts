@@ -584,6 +584,9 @@ export const MATRIX_USAGE = [
   'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
   'Usage: junior matrix context --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId> [--max N]',
   'Usage: junior matrix stale --hop <hop.json> --model <modelId> [--dir <project>]',
+  'Usage: junior matrix bootstrap --hop <hop.json> --model <modelId> --dir <project> [--out proposals.json]',
+  'Usage: junior matrix confirm --hop <hop.json> --model <modelId> --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
+  'Usage: junior matrix autolink --hop <hop.json> --model <modelId> --plan <plan_id>',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -623,14 +626,23 @@ interface CodemapOptions {
   featureDimensions: string[];
   max?: number;
   dir?: string;
+  out?: string;
+  proposals?: string;
+  min?: string;
+  only?: string[];
+  exclude?: string[];
+  plan?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
+const CODEMAP_CONFIDENCES = ['high', 'medium', 'low'];
+const CODEMAP_LIST_FLAGS = ['--only', '--exclude']; // comma-separated id lists
 
 function parseCodemapArgs(argv: string[]): CodemapOptions {
   const featureDimensions: string[] = [];
   const values: Record<string, string> = {};
+  const lists: Record<string, string[]> = { '--only': [], '--exclude': [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.indexOf('=');
@@ -640,10 +652,14 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     if (value === undefined) value = argv[++i];
     if (value === undefined || value === '') throw new Error(`Option ${name} requires a value`);
     if (name === '--feature-dimension') featureDimensions.push(value);
+    else if (CODEMAP_LIST_FLAGS.includes(name)) lists[name].push(...value.split(',').map((entry) => entry.trim()).filter(Boolean));
     else values[name] = value;
   }
   if (values['--observation'] !== undefined && !CODEMAP_OBSERVATIONS.includes(values['--observation'])) {
     throw new Error(`Unknown observation: ${values['--observation']}`);
+  }
+  if (values['--min'] !== undefined && !CODEMAP_CONFIDENCES.includes(values['--min'])) {
+    throw new Error(`Unknown minimum confidence: ${values['--min']}`);
   }
   return {
     hop: values['--hop'],
@@ -654,6 +670,12 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     featureDimensions,
     max: parseMax(values['--max']),
     dir: values['--dir'],
+    out: values['--out'],
+    proposals: values['--proposals'],
+    min: values['--min'],
+    only: lists['--only'],
+    exclude: lists['--exclude'],
+    plan: values['--plan'],
   };
 }
 
@@ -778,6 +800,53 @@ export async function main(argv: string[]): Promise<number> {
         resultPath: options.result,
         feature: options.feature,
         observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  if (argv[0] === 'bootstrap' || argv[0] === 'confirm' || argv[0] === 'autolink') {
+    const subcommand = argv[0];
+    try {
+      const options = parseCodemapArgs(argv.slice(1));
+      if (!options.hop) throw new Error(`matrix ${subcommand} requires --hop <hop.json>`);
+      if (!options.model) throw new Error(`matrix ${subcommand} requires --model <modelId>`);
+      const autopilot = await import('./matrix-autopilot.ts');
+      if (subcommand === 'bootstrap') {
+        const dir = options.dir ?? process.cwd();
+        const result = await autopilot.bootstrap({
+          hopPath: options.hop,
+          modelId: options.model,
+          dir,
+          out: options.out ?? path.join(dir, 'proposals.json'),
+        });
+        process.stdout.write(
+          `${JSON.stringify({ out: result.out, count: result.proposals.length, ...result.counts })}\n`,
+        );
+        return 0;
+      }
+      if (subcommand === 'confirm') {
+        if (!options.proposals) throw new Error('matrix confirm requires --proposals <proposals.json>');
+        const result = await autopilot.confirmProposals({
+          hopPath: options.hop,
+          modelId: options.model,
+          proposalsPath: options.proposals,
+          min: options.min as 'high' | 'medium' | 'low' | undefined,
+          only: options.only,
+          exclude: options.exclude,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
+      if (!options.plan) throw new Error('matrix autolink requires --plan <plan_id>');
+      const result = await autopilot.autolink({
+        hopPath: options.hop,
+        modelId: options.model,
+        planId: options.plan,
+        dir: options.dir ?? process.cwd(),
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;
