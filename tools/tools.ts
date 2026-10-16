@@ -45,8 +45,15 @@ import { openRouterAuthPath, readOpenRouterAuthFile } from "../billing.ts";
 // ---------------------------------------------------------------------------
 
 export const HOP_SCHEMA_VERSION = 1;
-export const TOOL_NAMES = ["fmeca", "cpm", "crossmatrix"] as const;
+export const TOOL_NAMES = ["fmeca", "cpm", "crossmatrix", "scientific-process", "elicitation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
+
+/**
+ * Tools every HOP has always carried. A HOP written before
+ * scientific-process/elicitation were registered legitimately lacks those two
+ * entries; only the legacy tools are required for such a manifest to load.
+ */
+const LEGACY_TOOL_NAMES: ReadonlySet<ToolName> = new Set(["fmeca", "cpm", "crossmatrix"]);
 export type Acceptance = "pending" | "accepted" | "rejected";
 export type CallKind = "read" | "command";
 
@@ -185,12 +192,16 @@ const DEFAULT_COMMAND: Record<ToolName, string> = {
   fmeca: "fmeca-mcp",
   cpm: "cpm-planner",
   crossmatrix: "crossmatrix-mcp",
+  "scientific-process": "scientific-process",
+  elicitation: "elicitation",
 };
 
 const NATIVE_RELATIVE: Record<ToolName, string> = {
   fmeca: "fmeca-state",
   cpm: "cpm-planner.db",
   crossmatrix: "crossmatrix-model.json",
+  "scientific-process": "scientific-process-state",
+  elicitation: "elicitation-state",
 };
 
 /** Read (query) tools whose successful results are exported as snapshots. */
@@ -219,6 +230,8 @@ const READ_TOOLS: Record<ToolName, ReadonlySet<string>> = {
     "plan.review",
   ]),
   crossmatrix: new Set(["crossmatrix.query"]),
+  "scientific-process": new Set(["state.get", "experiment.next", "report.export", "adjudicate"]),
+  elicitation: new Set(["state.get", "question.next", "readiness.assess", "spec.export"]),
 };
 
 /**
@@ -310,6 +323,7 @@ export function validateManifest(value: unknown, filePath: string): HopManifest 
   }
   for (const tool of TOOL_NAMES) {
     const entry = value.tools[tool];
+    if (entry === undefined && !LEGACY_TOOL_NAMES.has(tool)) continue;
     if (!isRecord(entry) || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
       throw new HopError("MALFORMED_MANIFEST", `${filePath}: tools.${tool} needs command + args`);
     }
@@ -319,6 +333,7 @@ export function validateManifest(value: unknown, filePath: string): HopManifest 
   }
   for (const tool of TOOL_NAMES) {
     const entry = value.native[tool];
+    if (entry === undefined && !LEGACY_TOOL_NAMES.has(tool)) continue;
     if (!isRecord(entry) || typeof entry.statePath !== "string") {
       throw new HopError("MALFORMED_MANIFEST", `${filePath}: native.${tool}.statePath is required`);
     }
@@ -775,6 +790,10 @@ function crossmatrixProjectDir(hopPath: string): string {
 export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
   if (tool === "fmeca") return { FMECA_STATE_DIR: nativeAbsPath(hopPath, tool, manifest) };
   if (tool === "cpm") return { CPM_PLANNER_DB: nativeAbsPath(hopPath, tool, manifest) };
+  if (tool === "scientific-process") {
+    return { SCIENTIFIC_PROCESS_STATE_DIR: nativeAbsPath(hopPath, tool, manifest) };
+  }
+  if (tool === "elicitation") return { ELICITATION_STATE_DIR: nativeAbsPath(hopPath, tool, manifest) };
   const store = path.join(crossmatrixProjectDir(hopPath), ".crossmatrix");
   return fs.existsSync(store) ? { CROSSMATRIX_DIR: store } : {};
 }
@@ -1014,6 +1033,12 @@ export async function callHop(
     const kind: CallKind = isReadTool(tool, toolName) ? "read" : "command";
     const revision = hop.revision + 1;
     const cfg = hop.tools[tool];
+    if (!cfg) {
+      throw new HopError(
+        "MALFORMED_MANIFEST",
+        `hop manifest has no configuration for '${tool}'; run \`junior init --install\` to refresh it`,
+      );
+    }
     const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
     const env = { ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
     if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env));
@@ -1167,9 +1192,9 @@ export function inspectHop(hopPath: string): InspectReport {
   const toolSourceShas = {} as Record<ToolName, string>;
   const nativeStatePaths = {} as Record<ToolName, string>;
   for (const tool of TOOL_NAMES) {
-    toolSourceVersions[tool] = hop.tools[tool].sourceVersion;
-    toolSourceShas[tool] = hop.tools[tool].sourceSha;
-    nativeStatePaths[tool] = hop.native[tool].statePath;
+    toolSourceVersions[tool] = hop.tools[tool]?.sourceVersion ?? "";
+    toolSourceShas[tool] = hop.tools[tool]?.sourceSha ?? "";
+    nativeStatePaths[tool] = hop.native[tool]?.statePath ?? NATIVE_RELATIVE[tool];
   }
   const snapshots: InspectSnapshot[] = hop.snapshots.map((s) => ({
     id: s.id,
@@ -1202,7 +1227,7 @@ export function inspectHop(hopPath: string): InspectReport {
     evidenceCount: hop.evidence.length,
     unresolved: hop.unresolved,
     recommendedNext,
-    cpmReview: cpmReviewStatus(hop.tools.cpm.env),
+    cpmReview: cpmReviewStatus(hop.tools.cpm?.env),
     note: "Jev recommends the next MCP call from this context; the executor executes it. Worker completion is never manager acceptance — acceptance only changes via recordManagerAcceptance().",
   };
 }
@@ -1256,7 +1281,7 @@ async function cliCall(args: string[]): Promise<CallOutcome> {
   if (!hopPath || !tool || !requestPath) {
     throw new HopError(
       "USAGE",
-      "usage: tools.ts call <hop.json> <fmeca|cpm|crossmatrix> <request.json>",
+      "usage: tools.ts call <hop.json> <fmeca|cpm|crossmatrix|scientific-process|elicitation> <request.json>",
     );
   }
   if (!TOOL_NAMES.includes(tool as ToolName)) {
@@ -1286,13 +1311,13 @@ function errorEnvelope(err: unknown): { ok: false; error: { code: string; messag
 const TOOLS_USAGE = [
   "Usage: junior tools <command> [args]",
   "  init    <hop.json> [config.json]",
-  "  call    <hop.json> <fmeca|cpm|crossmatrix> <request.json>",
+  "  call    <hop.json> <fmeca|cpm|crossmatrix|scientific-process|elicitation> <request.json>",
   "  inspect <hop.json>",
 ].join("\n");
 
 const TOOLS_COMMANDS: Record<string, { min: number; max: number; usage: string }> = {
   init: { min: 1, max: 2, usage: "Usage: junior tools init <hop.json> [config.json]" },
-  call: { min: 3, max: 3, usage: "Usage: junior tools call <hop.json> <fmeca|cpm|crossmatrix> <request.json>" },
+  call: { min: 3, max: 3, usage: "Usage: junior tools call <hop.json> <fmeca|cpm|crossmatrix|scientific-process|elicitation> <request.json>" },
   inspect: { min: 1, max: 1, usage: "Usage: junior tools inspect <hop.json>" },
 };
 

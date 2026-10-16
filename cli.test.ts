@@ -10,17 +10,19 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { initHop } from './tools/tools.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
 const TOOLS = join(ROOT, 'tools', 'tools.ts');
+const FAKE = join(ROOT, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 const NODE = process.execPath;
 
-function runJunior(args: string[], cwd: string) {
-  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1' } });
+function runJunior(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1', JUNIOR_NO_UPDATE_CHECK: '1', ...env } });
 }
 
 function runTools(args: string[], cwd: string) {
@@ -31,7 +33,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'update', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -162,6 +164,18 @@ test('junior doctor rejects an unknown option', () => {
   assert.notEqual(runJunior(['doctor', '--bogus'], workdir()).status, 0);
 });
 
+test('junior setup --dry-run executes no managed-tool install', () => {
+  const dir = workdir();
+  const res = runJunior(['setup', '--harness', 'codex', '--dry-run'], dir);
+  assert.equal(res.status, 0);
+});
+
+test('junior setup --dry-run writes nothing to the working directory', () => {
+  const dir = workdir();
+  runJunior(['setup', '--harness', 'codex', '--dry-run'], dir);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
 test('junior prune rejects an unknown option', () => {
   assert.notEqual(runJunior(['prune', '--bogus'], workdir()).status, 0);
 });
@@ -200,6 +214,82 @@ test('junior handoff rejects an unknown option', () => {
 
 test('junior validate rejects excess positional arguments', () => {
   assert.notEqual(runJunior(['validate', 'a.json', 'b.json'], workdir()).status, 0);
+});
+
+// --- prepare --choose/--correct flag handling -------------------------------
+
+function chooseTask(dir: string, id: string): string {
+  const taskPath = join(dir, `${id}.json`);
+  writeFileSync(taskPath, JSON.stringify({
+    id,
+    deliverable: 'Choose an option',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+  }));
+  return taskPath;
+}
+
+function writeBrief(dir: string, id: string): void {
+  const briefDir = join(dir, '.delivery', id, '123');
+  mkdirSync(briefDir, { recursive: true });
+  writeFileSync(join(briefDir, 'brief.json'), JSON.stringify({
+    understanding: { scope: [{ id: 'U1', text: 'Do it' }], outOfScope: [], assumptions: [{ id: 'A2', text: 'guess', status: 'guess' }], acceptanceProof: [] },
+    options: [{ id: 'B', title: 'B', approach: 'Option B approach', files: [], effort: { optimistic: 1, likely: 1, pessimistic: 1 }, risks: [], tradeoffs: 'none' }],
+    recommendation: { option: 'B', why: 'best' },
+  }));
+}
+
+test('junior handoff --choose records the choice in the prepare history', () => {
+  const dir = workdir();
+  const id = 'choose-cli';
+  const taskPath = chooseTask(dir, id);
+  writeBrief(dir, id);
+  runJunior(['handoff', taskPath, '--choose', 'B', '--correct', 'A2=x', '--mock', '--quiet'], dir);
+  assert.ok(existsSync(join(dir, '.delivery', 'prepare-history.jsonl')));
+});
+
+test('junior run rejects --choose', () => {
+  assert.notEqual(runJunior(['run', chooseTask(workdir(), 'run-cli'), '--choose', 'B'], workdir()).status, 0);
+});
+
+// --- clarify --answers flag handling ----------------------------------------
+
+test('junior handoff --answers continues the clarification loop', () => {
+  const dir = workdir();
+  const id = 'clar-cli';
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      elicitation: { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: 'echo' }, sourceVersion: '1.0.0', sourceSha: '0'.repeat(64) },
+    },
+  });
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id,
+    deliverable: 'Clarify the widget',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: NODE, args: ['-e', 'process.exit(0)'] }],
+    hopFrom: hop,
+  }));
+  const artifactDir = join(dir, '.delivery', id, '1');
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(join(artifactDir, 'clarify.json'), JSON.stringify({
+    outcome: 'needs_answers',
+    sessionId: `clarify:${id}`,
+    round: 1,
+    questions: [{ id: 'Q1', question: 'Q?', why: 'signal', suggestedAnswer: null, claimIds: [] }],
+    blockers: [],
+    playbooks: [],
+    artifactDir,
+  }));
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ Q1: { answer: 'yes', stance: 'assent' } }));
+  const res = runJunior(['handoff', taskPath, '--answers', join(dir, 'answers.json')], dir);
+  assert.equal(JSON.parse(res.stdout).outcome, 'needs_answers');
 });
 
 // --- nested tools strict flag parsing --------------------------------------
@@ -274,4 +364,42 @@ test('junior doctor writes nothing to the working directory', () => {
   const dir = workdir();
   runJunior(['doctor'], dir);
   assert.deepEqual(readdirSync(dir), []);
+});
+
+// --- startup update notice (R3) ---------------------------------------------
+
+function freshCacheHome(outdated: string[]): string {
+  const home = mkdtempSync(join(tmpdir(), 'junior-home-'));
+  const dir = join(home, '.junior');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'update-check.json'), JSON.stringify({ checkedAt: Date.now(), outdated, remediation: '' }));
+  return home;
+}
+
+function noticeEnv(home: string, noUpdateCheck: string): NodeJS.ProcessEnv {
+  return {
+    HOME: home,
+    JUNIOR_HOME: '',
+    JUNIOR_TOOLS_ROOT: join(home, '.junior', 'tools'),
+    JUNIOR_NO_UPDATE_CHECK: noUpdateCheck,
+  };
+}
+
+test('junior validate prints the update notice on stderr', () => {
+  const home = freshCacheHome(['crossmatrix', '@jevitate/cli']);
+  const res = runJunior(['validate', 'missing.json'], workdir(), noticeEnv(home, ''));
+  assert.match(res.stderr, /junior: 2 updates available \(crossmatrix, @jevitate\/cli\); run `junior update`/);
+});
+
+test('junior handoff never prints the update notice', () => {
+  const dir = workdir();
+  const home = freshCacheHome(['junior']);
+  const res = runJunior(['handoff', mockTask(dir), '--mock'], dir, noticeEnv(home, ''));
+  assert.doesNotMatch(res.stderr, /updates available/);
+});
+
+test('junior validate prints no update notice when JUNIOR_NO_UPDATE_CHECK=1', () => {
+  const home = freshCacheHome(['junior']);
+  const res = runJunior(['validate', 'missing.json'], workdir(), noticeEnv(home, '1'));
+  assert.doesNotMatch(res.stderr, /updates available/);
 });

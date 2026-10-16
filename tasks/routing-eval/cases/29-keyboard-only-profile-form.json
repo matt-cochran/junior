@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-29-keyboard-only-profile-form",
+    "deliverable": "Confirm keyboard-only users can complete the profile form in a real browser",
+    "workflow": "test_first",
+    "acceptance": [
+      "The jevitate suite completes the profile form using only keyboard events",
+      "A missing focus trap causes the suite to fail"
+    ],
+    "constraints": [
+      "Allowed files: e2e/profile-a11y.*",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "jevitate",
+        "application": "jevitate:browser-check",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "fmeca"
+    ],
+    "managerSetup": [
+      "start the app with a seeded profile fixture before running the browser suite"
+    ],
+    "rationale": "Keyboard accessibility is an observable browser behavior that only an automated browser journey can verify end to end"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "contract": {
+    "id": "routing-04-rename-local-variable",
+    "deliverable": "Rename the local variable `tmp` to `stagingDir` inside buildArtifact and change nothing else",
+    "workflow": "test_first",
+    "acceptance": [
+      "buildArtifact behavior is unchanged under the existing test suite"
+    ],
+    "constraints": [
+      "Allowed files: src/artifacts.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [],
+    "notTools": [
+      "fmeca",
+      "cpm",
+      "crossmatrix",
+      "triz"
+    ],
+    "managerSetup": [],
+    "rationale": "A pure local rename is mechanical and needs no coordination or analysis tool"
+  }
+}

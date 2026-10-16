@@ -1,0 +1,200 @@
+{
+  "traits": [
+    "vague_request",
+    "decision_needed",
+    "ui_or_journey",
+    "performance_or_measurement",
+    "flaky_or_unexplained_failure",
+    "risky_change",
+    "plan_sized",
+    "technical_contradiction",
+    "customer_job_or_outcome",
+    "trivial_change"
+  ],
+  "playbooks": [
+    {
+      "id": "vague-feature",
+      "title": "Shape a vague feature request into a plan",
+      "traits": { "vague_request": 1, "customer_job_or_outcome": 0.8, "plan_sized": 0.6 },
+      "steps": [
+        {
+          "tool": "elicitation",
+          "application": "elicitation:requirements-interview",
+          "relevance": "required",
+          "consumes": ["vague request"],
+          "produces": ["testable acceptance criteria"],
+          "managerSetup": ["interview the requester and capture jobs-to-be-done before dispatch"],
+          "junior": "junior discover --task task.json"
+        },
+        {
+          "tool": "crossmatrix",
+          "application": "crossmatrix:house-of-quality",
+          "relevance": "recommended",
+          "consumes": ["testable acceptance criteria"],
+          "produces": ["prioritized characteristics"],
+          "managerSetup": ["sync the requirements into crossmatrix and run the house-of-quality flow"]
+        },
+        {
+          "tool": "cpm",
+          "application": "cpm:plan-backed-deliverable",
+          "relevance": "recommended",
+          "consumes": ["prioritized characteristics"],
+          "produces": ["plan with pinned owned_files"],
+          "managerSetup": ["sync a cpm plan with this deliverable and pin owned_files"]
+        }
+      ]
+    },
+    {
+      "id": "decision-evaluate",
+      "title": "Evaluate competing options against customer value",
+      "traits": { "decision_needed": 1, "customer_job_or_outcome": 0.5 },
+      "steps": [
+        {
+          "tool": "crossmatrix",
+          "application": "crossmatrix:house-of-quality",
+          "relevance": "required",
+          "consumes": ["candidate options"],
+          "produces": ["value-weighted priorities"],
+          "managerSetup": ["sync the candidate options into crossmatrix and run the house-of-quality flow"]
+        },
+        {
+          "tool": "elicitation",
+          "application": "elicitation:requirements-interview",
+          "relevance": "recommended",
+          "consumes": ["stakeholder claims"],
+          "produces": ["captured value criteria"],
+          "managerSetup": ["interview the stakeholders to capture real value criteria before scoring"]
+        }
+      ]
+    },
+    {
+      "id": "flaky-bug",
+      "title": "Explain an intermittent or unexplained failure",
+      "traits": { "flaky_or_unexplained_failure": 1 },
+      "steps": [
+        {
+          "tool": "scientific-process",
+          "application": "scientific-process:hypothesis-experiment",
+          "relevance": "required",
+          "consumes": ["unexplained failure"],
+          "produces": ["discriminating experiment result"],
+          "managerSetup": ["frame the hypothesis and collect failure evidence before editing"]
+        },
+        {
+          "tool": "crossmatrix",
+          "application": "crossmatrix:codemap-context",
+          "relevance": "recommended",
+          "consumes": ["failing module"],
+          "produces": ["bounded feature context"],
+          "managerSetup": ["run matrix codemap init and pass the failing feature context"]
+        }
+      ]
+    },
+    {
+      "id": "perf-regression",
+      "title": "Measure and fix a performance regression",
+      "traits": { "performance_or_measurement": 1 },
+      "steps": [
+        {
+          "tool": "scientific-process",
+          "application": "scientific-process:hypothesis-experiment",
+          "relevance": "required",
+          "consumes": ["performance complaint"],
+          "produces": ["baseline and discriminating measurement"],
+          "managerSetup": ["confirm the reference environment and capture a baseline before changing code"]
+        },
+        {
+          "tool": "jevitate",
+          "application": "jevitate:browser-check",
+          "relevance": "recommended",
+          "consumes": ["baseline"],
+          "produces": ["load-metric evidence"],
+          "managerSetup": ["confirm a reproducible browser or load suite before dispatch"]
+        }
+      ]
+    },
+    {
+      "id": "risky-migration",
+      "title": "De-risk a risky change or migration",
+      "traits": { "risky_change": 1, "plan_sized": 0.5 },
+      "steps": [
+        {
+          "tool": "fmeca",
+          "application": "fmeca:risk-before-change",
+          "relevance": "required",
+          "consumes": ["risky change"],
+          "produces": ["scored failure modes"],
+          "managerSetup": ["open an FMECA session and score failure modes before the edit"]
+        },
+        {
+          "tool": "cpm",
+          "application": "cpm:plan-backed-deliverable",
+          "relevance": "recommended",
+          "consumes": ["scored failure modes"],
+          "produces": ["plan with pinned owned_files"],
+          "managerSetup": ["sync a cpm plan with this deliverable and pin owned_files"]
+        }
+      ]
+    },
+    {
+      "id": "ui-change",
+      "title": "Change a UI surface or journey",
+      "traits": { "ui_or_journey": 1 },
+      "steps": [
+        {
+          "tool": "crossmatrix",
+          "application": "crossmatrix:codemap-context",
+          "relevance": "required",
+          "consumes": ["ui surface"],
+          "produces": ["bounded feature context"],
+          "managerSetup": ["run matrix codemap init and pass the feature context"]
+        },
+        {
+          "tool": "jevitate",
+          "application": "jevitate:browser-check",
+          "relevance": "required",
+          "consumes": ["feature context"],
+          "produces": ["real-browser acceptance evidence"],
+          "managerSetup": ["start the app with seeded fixtures before the browser check"]
+        }
+      ]
+    },
+    {
+      "id": "contradiction",
+      "title": "Resolve a genuine technical contradiction",
+      "traits": { "technical_contradiction": 1 },
+      "steps": [
+        {
+          "tool": "triz",
+          "application": "triz:contradiction",
+          "relevance": "required",
+          "consumes": ["technical contradiction"],
+          "produces": ["resolved contradiction"],
+          "managerSetup": ["authorize the paid triz analysis call and attach its result to the contract"],
+          "junior": "junior investigate --task task.json"
+        }
+      ]
+    },
+    {
+      "id": "planned-change",
+      "title": "Plan a multi-file change",
+      "traits": { "plan_sized": 1 },
+      "steps": [
+        {
+          "tool": "cpm",
+          "application": "cpm:plan-backed-deliverable",
+          "relevance": "required",
+          "consumes": ["multi-file change"],
+          "produces": ["plan with pinned owned_files"],
+          "managerSetup": ["sync a cpm plan with this deliverable and pin owned_files"]
+        }
+      ]
+    },
+    {
+      "id": "plain-change",
+      "title": "Make a small, well-specified change",
+      "traits": { "trivial_change": 1 },
+      "steps": []
+    }
+  ]
+}

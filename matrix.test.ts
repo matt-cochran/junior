@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import {
   buildDimensionSet,
   codeLocations,
+  parseMatrixArgs,
   cpmDeliverables,
   fmecaFailureModes,
   jevitateJobs,
@@ -93,6 +94,29 @@ test('jevitateJobs maps a job priority to a weight observation', () => {
 test('jevitateJobs reads the {jobs:[...]} envelope form', () => {
   const dim = jevitateJobs({ jobs: [{ id: 'j1', name: 'Sign up' }] });
   assert.equal(dim.members.length, 1);
+});
+
+test('jevitateJobs emits desired outcomes as weighted requirement members', () => {
+  const dim = jevitateJobs([{ id: 'j1', priority: 'high', desiredOutcomes: [{ id: 'fast' }] }]);
+  assert.deepEqual(
+    dim.members.filter((m: any) => m.id.includes('outcome')).map((m: any) => m.id),
+    ['job:j1/outcome:fast'],
+  );
+});
+
+test('jevitateJobs weights a high-execution outcome above a low-evaluation one', () => {
+  const dim = jevitateJobs([
+    {
+      id: 'j1',
+      priority: 'high',
+      desiredOutcomes: [
+        { id: 'fast', priority: 'high', gulf: 'execution' },
+        { id: 'cheap', priority: 'low', gulf: 'evaluation' },
+      ],
+    },
+  ]);
+  const weights = dim.members.filter((m: any) => m.id.includes('outcome')).map((m: any) => m.weight);
+  assert.deepEqual(weights, [6, 1]);
 });
 
 test('jevitatePersonas collects distinct personas from the job catalog', () => {
@@ -205,6 +229,13 @@ test('validateDimensionSet accepts the jevitate jobs dimension', () => {
   assert.deepEqual(validateDimensionSet(doc), []);
 });
 
+test('validateDimensionSet accepts weighted desired outcomes', () => {
+  const doc = buildDimensionSet('s', [
+    jevitateJobs([{ id: 'j1', priority: 'high', desiredOutcomes: [{ id: 'fast', gulf: 'execution' }] }]),
+  ]);
+  assert.deepEqual(validateDimensionSet(doc), []);
+});
+
 test('validateDimensionSet accepts the cpm dimension', () => {
   const doc = buildDimensionSet('s', [cpmDeliverables([{ id: 'd1', title: 'Ship' }], 'plan1')]);
   assert.deepEqual(validateDimensionSet(doc), []);
@@ -277,4 +308,25 @@ test('test artifact member ids do not collide with code location ids', () => {
 test('the tests dimension lists test files without directory members', () => {
   const files = [{ path: 'test/login.test.ts', content: 'x' }, { path: 'test/fixture.json', content: '{}' }];
   assert.equal(testsAdapter(files).members.some((m) => m.attributes?.type === 'dir'), false);
+});
+
+// --- CLI: matrix sync --source state ----------------------------------------
+
+test('parseMatrixArgs accepts the state source with its companion session flags', () => {
+  const parsed = parseMatrixArgs([
+    '--source', 'state', '--hop', 'hop.json', '--model', 'm1',
+    '--plan', 'p1', '--fmeca-session', 'f1', '--elicitation-session', 'e1',
+    '--sp-session', 's1', '--jevitate-results', 'results/',
+  ]);
+  assert.deepEqual(
+    [parsed.sources, parsed.plan, parsed.fmecaSession, parsed.elicitationSession, parsed.spSession, parsed.jevitateResults],
+    [['state'], 'p1', 'f1', 'e1', 's1', 'results/'],
+  );
+});
+
+// --- CLI: matrix plan-from-spec dispatch ------------------------------------
+
+test('the matrix CLI dispatches plan-from-spec to the spec bridge', () => {
+  const result = spawnSync(NODE, [JUNIOR, 'matrix', 'plan-from-spec'], { encoding: 'utf8' });
+  assert.equal(result.stderr.includes('--spec <spec.json> or --session'), true);
 });

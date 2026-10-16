@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-23-conflicting-pricing-requirements",
+    "deliverable": "Reconcile sales' request for configurable pricing with finance's demand for a single audited price table",
+    "workflow": "evaluate",
+    "acceptance": [
+      "The conflicting requirements are named along with their owners",
+      "A ranked trade-off is recorded with supporting evidence"
+    ],
+    "constraints": [
+      "Allowed files: docs/pricing-requirements.md",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "elicitation",
+        "application": "elicitation:requirements-interview",
+        "relevance": "required"
+      },
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:house-of-quality",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "interview both stakeholder groups separately before proposing a trade-off",
+      "map the agreed requirements to pricing characteristics in crossmatrix"
+    ],
+    "rationale": "Opposing stakeholder needs must be elicited first, and the house of quality then makes the trade-off explicit and reviewable"
+  }
+}

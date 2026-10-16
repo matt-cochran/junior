@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-21-vague-notifications-request",
+    "deliverable": "Users keep asking for smarter notifications, so determine what to actually build and write acceptance criteria",
+    "workflow": "recon",
+    "acceptance": [
+      "The request is decomposed into testable requirements",
+      "Each requirement states who benefits and what behavior changes"
+    ],
+    "constraints": [
+      "Allowed files: docs/notifications-requirements.md",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "elicitation",
+        "application": "elicitation:requirements-interview",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "interview the requester and several busy users before writing any acceptance criteria"
+    ],
+    "rationale": "The request is vague, so requirements must be elicited from real users before a contract can exist"
+  }
+}

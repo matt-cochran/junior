@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-13-nullable-column-backfill",
+    "deliverable": "Add a nullable `display_name` column to users through a forward-only migration and backfill existing rows",
+    "workflow": "fmeca",
+    "acceptance": [
+      "The migration applies cleanly to a database with existing users",
+      "users.display_name is populated for every existing user"
+    ],
+    "constraints": [
+      "Allowed files: migrations/** and src/users.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "fmeca",
+        "application": "fmeca:risk-before-change",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "open an FMECA session and record the backfill failure modes before editing"
+    ],
+    "rationale": "A forward-only data migration has irreversible failure modes, so a risk pass must precede the change"
+  }
+}

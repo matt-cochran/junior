@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-18-roadmap-prioritization",
+    "deliverable": "Prioritize the next quarter's five candidate features by customer value and delivery risk",
+    "workflow": "evaluate",
+    "acceptance": [
+      "Each candidate has a weighted value and a weighted risk score",
+      "The ranked list is justified by observed evidence rather than invented numbers"
+    ],
+    "constraints": [
+      "Allowed files: none, this is an analysis report",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:house-of-quality",
+        "relevance": "required"
+      },
+      {
+        "tool": "elicitation",
+        "application": "elicitation:requirements-interview",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "sync the candidate features into crossmatrix and run the house-of-quality flow",
+      "interview the requesters to capture real value criteria before scoring"
+    ],
+    "rationale": "House of quality structures the value-to-risk trade-off, and the scores are only trustworthy if the requester criteria are elicited first"
+  }
+}

@@ -34,15 +34,25 @@ import { isDirectEntry } from "./cli-entry.ts";
 // Public constants and types
 // ---------------------------------------------------------------------------
 
-export type ToolName = "fmeca" | "cpm" | "crossmatrix";
+export type ToolName = "fmeca" | "cpm" | "crossmatrix" | "scientific-process" | "elicitation";
 
-export const TOOL_NAMES: readonly ToolName[] = ["fmeca", "cpm", "crossmatrix"];
+export const TOOL_NAMES: readonly ToolName[] = ["fmeca", "cpm", "crossmatrix", "scientific-process", "elicitation"];
+
+/**
+ * Managed tools registered before they publish a standard release. A missing
+ * release, a 404 or a release without this platform's asset is reported as a
+ * non-fatal `unavailable` for these tools only; the original three keep their
+ * existing failure behaviour.
+ */
+const UNAVAILABLE_TOOLS: ReadonlySet<ToolName> = new Set(["scientific-process", "elicitation"]);
 
 /** Repository + published binary name for each managed tool. */
 export const TOOL_REPOS: Record<ToolName, { repo: string; binary: string }> = {
   fmeca: { repo: "praxec/fmeca", binary: "fmeca-mcp" },
   cpm: { repo: "praxec/cpm-planner", binary: "cpm-planner" },
   crossmatrix: { repo: "praxec/crossmatrix", binary: "crossmatrix-mcp" },
+  "scientific-process": { repo: "praxec/scientific-process", binary: "scientific-process" },
+  elicitation: { repo: "praxec/elicitation", binary: "elicitation" },
 };
 
 export const INSTALL_STATE_SCHEMA_VERSION = 1;
@@ -877,6 +887,8 @@ export interface ToolUpdateStatus {
   latest: string | null;
   /** null when the latest release could not be resolved. */
   outdated: boolean | null;
+  /** True for a registered tool whose release is not published yet. */
+  unavailable?: boolean;
   error?: string;
 }
 
@@ -896,7 +908,14 @@ export async function checkToolUpdates(deps: InstallerDeps = {}): Promise<{ tool
       const latest = (await resolveLatestRelease(TOOL_REPOS[tool].repo, deps)).version;
       return { tool, installed, latest, outdated: installed ? compareDotted(installed, latest) < 0 : true };
     } catch (err) {
-      return { tool, installed, latest: null, outdated: null, error: err instanceof Error ? err.message : String(err) };
+      return {
+        tool,
+        installed,
+        latest: null,
+        outdated: null,
+        ...(UNAVAILABLE_TOOLS.has(tool) ? { unavailable: true } : {}),
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }));
   const optionalTriz = state.optional?.triz;
@@ -923,7 +942,7 @@ export interface InstallOptions {
   /** Also install the optional portable TRIZ CLI (separate, no model calls). */
   withTriz?: boolean;
 }
-export type ToolInstallStatus = "installed" | "current" | "update-available" | "failed";
+export type ToolInstallStatus = "installed" | "current" | "update-available" | "unavailable" | "failed";
 export interface ToolInstallOutcome {
   tool: ToolName;
   status: ToolInstallStatus;
@@ -1099,7 +1118,16 @@ async function installOne(
   deps: InstallerDeps,
 ): Promise<ToolInstallOutcome> {
   const repo = TOOL_REPOS[tool].repo;
-  const release = await resolveLatestRelease(repo, deps);
+  let release: ReleaseInfo;
+  try {
+    release = await resolveLatestRelease(repo, deps);
+  } catch (err) {
+    if (UNAVAILABLE_TOOLS.has(tool)) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { tool, status: "unavailable", changed: false, error: `release unavailable for ${repo}: ${message}` };
+    }
+    throw err;
+  }
   const assetName = releaseAssetName(tool, target);
   const asset = release.assets.find((a) => a.name === assetName);
   const existing = state.tools[tool];
@@ -1120,6 +1148,9 @@ async function installOne(
     };
   }
   if (!asset) {
+    if (UNAVAILABLE_TOOLS.has(tool)) {
+      return { tool, status: "unavailable", changed: false, error: `release ${release.tag} of ${repo} has no asset ${assetName}` };
+    }
     throw new InstallerError(
       "MISSING_ASSET",
       `release ${release.tag} of ${repo} has no asset ${assetName}`,

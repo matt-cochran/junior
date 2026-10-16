@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-22-search-feels-faster",
+    "deliverable": "Make search feel faster even though the ticket gives no metric, baseline or environment",
+    "workflow": "recon",
+    "acceptance": [
+      "A measurable latency target and measurement method are agreed",
+      "A baseline is captured on the reference environment"
+    ],
+    "constraints": [
+      "Allowed files: docs/search-latency.md",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "elicitation",
+        "application": "elicitation:requirements-interview",
+        "relevance": "required"
+      },
+      {
+        "tool": "scientific-process",
+        "application": "scientific-process:hypothesis-experiment",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "interview the requester to turn feels faster into a measurable target",
+      "confirm the reference environment before capturing a baseline"
+    ],
+    "rationale": "The goal is untestable until requirements are elicited, and the resulting latency target then needs an experiment to measure"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "contract": {
+    "id": "routing-03-patch-dependency-bump",
+    "deliverable": "Bump the pinned `undici` devDependency from 6.19.2 to 6.19.8 and refresh the lockfile",
+    "workflow": "checks_first",
+    "acceptance": [
+      "package.json pins undici 6.19.8",
+      "The existing test suite still passes"
+    ],
+    "constraints": [
+      "Allowed files: package.json and package-lock.json",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [],
+    "notTools": [
+      "fmeca",
+      "cpm",
+      "crossmatrix"
+    ],
+    "managerSetup": [],
+    "rationale": "A patch-level bump is low risk and already covered by the existing tests"
+  }
+}

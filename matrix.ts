@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDirectEntry } from './cli-entry.ts';
+import { playbookDimensions } from './playbooks.ts';
 import { callHop } from './tools/tools.ts';
 
 export type DimensionKind =
@@ -253,9 +254,19 @@ function personaAttributes(persona: unknown): Record<string, unknown> {
   return rest;
 }
 
+/** Numeric weight for a desired outcome from its priority and gulf. */
+const OUTCOME_PRIORITY_WEIGHT: Record<string, number> = { high: 3, medium: 2, low: 1 };
+const OUTCOME_GULF_WEIGHT: Record<string, number> = { execution: 2, evaluation: 1 };
+
+function desiredOutcomeWeight(priority: unknown, gulf: unknown): number {
+  const priorityScore = OUTCOME_PRIORITY_WEIGHT[String(priority ?? '')] ?? 1;
+  const gulfScore = OUTCOME_GULF_WEIGHT[String(gulf ?? '')] ?? 1;
+  return priorityScore * gulfScore;
+}
+
 /** Customer requirements from `.jevitate/jobs.json`; priority is categorical. */
 export function jevitateJobs(json: unknown): MatrixDimension {
-  const members: MatrixMember[] = jobsFrom(json).map((job) => {
+  const jobMembers: MatrixMember[] = jobsFrom(json).map((job) => {
     const id = String(job.id ?? job.name ?? '');
     const member: MatrixMember = {
       id: `job:${id}`,
@@ -276,6 +287,41 @@ export function jevitateJobs(json: unknown): MatrixDimension {
     if (typeof job.priority === 'string' && job.priority) member.weightObservation = job.priority;
     return member;
   });
+  // Desired outcomes are requirement members of the same dimension, weighted
+  // deterministically from their (or the job's) priority and gulf.
+  const outcomeMembers: MatrixMember[] = [];
+  for (const job of jobsFrom(json)) {
+    const jobId = String(job.id ?? job.name ?? '');
+    for (const outcome of Array.isArray(job.desiredOutcomes) ? job.desiredOutcomes : []) {
+      if (!isRecord(outcome)) continue;
+      const outcomeId = String(outcome.id ?? outcome.name ?? '');
+      if (!outcomeId) continue;
+      const member: MatrixMember = {
+        id: `job:${jobId}/outcome:${outcomeId}`,
+        label: String(outcome.object ?? outcome.measure ?? outcomeId),
+        status: 'active',
+        attributes: {
+          job: jobId,
+          direction: outcome.direction ?? null,
+          measure: outcome.measure ?? null,
+          object: outcome.object ?? null,
+          gulf: outcome.gulf ?? null,
+          target: outcome.target ?? null,
+          guardrail: outcome.guardrail ?? false,
+        },
+        sourceRef: {
+          system: 'jevitate',
+          sourceType: 'desired_outcome',
+          sourceRef: `jevitate:${jobId}/outcome:${outcomeId}`,
+          locator: '.jevitate/jobs.json',
+          contentHash: stableHash(outcome),
+        },
+      };
+      member.weight = desiredOutcomeWeight(outcome.priority ?? job.priority, outcome.gulf);
+      outcomeMembers.push(member);
+    }
+  }
+  const members: MatrixMember[] = [...jobMembers, ...outcomeMembers];
   return { id: 'jevitate-jobs', label: 'Jevitate jobs', kind: 'customer_requirement', order: 0, system: 'jevitate', members };
 }
 
@@ -565,25 +611,38 @@ interface MatrixOptions {
   hop?: string;
   plan?: string;
   session?: string;
+  fmecaSession?: string;
+  elicitationSession?: string;
+  spSession?: string;
+  jevitateResults?: string;
   model?: string;
 }
 
-const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca'];
-const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model'];
+const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca', 'playbooks', 'state'];
+const VALUE_FLAGS = [
+  '--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model',
+  '--fmeca-session', '--elicitation-session', '--sp-session', '--jevitate-results',
+];
 
 export const MATRIX_USAGE = [
-  'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
   'Usage: junior matrix init [--dir <project>]',
-  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source state',
+  '       [--plan <plan_id>] [--fmeca-session <id>] [--elicitation-session <id>]',
+  '       [--sp-session <id>] [--jevitate-results <dir|file>] [--dir <project>]',
   'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
   'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
   'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
   'Usage: junior matrix context --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId> [--max N]',
   'Usage: junior matrix stale --hop <hop.json> --model <modelId> [--dir <project>]',
+  'Usage: junior matrix bootstrap --hop <hop.json> --model <modelId> --dir <project> [--out proposals.json]',
+  'Usage: junior matrix confirm --hop <hop.json> --model <modelId> --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
+  'Usage: junior matrix autolink --hop <hop.json> --model <modelId> --plan <plan_id>',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -610,6 +669,10 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     hop: values['--hop'],
     plan: values['--plan'],
     session: values['--session'],
+    fmecaSession: values['--fmeca-session'],
+    elicitationSession: values['--elicitation-session'],
+    spSession: values['--sp-session'],
+    jevitateResults: values['--jevitate-results'],
     model: values['--model'],
   };
 }
@@ -623,14 +686,23 @@ interface CodemapOptions {
   featureDimensions: string[];
   max?: number;
   dir?: string;
+  out?: string;
+  proposals?: string;
+  min?: string;
+  only?: string[];
+  exclude?: string[];
+  plan?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
+const CODEMAP_CONFIDENCES = ['high', 'medium', 'low'];
+const CODEMAP_LIST_FLAGS = ['--only', '--exclude']; // comma-separated id lists
 
 function parseCodemapArgs(argv: string[]): CodemapOptions {
   const featureDimensions: string[] = [];
   const values: Record<string, string> = {};
+  const lists: Record<string, string[]> = { '--only': [], '--exclude': [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.indexOf('=');
@@ -640,10 +712,14 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     if (value === undefined) value = argv[++i];
     if (value === undefined || value === '') throw new Error(`Option ${name} requires a value`);
     if (name === '--feature-dimension') featureDimensions.push(value);
+    else if (CODEMAP_LIST_FLAGS.includes(name)) lists[name].push(...value.split(',').map((entry) => entry.trim()).filter(Boolean));
     else values[name] = value;
   }
   if (values['--observation'] !== undefined && !CODEMAP_OBSERVATIONS.includes(values['--observation'])) {
     throw new Error(`Unknown observation: ${values['--observation']}`);
+  }
+  if (values['--min'] !== undefined && !CODEMAP_CONFIDENCES.includes(values['--min'])) {
+    throw new Error(`Unknown minimum confidence: ${values['--min']}`);
   }
   return {
     hop: values['--hop'],
@@ -654,6 +730,12 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     featureDimensions,
     max: parseMax(values['--max']),
     dir: values['--dir'],
+    out: values['--out'],
+    proposals: values['--proposals'],
+    min: values['--min'],
+    only: lists['--only'],
+    exclude: lists['--exclude'],
+    plan: values['--plan'],
   };
 }
 
@@ -700,6 +782,7 @@ function readJevitateFiles(dir: string): MatrixFile[] {
 }
 
 async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
+  if (source === 'playbooks') return playbookDimensions();
   if (source === 'code') return [codeLocations(gitTrackedFiles(options.dir))];
   if (source === 'tests') return [tests(gitTrackedFiles(options.dir))];
   if (source === 'jevitate') {
@@ -734,6 +817,21 @@ export async function main(argv: string[]): Promise<number> {
       const options = parseMatrixArgs(argv.slice(1));
       if (!options.hop) throw new Error('matrix sync requires --hop <hop.json>');
       if (!options.model) throw new Error('matrix sync requires --model <modelId>');
+      if (options.sources.includes('state')) {
+        const { syncState } = await import('./state-sync.ts');
+        const result = await syncState({
+          hopPath: options.hop,
+          modelId: options.model,
+          planId: options.plan,
+          fmecaSession: options.fmecaSession,
+          elicitationSession: options.elicitationSession,
+          spSession: options.spSession,
+          jevitateResults: options.jevitateResults,
+          dir: options.dir,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
       const dimensions: MatrixDimension[] = [];
       for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
       const { syncDimensions } = await import('./matrix-sync.ts');
@@ -786,6 +884,53 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
+  if (argv[0] === 'bootstrap' || argv[0] === 'confirm' || argv[0] === 'autolink') {
+    const subcommand = argv[0];
+    try {
+      const options = parseCodemapArgs(argv.slice(1));
+      if (!options.hop) throw new Error(`matrix ${subcommand} requires --hop <hop.json>`);
+      if (!options.model) throw new Error(`matrix ${subcommand} requires --model <modelId>`);
+      const autopilot = await import('./matrix-autopilot.ts');
+      if (subcommand === 'bootstrap') {
+        const dir = options.dir ?? process.cwd();
+        const result = await autopilot.bootstrap({
+          hopPath: options.hop,
+          modelId: options.model,
+          dir,
+          out: options.out ?? path.join(dir, 'proposals.json'),
+        });
+        process.stdout.write(
+          `${JSON.stringify({ out: result.out, count: result.proposals.length, ...result.counts })}\n`,
+        );
+        return 0;
+      }
+      if (subcommand === 'confirm') {
+        if (!options.proposals) throw new Error('matrix confirm requires --proposals <proposals.json>');
+        const result = await autopilot.confirmProposals({
+          hopPath: options.hop,
+          modelId: options.model,
+          proposalsPath: options.proposals,
+          min: options.min as 'high' | 'medium' | 'low' | undefined,
+          only: options.only,
+          exclude: options.exclude,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
+      if (!options.plan) throw new Error('matrix autolink requires --plan <plan_id>');
+      const result = await autopilot.autolink({
+        hopPath: options.hop,
+        modelId: options.model,
+        planId: options.plan,
+        dir: options.dir ?? process.cwd(),
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
   if (argv[0] === 'files' || argv[0] === 'context' || argv[0] === 'stale') {
     const subcommand = argv[0];
     try {
@@ -824,6 +969,30 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
       return 1;
     }
+  }
+  if (argv[0] === 'qc') {
+    const { runLinkQc } = await import('./link-qc.ts');
+    return runLinkQc(argv.slice(1));
+  }
+  if (argv[0] === 'graph') {
+    const { runGraph } = await import('./context-graph.ts');
+    return runGraph(argv.slice(1));
+  }
+  if (argv[0] === 'jtbd') {
+    const { runJtbd } = await import('./jtbd-bridge.ts');
+    return runJtbd(argv.slice(1));
+  }
+  if (argv[0] === 'plan-from-spec') {
+    const { runPlanFromSpec } = await import('./spec-bridge.ts');
+    return runPlanFromSpec(argv.slice(1));
+  }
+  if (argv[0] === 'analyze') {
+    const { runAnalyze } = await import('./matrix-analyze.ts');
+    return runAnalyze(argv.slice(1));
+  }
+  if (argv[0] === 'adr') {
+    const { runAdr } = await import('./adr.ts');
+    return runAdr(argv.slice(1));
   }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);

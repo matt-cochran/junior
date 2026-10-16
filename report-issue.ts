@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { readPackageVersion, spawnSpec } from './cli-entry.ts';
 import { loadHop } from './tools/tools.ts';
 
-export type ReportTool = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz' | 'junior';
+export type ReportTool = 'fmeca' | 'cpm' | 'crossmatrix' | 'scientific-process' | 'elicitation' | 'jevitate' | 'triz' | 'junior';
 
 export interface ReportTarget {
   /** `owner/repo` on GitHub. */
@@ -36,6 +36,8 @@ export const REPORT_TARGETS: Record<ReportTool, ReportTarget> = {
   fmeca: { repo: 'praxec/fmeca', binary: 'fmeca-mcp' },
   cpm: { repo: 'praxec/cpm-planner', binary: 'cpm-planner' },
   crossmatrix: { repo: 'praxec/crossmatrix', binary: 'crossmatrix-mcp' },
+  'scientific-process': { repo: 'praxec/scientific-process', binary: 'scientific-process' },
+  elicitation: { repo: 'praxec/elicitation', binary: 'elicitation' },
   jevitate: { repo: 'matt-cochran/jevitate', binary: 'jevitate' },
   triz: { repo: 'matt-cochran/triz', binary: 'triz' },
   junior: { repo: 'matt-cochran/junior', binary: 'junior' },

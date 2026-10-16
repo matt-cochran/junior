@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-05-upload-speed-vs-memory",
+    "deliverable": "Cut large-image upload time below two seconds while keeping peak memory under the current 256 MB budget, even though faster processing currently requires buffering the whole image",
+    "workflow": "recon",
+    "acceptance": [
+      "A 50 MB image upload completes in under two seconds on the reference host",
+      "Peak RSS stays at or below 256 MB during the upload"
+    ],
+    "constraints": [
+      "Allowed files: src/upload/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "triz",
+        "application": "triz:contradiction",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "fmeca",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "authorize the paid triz analysis call and attach its result to the contract"
+    ],
+    "rationale": "Speed and memory trade directly against each other, so a real technical contradiction must be resolved before implementation"
+  }
+}

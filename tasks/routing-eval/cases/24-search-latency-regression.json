@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-24-search-latency-regression",
+    "deliverable": "Diagnose the threefold latency regression in the search endpoint introduced somewhere in the last forty commits",
+    "workflow": "recon",
+    "acceptance": [
+      "The commit or interaction that causes the regression is identified with a measurement",
+      "The finding is reproduced twice on the reference host"
+    ],
+    "constraints": [
+      "Allowed files: src/search/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "scientific-process",
+        "application": "scientific-process:hypothesis-experiment",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "define the hypothesis and the discriminating measurement before bisecting"
+    ],
+    "rationale": "A regression diagnosis is an experiment over candidate causes, so a hypothesis and discriminating measurement must be framed first"
+  }
+}

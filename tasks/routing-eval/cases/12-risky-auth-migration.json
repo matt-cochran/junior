@@ -1,0 +1,38 @@
+{
+  "contract": {
+    "id": "routing-12-risky-auth-migration",
+    "deliverable": "Migrate session storage from signed cookies to server-side sessions while preserving logout and expiry behavior",
+    "workflow": "fmeca",
+    "acceptance": [
+      "An expired session is rejected",
+      "Logout invalidates the server-side session immediately"
+    ],
+    "constraints": [
+      "Allowed files: src/auth.ts, auth.test.ts and migrations/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "fmeca",
+        "application": "fmeca:risk-before-change",
+        "relevance": "required"
+      },
+      {
+        "tool": "cpm",
+        "application": "cpm:plan-backed-deliverable",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "open an FMECA session and score the migration failure modes before any edit",
+      "sync a cpm plan so auth.ts and the migration files have explicit owners"
+    ],
+    "rationale": "Authentication blast radius is high, so failure modes must be scored first and the multi-file change still needs clear ownership"
+  }
+}

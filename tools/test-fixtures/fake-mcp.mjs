@@ -8,6 +8,9 @@
 //   unsupported respond with an ok:true result carrying a deferred/unsupported note
 //   timeout     complete initialize, then never answer tools/call
 //   crossmatrix emulate the in-memory crossmatrix server (import + queries)
+//   elicitation serve real `question.next`/`state.get`/`readiness.assess`/
+//               `spec.export` elicitation shapes (defaults to the captured
+//               live shapes; override with FAKE_ELICITATION_STATE=<file>)
 //
 // The crossmatrix mode intentionally starts with NO model in memory: a fresh
 // process only answers `validate: true` if the caller replayed the import
@@ -38,6 +41,56 @@ if (queryResponsesFile && fs.existsSync(queryResponsesFile)) {
   } catch {
     queryResponses = null;
   }
+}
+
+// Opt-in elicitation state: a JSON file with the real `question.next`/`state.get`
+// shapes ({ question, signals, claims, readiness, spec }). Unset (the default)
+// serves the real shapes captured from a live elicitation session so the
+// clarification loop can be exercised offline.
+const elicitationFile = process.env.FAKE_ELICITATION_STATE;
+const DEFAULT_ELICITATION = (() => {
+  const coverageGap = {
+    claims: [],
+    code: "coverage_gap",
+    dimension: "acceptance",
+    kind: "clarify",
+    message: "Coverage dimension 'acceptance' has no withstood hypothesis.",
+    suggested_question: "The acceptance hypothesis isn't settled yet \u2014 can you confirm or refute it?",
+  };
+  const openHypothesis = (claimId, dimension) => ({
+    claims: [claimId],
+    code: "open_hypothesis",
+    dimension,
+    kind: "clarify",
+    message: `Hypothesis '${claimId}' has no evidence yet; seek user assent or refutation.`,
+    suggested_question: `Can you confirm: ${claimId}?`,
+  });
+  return {
+    question: coverageGap,
+    signals: [
+      coverageGap,
+      openHypothesis("clarify:live-clarify/acceptance:0", "acceptance"),
+      openHypothesis("clarify:live-clarify/acceptance:1", "acceptance"),
+      openHypothesis("clarify:live-clarify/assumption:0", "assumptions"),
+    ],
+    claims: [
+      { id: "clarify:live-clarify/acceptance:0", subject: { id: "clarify:live-clarify", label: "Add a widget" }, object: { kind: "value", value: "Widget works" }, dimensions: ["acceptance"] },
+      { id: "clarify:live-clarify/acceptance:1", subject: { id: "clarify:live-clarify", label: "Add a widget" }, object: { kind: "value", value: "Widget is fast" }, dimensions: ["acceptance"] },
+      { id: "clarify:live-clarify/assumption:0", subject: { id: "clarify:live-clarify", label: "Add a widget" }, object: { kind: "value", value: "The API is stable" }, dimensions: ["assumptions"] },
+    ],
+    readiness: { ready: false, blockers: [] },
+    spec: { session_id: "clarify:live-clarify", ready: true, requirements: [], blockers: [] },
+  };
+})();
+function loadElicitationState() {
+  if (elicitationFile && fs.existsSync(elicitationFile)) {
+    try {
+      return JSON.parse(fs.readFileSync(elicitationFile, "utf8"));
+    } catch {
+      /* fall through to the default real shapes */
+    }
+  }
+  return DEFAULT_ELICITATION;
 }
 
 let model = null;
@@ -125,6 +178,36 @@ function handle(line) {
           links: ["query"],
         }),
       });
+      return;
+    }
+
+    if (mode === "elicitation") {
+      const state = loadElicitationState();
+      if (name === "session.open") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ ok: true, session_id: args?.session_id }) });
+        return;
+      }
+      if (name === "append") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ ok: true, variant: args?.variant }) });
+        return;
+      }
+      if (name === "question.next") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ question: state.question }) });
+        return;
+      }
+      if (name === "state.get") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ signals: state.signals, claims: state.claims }) });
+        return;
+      }
+      if (name === "readiness.assess") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured(state.readiness) });
+        return;
+      }
+      if (name === "spec.export") {
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ spec: state.spec }) });
+        return;
+      }
+      send({ jsonrpc: "2.0", id: msg.id, result: structured({ ok: true }) });
       return;
     }
 

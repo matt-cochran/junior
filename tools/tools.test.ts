@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -85,6 +85,13 @@ test("init writes a schemaVersion 1 manifest", () => {
   const hop = initHop(dir);
   const manifest = JSON.parse(fs.readFileSync(hop, "utf8"));
   assert.equal(manifest.schemaVersion, 1);
+});
+
+test("the managed tool registry includes scientific-process and elicitation", () => {
+  assert.deepEqual(
+    [...TOOL_NAMES].filter((tool) => tool === "scientific-process" || tool === "elicitation"),
+    ["scientific-process", "elicitation"],
+  );
 });
 
 test("init persists a stable project id across a later call", () => {
@@ -165,6 +172,33 @@ test("malformed manifest is rejected", () => {
   fs.writeFileSync(hop, "{ this is not json");
   const out = cliJson(runCli(["inspect", hop]));
   assert.equal(out.error.code, "MALFORMED_MANIFEST");
+});
+
+function legacyHop(dir) {
+  const hop = initHop(dir);
+  const manifest = JSON.parse(fs.readFileSync(hop, "utf8"));
+  for (const tool of ["scientific-process", "elicitation"]) {
+    delete manifest.tools[tool];
+    delete manifest.native[tool];
+  }
+  fs.writeFileSync(hop, JSON.stringify(manifest));
+  return hop;
+}
+
+test("an old hop without the new tools still runs a cpm call", () => {
+  const dir = tmpdir();
+  const hop = legacyHop(dir);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.status", arguments: {} });
+  const out = cliJson(runCli(["call", hop, "cpm", req]));
+  assert.equal(out.ok, true);
+});
+
+test("calling a new tool on an old hop names the re-init remedy", () => {
+  const dir = tmpdir();
+  const hop = legacyHop(dir);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "state.get", arguments: {} });
+  const out = cliJson(runCli(["call", hop, "scientific-process", req]));
+  assert.match(out.error.message, /junior init --install/);
 });
 
 test("stale expected revision is rejected", () => {
@@ -360,6 +394,14 @@ test("fmeca vet is classified as a read", () => {
   assert.equal(isReadTool("fmeca", "vet"), true);
 });
 
+test("elicitation spec.export is classified as a read", () => {
+  assert.equal(isReadTool("elicitation", "spec.export"), true);
+});
+
+test("scientific-process report.export is classified as a read", () => {
+  assert.equal(isReadTool("scientific-process", "report.export"), true);
+});
+
 // --- managed tool defaults ----------------------------------------------------
 //
 // A fresh HOP points at Junior's managed, checksum-verified binaries when they
@@ -478,6 +520,24 @@ test("buildToolEnv omits crossmatrix env when the project store is absent", () =
   fs.mkdirSync(hopDir, { recursive: true });
   const env = buildToolEnv(path.join(hopDir, "hop.json"), "crossmatrix", crossmatrixManifest());
   assert.deepEqual(env, {});
+});
+
+test("a fresh hop anchors the scientific-process state env beside the hop", () => {
+  const dir = tmpdir();
+  const hopPath = path.join(dir, "hop.json");
+  const manifest = initHopManifest(hopPath, { probeVersion: () => null });
+  assert.deepEqual(buildToolEnv(hopPath, "scientific-process", manifest), {
+    SCIENTIFIC_PROCESS_STATE_DIR: path.join(dir, "scientific-process-state"),
+  });
+});
+
+test("a fresh hop anchors the elicitation state env beside the hop", () => {
+  const dir = tmpdir();
+  const hopPath = path.join(dir, "hop.json");
+  const manifest = initHopManifest(hopPath, { probeVersion: () => null });
+  assert.deepEqual(buildToolEnv(hopPath, "elicitation", manifest), {
+    ELICITATION_STATE_DIR: path.join(dir, "elicitation-state"),
+  });
 });
 
 test("crossmatrixUsesStore is true for a 0.3.0 source version", () => {

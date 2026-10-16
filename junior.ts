@@ -16,10 +16,11 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
-import { inspectCompanions, installationDisabled } from './companions.ts';
+import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
+import { chooseBrief, readLatestBrief } from './prepare.ts';
 
 function usage(): string {
  return [
@@ -31,8 +32,8 @@ function usage(): string {
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
-  '  doctor  [--check-updates] [--online]     read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
-  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained Junior worktrees',
+  '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
@@ -66,8 +67,8 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--mock] [--full] [--quiet]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers'], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
@@ -76,8 +77,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
- doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
-  help: 'Usage: junior doctor [--check-updates] [--online]' },
+ doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
+  help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
+ setup: { flags: ['--yes', '--dry-run'], valueFlags: ['--harness', '--hop'], min: 0, max: 0,
+  help: 'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]' },
  update: {
   flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -110,12 +113,15 @@ function wantsHelp(args: string[]): boolean {
 interface ParsedCommand {
  flags: Set<string>;
  values: Record<string, string>;
+ /** Every value for a repeatable value flag, in order (e.g. --correct). */
+ multi: Record<string, string[]>;
  files: string[];
 }
 
 function parseCommand(command: string, spec: CommandSpec, args: string[]): ParsedCommand {
  const flags = new Set<string>();
  const values: Record<string, string> = {};
+ const multi: Record<string, string[]> = {};
  const files: string[] = [];
  for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -137,6 +143,7 @@ function parseCommand(command: string, spec: CommandSpec, args: string[]): Parse
     if (value === undefined) value = args[++i];
     if (value === undefined || value === '' || value.startsWith('-')) throw Error(`Option ${name} requires a value`);
     values[name] = value;
+    (multi[name] ??= []).push(value);
     continue;
    }
    throw Error(`Unknown option for ${command}: ${name}`);
@@ -146,7 +153,23 @@ function parseCommand(command: string, spec: CommandSpec, args: string[]): Parse
  }
  if (files.length < spec.min) throw Error(spec.help);
  if (files.length > spec.max) throw Error(`Too many arguments for ${command}: expected at most ${spec.max}`);
- return { flags, values, files };
+ return { flags, values, multi, files };
+}
+
+/** Apply `--choose <option>` to a handoff: read the latest prepare brief for the
+ * contract, build the implementation contract with any `--correct` replacements
+ * and record the choice in the prepare history. */
+function applyChooseOption(task: any, cwd: string, parsed: ParsedCommand): any {
+ const latest = readLatestBrief(cwd, String(task?.id));
+ if (!latest) throw Error(`No prepare brief found for ${String(task?.id)}; run the prepare workflow first.`);
+ const corrections: Record<string, string> = {};
+ for (const raw of parsed.multi['--correct'] ?? []) {
+  const eq = raw.indexOf('=');
+  if (eq <= 0) throw Error(`Invalid --correct value (expected <id>=<text>): ${raw}`);
+  corrections[raw.slice(0, eq)] = raw.slice(eq + 1);
+ }
+ const { contract } = chooseBrief({ cwd, task, brief: latest.brief, choice: { option: parsed.values['--choose'], corrections } });
+ return contract;
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -165,25 +188,35 @@ async function main(argv: string[]): Promise<void> {
  if (wantsHelp(rest)) { console.log(spec.help); return; }
  const parsed = parseCommand(command, spec, rest);
 
+ // Best-effort upgrade notice: must never throw and must never change the exit
+ // code. It is skipped entirely for commands where an upgrade is not useful.
+ const updateCheck = await import('./update-check.ts');
+ await updateCheck.startupNotice(command, { env: process.env, checkUpdates: parsed.flags.has('--check-updates') });
+
+ if (command === 'setup') {
+  const setup = await import('./readiness.ts');
+  const result = await setup.runSetup({}, {
+   cwd: process.cwd(),
+   harness: parsed.values['--harness'],
+   hopPath: parsed.values['--hop'],
+   yes: parsed.flags.has('--yes'),
+   dryRun: parsed.flags.has('--dry-run'),
+   juniorCommand: [process.execPath, process.argv[1]],
+  });
+  process.exitCode = result.exitCode;
+  return;
+ }
  if (command === 'doctor') {
-  const result:any = doctor();
+  const result:any = doctor({}, { harness: parsed.values['--harness'] });
   if (parsed.flags.has('--online')) {
    result.credentialsOnline = await checkCredentialsOnline();
   }
   if (parsed.flags.has('--check-updates')) {
-   const installer = await import('./installer.ts');
-   const selfUpdate = await import('./self-update.ts');
-   const managed = await installer.checkToolUpdates();
-   result.companions = inspectCompanions({}, { checkUpdates: true });
-   result.updates = { junior: selfUpdate.checkSelfUpdate({ moduleUrl: import.meta.url }), managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
-   const remediation: string[] = [];
-   if (result.updates.junior.outdated === true) remediation.push(result.updates.junior.kind === 'source'
-    ? 'This Junior runs from a source checkout; update it with `git pull` (junior update never touches a checkout).'
-    : 'Run `junior update` to adopt the newer Junior release.');
-   if (managed.outdated.length || result.updates.companions.length) remediation.push(managed.outdated.includes('triz')
-    ? 'Run `junior update --with-triz` to adopt the newer releases.'
-    : 'Run `junior update` to adopt the newer releases.');
-   if (remediation.length) result.updates.remediation = remediation.join(' ');
+   const collected = await updateCheck.collectUpdateCheck({
+    moduleUrl: import.meta.url,
+    onCompanions: (report:any) => { result.companions = report; },
+   });
+   result.updates = collected.updates;
   }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
@@ -268,13 +301,25 @@ async function main(argv: string[]): Promise<void> {
   return;
  }
  if (command === 'run' || command === 'handoff' || command === 'qa') {
+  if (parsed.values['--choose'] !== undefined && command !== 'handoff') throw Error('--choose is only valid for junior handoff');
   const path = parsed.files[0];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  const task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
+  let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
   if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
   const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+  if (parsed.values['--answers'] !== undefined) {
+   const answersPath = resolve(process.cwd(), parsed.values['--answers']);
+   const answers = JSON.parse(readFileSync(answersPath, 'utf8'));
+   const clarifyDeps = typeof task.hopFrom === 'string' && task.hopFrom.trim() ? { hopPath: resolve(taskCwd, task.hopFrom) } : {};
+   const { applyAnswers } = await import('./clarify.ts');
+   const outcome = await applyAnswers({ cwd: taskCwd, task, answers, deps: clarifyDeps });
+   console.log(JSON.stringify(outcome, null, 2));
+   if (outcome.outcome === 'escalated') process.exitCode = 3;
+   return;
+  }
+  if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
   const slowMount = detectSlowMount(taskCwd);
   if (slowMount) deps.progress?.(slowMount);
   const result = await run(task, mock, deps);

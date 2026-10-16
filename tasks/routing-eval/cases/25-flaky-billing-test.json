@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-25-flaky-billing-test",
+    "deliverable": "Explain why billing.test.ts fails about one in twenty CI runs and stabilise it",
+    "workflow": "recon",
+    "acceptance": [
+      "A specific nondeterminism source is named with a failing reproduction",
+      "The test passes one hundred consecutive local runs after the fix"
+    ],
+    "constraints": [
+      "Allowed files: billing.ts and billing.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "scientific-process",
+        "application": "scientific-process:hypothesis-experiment",
+        "relevance": "required"
+      },
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:test-coverage",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "frame the flakiness hypothesis and collect CI failure evidence before editing",
+      "confirm which billing requirements the flaky test is meant to protect"
+    ],
+    "rationale": "Flakiness must be reduced to a reproducible hypothesis, and the test's protective requirement should be confirmed so the fix does not weaken it"
+  }
+}

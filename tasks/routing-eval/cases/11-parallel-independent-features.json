@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-11-parallel-independent-features",
+    "deliverable": "Land two independent improvements, cached config reads and a new `--json` output mode, in one handoff window with disjoint files",
+    "workflow": "test_first",
+    "acceptance": [
+      "Cached config reads return the same values as uncached reads",
+      "`--json` prints a single JSON object to stdout"
+    ],
+    "constraints": [
+      "Allowed files: src/config.ts, src/config.test.ts, src/output.ts and src/output.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "cpm",
+        "application": "cpm:lease-cohort",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "submit both deliverables to the cpm plan and acquire a cohort lease before dispatch"
+    ],
+    "rationale": "Two non-conflicting ready deliverables can be leased and run together, but only after the planner proves the file sets are disjoint"
+  }
+}

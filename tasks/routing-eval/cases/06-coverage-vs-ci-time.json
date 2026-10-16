@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-06-coverage-vs-ci-time",
+    "deliverable": "Raise branch coverage from 71 percent to 90 percent without increasing the current four-minute CI test wall time",
+    "workflow": "recon",
+    "acceptance": [
+      "Branch coverage reported by c8 is at least 90 percent",
+      "The CI test step still completes within four minutes"
+    ],
+    "constraints": [
+      "Allowed files: src/** and *.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "triz",
+        "application": "triz:contradiction",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "jevitate",
+      "crossmatrix"
+    ],
+    "managerSetup": [
+      "authorize the paid triz analysis call before designing the test strategy"
+    ],
+    "rationale": "More coverage normally costs more CI time, so the contract hides a genuine trade-off better handled by TRIZ than by brainstorming"
+  }
+}

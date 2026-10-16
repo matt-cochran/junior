@@ -12,6 +12,73 @@ one bounded task and prints a compact receipt; you review the artifacts and
 accept. Keep the manager context small: contract, compact receipt, relevant diff
 and check evidence.
 
+## Session start
+
+Start every session with `junior doctor`; it is read-only and prints a
+`readiness` object for the active harness (`--harness claude|cursor|codex`
+forces one). Read `readiness.ready` and its `items` (Junior and companion
+skills, MCP registration, managed tools, cached updates). If `ready` is false,
+offer `junior setup`: it prints the ordered repair plan and, on a TTY, asks for
+confirmation before applying it. `--dry-run` prints the plan only; `--yes`
+applies it non-interactively, and a non-TTY run refuses to change anything
+without `--yes`. Setup never shells out: each action is an argv or a
+Junior-owned file write.
+
+A cached 24-hour update check may print one stderr line on `init`, `doctor`,
+`status` or `validate` covering Junior, the managed tools and the companions;
+`JUNIOR_NO_UPDATE_CHECK=1` disables it. Adopt newer releases with
+`junior update`, which updates Junior itself first, then every managed tool,
+companion and unmodified skill.
+
+## Junior as a junior engineer
+
+Junior routes each contract from the task itself, checks back before acting
+when the contract is unclear, and asks for missing information instead of
+guessing.
+
+### Routing
+
+The readiness call asks Jev for one probability per fixed task trait. Its
+answers select playbooks deterministically (for example `vague-feature`,
+`decision-evaluate`, `flaky-bug`, `perf-regression`, `risky-migration`,
+`ui-change`, `contradiction`, `planned-change`, `plain-change`); a playbook is
+considered only when its primary trait reaches 0.5. The selected playbooks
+flatten into a `toolPlan` on the receipt with per-application worker directions
+and a `managerSetup` list. Reflect every manager setup item before the worker
+starts: a required tool whose setup is unmet surfaces as a `tool_setup` clarify
+in `jev.mode: enforce`, and the worker does not start.
+
+### Check-back
+
+When Jev flags an unclear contract or a blocking assumption, or a decision/plan
+playbook routes, Junior runs the `prepare` workflow first and stops at
+`needs_choice` with `brief.json`/`brief.md`: numbered understanding items
+(`U1...`) and assumptions (`A1...`), scored options and a recommendation. Pick
+one with `junior handoff <task.json> --choose <option> --correct <id>=<text>`;
+each correction replaces the matching U/A item and becomes a constraint. Gating
+is the contract's `checkBack`: `auto` (default), `always` or `off`. An explicit
+`workflow` is never replaced by a check-back; the receipt records the
+recommendation when it is not applied.
+
+### Clarification loop
+
+A clarify returns a `needs_answers` batch of numbered questions instead of a
+result. Answer them in a JSON file and re-run
+`junior handoff <task.json> --answers <file>`; the readiness gate re-runs and
+either drafts a plan (`junior matrix plan-from-spec --spec <spec.json>`) or
+produces a prepare brief for `--choose`. Never invent user answers; unresolved
+questions stay unresolved.
+
+### Analysis workflows
+
+`discover` is an elicitation-backed requirements interview: research the
+repository first, record established claims with evidence, rank open questions
+by leverage with suggested answers, record contradictions and the
+`readiness.assess` result, and write `analysis-report.md`. `investigate` runs one
+scientific-process experiment per handoff: state or resume a hypothesis, design
+the smallest refuting experiment, record the observation with raw evidence, and
+recommend the next experiment. Neither changes production code.
+
 ## Locate the CLI
 
 The skill may be installed from a source checkout (`junior.ts`) or from the
@@ -176,34 +243,71 @@ value, snapshots). cpm-planner auto-baselines at the first execution unless
 Neither tool needs registering as an MCP server for this loop; Junior spawns the
 managed binaries itself.
 
-## Crossmatrix hub and the code map
+## Crossmatrix state graph
 
 Crossmatrix (0.3.0+) ties the other tools together in a committed
 `.crossmatrix/` store. Use it when work spans features, jobs, journeys, tests,
-risks and code, so the next session reads the relationships instead of
-rediscovering them. Every write is an observation (a scale token plus
-evidence), never a number you invent.
+risks, ADRs and code, so the next session reads the relationships instead of
+rediscovering them. Every write is an observation (a scale token plus evidence),
+never a number you invent.
 
 1. Once per project: `node <cli> matrix init` creates `.crossmatrix/`; commit it.
-2. Federate the entities: `node <cli> matrix sync --hop <hop> --model <id>
-   --source code --source tests [--source cpm --plan <plan_id>]
-   [--source jevitate] [--source fmeca --session <id>]`. Re-run after changes;
-   an unchanged roster is a no-op.
-3. Map features to code: `node <cli> matrix codemap init --hop <hop> --model
-   <id>`, then after each accepted handoff `node <cli> matrix link --hop <hop>
-   --model <id> --result <result.json> --feature cpm:<deliverable>`.
-4. Before dispatching: `node <cli> matrix context --hop <hop> --model <id>
-   --feature <dim>:<member>` prints a contract `context` array, and `matrix
-   files` lists the linked files with their relation (implements, tests,
-   touches), which tells you the `owned_files` for cpm.
-5. After merges: `node <cli> matrix stale --hop <hop> --model <id>` lists the
-   changed files and the links to re-confirm; re-link or deprecate them.
-6. For analysis, use the Crossmatrix skills (`crossmatrix-hoq`,
-   `crossmatrix-jtbd`, `crossmatrix-test-coverage`, `crossmatrix-risk`,
-   `crossmatrix-prioritize`, `crossmatrix-review`) through `node <cli> tools
-   call <hop> crossmatrix`. Feed the results back: revise cpm priorities from
-   `crossmatrix-prioritize`, point fmeca at high-weight uncovered
-   requirements, and turn uncovered journeys into jevitate campaigns.
+   `matrix export --source code|tests|jevitate|cpm|fmeca|playbooks` writes the
+   same dimensions as files under `.crossmatrix/` without a hop.
+2. Federate the entities: `node <cli> matrix sync --hop <hop.json> --model <id>
+   --source code --source tests [--source jevitate] [--source playbooks]
+   [--source cpm --plan <plan_id>] [--source fmeca --session <id>]`.
+   `--source state` mirrors companion-tool state (`cpm`, `fmeca`,
+   `elicitation`, `scientific-process`, jevitate results) as idempotent
+   observations; `--source playbooks` publishes the capability map. Re-run after
+   changes; an unchanged roster is a no-op.
+3. Autopilot the links once artifacts exist: `matrix bootstrap` proposes
+   feature/journey/job/test -> code links with evidence and confidence,
+   `matrix confirm --proposals <proposals.json>` records a reviewed selection
+   (`--min high|medium|low`, `--only`, `--exclude`), and `matrix autolink --plan
+   <plan_id>` links completed cpm deliverables' results. All three are
+   content-addressed and replay identically.
+4. Map features to code explicitly: `matrix codemap init`, then `matrix link
+   --result <result.json> --feature <dimensionId>:<memberId>` after each
+   accepted handoff.
+5. Query the graph: `matrix graph --seed <dimensionId>:<memberId>` walks to a
+   bounded, deterministic slice and prints a contract `context` array;
+   `matrix graph --impact --result <result.json>` reverse-walks changed files
+   into focused test and jevitate checks. `matrix context` prints one feature's
+   contract context, `matrix files` lists its linked files and relation
+   (implements, tests, touches), and `matrix stale` lists links to re-confirm.
+6. Audit quality with `matrix qc`: it scopes links (optionally `--seed`, capped
+   by `--max-links`) and reports stale links, contradictions, coverage gaps and
+   Jev-implausible/uncertain links to a review queue (`--no-jev`, `--md`,
+   `--out`). It never writes; confirm or remove links through
+   `crossmatrix.command`.
+7. Analyze with `matrix analyze --input <analysis.json>`: items x criteria x
+   scales scored in batched Jev cells, with weighted ranking, coverage, orphans,
+   sensitivity and low-confidence review. Presets are `decision-matrix`,
+   `house-of-quality`, `traceability` and `risk-matrix`; `--record` mirrors the
+   result into the store, and nothing is written without it.
+8. Govern decisions with `matrix adr new|lint|sync|check`: `new` writes the next
+   numbered MADR record, `lint` checks id/status/supersedes and accepted-record
+   invariants, `sync` publishes accepted rules as an `adr` dimension, and
+   `check` scores rules against changed files or the code map (`--record` stores
+   proposed conformance observations).
+9. Bridge jobs with `matrix jtbd seed|evidence|draft`: `seed` turns a jevitate
+   job into elicitation coverage and claims, `evidence` appends journey results
+   as evidence, and `draft` turns an exported elicitation spec into unapproved
+   job drafts.
+10. Turn a ready spec into work with `matrix plan-from-spec --spec <spec.json>`
+    (`--session <id>` exports it through elicitation): it writes a lint-clean
+    draft cpm plan under `.cpm-planner/plans/<name>/main.json` with deliverables
+    per requirement and evidence-only edges. `--allow-unready` overrides the
+    readiness gate, `--suggest-edges` adds Jev-suggested edges marked for
+    review, `--codemap --hop <hop.json> --model <id>` records owned files, and
+    `--force` overwrites an existing draft.
+11. For analysis, use the Crossmatrix skills (`crossmatrix-hoq`,
+    `crossmatrix-jtbd`, `crossmatrix-test-coverage`, `crossmatrix-risk`,
+    `crossmatrix-prioritize`, `crossmatrix-review`) through `node <cli> tools
+    call <hop> crossmatrix`. Feed the results back: revise cpm priorities from
+    `crossmatrix-prioritize`, point fmeca at high-weight uncovered requirements,
+    and turn uncovered journeys into jevitate campaigns.
 
 AI assist (`assist.suggest`, `assist.members`) is opt-in and paid; its
 proposals do not count until a human or you confirm them with `observe`.
@@ -211,16 +315,19 @@ proposals do not count until a human or you confirm them with `observe`.
 ## Companion tools and skills
 
 `junior init` installs, by default: Pi, the checksum-verified managed
-FMECA/CPM/Crossmatrix binaries (`~/.junior/tools`, used by delegated runs), the
-npm companion CLIs `@matthew-cochran/fmeca`, `@matthew-cochran/cpm`,
-`@matthew-cochran/crossmatrix`, `@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent skills
-for the selected targets
-(`--no-install` and `--no-companions` opt out). Prefer those skills for their
-domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm` for planning, and
-`jevitate-getting-started` as the entry point for browser testing, demos and CI
-gates of web apps. A jevitate command with a pass/fail exit code (for example
-`jevitate check --suite <file>`) can be a contract `checks` entry so a commodity
-deliverable is verified in a real browser.
+FMECA/CPM/Crossmatrix/scientific-process/elicitation binaries (`~/.junior/tools`,
+used by delegated runs), the npm companion CLIs `@matthew-cochran/fmeca`,
+`@matthew-cochran/cpm`, `@matthew-cochran/crossmatrix`,
+`@matthew-cochran/scientific-process`, `@matthew-cochran/elicitation`,
+`@jevitate/cli` and `@matthew-cochran/triz`, and each companion's own agent
+skills for the selected targets (`--no-install` and `--no-companions` opt out).
+The two newest managed tools are registered before their first release, so a
+missing release is reported as `unavailable` rather than a failure. Prefer those
+skills for their domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm`
+for planning, and `jevitate-getting-started` as the entry point for browser
+testing, demos and CI gates of web apps. A jevitate command with a pass/fail exit
+code (for example `jevitate check --suite <file>`) can be a contract `checks`
+entry so a commodity deliverable is verified in a real browser.
 
 `junior doctor` is read-only; it reports Pi, skills, managed tools and companion
 tools separately. `junior doctor --check-updates` also asks npm and GitHub for

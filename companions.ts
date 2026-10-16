@@ -23,7 +23,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz';
+export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'scientific-process' | 'elicitation' | 'jevitate' | 'triz';
 export type SkillTarget = 'codex' | 'claude' | 'both' | 'none';
 export type SkillScope = 'project' | 'user';
 
@@ -43,6 +43,10 @@ export const COMPANIONS: readonly Companion[] = [
     mcpRegister: 'claude mcp add cpm-planner --scope user -- npx -y @matthew-cochran/cpm' },
   { id: 'crossmatrix', package: '@matthew-cochran/crossmatrix', binary: 'crossmatrix-mcp', repo: 'https://github.com/praxec/crossmatrix',
     mcpRegister: 'claude mcp add crossmatrix --scope user -- npx -y @matthew-cochran/crossmatrix' },
+  { id: 'scientific-process', package: '@matthew-cochran/scientific-process', binary: 'scientific-process', repo: 'https://github.com/praxec/scientific-process',
+    mcpRegister: 'claude mcp add scientific-process --scope user -- npx -y @matthew-cochran/scientific-process' },
+  { id: 'elicitation', package: '@matthew-cochran/elicitation', binary: 'elicitation', repo: 'https://github.com/praxec/elicitation',
+    mcpRegister: 'claude mcp add elicitation --scope user -- npx -y @matthew-cochran/elicitation' },
   { id: 'jevitate', package: '@jevitate/cli', binary: 'jevitate', repo: 'https://github.com/matt-cochran/jevitate',
     mcpRegister: 'jevitate init --skip-keys (registers the jevitate MCP server)' },
   { id: 'triz', package: '@matthew-cochran/triz', binary: 'triz', repo: 'https://github.com/matt-cochran/triz',
@@ -278,6 +282,8 @@ const SKILL_MANIFESTS: Partial<Record<CompanionId, SkillManifest>> = {
   fmeca: { file: '.fmeca-mcp-skills.json', kind: 'files' },
   cpm: { file: '.cpm-planner-skills.json', kind: 'files' },
   crossmatrix: { file: '.crossmatrix-skills.json', kind: 'files' },
+  'scientific-process': { file: '.scientific-process-skills.json', kind: 'files' },
+  elicitation: { file: '.elicitation-skills.json', kind: 'files' },
   triz: { file: '.triz-skills.json', kind: 'files' },
   jevitate: { file: 'skills-install-state.json', kind: 'state', dir: '.jevitate' },
 };
@@ -369,11 +375,27 @@ function aggregateProbe(statuses: SkillProbe[]): SkillProbe {
   return 'modified';
 }
 
+/** Across the harness's skill roots, the companion is readable when any root
+ * holds a present copy; a definite miss elsewhere never masks that. */
+function aggregateRootProbe(statuses: SkillProbe[]): SkillProbe {
+  if (!statuses.length) return 'unknown';
+  if (statuses.some((s) => s === 'present')) return 'present';
+  if (statuses.some((s) => s === 'modified')) return 'modified';
+  if (statuses.some((s) => s === 'unknown')) return 'unknown';
+  return 'missing';
+}
+
+/** True when a root is a Claude Code skill root, the only place jevitate
+ * records its skills. */
+function isClaudeSkillRoot(root: string): boolean {
+  return root.endsWith(join('.claude', 'skills'));
+}
+
 /** Read-only readiness for each companion's agent skills. Never installs and
  * never writes; inspects the installer-written manifests and skill files. */
 export function inspectCompanionSkills(
   deps: CompanionDeps = {},
-  opts: { target: SkillTarget; scope: SkillScope; cwd: string; home?: string },
+  opts: { target: SkillTarget; scope: SkillScope; cwd: string; home?: string; roots?: string[] },
 ): CompanionSkillsReport {
   const target = opts.target ?? 'both';
   const scope = opts.scope ?? 'project';
@@ -382,6 +404,7 @@ export function inspectCompanionSkills(
   if (target === 'none') return { ok: true, target, scope, skills: [], remediation: [] };
   const managers: Array<'codex' | 'claude'> = target === 'both' ? ['codex', 'claude'] : [target];
   const command = `junior init --target ${target}${scope === 'user' ? ' --user' : ' --project'}`;
+  const explicitRoots = opts.roots && opts.roots.length ? opts.roots : null;
   const skills = COMPANIONS.map((c): CompanionSkillCheck => {
     const executable = which(deps, c.binary);
     if (!executable) {
@@ -391,21 +414,33 @@ export function inspectCompanionSkills(
     if (!manifest) {
       return { id: c.id, status: 'unknown', managers: [], roots: [], remediation: command, detail: `${c.id} has no known agent-skill manifest` };
     }
-    // jevitate's installer always writes Claude Code skills at user level and
-    // records them in its own state file; it has no Codex skill directory.
-    const probeManagers = c.id === 'jevitate' ? managers.filter((m) => m === 'claude') : managers;
+    let probeManagers: Array<'codex' | 'claude'>;
+    let rootList: string[];
+    if (explicitRoots) {
+      rootList = c.id === 'jevitate' ? explicitRoots.filter(isClaudeSkillRoot) : explicitRoots;
+      // jevitate records only Claude Code skills; a harness with no Claude
+      // skill root cannot read them, so it is not a readiness failure.
+      if (c.id === 'jevitate' && rootList.length === 0) {
+        return { id: c.id, status: 'not_installed', managers: [], roots: [], detail: `${c.binary} skills are Claude Code-only` };
+      }
+      probeManagers = managers;
+    } else {
+      // jevitate's installer always writes Claude Code skills at user level and
+      // records them in its own state file; it has no Codex skill directory.
+      probeManagers = c.id === 'jevitate' ? managers.filter((m) => m === 'claude') : managers;
+      rootList = probeManagers.map((manager) => c.id === 'jevitate'
+        ? join(home, '.claude', 'skills')
+        : companionSkillRoot(manager, scope, opts.cwd, home));
+    }
     const probes: SkillProbe[] = [];
     const roots: string[] = [];
-    for (const manager of probeManagers) {
-      const root = c.id === 'jevitate'
-        ? join(home, '.claude', 'skills')
-        : companionSkillRoot(manager, scope, opts.cwd, home);
+    for (const root of rootList) {
       roots.push(root);
       probes.push(manifest.kind === 'files'
         ? probeBesideManifest(deps, root, manifest.file)
         : probeStateManifest(deps, join(home, manifest.dir, manifest.file), root));
     }
-    const status = aggregateProbe(probes);
+    const status = explicitRoots ? aggregateRootProbe(probes) : aggregateProbe(probes);
     const check: CompanionSkillCheck = { id: c.id, status, managers: probeManagers, roots };
     if (status !== 'present') check.remediation = command;
     if (status === 'unknown') check.detail = `${c.id} agent-skill state could not be determined`;

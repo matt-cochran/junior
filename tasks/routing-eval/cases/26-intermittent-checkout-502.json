@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-26-intermittent-checkout-502",
+    "deliverable": "Find the root cause of sporadic 502 responses from the checkout service during peak traffic",
+    "workflow": "recon",
+    "acceptance": [
+      "A causal mechanism is proposed and tested against logs or a reproduction",
+      "The mechanism explains both the 502s and their correlation with peak traffic"
+    ],
+    "constraints": [
+      "Allowed files: src/checkout/** and docs/checkout-502.md",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "scientific-process",
+        "application": "scientific-process:hypothesis-experiment",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "collect the peak-window logs and define competing hypotheses before changing code"
+    ],
+    "rationale": "Intermittent production symptoms require competing hypotheses tested against evidence rather than an immediate code change"
+  }
+}

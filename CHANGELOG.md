@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-16
+
+### Added
+
+- Harness detection for Claude Code, Cursor and Codex (`junior doctor
+  --harness`), listing each harness's skill roots and MCP config locations.
+- `junior doctor` reports a per-harness `readiness` object covering skills, MCP
+  registration, managed tools and cached updates, with one `junior setup` fix
+  command; `inspectMcpRegistration` reads Claude (project/user/local), Cursor
+  and Codex MCP configs read-only.
+- `junior setup` previews the ordered repair plan and confirms before applying
+  it; `--dry-run` previews only, `--yes` applies non-interactively, and a
+  non-TTY run refuses to change anything without `--yes`.
+- Startup update notice: a cached 24-hour check over Junior, the managed tools
+  and the companions prints one stderr line on `init`, `doctor`, `status` and
+  `validate`; `JUNIOR_NO_UPDATE_CHECK=1` disables it.
+- Jev tool routing: the readiness call returns one probability per task trait,
+  selects deterministic playbooks and attaches a `toolPlan` (worker directions
+  plus `managerSetup`) to the receipt; in `jev.mode: enforce` a required tool
+  with unmet setup returns a `tool_setup` clarify before the worker starts.
+- Multi-tool playbooks and a deterministic capability map (`playbooks/`),
+  with the routing evaluation set in `tasks/routing-eval`; `junior matrix sync
+  --source playbooks` publishes the map into Crossmatrix.
+- Cross-tool state mirror: `junior matrix sync --source state` records cpm
+  status, fmeca failure modes, elicitation claim standing, scientific-process
+  verdicts and jevitate journey results as idempotent Crossmatrix observations.
+- Crossmatrix autopilot: `junior matrix bootstrap` proposes
+  feature/journey/job/test -> code links with evidence and confidence, `junior
+  matrix confirm` records a reviewed selection, and `junior matrix autolink`
+  links completed cpm deliverables' results.
+- Context graph and impact analysis: `junior matrix graph` walks the store to a
+  bounded, deterministic slice with a contract `context` array, and `--impact`
+  turns changed files into focused test and jevitate checks.
+- `junior matrix qc` audits Crossmatrix links (stale, contradictory, coverage
+  gaps, Jev plausibility) into an advisory review queue and never writes.
+- `junior matrix analyze` scores items x criteria x scales with batched Jev
+  cells and weighted ranking, coverage, orphans and sensitivity, with
+  `decision-matrix`, `house-of-quality`, `traceability` and `risk-matrix`
+  presets and optional `--record`.
+- `junior matrix adr new|lint|sync|check`: MADR records with checkable rules,
+  published as an `adr` dimension and scored for conformance; Junior's first
+  four ADRs live in `docs/adr/`.
+- `junior matrix jtbd seed|evidence|draft`: jevitate jobs seed elicitation
+  coverage, journey results become evidence, and a ready spec becomes unapproved
+  job drafts.
+- `junior matrix plan-from-spec`: turns an elicitation spec (or `--session`)
+  into a lint-clean draft cpm plan with deliverables per requirement and
+  evidence-only edges; `--suggest-edges`, `--codemap`, `--allow-unready` and
+  `--force` are supported.
+- Prepare workflow and check-back: `junior handoff --choose <option> --correct
+  <id>=<text>` consumes a `needs_choice` brief (numbered U/A items, scored
+  options, recommendation), gated by `checkBack: auto|always|off`.
+- Clarification loop: an unclear contract (or a vague-feature routing) opens an
+  elicitation session and returns a `needs_answers` batch of ranked questions
+  with the reason and any suggested answer; `junior handoff <task.json>
+  --answers <file>` records assent, refutation or amendments until the
+  readiness gate passes, then drafts a cpm plan (plan-sized work) or a
+  prepare brief. Same gating as the check-back: an explicit workflow is never
+  replaced.
+- `discover` and `investigate` analysis workflows: an elicitation-backed
+  requirements interview and one scientific-process experiment per handoff.
+- Managed tools `scientific-process` and `elicitation`: installer, npm
+  companions, agent skills, hop native state (`SCIENTIFIC_PROCESS_STATE_DIR`,
+  `ELICITATION_STATE_DIR`), read classification and MCP names. Their releases
+  are reported as `unavailable` until published.
+
+### Fixed
+
+- A playbook activates only when its primary trait reaches 0.5, so a vague
+  request no longer selects `vague-feature` at a 0.10 primary-trait score.
+
 ## [0.4.0] - 2026-10-16
 
 ### Added
@@ -139,7 +210,8 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/matt-cochran/junior/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/matt-cochran/junior/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/matt-cochran/junior/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/matt-cochran/junior/compare/v0.3.0...v0.3.1

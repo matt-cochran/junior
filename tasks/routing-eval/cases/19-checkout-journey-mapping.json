@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-19-checkout-journey-mapping",
+    "deliverable": "Map the checkout journey across UI, API and tests so the team can see coverage gaps before the redesign",
+    "workflow": "evaluate",
+    "acceptance": [
+      "Every checkout step is linked to implementing code and at least one test",
+      "Steps with no test are listed explicitly"
+    ],
+    "constraints": [
+      "Allowed files: none, this is an analysis report",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:multidimensional-matrix",
+        "relevance": "required"
+      },
+      {
+        "tool": "jevitate",
+        "application": "jevitate:browser-check",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "federate features, journeys, tests and code into the crossmatrix model",
+      "confirm a jevitate suite exists to ground the browser-facing steps"
+    ],
+    "rationale": "A journey map needs the multidimensional model, and the browser steps are only verifiable if a jevitate suite already exists"
+  }
+}

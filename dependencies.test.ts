@@ -351,6 +351,40 @@ test('A release with no matching asset fails explicitly', async () => {
   assert.equal(report.outcomes[0].error, `release v1.2.3 of ${TOOL_REPOS.fmeca.repo} has no asset ${fmecaAsset}`);
 });
 
+// --- tools with no standard release yet --------------------------------------
+// scientific-process and elicitation are registered managed tools, but until
+// they publish a standard release their lookup/asset absence is a non-fatal
+// `unavailable`, never a failed install. fmeca/cpm/crossmatrix keep failing.
+
+const scientificTarget = { os: 'linux' as const, arch: 'x64' as const, triple: 'x86_64-unknown-linux-gnu', ext: 'tar.gz' as const };
+const scientificAsset = releaseAssetName('scientific-process', scientificTarget);
+
+function missingScientificServer() {
+  return releaseServer({ repo: TOOL_REPOS['scientific-process'].repo, assetName: scientificAsset, entries: [] });
+}
+
+test('A missing scientific-process release is reported unavailable', async () => {
+  const report = await installTools(
+    { tools: ['scientific-process'] },
+    baseDeps(missingScientificServer(), { resolveRelease: async () => { throw new Error('HTTP 404'); } }),
+  );
+  assert.equal(report.outcomes[0].status, 'unavailable');
+});
+
+test('A missing scientific-process release does not fail the install run', async () => {
+  const report = await installTools(
+    { tools: ['scientific-process'] },
+    baseDeps(missingScientificServer(), { resolveRelease: async () => { throw new Error('HTTP 404'); } }),
+  );
+  assert.equal(report.ok, true);
+});
+
+test('A scientific-process release without the platform asset is reported unavailable', async () => {
+  const server = releaseServer({ repo: TOOL_REPOS['scientific-process'].repo, assetName: scientificAsset, entries: [], assets: [] });
+  const report = await installTools({ tools: ['scientific-process'] }, baseDeps(server));
+  assert.equal(report.outcomes[0].status, 'unavailable');
+});
+
 test('An archive entry that traverses out of the extraction root is rejected', async () => {
   const server = releaseServer({
     repo: TOOL_REPOS.fmeca.repo,
@@ -1162,6 +1196,11 @@ test('update check reports a managed tool at the latest release as current', asy
 test('update check leaves outdated unknown when the release lookup fails', async () => {
   const report = await checkToolUpdates({ ...managedStateWith({ fmeca: '0.0.2' }), resolveRelease: async () => { throw new Error('offline'); } });
   assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.outdated, null);
+});
+
+test('update check reports scientific-process as unavailable when its release lookup fails', async () => {
+  const report = await checkToolUpdates({ ...managedStateWith({}), resolveRelease: async () => { throw new Error('offline'); } });
+  assert.equal(report.tools.find((t) => t.tool === 'scientific-process')?.unavailable, true);
 });
 
 test('update check reports the optional managed TRIZ install as tool triz', async () => {

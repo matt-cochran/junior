@@ -1,0 +1,38 @@
+{
+  "contract": {
+    "id": "routing-10-cut-release-0-5",
+    "deliverable": "Cut release 0.5.0 by bumping the version, updating CHANGELOG.md and confirming the packed artifact installs",
+    "workflow": "checks_first",
+    "acceptance": [
+      "package.json version is 0.5.0",
+      "CHANGELOG.md has a 0.5.0 section",
+      "The packed artifact installs and its binary runs"
+    ],
+    "constraints": [
+      "Allowed files: package.json, CHANGELOG.md and package-lock.json",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "cpm",
+        "application": "cpm:plan-backed-deliverable",
+        "relevance": "required"
+      },
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:stale-relink",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "sync a cpm plan with the ordered release steps",
+      "run matrix stale after the release commit and re-link or deprecate the changed files"
+    ],
+    "rationale": "Release steps have a strict order and post-release the code map must be re-checked so later sessions do not trust stale links"
+  }
+}

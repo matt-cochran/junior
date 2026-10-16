@@ -12,12 +12,14 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
+ hopToolBlock,discoverReportBlock,investigateReportBlock,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
  ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
+import { loadPlaybooks } from './playbooks.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
 const resultFile=(value:any)=>{const f=join(mkdtempSync(join(tmpdir(),'delivery-')),'result.json');writeFileSync(f,typeof value==='string'?value:JSON.stringify(value));return f;};
@@ -482,7 +484,7 @@ test('Validate accepts analysis workflows and preserves them',()=>{
  assert.equal(isAnalysisWorkflow('evaluate'),true);
  assert.equal(isAnalysisWorkflow('recon'),true);
  assert.equal(isAnalysisWorkflow('test_first'),false);
- assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate']);
+ assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate','discover','investigate','prepare']);
 });
 test('fmeca and evaluate prompt blocks carry the bounded evidence contract',()=>{
  const fmeca=WORKFLOW_PROMPT_BLOCKS.fmeca;
@@ -546,6 +548,77 @@ test('Auto workflow can select fmeca or evaluate through one Jev choice',async()
   assert.equal(r.workflow.selected,w);
   assert.equal(r.workflow.recommended,w);
  }
+});
+// --- D10 discover/investigate analysis workflows (offline; no paid calls) ---
+test('Validate accepts the discover workflow',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{workflow:'discover'})));
+});
+test('Validate accepts the investigate workflow',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{workflow:'investigate'})));
+});
+test('The invalid-workflow error names discover and investigate',()=>{
+ assert.throws(()=>validate(task(0,{workflow:'bogus'})),/discover.*investigate/);
+});
+test('discover is classified as an analysis workflow',()=>{
+ assert.equal(isAnalysisWorkflow('discover'),true);
+});
+test('investigate is classified as an analysis workflow',()=>{
+ assert.equal(isAnalysisWorkflow('investigate'),true);
+});
+test('taskWorkflow preserves the discover value',()=>{
+ assert.equal(taskWorkflow({workflow:'discover'}),'discover');
+});
+test('taskWorkflow preserves the investigate value',()=>{
+ assert.equal(taskWorkflow({workflow:'investigate'}),'investigate');
+});
+test('EXPLICIT_WORKFLOWS lists discover',()=>{
+ assert.ok((EXPLICIT_WORKFLOWS as readonly string[]).includes('discover'));
+});
+test('EXPLICIT_WORKFLOWS lists investigate',()=>{
+ assert.ok((EXPLICIT_WORKFLOWS as readonly string[]).includes('investigate'));
+});
+test('WORKFLOW_DESCRIPTIONS offers discover to the Jev workflow choice',()=>{
+ assert.ok(WORKFLOW_DESCRIPTIONS.discover.length>0);
+});
+test('WORKFLOW_DESCRIPTIONS offers investigate to the Jev workflow choice',()=>{
+ assert.ok(WORKFLOW_DESCRIPTIONS.investigate.length>0);
+});
+test('The discover prompt names the elicitation CLI call',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.discover,/junior tools call/);
+});
+test('The discover prompt names the readiness.assess result',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.discover,/readiness\.assess/);
+});
+test('The investigate prompt names the scientific-process CLI call',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.investigate,/junior tools call/);
+});
+test('The investigate prompt forbids concluding Supported without observations',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.investigate,/Never conclude Supported without supporting observations/);
+});
+test('The hop tool block names the hop path and the elicitation CLI call',()=>{
+ const block=hopToolBlock({hopFrom:'/tmp/handoff/hop.json'},'discover');
+ assert.match(block!,/junior tools call \/tmp\/handoff\/hop\.json elicitation/);
+});
+test('The hop tool block is absent without hopFrom',()=>{
+ assert.equal(hopToolBlock({workflow:'discover'}),null);
+});
+test('The discover prompt states the hop path when hopFrom is set',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'discover',hopFrom:'/tmp/handoff/hop.json'}),'discover');
+ assert.ok(prompt.includes('junior tools call /tmp/handoff/hop.json elicitation'));
+});
+test('The discover report block requires the established claims',()=>{
+ assert.match(discoverReportBlock('/tmp/art/analysis-report.md'),/established claims/i);
+});
+test('The investigate report block requires the recommended next experiment or conclusion',()=>{
+ assert.match(investigateReportBlock('/tmp/art/analysis-report.md'),/recommended next experiment or conclusion/i);
+});
+test('A discover run reports needs_review until its analysis report exists',async()=>{
+ const r=await run(task(0,{workflow:'discover'}),true);
+ assert.equal(r.status,'needs_review');
+});
+test('An investigate run reports needs_review until its analysis report exists',async()=>{
+ const r=await run(task(0,{workflow:'investigate'}),true);
+ assert.equal(r.status,'needs_review');
 });
 test('Analysis run without its report is needs_review, not completion',async()=>{
  const r=await run(task(0,{workflow:'fmeca'}),true);
@@ -2890,4 +2963,55 @@ test('junior validate warns to split a contract with eleven acceptance criteria'
  writeFileSync(taskPath,JSON.stringify({id:'warn-acc',deliverable:'x',cwd:repo.dir,acceptance,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
  const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
+});
+
+// --- J3 tool routing: trait questions, routed plan and tool_setup gate ---
+const routingClassifier=(traits:Record<string,number>)=>({
+ stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',
+ answers:{...JEVPASS,...Object.fromEntries(Object.entries(traits).map(([k,v])=>[`trait_${k}`,bool(v)]))},usage:gateUsage,
+});
+const routingSeam=(traits:Record<string,number>):any=>async()=>routingClassifier(traits);
+const routingPlan={traits:{},playbooks:[],tools:[],managerSetup:[],workerDirections:['junior tools call <hop> fmeca <request.json> — scored failure modes']};
+
+test('The Jev readiness request carries one binary question per catalog trait',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ const asked=Object.keys(questions).filter((k)=>k.startsWith('trait_')).map((k)=>k.slice('trait_'.length)).sort();
+ assert.deepEqual(asked,[...loadPlaybooks().traits].sort());
+});
+test('A decided trait attaches a routed tool plan to the readiness attention',async()=>{
+ const pre=await assessPreflight(task(),routingSeam({risky_change:0.95}));
+ assert.ok(pre.attention.toolPlan?.tools.some((tool)=>tool.tool==='fmeca'));
+});
+test('The compact receipt carries the routed tool plan manager setup',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:routingSeam({risky_change:0.95})});
+ assert.ok(compactHandoff(r).attention?.toolPlan?.managerSetup.some((line)=>/FMECA/.test(line)));
+});
+test('A failed classifier yields a null tool plan on a continued shadow handoff',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:outage});
+ assert.equal(r.jev.preflight.attention.toolPlan,null);
+});
+test('The worker prompt includes tool routing directions when hopFrom is set',()=>{
+ const prompt=buildPrompt(task(0,{hopFrom:'/tmp/handoff/hop.json'}),'test_first',null,null,null,null,routingPlan);
+ assert.match(prompt,/junior tools call \/tmp\/handoff\/hop\.json fmeca/);
+});
+test('The worker prompt omits tool routing directions without hopFrom',()=>{
+ const prompt=buildPrompt(task(0,{}),'test_first',null,null,null,null,routingPlan);
+ assert.ok(!prompt.includes('Tool routing directions'));
+});
+test('Enforce mode with a required tool and no hopFrom returns the tool_setup clarify trigger',async()=>{
+ const r=await run(task(0,{jev:{mode:'enforce'}}),false,{classify:routingSeam({risky_change:0.95}),spawnPi:()=>({status:0,stdout:stream('stop')})});
+ assert.equal(r.jev.preflight.attention.trigger,'tool_setup');
+});
+test('Enforce mode with a required tool and no hopFrom does not start the worker',async()=>{
+ let started=0;
+ await run(task(0,{jev:{mode:'enforce'}}),false,{classify:routingSeam({risky_change:0.95}),spawnPi:()=>{started+=1;return {status:0,stdout:stream('stop')};}});
+ assert.equal(started,0);
+});
+test('The readiness request omits trait questions when they would exceed the per-call limit',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier,{maxQuestions:3});
+ assert.equal(Object.keys(questions).filter((k)=>k.startsWith('trait_')).length,0);
 });

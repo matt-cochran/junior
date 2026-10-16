@@ -24,6 +24,7 @@ import { inspectCompanions, inspectCompanionSkills, installCompanions, installCo
  type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport, type CompanionSkillsReport } from './companions.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
+import { inspectReadiness, type ReadinessResult } from './readiness.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -378,6 +379,8 @@ export type DoctorResult = {
  integrationsReady:boolean;
  /** Read-only retained-worktree count and disk usage; never blocks readiness. */
  retention:RetentionSummary;
+ /** Per-harness readiness for Junior and its companions; never changes the `ok` rule. */
+ readiness:ReadinessResult;
  checks:DoctorCheck[];
  remediation:string[];
 };
@@ -412,7 +415,7 @@ export function detectSlowMount(cwd:string, deps:SetupDeps = {}):string|null {
 }
 
 /** Read-only readiness check. No installation, config writes or paid calls. */
-export function doctor(deps:SetupDeps = {}):DoctorResult {
+export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorResult {
  const env=deps.env ?? process.env;
  const version=deps.nodeVersion ?? process.versions.node;
  const cwd=deps.cwd ?? process.cwd();
@@ -452,7 +455,17 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
  const companionSkills=inspectCompanionSkills({ env, exists:deps.exists, readFile:deps.readFile }, { target:'both', scope:'project', cwd });
  if (companionSkills.remediation.length) remediation.push(...companionSkills.remediation);
- return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
+ const readiness=inspectReadiness({
+  env,
+  home: env.HOME || env.USERPROFILE,
+  exists: deps.exists,
+  readFile: deps.readFile,
+  skillSource: deps.skillSource,
+  toolsRoot: deps.toolsRoot,
+  exec: deps.exec,
+  integrations,
+ }, { cwd, harness: opts.harness });
+ return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
@@ -625,7 +638,7 @@ export type SkillReadiness = {
  source:string;
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
-export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string };
+export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string; roots?:string[] };
 export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean };
 
 function sha256(text:string):string {
@@ -720,27 +733,43 @@ export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
  return { target, scope, source:sourcePath, actions, ok };
 }
 
-/** Read-only skill readiness for the selected managers. Never writes. */
+/** Classify one installed skill copy against the packaged source hash: an
+ * exact match is current, a copy that still matches its recorded manifest is
+ * outdated, and anything else was customized. */
+function skillStatusAt(deps:SetupDeps, sourceHash:string, root:string, path:string):SkillReadiness['targets'][number]['status'] {
+ if (!exists(deps,path)) return 'missing';
+ const currentHash=sha256(readText(deps,path));
+ if (currentHash === sourceHash) return 'current';
+ if (readManifestHash(deps,join(root,SKILL_MANIFEST_FILENAME)) === currentHash) return 'outdated';
+ return 'customized';
+}
+
+/** Read-only skill readiness for the selected managers. Never writes. When
+ * `roots` is supplied, those explicit harness skill roots are inspected
+ * instead of the manager/scope defaults and the skill is ready when any root
+ * holds a current copy. */
 export function inspectSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {}):SkillReadiness {
  const target=opts.target ?? 'both';
  const scope=opts.scope ?? 'project';
  const { path:sourcePath, text:source }=readSkillSource(deps);
  const sourceHash=sha256(source);
  const targets:SkillReadiness['targets']=[];
- for (const manager of selectedManagers(target)) {
-  const root=skillRootFor(deps,scope,manager,opts.skillRoot);
-  const path=join(root,SKILL_NAME,SKILL_FILENAME);
-  let status:SkillReadiness['targets'][number]['status'];
-  if (!exists(deps,path)) status='missing';
-  else {
-   const currentHash=sha256(readText(deps,path));
-   if (currentHash === sourceHash) status='current';
-   else if (readManifestHash(deps,join(root,SKILL_MANIFEST_FILENAME)) === currentHash) status='outdated';
-   else status='customized';
+ const roots=opts.roots && opts.roots.length ? opts.roots : null;
+ if (roots) {
+  for (const root of roots) {
+   const path=join(root,SKILL_NAME,SKILL_FILENAME);
+   const manager:SkillManager=root.includes('.claude') ? 'claude' : 'codex';
+   targets.push({manager,path,status:skillStatusAt(deps,sourceHash,root,path)});
   }
-  targets.push({manager,path,status});
+ } else {
+  for (const manager of selectedManagers(target)) {
+   const root=skillRootFor(deps,scope,manager,opts.skillRoot);
+   const path=join(root,SKILL_NAME,SKILL_FILENAME);
+   targets.push({manager,path,status:skillStatusAt(deps,sourceHash,root,path)});
+  }
  }
- return { ready:targets.every((t)=>t.status === 'current'), source:sourcePath, targets };
+ const ready=roots ? targets.some((t)=>t.status === 'current') : targets.every((t)=>t.status === 'current');
+ return { ready, source:sourcePath, targets };
 }
 
 const SKILL_TARGETS:SkillTargetSelection[]=['codex','claude','both','none'];
