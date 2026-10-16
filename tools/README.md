@@ -1,8 +1,9 @@
 # junior-tools
 
-A dependency-free TypeScript CLI + library that wraps three MCP servers —
-**FMECA**, **CPM Planner**, and **Crossmatrix** — behind a persistent, versioned
-JSON hand-off file (a **HOP**). It is built for a two-role workflow:
+A dependency-free TypeScript CLI + library that wraps five MCP servers —
+**FMECA**, **CPM Planner**, **Crossmatrix**, **scientific-process** and
+**elicitation** — behind a persistent, versioned JSON hand-off file (a
+**HOP**). It is built for a two-role workflow:
 
 > **Jev recommends, the executor executes.**
 > `inspect` produces a compact context a frontier manager or the Jev classifier
@@ -18,8 +19,10 @@ No npm dependencies; Node builtins only.
 
 - Node.js with native TypeScript execution (v22.6+ for `--experimental-strip-types`;
   v26 tested).
-- The three upstream Rust MCP binaries on `PATH` or referenced by absolute path
+- The five upstream Rust MCP binaries on `PATH` or referenced by absolute path
   in the HOP config (see [Building the MCP servers](#building-the-mcp-servers)).
+  The `scientific-process` and `elicitation` releases are not published yet, so
+  `junior init` reports them as `unavailable` instead of failing.
 
 ## Quick start
 
@@ -43,7 +46,7 @@ successful commands exit `0`.
 | Command | Description |
 | --- | --- |
 | `node tools.ts init <hop.json> [config.json]` | Create a new schemaVersion 1 HOP. Refuses to overwrite an existing file. |
-| `node tools.ts call <hop.json> <fmeca\|cpm\|crossmatrix> <request.json>` | Execute one MCP call, advance the revision, persist evidence + snapshots. |
+| `node tools.ts call <hop.json> <fmeca\|cpm\|crossmatrix\|scientific-process\|elicitation> <request.json>` | Execute one MCP call, advance the revision, persist evidence + snapshots. |
 | `node tools.ts inspect <hop.json>` | Emit a compact snapshot context for a manager or the Jev classifier. |
 
 ## Config file (input to `init`)
@@ -81,6 +84,16 @@ SHA. There is no built-in release table; `junior update` installs new releases.
       "env": {},
       "sourceVersion": "0.3.2",
       "sourceSha": "81a8fbec6af8350c9377479d9b904c7c5d321d12"
+    },
+    "scientific-process": {
+      "command": "/opt/praxec/bin/scientific-process",
+      "args": [],
+      "env": {}
+    },
+    "elicitation": {
+      "command": "/opt/praxec/bin/elicitation",
+      "args": [],
+      "env": {}
     }
   }
 }
@@ -185,6 +198,8 @@ and then fails with `LOCKED`. Malformed or schema-mismatched manifests fail with
 | CPM | `cpm-planner.db` | `CPM_PLANNER_DB` | SQLite database in WAL mode (`-shm`/`-wal` siblings) |
 | Crossmatrix (0.2.x) | `crossmatrix-model.json` | — | wrapper-owned validated model JSON (see below) |
 | Crossmatrix (0.3.0+) | `<project>/.crossmatrix/` | `CROSSMATRIX_DIR` | server-owned project store (see below) |
+| scientific-process | `scientific-process-state/` | `SCIENTIFIC_PROCESS_STATE_DIR` | upstream-owned state directory |
+| elicitation | `elicitation-state/` | `ELICITATION_STATE_DIR` | upstream-owned state directory |
 
 `<project>` is the Git top-level of the hop file's directory, or the hop file's
 grandparent when the hop is not inside a Git repository.

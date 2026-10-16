@@ -33,6 +33,24 @@ performs no provider call.
 
 ## Readiness and execution
 
+`junior doctor` is the read-only start: it prints a `readiness` object for the
+active harness (`--harness claude|cursor|codex`) covering skills, MCP
+registration, managed tools and cached updates. When `readiness.ready` is false,
+`junior setup` previews an ordered repair plan and confirms before applying it
+(`--dry-run`, `--yes`). A cached 24-hour update notice may print one stderr line
+on `init`, `doctor`, `status` or `validate`; `JUNIOR_NO_UPDATE_CHECK=1` disables
+it, and `junior update` adopts newer releases.
+
+Junior routes each contract from Jev task traits to deterministic playbooks and a
+`toolPlan` (worker directions plus manager setup) that is reflected before the
+worker starts. When the contract is unclear it runs the `prepare` workflow and
+stops at `needs_choice` with a numbered U/A brief; choose with
+`junior handoff <task> --choose <option> --correct <id>=<text>`, gated by the
+contract's `checkBack` (`auto|always|off`). A clarify returns a `needs_answers`
+batch that `junior handoff <task> --answers <file>` resolves before a
+`plan-from-spec` draft or a prepare brief. The `discover` and `investigate`
+workflows are report-only.
+
 `junior doctor` adds a `companionSkills` report beside its `companions` report:
 each companion's agent skills read as `present`, `missing`,
 `modified`, `unknown` or `not_installed`, and an unready one carries a complete
@@ -66,14 +84,20 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
 
 ## What's in the box
 
-- **[Getting started](docs/getting-started.md)** — setup, the `doctor`/`init`
-  readiness commands, Pi installation and authentication.
+- **[Getting started](docs/getting-started.md)** — setup, the
+  `doctor`/`setup`/`init` readiness commands, Pi installation and
+  authentication.
 - **[Contracts](docs/contracts.md)** — the contract schema, micro-deliverable
   stages, workflow templates, session continuation and the Jev gates.
 - **[Runtime](docs/runtime.md)** — execution receipts, cost and billing, Git
   worktree isolation, change evidence, deadlines and the compact handoff.
 - **[Tools](docs/tools.md)** — common tool handoffs, `junior report-issue`, MCP
   registration and frontier-attention classification.
+- **[Crossmatrix state graph](skills/junior/SKILL.md)** — the `matrix` commands
+  (`init`, `export`, `sync`, `bootstrap`, `confirm`, `autolink`, `codemap`,
+  `link`, `graph`, `qc`, `analyze`, `adr`, `jtbd`, `plan-from-spec`), the
+  playbook/toolPlan routing, check-back and the managed `scientific-process`
+  and `elicitation` tools.
 - **[Releasing](docs/releasing.md)** — packing, publishing and trusted-publisher
   setup.
 
@@ -87,6 +111,7 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
 | [docs/runtime.md](docs/runtime.md) | Receipts, cost, isolation, evidence and the handoff. |
 | [docs/tools.md](docs/tools.md) | Companion tools, `report-issue` and MCP registration. |
 | [docs/releasing.md](docs/releasing.md) | Packing and publishing. |
+| [docs/adr/](docs/adr/) | Architecture decision records (MADR) and their conformance rules, checked by `junior matrix adr`. |
 | [skills/junior/SKILL.md](skills/junior/SKILL.md) | The agent instructions that `junior init` installs into your project. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history. |
 
