@@ -2742,3 +2742,30 @@ test('A worker run past the output cap marks the receipt truncated tail',async()
  const r=await p;
  assert.equal(r.receipt.truncatedTail,true);
 });
+
+// --- J41a stream compaction: maxOutputBytes bound and split warnings ---
+test('validate rejects execution.maxOutputBytes above 32 MiB',()=>{
+ assert.throws(()=>validate(task(0,{execution:{maxOutputBytes:32*1024*1024+1}})),/Invalid execution\.maxOutputBytes/);
+});
+test('validate accepts execution.maxOutputBytes at 32 MiB',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{execution:{maxOutputBytes:32*1024*1024}})));
+});
+test('junior validate warns to split a contract naming seven distinct context paths',()=>{
+ const repo=gitRepo();
+ const context=[];
+ for(let i=0;i<7;i++){const p=`ctx-${i}.txt`;writeFileSync(join(repo.dir,p),'x\n');context.push({path:p});}
+ const cfg=mkdtempSync(join(tmpdir(),'junior-warn-'));
+ const taskPath=join(cfg,'t.json');
+ writeFileSync(taskPath,JSON.stringify({id:'warn-paths',deliverable:'x',cwd:repo.dir,acceptance:['ok'],context,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
+ assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
+});
+test('junior validate warns to split a contract with eleven acceptance criteria',()=>{
+ const repo=gitRepo();
+ const acceptance=Array.from({length:11},(_,i)=>`criterion ${i}`);
+ const cfg=mkdtempSync(join(tmpdir(),'junior-warn-'));
+ const taskPath=join(cfg,'t.json');
+ writeFileSync(taskPath,JSON.stringify({id:'warn-acc',deliverable:'x',cwd:repo.dir,acceptance,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
+ assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
+});

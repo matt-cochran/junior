@@ -6,7 +6,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
-import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, DEFAULT_MAX_OUTPUT_BYTES, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
+import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
 import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
@@ -19,12 +19,12 @@ export { boundEvidence, boundedGitEvidence, collectGitEvidence, evidenceDelta } 
 export type { GitEvidence, GitFileChange, EvidenceDelta } from './evidence.ts';
 export { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf } from './isolation.ts';
 export type { IsolationMode, LockHandle } from './isolation.ts';
-export { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, ToolWatchdog, RuntimeHeartbeat, EXECUTION_DEFAULTS, EXECUTION_BOUNDS, DEFAULT_MAX_OUTPUT_BYTES } from './runtime.ts';
+export { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, ToolWatchdog, RuntimeHeartbeat, EXECUTION_DEFAULTS, EXECUTION_BOUNDS, DEFAULT_MAX_OUTPUT_BYTES, TOOL_TEXT_LIMIT_BYTES, compactEventLine, sanitizeToolCallId } from './runtime.ts';
 export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot, RuntimeState, RuntimePhase } from './runtime.ts';
 
 /** Every top-level contract field the worker understands. A nested `execution`
  * object is also supported (its keys are validated by
- * resolveExecutionSettings), and its six runtime settings may also be given
+ * resolveExecutionSettings), and its runtime settings may also be given
  * directly at the top level. Unknown fields are rejected so a typo or an
  * unsupported feature fails before any paid call instead of being ignored. */
 export const TASK_FIELDS = [
@@ -33,7 +33,7 @@ export const TASK_FIELDS = [
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
  'hopFrom','hopRevision','hopContext',
- 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','isolationSetup',
+ 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','isolationSetup',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
@@ -233,6 +233,26 @@ export function validate(t: any) {
  }
  for (const k of Object.keys(t)) if (!(TASK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown contract field: ${k}`);
  return t;
+}
+
+/** Number of distinct context paths above which a contract is suggested for
+ * splitting into chained contracts. */
+export const SPLIT_WARNING_CONTEXT_PATHS = 6;
+/** Number of acceptance criteria above which a contract is suggested for
+ * splitting into chained contracts. */
+export const SPLIT_WARNING_ACCEPTANCE = 10;
+
+/** Non-blocking suggestions for a valid contract. Warnings never make a
+ * contract invalid; they only point out a contract large enough to benefit
+ * from being split into chained contracts. */
+export function contractWarnings(t:any):string[] {
+ const warnings:string[] = [];
+ const context = Array.isArray(t?.context) ? t.context : [];
+ const distinctPaths = new Set(context.map((e:any)=>e && typeof e.path === 'string' && e.path.trim() ? e.path : '').filter(Boolean));
+ if (distinctPaths.size > SPLIT_WARNING_CONTEXT_PATHS) warnings.push(`Contract names ${distinctPaths.size} distinct context paths; consider splitting it into chained contracts so each stays focused.`);
+ const acceptance = Array.isArray(t?.acceptance) ? t.acceptance : [];
+ if (acceptance.length > SPLIT_WARNING_ACCEPTANCE) warnings.push(`Contract has ${acceptance.length} acceptance criteria; consider splitting it into chained contracts so each stays focused.`);
+ return warnings;
 }
 
 export type Usage = {
@@ -1707,7 +1727,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     spawnChild, command:'pi',
     args:[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],
     cwd:executionCwd, env:piBashEnv, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
-    phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? settings.maxOutputBytes,
    });
    stdout=streamResult.stdout; stderr=streamResult.stderr;
    workerStatus=streamResult.exitCode ?? 1;
@@ -1944,7 +1964,7 @@ if (isDirectEntry(import.meta.url)) {
  console.log(JSON.stringify(result,null,2));
  } else {
  const t=validate(JSON.parse(readFileSync(path,'utf8')));
- const result=command==='validate' ? {valid:true,id:t.id} : await run(t,flag==='--mock');
+ const result=command==='validate' ? {valid:true,id:t.id,warnings:contractWarnings(t)} : await run(t,flag==='--mock');
  console.log(JSON.stringify(result,null,2));
  if(result.status && !['simulation_passed','ready_for_review'].includes(result.status)) process.exitCode=1;
  }

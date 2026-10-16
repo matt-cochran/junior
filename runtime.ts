@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 export type ExecutionSettings = {
@@ -31,6 +31,9 @@ export type ExecutionSettings = {
  /** Budget carved out of the total wall deadline so the contract's checks can
   * still run after the worker phase is stopped. Must be less than deadlineMs. */
  checkReserveMs: number;
+ /** Cap on retained (compacted) bytes persisted from the worker's stdout. The
+  * raw stream has a separate hard ceiling of 8x this value. */
+ maxOutputBytes: number;
 };
 
 export const EXECUTION_DEFAULTS: ExecutionSettings = {
@@ -40,6 +43,7 @@ export const EXECUTION_DEFAULTS: ExecutionSettings = {
  heartbeatMs: 5000,
  checkTimeoutMs: 120000,
  checkReserveMs: 120000,
+ maxOutputBytes: 8 * 1024 * 1024,
 };
 
 /** Positive finite bounds. Values outside a bound are rejected, not coerced. */
@@ -50,6 +54,7 @@ export const EXECUTION_BOUNDS: Record<keyof ExecutionSettings, { min: number; ma
  heartbeatMs: { min: 1, max: 60 * 60 * 1000 },
  checkTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
  checkReserveMs: { min: 0, max: 24 * 60 * 60 * 1000 },
+ maxOutputBytes: { min: 1024 * 1024, max: 32 * 1024 * 1024 },
 };
 
 export const EXECUTION_FIELDS = Object.keys(EXECUTION_DEFAULTS) as (keyof ExecutionSettings)[];
@@ -355,6 +360,73 @@ export function splitLines(buffer: string, chunk: string): { lines: string[]; re
  return { lines: parts, rest };
 }
 
+/** A single tool result text block larger than this is replaced by its head and
+ * tail plus an omission marker, with the full text written once beside the
+ * events log. */
+export const TOOL_TEXT_LIMIT_BYTES = 32 * 1024;
+/** Bytes kept from each end of an oversized tool text block. */
+export const TOOL_TEXT_KEEP_BYTES = 16 * 1024;
+
+/** Restrict a tool call id to a safe flat filename. */
+export function sanitizeToolCallId(id: string): string {
+ const base = String(id ?? '').replace(/[^A-Za-z0-9._-]/g, '_');
+ return base || 'unknown';
+}
+
+/** Replace oversized text blocks in a tool result content array with a head and
+ * tail plus a marker, writing the full text once to the sidecar directory.
+ * Returns true when at least one block was rewritten. */
+function compactToolContent(container: any, toolCallId: string, outputDir: string, written: Set<string>): boolean {
+ if (!container || typeof container !== 'object' || Array.isArray(container)) return false;
+ const content = container.content;
+ if (!Array.isArray(content)) return false;
+ let changed = false;
+ for (const block of content) {
+  if (!block || typeof block !== 'object' || block.type !== 'text' || typeof block.text !== 'string') continue;
+  if (block.text.length <= TOOL_TEXT_LIMIT_BYTES) continue;
+  const full = block.text;
+  const sidecar = join(outputDir, `${toolCallId}.txt`);
+  if (!written.has(toolCallId)) {
+   try { mkdirSync(outputDir, { recursive: true }); writeFileSync(sidecar, full); written.add(toolCallId); }
+   catch { /* the marker still points at the intended path */ }
+  }
+  const omitted = full.length - 2 * TOOL_TEXT_KEEP_BYTES;
+  const marker = `[... ${omitted} bytes omitted; full text: tool-output/${toolCallId}.txt ...]`;
+  block.text = `${full.slice(0, TOOL_TEXT_KEEP_BYTES)}\n${marker}\n${full.slice(full.length - TOOL_TEXT_KEEP_BYTES)}`;
+  changed = true;
+ }
+ return changed;
+}
+
+/** Compact one raw stdout line for persistence. Returns the line to retain, or
+ * null when the event is dropped entirely. Non-JSON and non-compacted lines are
+ * returned verbatim so malformed-line detection still works. */
+export function compactEventLine(rawLine: string, eventsPath: string, written: Set<string> = new Set()): string | null {
+ let ev: any;
+ try { ev = JSON.parse(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine); }
+ catch { return rawLine; }
+ if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return rawLine;
+ const type = ev.type;
+ if (type === 'message_update' || type === 'tool_execution_update') return null;
+ if (type === 'turn_end') return JSON.stringify({ type: 'turn_end', toolResultCount: Array.isArray(ev.toolResults) ? ev.toolResults.length : 0 });
+ if (type === 'agent_end') return JSON.stringify({ type: 'agent_end', willRetry: !!ev.willRetry, messageCount: Array.isArray(ev.messages) ? ev.messages.length : 0 });
+ const outputDir = join(dirname(eventsPath), 'tool-output');
+ if (type === 'tool_execution_end') {
+  const toolCallId = sanitizeToolCallId(typeof ev.toolCallId === 'string' && ev.toolCallId ? ev.toolCallId : (typeof ev.toolName === 'string' ? ev.toolName : 'unknown'));
+  return compactToolContent(ev.result, toolCallId, outputDir, written) ? JSON.stringify(ev) : rawLine;
+ }
+ if (type === 'message_end') {
+  const m = ev.message;
+  if (m && typeof m === 'object' && m.role === 'toolResult') {
+   const rawId = typeof m.toolCallId === 'string' && m.toolCallId ? m.toolCallId : (typeof ev.toolCallId === 'string' ? ev.toolCallId : 'unknown');
+   const toolCallId = sanitizeToolCallId(rawId);
+   return compactToolContent(m, toolCallId, outputDir, written) ? JSON.stringify(ev) : rawLine;
+  }
+  return rawLine;
+ }
+ return rawLine;
+}
+
 /** Execute a live Pi child with streaming persistence, heartbeat and bounds.
  * Always resolves with an inspectable result, even on startup error, malformed
  * or partial events, timeout, deadline breach or interruption. Completion is
@@ -365,13 +437,18 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  const startedAt = Date.now();
  const heartbeat = opts.heartbeat ?? new RuntimeHeartbeat(runtimePath, settings, startedAt, opts.deadlineAt, opts.phase ?? 'worker');
  const watchdog = new ToolWatchdog();
- const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES;
+ const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : (settings.maxOutputBytes > 0 ? settings.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES);
+ // The retained cap bounds what is persisted; a much higher raw ceiling stops
+ // a runaway stream that produces only dropped events.
+ const maxRawOutputBytes = maxOutputBytes * 8;
+ const writtenToolOutput = new Set<string>();
  heartbeat.update({ phase: opts.phase ?? 'worker' });
  if (!opts.heartbeat) heartbeat.begin();
 
  let stdout = '';
  let stderr = '';
  let pending = '';
+ let rawStdoutBytes = 0;
  let stopReason: StreamStopReason | null = null;
  let timedOut = false;
  let deadlineExceeded = false;
@@ -454,6 +531,30 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   opts.onActivity?.(heartbeat.snapshot());
  }
 
+ // Retain one compacted line under the cap and persist it. The cap is a stop
+ // condition: once retained output reaches it the process group is torn down
+ // exactly like a wall-deadline breach, so a runaway child cannot keep
+ // producing after the cap.
+ function retainStdout(line: string): void {
+  if (stdout.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
+  const remaining = maxOutputBytes - stdout.length;
+  const text = line + '\n';
+  let accepted = text;
+  if (accepted.length > remaining) { accepted = text.slice(0, remaining); outputTruncated = true; }
+  stdout += accepted;
+  append(eventsPath, accepted);
+  if (outputTruncated) requestStop('output_truncated');
+ }
+
+ // Feed every raw line to the watchdog/heartbeat, then persist its compacted
+ // form. Dropped events (message_update, tool_execution_update) are not kept.
+ function processStdoutLine(rawLine: string): void {
+  handleLine(rawLine);
+  const compacted = compactEventLine(rawLine, eventsPath, writtenToolOutput);
+  if (compacted === null) return;
+  retainStdout(compacted);
+ }
+
  // Append up to the cap and report the accepted (possibly truncated) text.
  function pushOutput(kind: 'stdout' | 'stderr', text: string): string {
   const current = kind === 'stdout' ? stdout : stderr;
@@ -487,7 +588,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  function onClose(code: number | null, signal: string | null): void {
   if (exitCode === null && code !== undefined) exitCode = code ?? null;
   if (exitSignal === null && signal) exitSignal = signal;
-  if (pending.trim()) handleLine(pending);
+  if (pending.trim()) processStdoutLine(pending);
   finalize();
  }
 
@@ -503,11 +604,11 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   if (stream.stdout) {
    stream.stdout.on('data', (chunk: any) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-    const accepted = pushOutput('stdout', text);
-    if (!accepted) return;
-    const split = splitLines(pending, accepted);
+    rawStdoutBytes += text.length;
+    const split = splitLines(pending, text);
     pending = split.rest;
-    for (const line of split.lines) handleLine(line);
+    for (const line of split.lines) processStdoutLine(line);
+    if (!stopReason && rawStdoutBytes > maxRawOutputBytes) { outputTruncated = true; requestStop('output_truncated'); }
    });
    stream.stdout.on?.('error', onStreamError);
   }

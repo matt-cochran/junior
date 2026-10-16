@@ -31,7 +31,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "pretest": "npm run build",
-    "test": "node --test companions.test.ts worker.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts",
+    "test": "node --test companions.test.ts worker.test.ts runtime.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts",
     "pack": "npm pack",
     "prepack": "npm run build",
     "release": "npm publish --access public"
