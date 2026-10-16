@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
-import { inspectCompanions, installationDisabled } from './companions.ts';
+import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
@@ -165,25 +165,22 @@ async function main(argv: string[]): Promise<void> {
  if (wantsHelp(rest)) { console.log(spec.help); return; }
  const parsed = parseCommand(command, spec, rest);
 
+ // Best-effort upgrade notice: must never throw and must never change the exit
+ // code. It is skipped entirely for commands where an upgrade is not useful.
+ const updateCheck = await import('./update-check.ts');
+ await updateCheck.startupNotice(command, { env: process.env, checkUpdates: parsed.flags.has('--check-updates') });
+
  if (command === 'doctor') {
   const result:any = doctor();
   if (parsed.flags.has('--online')) {
    result.credentialsOnline = await checkCredentialsOnline();
   }
   if (parsed.flags.has('--check-updates')) {
-   const installer = await import('./installer.ts');
-   const selfUpdate = await import('./self-update.ts');
-   const managed = await installer.checkToolUpdates();
-   result.companions = inspectCompanions({}, { checkUpdates: true });
-   result.updates = { junior: selfUpdate.checkSelfUpdate({ moduleUrl: import.meta.url }), managed, companions: result.companions.companions.filter((c:any) => c.outdated === true).map((c:any) => c.package) };
-   const remediation: string[] = [];
-   if (result.updates.junior.outdated === true) remediation.push(result.updates.junior.kind === 'source'
-    ? 'This Junior runs from a source checkout; update it with `git pull` (junior update never touches a checkout).'
-    : 'Run `junior update` to adopt the newer Junior release.');
-   if (managed.outdated.length || result.updates.companions.length) remediation.push(managed.outdated.includes('triz')
-    ? 'Run `junior update --with-triz` to adopt the newer releases.'
-    : 'Run `junior update` to adopt the newer releases.');
-   if (remediation.length) result.updates.remediation = remediation.join(' ');
+   const collected = await updateCheck.collectUpdateCheck({
+    moduleUrl: import.meta.url,
+    onCompanions: (report:any) => { result.companions = report; },
+   });
+   result.updates = collected.updates;
   }
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;

@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,8 +19,8 @@ const JUNIOR = join(ROOT, 'junior.ts');
 const TOOLS = join(ROOT, 'tools', 'tools.ts');
 const NODE = process.execPath;
 
-function runJunior(args: string[], cwd: string) {
-  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1' } });
+function runJunior(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1', JUNIOR_NO_UPDATE_CHECK: '1', ...env } });
 }
 
 function runTools(args: string[], cwd: string) {
@@ -274,4 +274,42 @@ test('junior doctor writes nothing to the working directory', () => {
   const dir = workdir();
   runJunior(['doctor'], dir);
   assert.deepEqual(readdirSync(dir), []);
+});
+
+// --- startup update notice (R3) ---------------------------------------------
+
+function freshCacheHome(outdated: string[]): string {
+  const home = mkdtempSync(join(tmpdir(), 'junior-home-'));
+  const dir = join(home, '.junior');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'update-check.json'), JSON.stringify({ checkedAt: Date.now(), outdated, remediation: '' }));
+  return home;
+}
+
+function noticeEnv(home: string, noUpdateCheck: string): NodeJS.ProcessEnv {
+  return {
+    HOME: home,
+    JUNIOR_HOME: '',
+    JUNIOR_TOOLS_ROOT: join(home, '.junior', 'tools'),
+    JUNIOR_NO_UPDATE_CHECK: noUpdateCheck,
+  };
+}
+
+test('junior validate prints the update notice on stderr', () => {
+  const home = freshCacheHome(['crossmatrix', '@jevitate/cli']);
+  const res = runJunior(['validate', 'missing.json'], workdir(), noticeEnv(home, ''));
+  assert.match(res.stderr, /junior: 2 updates available \(crossmatrix, @jevitate\/cli\); run `junior update`/);
+});
+
+test('junior handoff never prints the update notice', () => {
+  const dir = workdir();
+  const home = freshCacheHome(['junior']);
+  const res = runJunior(['handoff', mockTask(dir), '--mock'], dir, noticeEnv(home, ''));
+  assert.doesNotMatch(res.stderr, /updates available/);
+});
+
+test('junior validate prints no update notice when JUNIOR_NO_UPDATE_CHECK=1', () => {
+  const home = freshCacheHome(['junior']);
+  const res = runJunior(['validate', 'missing.json'], workdir(), noticeEnv(home, '1'));
+  assert.doesNotMatch(res.stderr, /updates available/);
 });
