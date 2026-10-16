@@ -323,3 +323,10 @@ test('parseMatrixArgs accepts the state source with its companion session flags'
     [['state'], 'p1', 'f1', 'e1', 's1', 'results/'],
   );
 });
+
+// --- CLI: matrix plan-from-spec dispatch ------------------------------------
+
+test('the matrix CLI dispatches plan-from-spec to the spec bridge', () => {
+  const result = spawnSync(NODE, [JUNIOR, 'matrix', 'plan-from-spec'], { encoding: 'utf8' });
+  assert.equal(result.stderr.includes('--spec <spec.json> or --session'), true);
+});
