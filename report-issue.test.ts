@@ -79,6 +79,8 @@ test('report-issue maps each supported tool to its upstream repository', () => {
       fmeca: 'praxec/fmeca',
       cpm: 'praxec/cpm-planner',
       crossmatrix: 'praxec/crossmatrix',
+      'scientific-process': 'praxec/scientific-process',
+      elicitation: 'praxec/elicitation',
       jevitate: 'matt-cochran/jevitate',
       triz: 'matt-cochran/triz',
       junior: 'matt-cochran/junior',

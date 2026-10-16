@@ -30,6 +30,8 @@ const MCP_SERVER_NAMES: Record<ToolName, string> = {
   fmeca: 'fmeca-mcp',
   cpm: 'cpm-planner',
   crossmatrix: 'crossmatrix-mcp',
+  'scientific-process': 'scientific-process',
+  elicitation: 'elicitation',
 };
 
 export type McpTarget = 'claude' | 'cursor' | 'print' | 'codex';
@@ -324,15 +326,19 @@ function deepEqual(a: unknown, b: unknown): boolean {
  */
 export function buildMcpServers(hopPath: string): McpServerEntry[] {
   const hop = loadHop(hopPath);
-  return TOOL_NAMES.map((tool) => {
+  const servers: McpServerEntry[] = [];
+  for (const tool of TOOL_NAMES) {
     const cfg = hop.tools[tool];
-    return {
+    // A HOP written before a new tool was registered simply has no entry yet.
+    if (!cfg) continue;
+    servers.push({
       name: MCP_SERVER_NAMES[tool],
       command: cfg.command,
       args: [...cfg.args],
       env: { ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) },
-    };
-  });
+    });
+  }
+  return servers;
 }
 
 /** Project a server list into the host config shape. */

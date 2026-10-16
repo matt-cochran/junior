@@ -66,11 +66,27 @@ function world(opts: {
 const FMECA = '@matthew-cochran/fmeca';
 const CPM = '@matthew-cochran/cpm';
 const CROSSMATRIX = '@matthew-cochran/crossmatrix';
+const SCIENTIFIC_PROCESS = '@matthew-cochran/scientific-process';
+const ELICITATION = '@matthew-cochran/elicitation';
 const JEV = '@jevitate/cli';
 const TRIZ = '@matthew-cochran/triz';
 
-test('the companion catalog covers fmeca, cpm, crossmatrix, jevitate and triz', () => {
-  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'crossmatrix', 'jevitate', 'triz']);
+test('the companion catalog covers fmeca, cpm, crossmatrix, scientific-process, elicitation, jevitate and triz', () => {
+  assert.deepEqual(COMPANIONS.map((c) => c.id), ['fmeca', 'cpm', 'crossmatrix', 'scientific-process', 'elicitation', 'jevitate', 'triz']);
+});
+
+test('the new companions install their agent skills through their own binary', () => {
+  const { deps, calls } = world({ installed: { [SCIENTIFIC_PROCESS]: '1.0.0', [ELICITATION]: '1.0.0' } });
+  installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(
+    calls
+      .filter((c) => (c.command.endsWith('scientific-process') || c.command.endsWith('elicitation')) && c.args[0] === 'skills')
+      .map((c) => [c.command.split('/').pop(), ...c.args]),
+    [
+      ['scientific-process', 'skills', 'install', '--target', 'claude', '--project', '/repo'],
+      ['elicitation', 'skills', 'install', '--target', 'claude', '--project', '/repo'],
+    ],
+  );
 });
 
 test('the companion catalog describes crossmatrix with its npm package and MCP launcher', () => {
@@ -120,22 +136,22 @@ test('readiness requires every companion to be installed', () => {
 });
 
 test('install fetches a missing companion with npm argv at the latest tag', () => {
-  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0' }, latest: { [JEV]: '0.13.0' } });
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [SCIENTIFIC_PROCESS]: '0.1.0', [ELICITATION]: '0.1.0' }, latest: { [JEV]: '0.13.0' } });
   installCompanions(deps);
   assert.deepEqual(calls.find((c) => c.command === 'npm' && c.args[0] === 'install')?.args,
     ['install', '-g', '--prefer-online', `${JEV}@latest`]);
 });
 
 test('install leaves an already-present companion alone when no update is requested', () => {
-  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' } });
+  const { deps, calls } = world({ installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [SCIENTIFIC_PROCESS]: '0.1.0', [ELICITATION]: '0.1.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' } });
   installCompanions(deps);
   assert.equal(calls.some((c) => c.command === 'npm' && c.args[0] === 'install'), false);
 });
 
 test('update reinstalls only companions behind the npm latest version', () => {
   const { deps, calls } = world({
-    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
-    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
+    installed: { [FMECA]: '0.1.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [SCIENTIFIC_PROCESS]: '0.1.0', [ELICITATION]: '0.1.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
+    latest: { [FMECA]: '0.2.0', [CPM]: '0.2.2', [CROSSMATRIX]: '0.3.0', [SCIENTIFIC_PROCESS]: '0.1.0', [ELICITATION]: '0.1.0', [JEV]: '0.13.0', [TRIZ]: '0.1.0' },
   });
   installCompanions(deps, { update: true });
   assert.deepEqual(calls.filter((c) => c.command === 'npm' && c.args[0] === 'install').map((c) => c.args[3]), [`${FMECA}@latest`]);

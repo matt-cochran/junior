@@ -23,7 +23,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'jevitate' | 'triz';
+export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'scientific-process' | 'elicitation' | 'jevitate' | 'triz';
 export type SkillTarget = 'codex' | 'claude' | 'both' | 'none';
 export type SkillScope = 'project' | 'user';
 
@@ -43,6 +43,10 @@ export const COMPANIONS: readonly Companion[] = [
     mcpRegister: 'claude mcp add cpm-planner --scope user -- npx -y @matthew-cochran/cpm' },
   { id: 'crossmatrix', package: '@matthew-cochran/crossmatrix', binary: 'crossmatrix-mcp', repo: 'https://github.com/praxec/crossmatrix',
     mcpRegister: 'claude mcp add crossmatrix --scope user -- npx -y @matthew-cochran/crossmatrix' },
+  { id: 'scientific-process', package: '@matthew-cochran/scientific-process', binary: 'scientific-process', repo: 'https://github.com/praxec/scientific-process',
+    mcpRegister: 'claude mcp add scientific-process --scope user -- npx -y @matthew-cochran/scientific-process' },
+  { id: 'elicitation', package: '@matthew-cochran/elicitation', binary: 'elicitation', repo: 'https://github.com/praxec/elicitation',
+    mcpRegister: 'claude mcp add elicitation --scope user -- npx -y @matthew-cochran/elicitation' },
   { id: 'jevitate', package: '@jevitate/cli', binary: 'jevitate', repo: 'https://github.com/matt-cochran/jevitate',
     mcpRegister: 'jevitate init --skip-keys (registers the jevitate MCP server)' },
   { id: 'triz', package: '@matthew-cochran/triz', binary: 'triz', repo: 'https://github.com/matt-cochran/triz',
@@ -278,6 +282,8 @@ const SKILL_MANIFESTS: Partial<Record<CompanionId, SkillManifest>> = {
   fmeca: { file: '.fmeca-mcp-skills.json', kind: 'files' },
   cpm: { file: '.cpm-planner-skills.json', kind: 'files' },
   crossmatrix: { file: '.crossmatrix-skills.json', kind: 'files' },
+  'scientific-process': { file: '.scientific-process-skills.json', kind: 'files' },
+  elicitation: { file: '.elicitation-skills.json', kind: 'files' },
   triz: { file: '.triz-skills.json', kind: 'files' },
   jevitate: { file: 'skills-install-state.json', kind: 'state', dir: '.jevitate' },
 };

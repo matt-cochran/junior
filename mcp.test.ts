@@ -51,7 +51,7 @@ test('buildMcpServers exposes one server per hop tool', () => {
   const hop = makeHop(workdir());
   assert.deepEqual(
     buildMcpServers(hop).map((s) => s.name),
-    ['fmeca-mcp', 'cpm-planner', 'crossmatrix-mcp'],
+    ['fmeca-mcp', 'cpm-planner', 'crossmatrix-mcp', 'scientific-process', 'elicitation'],
   );
 });
 
@@ -93,7 +93,9 @@ test('junior mcp register writes all servers into .mcp.json for claude', () => {
   assert.deepEqual(Object.keys(readJson(join(dir, '.mcp.json')).mcpServers).sort(), [
     'cpm-planner',
     'crossmatrix-mcp',
+    'elicitation',
     'fmeca-mcp',
+    'scientific-process',
   ]);
 });
 
@@ -162,7 +164,9 @@ test('junior mcp register --target print prints the MCP config JSON', () => {
   assert.deepEqual(Object.keys(JSON.parse(out.stdout).mcpServers).sort(), [
     'cpm-planner',
     'crossmatrix-mcp',
+    'elicitation',
     'fmeca-mcp',
+    'scientific-process',
   ]);
 });
 
@@ -184,7 +188,7 @@ test('junior mcp register --dry-run reports planned additions', () => {
   const dir = workdir();
   const hop = makeHop(dir);
   const report = JSON.parse(runJunior(['mcp', 'register', '--hop', hop, '--target', 'claude', '--dry-run'], dir).stdout);
-  assert.equal(report.added.length, 3);
+  assert.equal(report.added.length, 5);
 });
 
 // --- project directory ------------------------------------------------------
@@ -217,6 +221,8 @@ test('junior mcp register reports written false when only conflicting servers ex
       'fmeca-mcp': { command: 'other', args: [], env: {} },
       'cpm-planner': { command: 'other', args: [], env: {} },
       'crossmatrix-mcp': { command: 'other', args: [], env: {} },
+      'scientific-process': { command: 'other', args: [], env: {} },
+      elicitation: { command: 'other', args: [], env: {} },
     },
   });
   const report = JSON.parse(runJunior(['mcp', 'register', '--hop', hop, '--project', dir, '--target', 'claude'], dir).stdout);
@@ -382,4 +388,12 @@ test('inspect marks a parseable config location as parsed', () => {
 test('inspect expects the jevitate server without a hop manifest', () => {
   const report = inspectClaude({});
   assert.ok(report.servers.some((server) => server.name === 'jevitate'));
+});
+
+test('inspect expects the scientific-process and elicitation servers without a hop manifest', () => {
+  const report = inspectClaude({});
+  assert.deepEqual(
+    report.servers.map((server) => server.name).filter((name) => name === 'scientific-process' || name === 'elicitation'),
+    ['scientific-process', 'elicitation'],
+  );
 });

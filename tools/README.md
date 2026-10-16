@@ -116,6 +116,8 @@ command. The wrapper classifies them as:
 | `fmeca` | `state.get`, `risk.next`, `readiness.assess`, `report.export`, `scoring.catalog`, `analyze`, `session.list`, `actions.suggest`, `policy.list`, `vet` | `session.open`, `append`, … |
 | `cpm` | `plan.status`, `plan.get`, `plan.lint`, `plan.schedule`, `plan.simulate`, `plan.list`, `plan.compare`, `plan.ev`, `plan.review` | `plan.submit`, `plan.export`, `plan.snapshot`, `plan.baseline`, `plan.acquire_cohort`, `plan.heartbeat`, `plan.mark_status`, `plan.force_release` |
 | `crossmatrix` | `crossmatrix.query` | `crossmatrix.command` |
+| `scientific-process` | `state.get`, `experiment.next`, `report.export`, `adjudicate` | `experiment.open`, `experiment.append`, … |
+| `elicitation` | `state.get`, `question.next`, `readiness.assess`, `spec.export` | `session.open`, `answer.record`, … |
 
 `vet` and `plan.review` are advisory, paid, nondeterministic model calls that
 never change plan or analysis state, so they are snapshotted as reads and do not
