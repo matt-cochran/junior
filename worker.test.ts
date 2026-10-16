@@ -9,7 +9,7 @@ import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
  estimateCost,validatePricing,
- taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,
+ taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
@@ -602,9 +602,53 @@ test('Analysis-to-implementation requires an explicit workflow',async()=>{
  assert.match(r.workflow.note,/requires an explicit workflow/);
 });
 test('Pi argv passes explicit --session on resume and never --continue',()=>{
- assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},'sess'),['--provider','openrouter','--model','m','--mode','json','--session','sess']);
- assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'}),['--provider','openrouter','--model','m','--mode','json']);
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},'sess'),['--provider','openrouter','--model','m','--mode','json','--session','sess','-e',piGuardModulePath()]);
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'}),['--provider','openrouter','--model','m','--mode','json','-e',piGuardModulePath()]);
  assert.ok(!buildPiArgs({provider:'openrouter',model:'m'},'sess').includes('--continue'));
+});
+test('Pi argv loads the pi-guard extension from an existing module path',()=>{
+ const args=buildPiArgs({provider:'openrouter',model:'m'});
+ const at=args.indexOf('-e');
+ assert.ok(at>=0 && existsSync(args[at+1]));
+});
+test('piBashTimeoutSeconds reserves ten seconds on long tool budgets',()=>{
+ assert.equal(piBashTimeoutSeconds(300000),290);
+});
+test('piBashTimeoutSeconds halves short tool budgets with a one second floor',()=>{
+ assert.equal(piBashTimeoutSeconds(1000),1);
+});
+test('Live Pi child environment carries the derived bash timeout',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'guard-env',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:8000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:(_c:string,_a:string[],opts:any)=>{seen=opts;return fake.child;}});
+ fake.emit({type:'agent_start'});
+ fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});
+ fake.emit({type:'agent_settled'});
+ fake.end(0);
+ await p;
+ assert.equal(seen.env.JUNIOR_PI_BASH_TIMEOUT_S,'4');
+});
+test('A tool timeout names the tool and truncated command in the result unresolved list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const command='x'.repeat(300);
+ const t=okTask(repo,{id:'guard-unresolved',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ const r=await p;
+ assert.equal((r.unresolved as string[]).find((u)=>u.includes('bash')),`tool timed out: bash: ${command.slice(0,200)}`);
+});
+test('A tool timeout names the tool and truncated command in the compact handoff unresolved list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const command='y'.repeat(300);
+ const t=okTask(repo,{id:'guard-handoff',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ const r=await p;
+ assert.ok(compactHandoff(r).unresolved.some((u)=>u.includes(`bash: ${command.slice(0,200)}`)));
 });
 const SESSION_A='123e4567-e89b-12d3-a456-426614174000';
 const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A},...over});

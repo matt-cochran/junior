@@ -217,19 +217,25 @@ export class RuntimeHeartbeat {
 // Tool watchdog
 // ---------------------------------------------------------------------------
 
-type ActiveTool = { name: string; startedAt: number };
+type ActiveTool = { name: string; startedAt: number; command?: string };
+
+/** The command string from a `tool_execution_start` `args` payload, when present. */
+function toolCommand(args: any): string | undefined {
+ return args && typeof args === 'object' && typeof args.command === 'string' ? args.command : undefined;
+}
 
 /** Correlates Pi `tool_execution_start/update/end` events by `toolCallId`. The
  * duration runs from start through end; an update only refreshes activity and
- * never resets the duration. */
+ * never resets the duration. The start `args.command`, when present, is kept so
+ * a timeout can name the offending command. */
 export class ToolWatchdog {
  private active = new Map<string, ActiveTool>();
  onEvent(ev: any, now: number): void {
   if (!ev || typeof ev !== 'object') return;
   const id = typeof ev.toolCallId === 'string' && ev.toolCallId ? ev.toolCallId : (typeof ev.toolName === 'string' ? `name:${ev.toolName}` : null);
   if (!id) return;
-  if (ev.type === 'tool_execution_start') this.active.set(id, { name: ev.toolName || 'tool', startedAt: now });
-  else if (ev.type === 'tool_execution_update') { if (!this.active.has(id)) this.active.set(id, { name: ev.toolName || 'tool', startedAt: now }); }
+  if (ev.type === 'tool_execution_start') this.active.set(id, { name: ev.toolName || 'tool', startedAt: now, command: toolCommand(ev.args) });
+  else if (ev.type === 'tool_execution_update') { if (!this.active.has(id)) this.active.set(id, { name: ev.toolName || 'tool', startedAt: now, command: toolCommand(ev.args) }); }
   else if (ev.type === 'tool_execution_end') this.active.delete(id);
  }
  currentTool(): string | null {
@@ -238,16 +244,16 @@ export class ToolWatchdog {
   return latest ? latest.name : null;
  }
  activeCount(): number { return this.active.size; }
- longest(now: number): { id: string; name: string; elapsedMs: number } | null {
-  let out: { id: string; name: string; elapsedMs: number } | null = null;
+ longest(now: number): { id: string; name: string; elapsedMs: number; command?: string } | null {
+  let out: { id: string; name: string; elapsedMs: number; command?: string } | null = null;
   for (const [id, t] of this.active) {
    const elapsedMs = now - t.startedAt;
-   if (!out || elapsedMs > out.elapsedMs) out = { id, name: t.name, elapsedMs };
+   if (!out || elapsedMs > out.elapsedMs) out = { id, name: t.name, elapsedMs, command: t.command };
   }
   return out;
  }
  /** The first active tool that has exceeded the per-tool limit, if any. */
- expired(now: number, toolTimeoutMs: number): { id: string; name: string; elapsedMs: number } | null {
+ expired(now: number, toolTimeoutMs: number): { id: string; name: string; elapsedMs: number; command?: string } | null {
   const l = this.longest(now);
   return l && l.elapsedMs >= toolTimeoutMs ? l : null;
  }
@@ -312,6 +318,9 @@ export type WorkerStreamResult = {
  /** True when stdout/stderr exceeded the accumulation cap; the receipt is not complete. */
  outputTruncated: boolean;
  stopReason: string;
+ /** The tool whose execution exceeded the per-tool limit, when the run stopped
+  * on `tool_timeout`. `command` is the `tool_execution_start` `args.command`. */
+ timedOutTool?: { name: string; command?: string };
  runtime: RuntimeSnapshot;
 };
 
@@ -327,6 +336,8 @@ export type ExecuteWorkerOptions = {
  deadlineAt: number;
  phase?: RuntimePhase;
  signal?: AbortSignal;
+ /** Environment for the spawned child; defaults to the current process env. */
+ env?: NodeJS.ProcessEnv;
  /** Optional output cap override (bytes); defaults to DEFAULT_MAX_OUTPUT_BYTES. */
  maxOutputBytes?: number;
  onActivity?: (snapshot: RuntimeSnapshot) => void;
@@ -371,6 +382,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  let persistError: string | undefined;
  let exitCode: number | null = null;
  let exitSignal: string | null = null;
+ let timedOutTool: { name: string; command?: string } | undefined;
  let finished = false;
  let killTimer: ReturnType<typeof setTimeout> | undefined;
  let killEscalationComplete = false;
@@ -409,7 +421,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   else heartbeat.setState(exitCode === 0 ? 'running' : 'failed', { stopReason: exitCode === 0 ? 'completed' : 'failed', exitCode, signal: exitSignal });
   const runtime = heartbeat.snapshot();
   const reason = runtime.stopReason ?? (exitCode === 0 ? 'completed' : 'failed');
-  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated, stopReason: reason, runtime });
+  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated, stopReason: reason, timedOutTool, runtime });
  }
 
  function requestStop(reason: StreamStopReason): void {
@@ -480,7 +492,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  }
 
  try {
-  if (!opts.signal?.aborted) child = spawnChild(command, args, { cwd });
+  if (!opts.signal?.aborted) child = spawnChild(command, args, { cwd, env: opts.env });
  } catch (err: any) {
   startupError = err?.message || String(err);
   stopReason = 'startup_error';
@@ -514,7 +526,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
    heartbeat.poll(now, watchdog.currentTool(), longest ? longest.elapsedMs : null);
    if (stopReason) return;
    const expired = watchdog.expired(now, settings.toolTimeoutMs);
-   if (expired) requestStop('tool_timeout');
+   if (expired) { timedOutTool = { name: expired.name, command: expired.command }; requestStop('tool_timeout'); }
    else if (now >= opts.deadlineAt) requestStop('deadline');
   }, 25);
  } else {

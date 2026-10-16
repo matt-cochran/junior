@@ -2,7 +2,7 @@ import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
@@ -916,12 +916,38 @@ export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo
  return blocks.join('\n\n');
 }
 
+/** Absolute path of the pi-guard extension beside the running module. Resolves
+ * to `pi-guard.ts` when running from source and `pi-guard.js` from `dist/`, so
+ * the same argv works in both layouts. */
+export function piGuardModulePath(moduleUrl:string = import.meta.url):string {
+ const here = fileURLToPath(moduleUrl);
+ const guard = here.endsWith('.ts') ? 'pi-guard.ts' : 'pi-guard.js';
+ return join(dirname(here), guard);
+}
+
+/** Pi's own bash timeout in whole seconds, chosen to fire before Junior's
+ * per-tool watchdog: ten seconds of headroom for budgets of 20s or more, and
+ * half the budget for shorter ones (never below one second). */
+export function piBashTimeoutSeconds(toolTimeoutMs:number):number {
+ const seconds = toolTimeoutMs >= 20000 ? Math.floor(toolTimeoutMs/1000) - 10 : Math.floor(toolTimeoutMs/2000);
+ return Math.max(1, seconds);
+}
+
+/** One bounded unresolved entry for a tool that exceeded its per-tool limit. */
+function timedOutToolLine(tool:{name:string; command?:string|null}):string {
+ const command = typeof tool.command === 'string' ? tool.command : '';
+ return `tool timed out: ${tool.name}${command ? `: ${command.slice(0,200)}` : ''}`;
+}
+
 /** Build Pi argv for a run. Resume passes an explicit `--session <id>` and
- * never `--continue`, so continuation cannot silently pick the wrong session. */
-export function buildPiArgs(requested:{provider:string;model:string}, sessionId?:string|null, thinking?:string):string[] {
+ * never `--continue`, so continuation cannot silently pick the wrong session.
+ * `-e <path>` loads the pi-guard extension that redirects bash stdin and bounds
+ * its timeout. */
+export function buildPiArgs(requested:{provider:string;model:string}, sessionId?:string|null, thinking?:string, guardPath:string|null=piGuardModulePath()):string[] {
  const args=['--provider',requested.provider,'--model',requested.model,'--mode','json'];
  if (thinking) args.push('--thinking',thinking);
  if (sessionId) args.push('--session',sessionId);
+ if (guardPath) args.push('-e',guardPath);
  return args;
 }
 
@@ -1652,6 +1678,9 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let streamResult:WorkerStreamResult|undefined;
   const preInterrupt = !!signal?.aborted;
   const preDeadline = !preInterrupt && workerOutOfTime();
+  // Pi's own bash timeout must fire before Junior's watchdog so a slow command
+  // fails only that tool call and returns a tool error to the model.
+  const piBashEnv = { ...process.env, JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
   if (mock) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
@@ -1666,7 +1695,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     stopReason: preInterrupt ? 'interrupted' : 'deadline_exceeded', runtime:heartbeat.snapshot() };
   } else if (deps.spawnPi) {
    const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
-   const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432});
+   const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432,env:piBashEnv});
    stdout=r.stdout || ''; stderr=r.stderr || '';
    workerStatus=r.status ?? (r.error ? 1 : 0);
    legacyError=r.error?.message;
@@ -1677,7 +1706,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    streamResult = await executeWorkerStreaming({
     spawnChild, command:'pi',
     args:[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],
-    cwd:executionCwd, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
+    cwd:executionCwd, env:piBashEnv, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
     phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
    });
    stdout=streamResult.stdout; stderr=streamResult.stderr;
@@ -1728,7 +1757,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let workerError=legacyError;
   if (!workerError && streamResult?.interrupted) workerError='Run interrupted by signal; partial logs and edits preserved.';
   if (!workerError && streamResult?.deadlineExceeded) workerError='Total wall deadline exceeded; Pi process group was stopped.';
-  if (!workerError && streamResult?.timedOut) workerError='Tool execution exceeded the per-tool timeout; Pi process group was stopped.';
+  if (!workerError && streamResult?.timedOut) workerError='Tool execution exceeded the per-tool timeout; Pi process group was stopped.'+ (streamResult.timedOutTool ? ` ${timedOutToolLine(streamResult.timedOutTool)}.` : '');
   if (!workerError && streamResult?.streamError) workerError=`Worker output stream failed: ${streamResult.streamError}`;
   if (!workerError && streamResult?.persistError) workerError=`Could not persist worker logs/events: ${streamResult.persistError}`;
   if (!workerError && streamResult?.outputTruncated) workerError='Worker output exceeded the accumulation cap; the worker was stopped.';
@@ -1825,6 +1854,11 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
 
   const runtime=heartbeat.snapshot();
   const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false};
+  result.unresolved=[];
+  if (streamResult?.timedOut && streamResult.timedOutTool) {
+   result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
+   result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));
+  }
   if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount };
   result.sourceCwd=sourceCwd;
   result.executionCwd=executionCwd;
