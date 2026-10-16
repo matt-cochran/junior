@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDirectEntry } from './cli-entry.ts';
+import { playbookDimensions } from './playbooks.ts';
 import { callHop } from './tools/tools.ts';
 
 export type DimensionKind =
@@ -613,16 +614,16 @@ interface MatrixOptions {
   model?: string;
 }
 
-const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca'];
+const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca', 'playbooks'];
 const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model'];
 
 export const MATRIX_USAGE = [
-  'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
   'Usage: junior matrix init [--dir <project>]',
-  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca [--source ...]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
   'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
   'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
@@ -767,6 +768,7 @@ function readJevitateFiles(dir: string): MatrixFile[] {
 }
 
 async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
+  if (source === 'playbooks') return playbookDimensions();
   if (source === 'code') return [codeLocations(gitTrackedFiles(options.dir))];
   if (source === 'tests') return [tests(gitTrackedFiles(options.dir))];
   if (source === 'jevitate') {
