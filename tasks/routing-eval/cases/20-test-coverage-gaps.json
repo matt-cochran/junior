@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-20-test-coverage-gaps",
+    "deliverable": "Find requirements and user journeys that no automated test covers",
+    "workflow": "evaluate",
+    "acceptance": [
+      "The report lists each uncovered requirement and journey",
+      "Each finding cites the model relation it came from"
+    ],
+    "constraints": [
+      "Allowed files: none, this is an analysis report",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:test-coverage",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "fmeca"
+    ],
+    "managerSetup": [
+      "sync code and tests into crossmatrix before running the coverage query"
+    ],
+    "rationale": "Coverage gaps are a relationship query over the committed model, so the map must be fed first and then queried"
+  }
+}

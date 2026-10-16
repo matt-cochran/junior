@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-27-checkout-browser-journey",
+    "deliverable": "Verify the full checkout journey of cart, address, payment and confirmation in a real browser",
+    "workflow": "test_first",
+    "acceptance": [
+      "A jevitate suite drives all four checkout steps to a confirmation page",
+      "The suite exits non-zero when a step is broken"
+    ],
+    "constraints": [
+      "Allowed files: e2e/checkout.spec.* and e2e/jevitate.json",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "jevitate",
+        "application": "jevitate:browser-check",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "fmeca"
+    ],
+    "managerSetup": [
+      "confirm the app can be started locally and seed the test account before the handoff"
+    ],
+    "rationale": "A multi-page checkout can only be accepted through a real-browser journey, which is exactly what the jevitate check provides"
+  }
+}

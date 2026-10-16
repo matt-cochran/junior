@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-30-webhook-input-hardening",
+    "deliverable": "Harden the public webhook handler against malformed and oversized payloads",
+    "workflow": "fmeca",
+    "acceptance": [
+      "Oversized payloads are rejected with 413 before parsing",
+      "Malformed JSON returns 400 without echoing the request body"
+    ],
+    "constraints": [
+      "Allowed files: src/webhook.ts and webhook.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "fmeca",
+        "application": "fmeca:risk-before-change",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "open an FMECA session enumerating parser and size-limit failure modes before editing"
+    ],
+    "rationale": "A public unauthenticated endpoint has adversarial failure modes, so they are scored before the hardening change"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "contract": {
+    "id": "routing-01-null-guard",
+    "deliverable": "Reject POST /widgets bodies that omit `name` with HTTP 400 instead of throwing a TypeError",
+    "workflow": "test_first",
+    "acceptance": [
+      "A POST /widgets request without `name` returns status 400",
+      "A POST /widgets request with `name` still returns 201"
+    ],
+    "constraints": [
+      "Allowed files: src/widgets.ts and widgets.test.ts",
+      "No commits or pushes",
+      "Restrict searches to the checkout"
+    ]
+  },
+  "expected": {
+    "tools": [],
+    "notTools": [
+      "fmeca",
+      "cpm",
+      "crossmatrix"
+    ],
+    "managerSetup": [],
+    "rationale": "A single well-specified guard clause needs no planning, risk or context tooling"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "contract": {
+    "id": "routing-17-csv-export-wide-feature",
+    "deliverable": "Add CSV export to the reports screen, touching the API handler, the React view and the shared serializers",
+    "workflow": "test_first",
+    "acceptance": [
+      "GET /reports/export.csv returns valid CSV with the current filters applied",
+      "The export button downloads the file"
+    ],
+    "constraints": [
+      "Allowed files: src/api/reports.ts, src/ui/Reports.tsx and src/serializers/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:codemap-context",
+        "relevance": "required"
+      },
+      {
+        "tool": "cpm",
+        "application": "cpm:plan-backed-deliverable",
+        "relevance": "recommended"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "run matrix codemap init and pass the context for the reports feature",
+      "sync a cpm plan with owned_files across api, ui and serializers"
+    ],
+    "rationale": "The feature crosses api, ui and serializers, so the code map supplies context and the plan supplies owned-file boundaries"
+  }
+}

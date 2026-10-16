@@ -1,0 +1,25 @@
+{
+  "contract": {
+    "id": "routing-02-readme-typo",
+    "deliverable": "Fix the misspelled `recieve` occurrences in README.md and change no other file",
+    "workflow": "checks_first",
+    "acceptance": [
+      "README.md contains no occurrence of `recieve`"
+    ],
+    "constraints": [
+      "Allowed files: README.md",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [],
+    "notTools": [
+      "fmeca",
+      "cpm",
+      "crossmatrix",
+      "elicitation"
+    ],
+    "managerSetup": [],
+    "rationale": "A spelling fix is fully specified by the contract and has no routing decision to make"
+  }
+}

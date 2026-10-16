@@ -1,0 +1,31 @@
+{
+  "contract": {
+    "id": "routing-28-ci-browser-regression-gate",
+    "deliverable": "Add a browser regression gate to CI that fails the build when the signup flow breaks",
+    "workflow": "checks_first",
+    "acceptance": [
+      "CI runs the jevitate suite and fails on a non-zero exit",
+      "A deliberately broken signup step fails the build"
+    ],
+    "constraints": [
+      "Allowed files: .github/workflows/ci.yml and e2e/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "jevitate",
+        "application": "jevitate:browser-check",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz"
+    ],
+    "managerSetup": [
+      "provide a CI-safe jevitate suite and test credentials before wiring the gate"
+    ],
+    "rationale": "The deliverable is a browser gate, so a real-browser check must run in CI and its exit code must fail the build"
+  }
+}

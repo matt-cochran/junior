@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-07-bundle-size-vs-features",
+    "deliverable": "Cut the production JavaScript bundle below 180 KB gzipped while keeping every current feature, though the largest features are exactly what push it over",
+    "workflow": "recon",
+    "acceptance": [
+      "The gzipped production entry bundle is below 180 KB",
+      "The full acceptance suite passes unchanged"
+    ],
+    "constraints": [
+      "Allowed files: src/** and build.mjs",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "triz",
+        "application": "triz:contradiction",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "fmeca",
+      "elicitation"
+    ],
+    "managerSetup": [
+      "authorize the paid triz analysis call and attach the saved result to the contract"
+    ],
+    "rationale": "Bundle size and feature completeness contradict each other directly, which is the TRIZ use case rather than ordinary optimization"
+  }
+}

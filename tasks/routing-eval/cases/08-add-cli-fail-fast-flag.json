@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-08-cli-fail-fast-flag",
+    "deliverable": "Add a `--fail-fast` flag to the `run` command that stops at the first failed step and exits non-zero",
+    "workflow": "test_first",
+    "acceptance": [
+      "`run --fail-fast` stops after the first failing step",
+      "`run` without the flag still runs every step"
+    ],
+    "constraints": [
+      "Allowed files: src/cli.ts, src/runner.ts and cli.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "cpm",
+        "application": "cpm:plan-backed-deliverable",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "sync a cpm plan with this deliverable and pin owned_files for cli.ts, runner.ts and cli.test.ts"
+    ],
+    "rationale": "The change spans two source files plus tests, so an explicit plan with owned files prevents overlapping edits"
+  }
+}

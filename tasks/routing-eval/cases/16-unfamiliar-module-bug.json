@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-16-unfamiliar-module-bug",
+    "deliverable": "Fix the intermittent double-charge bug in the billing reconciliation module, which the assignee has never read",
+    "workflow": "recon",
+    "acceptance": [
+      "Re-running reconciliation for a settled day produces no additional charge",
+      "Existing billing tests pass"
+    ],
+    "constraints": [
+      "Allowed files: src/reconciliation/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "crossmatrix",
+        "application": "crossmatrix:codemap-context",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "run matrix codemap init and pass the reconciliation feature context into the contract"
+    ],
+    "rationale": "The module is unfamiliar, so a code map linking the feature to its files is the cheapest way to bound the handoff"
+  }
+}

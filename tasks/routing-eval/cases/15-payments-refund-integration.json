@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-15-payments-refund-integration",
+    "deliverable": "Integrate the Acme payments API for refunds including retry and idempotency handling",
+    "workflow": "fmeca",
+    "acceptance": [
+      "A refund is issued exactly once for a given idempotency key",
+      "A 5xx response from Acme is retried with backoff"
+    ],
+    "constraints": [
+      "Allowed files: src/payments/**",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "fmeca",
+        "application": "fmeca:risk-before-change",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "crossmatrix"
+    ],
+    "managerSetup": [
+      "open an FMECA session covering retries, duplicate refunds and key storage before implementation"
+    ],
+    "rationale": "Money movement and idempotency failures are costly and hard to reverse, so failure modes get scored before code"
+  }
+}

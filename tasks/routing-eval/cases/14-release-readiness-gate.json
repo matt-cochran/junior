@@ -1,0 +1,33 @@
+{
+  "contract": {
+    "id": "routing-14-release-readiness-gate",
+    "deliverable": "Confirm release 0.5.0 is safe to ship by enumerating and closing outstanding failure modes",
+    "workflow": "fmeca",
+    "acceptance": [
+      "Every open FMECA action has an owner and disposition",
+      "readiness.assess reports no blocking risk"
+    ],
+    "constraints": [
+      "Allowed files: none, this is an analysis-only deliverable",
+      "The artifact is a report, not code",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "fmeca",
+        "application": "fmeca:readiness-assess",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "triz",
+      "jevitate"
+    ],
+    "managerSetup": [
+      "open or reuse the release FMECA session and run readiness.assess before tagging"
+    ],
+    "rationale": "A ship or block decision is exactly what the FMECA readiness gate exists to answer before release work proceeds"
+  }
+}

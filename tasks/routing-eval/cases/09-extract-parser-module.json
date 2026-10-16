@@ -1,0 +1,32 @@
+{
+  "contract": {
+    "id": "routing-09-extract-parser-module",
+    "deliverable": "Extract the inline argument parsing from cli.ts into src/args.ts and update imports while preserving behavior",
+    "workflow": "test_first",
+    "acceptance": [
+      "All existing CLI tests pass against the extracted module",
+      "src/args.ts exports parseArgs"
+    ],
+    "constraints": [
+      "Allowed files: src/cli.ts, src/args.ts and cli.test.ts",
+      "No commits or pushes"
+    ]
+  },
+  "expected": {
+    "tools": [
+      {
+        "tool": "cpm",
+        "application": "cpm:plan-backed-deliverable",
+        "relevance": "required"
+      }
+    ],
+    "notTools": [
+      "jevitate",
+      "triz"
+    ],
+    "managerSetup": [
+      "sync a cpm plan with this refactor and pin the owned files before dispatch"
+    ],
+    "rationale": "A multi-file refactor benefits from a plan that records file ownership and the dependency between the extraction and the import update"
+  }
+}
