@@ -19,6 +19,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
+import { loadPlaybooks } from './playbooks.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
 const resultFile=(value:any)=>{const f=join(mkdtempSync(join(tmpdir(),'delivery-')),'result.json');writeFileSync(f,typeof value==='string'?value:JSON.stringify(value));return f;};
@@ -2962,4 +2963,55 @@ test('junior validate warns to split a contract with eleven acceptance criteria'
  writeFileSync(taskPath,JSON.stringify({id:'warn-acc',deliverable:'x',cwd:repo.dir,acceptance,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
  const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
+});
+
+// --- J3 tool routing: trait questions, routed plan and tool_setup gate ---
+const routingClassifier=(traits:Record<string,number>)=>({
+ stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',
+ answers:{...JEVPASS,...Object.fromEntries(Object.entries(traits).map(([k,v])=>[`trait_${k}`,bool(v)]))},usage:gateUsage,
+});
+const routingSeam=(traits:Record<string,number>):any=>async()=>routingClassifier(traits);
+const routingPlan={traits:{},playbooks:[],tools:[],managerSetup:[],workerDirections:['junior tools call <hop> fmeca <request.json> — scored failure modes']};
+
+test('The Jev readiness request carries one binary question per catalog trait',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ const asked=Object.keys(questions).filter((k)=>k.startsWith('trait_')).map((k)=>k.slice('trait_'.length)).sort();
+ assert.deepEqual(asked,[...loadPlaybooks().traits].sort());
+});
+test('A decided trait attaches a routed tool plan to the readiness attention',async()=>{
+ const pre=await assessPreflight(task(),routingSeam({risky_change:0.95}));
+ assert.ok(pre.attention.toolPlan?.tools.some((tool)=>tool.tool==='fmeca'));
+});
+test('The compact receipt carries the routed tool plan manager setup',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:routingSeam({risky_change:0.95})});
+ assert.ok(compactHandoff(r).attention?.toolPlan?.managerSetup.some((line)=>/FMECA/.test(line)));
+});
+test('A failed classifier yields a null tool plan on a continued shadow handoff',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:outage});
+ assert.equal(r.jev.preflight.attention.toolPlan,null);
+});
+test('The worker prompt includes tool routing directions when hopFrom is set',()=>{
+ const prompt=buildPrompt(task(0,{hopFrom:'/tmp/handoff/hop.json'}),'test_first',null,null,null,null,routingPlan);
+ assert.match(prompt,/junior tools call \/tmp\/handoff\/hop\.json fmeca/);
+});
+test('The worker prompt omits tool routing directions without hopFrom',()=>{
+ const prompt=buildPrompt(task(0,{}),'test_first',null,null,null,null,routingPlan);
+ assert.ok(!prompt.includes('Tool routing directions'));
+});
+test('Enforce mode with a required tool and no hopFrom returns the tool_setup clarify trigger',async()=>{
+ const r=await run(task(0,{jev:{mode:'enforce'}}),false,{classify:routingSeam({risky_change:0.95}),spawnPi:()=>({status:0,stdout:stream('stop')})});
+ assert.equal(r.jev.preflight.attention.trigger,'tool_setup');
+});
+test('Enforce mode with a required tool and no hopFrom does not start the worker',async()=>{
+ let started=0;
+ await run(task(0,{jev:{mode:'enforce'}}),false,{classify:routingSeam({risky_change:0.95}),spawnPi:()=>{started+=1;return {status:0,stdout:stream('stop')};}});
+ assert.equal(started,0);
+});
+test('The readiness request omits trait questions when they would exceed the per-call limit',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier,{maxQuestions:3});
+ assert.equal(Object.keys(questions).filter((k)=>k.startsWith('trait_')).length,0);
 });
