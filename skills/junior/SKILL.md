@@ -103,6 +103,17 @@ report them as skipped.
   stop reasons, changed files and artifact paths. `ready_for_review` is a
   handoff, not acceptance. An unavailable estimate with `billedUsd: null` is
   unknown, not free.
+- A Pi guard extension makes every bash tool call read stdin from `/dev/null`
+  and caps its timeout ten seconds under `execution.toolTimeoutMs` (half below
+  20s), so a slow bash call fails only that call. Any tool that outlasts the
+  watchdog still stops the run, and the receipt names it as `timedOutTool`.
+- `execution.maxOutputBytes` (1-32 MiB, default 8 MiB) bounds the retained
+  worker output. Oversized tool text is compacted to a head/tail marker and the
+  full text is written to `tool-output/<toolCallId>.txt`.
+- After an output-capped segment, `execution.continuations` (0-3, default 1)
+  starts an automatic fresh-session continuation segment, writing
+  `checkpoint-<n>.md` and `events-<n>.jsonl`; the receipt reflects the final
+  segment.
 
 ## Review and bounded repair
 
@@ -155,6 +166,12 @@ so it is recorded as evidence (reads become immutable snapshots):
 4. Review the receipt, diff and checks yourself, then `plan.mark_status`
    complete (with `evidence`) or failed with a reason; repair at most once.
 5. Repeat until `plan.status` shows the plan complete.
+
+The companion cpm skills follow the plan's life: `cpm-plan` (author, lint, sync,
+critical path), `cpm-improve` (parallelize, crash or fast-track; advisory
+`plan.review`), `cpm-run` (lease, mark, accept) and `cpm-ev` (baseline, earned
+value, snapshots). cpm-planner auto-baselines at the first execution unless
+`CPM_BASELINE_MODE=refuse`; re-baselines stay explicit.
 
 Neither tool needs registering as an MCP server for this loop; Junior spawns the
 managed binaries itself.
