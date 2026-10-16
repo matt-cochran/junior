@@ -11,10 +11,10 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureLocalExcludes } from './isolation.ts';
+import { ensureLocalExcludes, provisionIsolationSetup } from './isolation.ts';
 
 const GENERATED = ['/.delivery/', '/delivery.config.json', '/tasks/example-task.json'];
 
@@ -142,4 +142,89 @@ test('ensureLocalExcludes omits an unapplied pattern from added', (t) => {
 test('ensureLocalExcludes names an unapplied pattern in its error', (t) => {
   const repo = repoIn(arena(t));
   assert.match(ensureLocalExcludes(repo, ['!keep']).error ?? '', /!keep/);
+});
+
+// ---------------------------------------------------------------------------
+// Idempotent isolation setup provisioning (links and copies).
+//
+// The resume path reuses a prior worktree where isolationSetup already ran, so
+// provisioning must treat an identical existing symlink as satisfied while
+// still reporting a conflicting destination (different symlink, file, dir).
+// Every fixture lives under os.tmpdir() and is removed by the arena helper.
+// ---------------------------------------------------------------------------
+
+const SETUP_OPTS = { deadlineAt: Date.now() + 60_000, checkTimeoutMs: 5_000 };
+
+/** Source and worktree directories plus a node_modules link source. */
+const setupFixture = (t: any) => {
+  const root = arena(t);
+  const source = join(root, 'source');
+  const worktree = join(root, 'worktree');
+  mkdirSync(join(source, 'node_modules'), { recursive: true });
+  writeFileSync(join(source, 'node_modules', 'pkg.txt'), 'pkg\n');
+  mkdirSync(worktree);
+  return { root, source, worktree };
+};
+
+const NODE_MODULES_LINK = { links: [{ from: 'node_modules', to: 'node_modules' }] };
+
+// --- links -------------------------------------------------------------------
+
+test('provisioning a link twice into the same worktree succeeds the second time', (t) => {
+  const { source, worktree } = setupFixture(t);
+  provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, '', SETUP_OPTS);
+  const second = provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, '', SETUP_OPTS);
+  assert.equal(second.ok, true);
+});
+
+test('a repeated link provisioning logs that the link is already present', (t) => {
+  const { root, source, worktree } = setupFixture(t);
+  const artifacts = join(root, 'artifacts');
+  mkdirSync(artifacts);
+  provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, artifacts, SETUP_OPTS);
+  provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, artifacts, SETUP_OPTS);
+  assert.match(readFileSync(join(artifacts, 'isolation-setup.log'), 'utf8'), /link node_modules already present/);
+});
+
+test('a link destination symlink pointing at a different target fails', (t) => {
+  const { source, worktree } = setupFixture(t);
+  mkdirSync(join(source, 'other'));
+  symlinkSync(join(source, 'other'), join(worktree, 'node_modules'), 'dir');
+  const result = provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, '', SETUP_OPTS);
+  assert.equal(result.ok, false);
+});
+
+test('a conflicting link failure names the destination path', (t) => {
+  const { source, worktree } = setupFixture(t);
+  mkdirSync(join(source, 'other'));
+  symlinkSync(join(source, 'other'), join(worktree, 'node_modules'), 'dir');
+  const result = provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, '', SETUP_OPTS);
+  assert.match(result.error ?? '', /node_modules/);
+});
+
+test('a regular file at the link destination still fails', (t) => {
+  const { source, worktree } = setupFixture(t);
+  writeFileSync(join(worktree, 'node_modules'), 'occupied\n');
+  const result = provisionIsolationSetup(NODE_MODULES_LINK, source, worktree, '', SETUP_OPTS);
+  assert.equal(result.ok, false);
+});
+
+// --- copies ------------------------------------------------------------------
+
+test('provisioning a copied symlink twice succeeds the second time', (t) => {
+  const { source, worktree } = setupFixture(t);
+  symlinkSync(join(source, 'node_modules'), join(source, 'deps'), 'dir');
+  const setup = { copy: ['deps'] };
+  provisionIsolationSetup(setup, source, worktree, '', SETUP_OPTS);
+  const second = provisionIsolationSetup(setup, source, worktree, '', SETUP_OPTS);
+  assert.equal(second.ok, true);
+});
+
+test('a copied symlink destination pointing elsewhere fails', (t) => {
+  const { source, worktree } = setupFixture(t);
+  mkdirSync(join(source, 'other'));
+  symlinkSync(join(source, 'node_modules'), join(source, 'deps'), 'dir');
+  symlinkSync(join(source, 'other'), join(worktree, 'deps'), 'dir');
+  const result = provisionIsolationSetup({ copy: ['deps'] }, source, worktree, '', SETUP_OPTS);
+  assert.equal(result.ok, false);
 });

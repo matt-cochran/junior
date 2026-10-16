@@ -186,12 +186,33 @@ export function configuredIsolationSetup(cwd: string): unknown {
 export type IsolationSetupStep = { kind: 'link' | 'copy' | 'command'; target: string; ok: boolean; output?: string; error?: string };
 export type IsolationSetupResult = { ok: boolean; error?: string; steps: IsolationSetupStep[]; logPath: string | null; excludePatterns: string[] };
 
+/** True when `dest` is a symlink resolving to `expected` (an absolute path).
+ * Used to make link/copy provisioning idempotent across a reused worktree. */
+function linkResolvesTo(dest: string, expected: string): boolean {
+ try {
+  if (!lstatSync(dest).isSymbolicLink()) return false;
+  return resolve(dirname(dest), readlinkSync(dest)) === resolve(expected);
+ } catch { return false; }
+}
+
+/** True when a path exists, including a dangling symlink. */
+function pathExists(p: string): boolean {
+ try { lstatSync(p); return true; } catch { return false; }
+}
+
 /** Recursively copy a file, directory or symlink, preserving relative shape. */
 function copyRecursive(src: string, dest: string): void {
  const st = lstatSync(src);
  if (st.isSymbolicLink()) {
   mkdirSync(dirname(dest), { recursive: true });
-  symlinkSync(readlinkSync(src), dest);
+  try {
+   symlinkSync(readlinkSync(src), dest);
+  } catch (e: any) {
+   // A reused worktree already holds the copied symlink: only an identical
+   // target is satisfied; anything else is a real conflict.
+   if (e?.code === 'EEXIST' && linkResolvesTo(dest, resolve(dirname(src), readlinkSync(src)))) return;
+   throw e;
+  }
  } else if (st.isDirectory()) {
   mkdirSync(dest, { recursive: true });
   for (const entry of readdirSync(src)) copyRecursive(join(src, entry), join(dest, entry));
@@ -231,6 +252,15 @@ export function provisionIsolationSetup(
   try {
    if (!existsSync(source)) throw Error(`source does not exist: ${source}`);
    mkdirSync(dirname(target), { recursive: true });
+   if (pathExists(target)) {
+    if (linkResolvesTo(target, source)) {
+     excludePatterns.push(`/${link.to}`);
+     steps.push({ kind: 'link', target: link.to, ok: true });
+     lines.push(`link ${link.to} already present`);
+     continue;
+    }
+    throw Error(`destination ${target} already exists and is not a symlink to ${source}`);
+   }
    symlinkSync(source, target, statSync(source).isDirectory() ? 'dir' : 'file');
    excludePatterns.push(`/${link.to}`);
    steps.push({ kind: 'link', target: link.to, ok: true });
