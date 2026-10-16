@@ -31,7 +31,7 @@ function usage(): string {
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
   '  tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
-  '  doctor  [--check-updates] [--online]     read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
+  '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained Junior worktrees',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
@@ -76,8 +76,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
- doctor: { flags: ['--check-updates', '--online'], valueFlags: [], min: 0, max: 0,
-  help: 'Usage: junior doctor [--check-updates] [--online]' },
+ doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
+  help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
  update: {
   flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -171,7 +171,7 @@ async function main(argv: string[]): Promise<void> {
  await updateCheck.startupNotice(command, { env: process.env, checkUpdates: parsed.flags.has('--check-updates') });
 
  if (command === 'doctor') {
-  const result:any = doctor();
+  const result:any = doctor({}, { harness: parsed.values['--harness'] });
   if (parsed.flags.has('--online')) {
    result.credentialsOnline = await checkCredentialsOnline();
   }
