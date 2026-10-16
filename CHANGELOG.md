@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare workflow and check-back: `junior handoff --choose <option> --correct
   <id>=<text>` consumes a `needs_choice` brief (numbered U/A items, scored
   options, recommendation), gated by `checkBack: auto|always|off`.
+- Clarification loop: an unclear contract (or a vague-feature routing) opens an
+  elicitation session and returns a `needs_answers` batch of ranked questions
+  with the reason and any suggested answer; `junior handoff <task.json>
+  --answers <file>` records assent, refutation or amendments until the
+  readiness gate passes, then drafts a cpm plan (plan-sized work) or a
+  prepare brief. Same gating as the check-back: an explicit workflow is never
+  replaced.
 - `discover` and `investigate` analysis workflows: an elicitation-backed
   requirements interview and one scientific-process experiment per handoff.
 - Managed tools `scientific-process` and `elicitation`: installer, npm
