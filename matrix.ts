@@ -970,6 +970,10 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
+  if (argv[0] === 'qc') {
+    const { runLinkQc } = await import('./link-qc.ts');
+    return runLinkQc(argv.slice(1));
+  }
   if (argv[0] === 'graph') {
     const { runGraph } = await import('./context-graph.ts');
     return runGraph(argv.slice(1));
