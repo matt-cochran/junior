@@ -7,7 +7,8 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -277,6 +278,55 @@ test('runSetup backs up .cursor/mcp.json before the cursor registration writes i
     { cwd: dir, harness: 'cursor', hopPath, yes: true },
   );
   assert.deepEqual(JSON.parse(readFileSync(join(dir, '.cursor', 'mcp.json.bak'), 'utf8')), { mcpServers: {} });
+});
+
+test('runSetup records a companion skill install in the repository-local git exclude', async (t) => {
+  const dir = tempDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', 'user.email', 't@example.com'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'tester'], { cwd: dir });
+  writeFileSync(join(dir, 'base.txt'), 'base\n');
+  spawnSync('git', ['add', 'base.txt'], { cwd: dir });
+  spawnSync('git', ['commit', '-qm', 'base'], { cwd: dir });
+  const readiness = readinessWith([{ id: 'skill:elicitation', kind: 'skill', name: 'elicitation', status: 'missing', required: true }], 'claude');
+  await runSetup(
+    {
+      readiness,
+      inspect: () => readinessWith([], 'claude'),
+      env: { PATH: '', HOME: dir },
+      exec: () => {
+        const skillDir = join(dir, '.claude', 'skills', 'elicitation');
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(join(skillDir, 'SKILL.md'), '# elicitation\n');
+        return { status: 0 };
+      },
+      ...SILENT,
+    },
+    { cwd: dir, harness: 'claude', hopPath: hopOnDisk(dir), yes: true },
+  );
+  assert.match(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), /\/\.claude\/skills\/elicitation\/SKILL\.md/);
+});
+
+test('runSetup writes no local exclude outside a git repository', async () => {
+  const dir = tempDir();
+  const readiness = readinessWith([{ id: 'skill:elicitation', kind: 'skill', name: 'elicitation', status: 'missing', required: true }], 'claude');
+  await runSetup(
+    {
+      readiness,
+      inspect: () => readinessWith([], 'claude'),
+      env: { PATH: '', HOME: dir },
+      exec: () => {
+        const skillDir = join(dir, '.claude', 'skills', 'elicitation');
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(join(skillDir, 'SKILL.md'), '# elicitation\n');
+        return { status: 0 };
+      },
+      ...SILENT,
+    },
+    { cwd: dir, harness: 'claude', hopPath: hopOnDisk(dir), yes: true },
+  );
+  assert.equal(existsSync(join(dir, '.git', 'info', 'exclude')), false);
 });
 
 test('runSetup --dry-run runs no commands', async () => {

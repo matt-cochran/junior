@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSpec } from './cli-entry.ts';
 import { checkSelfUpdate, type SelfUpdateCheck, type SelfUpdateDeps } from './self-update.ts';
@@ -50,6 +50,7 @@ export interface UpdateCheckFs {
   mkdirSync(path: string, options: { recursive: boolean }): void;
   renameSync(oldPath: string, newPath: string): void;
   existsSync(path: string): boolean;
+  unlinkSync(path: string): void;
 }
 
 export interface UpdateCheckDeps {
@@ -91,6 +92,7 @@ const nodeFs: UpdateCheckFs = {
   mkdirSync: (path, options) => mkdirSync(path, options),
   renameSync: (oldPath, newPath) => renameSync(oldPath, newPath),
   existsSync: (path) => existsSync(path),
+  unlinkSync: (path) => unlinkSync(path),
 };
 
 /** Resolve `~/.junior/update-check.json`, honouring JUNIOR_HOME and the parent
@@ -199,6 +201,15 @@ function writeCache(fs: UpdateCheckFs, path: string, summary: UpdateSummary): vo
   fs.renameSync(tmp, path);
 }
 
+/** Remove the cached summary, treating a missing or unremovable file as fine. */
+function removeCache(fs: UpdateCheckFs, path: string): void {
+  try {
+    if (fs.existsSync(path)) fs.unlinkSync(path);
+  } catch {
+    /* an unremovable cache is not a failure */
+  }
+}
+
 /** True when at least one probe actually reached its registry. A complete
  * failure (all `latest` null) must not overwrite the cache with "nothing". */
 function collectionResolved(updates: CollectedUpdates): boolean {
@@ -256,6 +267,30 @@ export async function cachedUpdateSummary(deps: UpdateCheckDeps = {}): Promise<U
     return summary;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Refresh the cached update summary after `junior update` has adopted newer
+ * releases. The stale summary is removed first, so a failed fresh collection
+ * (or a cache write error) can never keep reporting the components that were
+ * just installed. Every error is swallowed: updating must never fail because
+ * the cache could not be refreshed.
+ */
+export async function refreshUpdateCache(deps: UpdateCheckDeps = {}): Promise<void> {
+  const env = deps.env ?? process.env;
+  const fs = deps.fs ?? nodeFs;
+  const now = deps.now ?? Date.now;
+  const path = deps.cachePath ?? updateCheckCachePath(env, deps.home);
+  const budget = deps.budgetMs ?? deps.refreshTimeoutMs ?? UPDATE_CHECK_REFRESH_TIMEOUT_MS;
+  const collect = deps.collect ?? ((collectDeps?: UpdateCheckDeps) => collectUpdates(collectDeps));
+  removeCache(fs, path);
+  try {
+    const updates = await withTimeout(collect({ ...deps, budgetMs: budget }), budget);
+    if (!collectionResolved(updates)) return;
+    writeCache(fs, path, summarize(updates, now()));
+  } catch {
+    /* the stale cache is already gone; stay silent offline */
   }
 }
 

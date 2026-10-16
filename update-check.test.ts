@@ -30,6 +30,7 @@ function memoryFs(): UpdateCheckFs & { files: Map<string, string> } {
       files.delete(from);
     },
     existsSync: (path: string) => files.has(path),
+    unlinkSync: (path: string) => { files.delete(path); },
   };
 }
 
@@ -160,6 +161,38 @@ test('cachedUpdateSummary withholds a summary when no probe resolved', async () 
     }),
   });
   assert.equal(summary, null);
+});
+
+// --- refreshUpdateCache -----------------------------------------------------
+
+test('refreshUpdateCache stops listing a component that was just updated', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1, outdated: ['junior', 'crossmatrix'], remediation: '' }));
+  await (await import('./update-check.ts')).refreshUpdateCache({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({ junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' } }),
+  });
+  const stored = JSON.parse(fs.files.get(CACHE) ?? 'null');
+  assert.deepEqual(stored.outdated, []);
+});
+
+test('refreshUpdateCache never rejects when the cache write fails', async () => {
+  const fs = memoryFs();
+  fs.writeFileSync = () => { throw new Error('read-only cache'); };
+  await assert.doesNotReject((await import('./update-check.ts')).refreshUpdateCache({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates(),
+  }));
+});
+
+test('refreshUpdateCache removes the stale summary when the refresh fails', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1, outdated: ['junior'], remediation: '' }));
+  await (await import('./update-check.ts')).refreshUpdateCache({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => { throw new Error('offline'); },
+  });
+  assert.equal(fs.files.has(CACHE), false);
 });
 
 // --- startupNotice ----------------------------------------------------------

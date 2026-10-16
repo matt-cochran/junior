@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-16
+
+### Fixed
+
+- `junior update` refreshes the cached update summary once the newer releases
+  are adopted, so the startup notice and `junior doctor` readiness stop
+  reporting the components that were just installed.
+- `junior setup` records the companion skill files its installers create in the
+  repository-local `.git/info/exclude`, matching `junior init`; outside a Git
+  repository it stays silent.
+
 ## [0.5.0] - 2026-10-16
 
 ### Added
@@ -210,7 +221,8 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/matt-cochran/junior/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/matt-cochran/junior/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/matt-cochran/junior/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/matt-cochran/junior/compare/v0.3.1...v0.3.2
