@@ -67,8 +67,8 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct'], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers'], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
@@ -309,6 +309,16 @@ async function main(argv: string[]): Promise<void> {
   const deps: GateDeps = {};
   if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
   const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+  if (parsed.values['--answers'] !== undefined) {
+   const answersPath = resolve(process.cwd(), parsed.values['--answers']);
+   const answers = JSON.parse(readFileSync(answersPath, 'utf8'));
+   const clarifyDeps = typeof task.hopFrom === 'string' && task.hopFrom.trim() ? { hopPath: resolve(taskCwd, task.hopFrom) } : {};
+   const { applyAnswers } = await import('./clarify.ts');
+   const outcome = await applyAnswers({ cwd: taskCwd, task, answers, deps: clarifyDeps });
+   console.log(JSON.stringify(outcome, null, 2));
+   if (outcome.outcome === 'escalated') process.exitCode = 3;
+   return;
+  }
   if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
   const slowMount = detectSlowMount(taskCwd);
   if (slowMount) deps.progress?.(slowMount);

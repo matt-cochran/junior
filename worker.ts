@@ -12,6 +12,7 @@ import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpen
 import { loadPlaybooks } from './playbooks.ts';
 import { routeTools, type ToolRoute } from './tool-routing.ts';
 import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
+import { clarificationApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
 export { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_MODES, BILLING_ENDPOINT, BILLING_MAX_TIMEOUT_MS, BILLING_DEFAULT_TIMEOUT_MS, BILLING_MAX_GENERATIONS } from './billing.ts';
@@ -32,7 +33,7 @@ export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot
  * directly at the top level. Unknown fields are rejected so a typo or an
  * unsupported feature fails before any paid call instead of being ignored. */
 export const TASK_FIELDS = [
- 'id','deliverable','cwd','acceptance','checks','constraints','context',
+ 'id','deliverable','cwd','acceptance','assumptions','checks','constraints','context',
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
@@ -208,6 +209,13 @@ export function validate(t: any) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) throw Error('Invalid acceptance (expected a string or { text, when })');
   if (typeof a.text !== 'string' || !a.text.trim()) throw Error('Missing acceptance');
   if (a.when !== undefined && (typeof a.when !== 'string' || !a.when.trim())) throw Error('Invalid acceptance.when (expected a non-empty string)');
+ }
+ if (t.assumptions !== undefined) {
+  if (!Array.isArray(t.assumptions)) throw Error('Invalid assumptions (expected an array)');
+  for (const a of t.assumptions) {
+   if (typeof a === 'string') { if (!a.trim()) throw Error('Invalid assumptions (expected non-empty strings or { text })'); continue; }
+   if (!a || typeof a !== 'object' || Array.isArray(a) || typeof a.text !== 'string' || !a.text.trim()) throw Error('Invalid assumptions (expected non-empty strings or { text })');
+  }
  }
  if (!Array.isArray(t.checks) || !t.checks.length) throw Error('Missing checks');
  for (const c of t.checks) {
@@ -1498,6 +1506,8 @@ export type GateDeps = {
  maxOutputBytes?:number;
  /** Injectable billing fetch seam for offline authoritative-billing tests. */
  billingFetch?:BillingFetch;
+ /** Injectable clarification-loop seams (elicitation hop call and discover report). */
+ clarify?:ClarifyDeps;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
  /** Optional short progress sink: one line per phase change plus a bounded
@@ -1908,6 +1918,39 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // auto, or sets `checkBack: "always"`; `checkBack: "off"` disables it. When
   // it is recommended but not applied, the receipt says so.
   const checkBackMode = t.checkBack === 'always' || t.checkBack === 'off' ? t.checkBack : 'auto';
+  // Clarification gate: an unclear contract (or a vague-feature routing) is
+  // interviewed before any commodity work. An explicit workflow is never
+  // replaced (ADR-0003), `checkBack: "off"` disables the loop, and a contract
+  // already derived from a prepare brief never re-enters it.
+  if (explicitWorkflow === 'auto' && checkBackMode !== 'off' && typeof t.preparedFrom !== 'string'
+      && (t.hopFrom || deps.clarify?.hopPath || deps.clarify?.callHop)
+      && clarificationApplies(jev?.preflight?.attention ?? null, preparePlan)) {
+   try {
+    emit('clarify');
+    const batch = await startClarification(t, {
+      dir,
+      hopPath: t.hopFrom ? resolve(sourceCwd, t.hopFrom) : deps.clarify?.hopPath,
+      callHop: deps.clarify?.callHop,
+      discoverReport: deps.clarify?.discoverReport ?? resolveDiscoverReport(t, sourceCwd) ?? undefined,
+      playbooks: (preparePlan?.playbooks ?? []).map((p:any)=>p.id),
+      maxQuestions: deps.clarify?.maxQuestions,
+      maxRounds: deps.clarify?.maxRounds,
+     });
+     heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs())});
+     heartbeat.setState('ready_for_review',{stopReason:'needs_answers'});
+     const clarifyResult:any={ id:t.id, simulated:mock, status:'needs_answers', workerExitCode:null,
+      checks:[], artifactDir:dir, jev, workflow:decision, runtime:heartbeat.snapshot(), lineage,
+      sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+      toolPlan: preparePlan,
+      clarification:{ sessionId:batch.sessionId, round:batch.round, questions:batch.questions } };
+     writeFileSync(join(dir,'result.json'),JSON.stringify(clarifyResult,null,2));
+     return clarifyResult;
+   } catch (e) {
+    // A session that cannot open must not crash the run; record it and fall
+    // through to the normal prepare/implement decision.
+    emit(`clarify unavailable: ${msg(e)}`);
+   }
+  }
   const checkBackRecommended = typeof t.preparedFrom !== 'string' && decision.selected !== 'prepare'
       && shouldCheckBack(jev?.preflight?.attention ?? null, preparePlan, prepareHistory);
   if (checkBackRecommended && jev?.preflight?.attention) jev.preflight.attention.checkBackRecommended = true;

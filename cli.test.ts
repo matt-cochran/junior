@@ -13,10 +13,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { initHop } from './tools/tools.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
 const TOOLS = join(ROOT, 'tools', 'tools.ts');
+const FAKE = join(ROOT, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 const NODE = process.execPath;
 
 function runJunior(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) {
@@ -250,6 +252,44 @@ test('junior handoff --choose records the choice in the prepare history', () => 
 
 test('junior run rejects --choose', () => {
   assert.notEqual(runJunior(['run', chooseTask(workdir(), 'run-cli'), '--choose', 'B'], workdir()).status, 0);
+});
+
+// --- clarify --answers flag handling ----------------------------------------
+
+test('junior handoff --answers continues the clarification loop', () => {
+  const dir = workdir();
+  const id = 'clar-cli';
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      elicitation: { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: 'echo' }, sourceVersion: '1.0.0', sourceSha: '0'.repeat(64) },
+    },
+  });
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id,
+    deliverable: 'Clarify the widget',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: NODE, args: ['-e', 'process.exit(0)'] }],
+    hopFrom: hop,
+  }));
+  const artifactDir = join(dir, '.delivery', id, '1');
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(join(artifactDir, 'clarify.json'), JSON.stringify({
+    outcome: 'needs_answers',
+    sessionId: `clarify:${id}`,
+    round: 1,
+    questions: [{ id: 'Q1', question: 'Q?', why: 'signal', suggestedAnswer: null, claimIds: [] }],
+    blockers: [],
+    playbooks: [],
+    artifactDir,
+  }));
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ Q1: { answer: 'yes', stance: 'assent' } }));
+  const res = runJunior(['handoff', taskPath, '--answers', join(dir, 'answers.json')], dir);
+  assert.equal(JSON.parse(res.stdout).outcome, 'needs_answers');
 });
 
 // --- nested tools strict flag parsing --------------------------------------
