@@ -14,7 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { run, validate, status, type GateDeps } from './worker.ts';
+import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
 import { inspectCompanions, installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
@@ -248,7 +248,7 @@ async function main(argv: string[]): Promise<void> {
  if (command === 'validate') {
   const path = parsed.files[0];
   const t = validate(JSON.parse(readFileSync(path, 'utf8')));
-  console.log(JSON.stringify({ valid: true, id: t.id }, null, 2));
+  console.log(JSON.stringify({ valid: true, id: t.id, warnings: contractWarnings(t) }, null, 2));
   return;
  }
  if (command === 'status') {

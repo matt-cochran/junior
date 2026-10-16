@@ -35,6 +35,8 @@ export type CompactHandoff = {
  sourceCwd: string | null;
  execution: { cwd: string | null; artifact: string | null; isolation: string };
  artifact: string | null;
+ /** Number of worker segments that ran (1 unless automatic continuation ran). */
+ segments: number;
  changedFiles: string[];
  checks: { command: string; exitCode: number | null; passed: boolean; error?: string }[];
  unresolved: string[];
@@ -242,6 +244,7 @@ export function compactHandoff(result: any): CompactHandoff {
    isolation: r.isolation?.mode ?? 'none',
   },
   artifact: dir,
+  segments: Array.isArray(r.segments) ? r.segments.length : 0,
   changedFiles,
   checks: (Array.isArray(r.checks) ? r.checks : []).map((c: any) => ({
    command: [c?.command, ...(Array.isArray(c?.args) ? c.args : [])].filter(Boolean).join(' '),

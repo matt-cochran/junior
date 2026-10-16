@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `junior doctor` reports companion agent-skill readiness as `companionSkills`:
+  each skill is `present`, `missing`, `modified`, `unknown` or `not_installed`,
+  and an unready one carries a complete `junior init --target ...` remediation
+  command. Skill readiness is reported separately and never gates `ok` (#39).
+- The Pi guard extension (`pi-guard.ts`) makes every bash tool call read stdin
+  from `/dev/null` and caps its timeout ten seconds under
+  `execution.toolTimeoutMs` (half the budget below 20s), so a slow command fails
+  only that call before Junior's watchdog; a timed-out tool is named in the
+  receipt as `timedOutTool` (#42).
+- `execution.maxOutputBytes` (1-32 MiB, default 8 MiB) bounds the retained
+  worker output; the retained Pi event stream is compacted and oversized tool
+  text is written once to `tool-output/<toolCallId>.txt` behind a head/tail
+  marker (#41).
+- `execution.continuations` (0-3, default 1) starts an automatic fresh-session
+  continuation segment after an output-capped segment, writing
+  `checkpoint-<n>.md` and `events-<n>.jsonl` (#41).
+- `junior validate` adds non-blocking split warnings for a contract naming more
+  than six distinct context paths or more than ten acceptance criteria (#41).
+- The cpm tool's `plan.review` sees Junior's managed OpenRouter key when no
+  explicit key is set, and `junior tools inspect` reports review-key visibility
+  as `cpmReview` without its value (praxec/cpm-planner#72).
+
+### Fixed
+
+- Local git excludes are verified with `git check-ignore`; a pattern Git does
+  not apply is reported in `unapplied` and named in an error instead of being
+  recorded as added (#40).
+- `isolationSetup` provisioning is idempotent in a resumed worktree: an
+  existing link that already points at the source is satisfied instead of
+  failing with EEXIST, while a link to a different target still fails (resumed
+  worktree link fix).
+
 ## [0.3.2] - 2026-10-12
 
 ### Fixed

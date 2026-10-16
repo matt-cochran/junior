@@ -9,7 +9,7 @@ import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
  estimateCost,validatePricing,
- taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,
+ taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
@@ -602,9 +602,175 @@ test('Analysis-to-implementation requires an explicit workflow',async()=>{
  assert.match(r.workflow.note,/requires an explicit workflow/);
 });
 test('Pi argv passes explicit --session on resume and never --continue',()=>{
- assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},'sess'),['--provider','openrouter','--model','m','--mode','json','--session','sess']);
- assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'}),['--provider','openrouter','--model','m','--mode','json']);
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},'sess'),['--provider','openrouter','--model','m','--mode','json','--session','sess','-e',piGuardModulePath()]);
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'}),['--provider','openrouter','--model','m','--mode','json','-e',piGuardModulePath()]);
  assert.ok(!buildPiArgs({provider:'openrouter',model:'m'},'sess').includes('--continue'));
+});
+test('Pi argv loads the pi-guard extension from an existing module path',()=>{
+ const args=buildPiArgs({provider:'openrouter',model:'m'});
+ const at=args.indexOf('-e');
+ assert.ok(at>=0 && existsSync(args[at+1]));
+});
+test('piBashTimeoutSeconds reserves ten seconds on long tool budgets',()=>{
+ assert.equal(piBashTimeoutSeconds(300000),290);
+});
+test('piBashTimeoutSeconds halves short tool budgets with a one second floor',()=>{
+ assert.equal(piBashTimeoutSeconds(1000),1);
+});
+test('Live Pi child environment carries the derived bash timeout',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'guard-env',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:8000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:(_c:string,_a:string[],opts:any)=>{seen=opts;return fake.child;}});
+ fake.emit({type:'agent_start'});
+ fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});
+ fake.emit({type:'agent_settled'});
+ fake.end(0);
+ await p;
+ assert.equal(seen.env.JUNIOR_PI_BASH_TIMEOUT_S,'4');
+});
+test('A tool timeout names the tool and truncated command in the result unresolved list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const command='x'.repeat(300);
+ const t=okTask(repo,{id:'guard-unresolved',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ const r=await p;
+ assert.equal((r.unresolved as string[]).find((u)=>u.includes('bash')),`tool timed out: bash: ${command.slice(0,200)}`);
+});
+test('A tool timeout names the tool and truncated command in the compact handoff unresolved list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const command='y'.repeat(300);
+ const t=okTask(repo,{id:'guard-handoff',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ const r=await p;
+ assert.ok(compactHandoff(r).unresolved.some((u)=>u.includes(`bash: ${command.slice(0,200)}`)));
+});
+// --- Step 3 automatic continuation (offline; fake segments that hit the cap) ---
+const CONTINUATION_CAP=1024;
+const until=async(fn:()=>boolean,ms=8000)=>{const start=Date.now();while(!fn()){if(Date.now()-start>ms)throw Error('timed out waiting for condition');await delay(20);}};
+const continuationFixture=(repo:any,continuations=1,extra:any={})=>{
+ const fakes:any[]=[];const argvs:string[][]=[];
+ const spawnChild=(_c:string,args:string[])=>{argvs.push(args);const f=makeFakeChild();fakes.push(f);return f.child;};
+ const t=okTask(repo,{id:'cont',acceptance:['distinctive acceptance phrase'],execution:{continuations,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000},...extra});
+ const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP});
+ return {t,p,fakes,argvs};
+};
+const firstAssistant=(f:any,text:string,usage:any=U(1,2,3))=>f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'stop',content:[{type:'text',text}]}});
+const exhaustCap=(f:any)=>f.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command:'z'.repeat(4000)}});
+const completeSegment=(f:any,usage:any=U(1,1,2))=>{f.emit({type:'session',id:'seg-session'});f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'stop'}});f.emit({type:'agent_settled'});f.end(0);};
+const driveToContinuation=async(fakes:any[],argvs:string[][],firstUsage:any=U(1,2,3))=>{
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-one'});
+ firstAssistant(fakes[0],'work done in the first segment',firstUsage);
+ exhaustCap(fakes[0]);
+ await until(()=>fakes.length>=2);
+};
+test('Execution settings default continuations to one',()=>{
+ assert.equal(resolveExecutionSettings({}).continuations,1);
+});
+test('A capped segment with a continuation completes ready_for_review',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.status,'ready_for_review');
+});
+test('A continued run records two segments',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
+});
+test('A continuation segment starts with no --session',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(!argvs[1].includes('--session'));
+});
+test('A continuation prompt carries the checkpoint text',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(argvs[1][argvs[1].length-1].includes('distinctive acceptance phrase'));
+});
+test('A continuation checkpoint records the git status',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ writeFileSync(join(repo.dir,'a.txt'),'modified\n');
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.match(readFileSync(join(r.artifactDir,'checkpoint-1.md'),'utf8'),/a\.txt/);
+});
+test('A continuation checkpoint records the acceptance list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.match(readFileSync(join(r.artifactDir,'checkpoint-1.md'),'utf8'),/distinctive acceptance phrase/);
+});
+test('Result usage sums tokens across continuation segments',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs,U(1,2,3));
+ completeSegment(fakes[1],U(10,20,30));
+ const r=await p;
+ assert.equal(r.receipt.usage.totalTokens,33);
+});
+test('A capped run with continuations 0 ends output_truncated',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,0);
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-only'});
+ firstAssistant(fakes[0],'capped work');
+ exhaustCap(fakes[0]);
+ const r=await p;
+ assert.equal(r.status,'output_truncated');
+});
+test('A capped run with continuations 0 records exactly one segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,0);
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-only'});
+ firstAssistant(fakes[0],'capped work');
+ exhaustCap(fakes[0]);
+ const r=await p;
+ assert.equal(r.segments.length,1);
+});
+test('Compact handoff reports the segment count',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const r=await run(okTask(repo,{id:'seg-count'}),false,{spawnPi:okSpawn()});
+ assert.equal(compactHandoff(r).segments,1);
+});
+test('Continuations above three are rejected by validate',()=>{
+ assert.throws(()=>validate(task(0,{execution:{continuations:4}})),/Invalid execution\.continuations/);
+});
+test('A fractional continuations value is rejected by validate',()=>{
+ assert.throws(()=>validate(task(0,{execution:{continuations:1.5}})),/Invalid execution\.continuations/);
+});
+test('A top-level continuations setting enables a continuation segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fakes:any[]=[];const argvs:string[][]=[];
+ const spawnChild=(_c:string,args:string[])=>{argvs.push(args);const f=makeFakeChild();fakes.push(f);return f.child;};
+ const t=okTask(repo,{id:'cont-top',acceptance:['distinctive acceptance phrase'],continuations:1});
+ const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP});
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
 });
 const SESSION_A='123e4567-e89b-12d3-a456-426614174000';
 const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A},...over});
@@ -2697,4 +2863,31 @@ test('A worker run past the output cap marks the receipt truncated tail',async()
  fake.end(0);
  const r=await p;
  assert.equal(r.receipt.truncatedTail,true);
+});
+
+// --- J41a stream compaction: maxOutputBytes bound and split warnings ---
+test('validate rejects execution.maxOutputBytes above 32 MiB',()=>{
+ assert.throws(()=>validate(task(0,{execution:{maxOutputBytes:32*1024*1024+1}})),/Invalid execution\.maxOutputBytes/);
+});
+test('validate accepts execution.maxOutputBytes at 32 MiB',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{execution:{maxOutputBytes:32*1024*1024}})));
+});
+test('junior validate warns to split a contract naming seven distinct context paths',()=>{
+ const repo=gitRepo();
+ const context=[];
+ for(let i=0;i<7;i++){const p=`ctx-${i}.txt`;writeFileSync(join(repo.dir,p),'x\n');context.push({path:p});}
+ const cfg=mkdtempSync(join(tmpdir(),'junior-warn-'));
+ const taskPath=join(cfg,'t.json');
+ writeFileSync(taskPath,JSON.stringify({id:'warn-paths',deliverable:'x',cwd:repo.dir,acceptance:['ok'],context,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
+ assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
+});
+test('junior validate warns to split a contract with eleven acceptance criteria',()=>{
+ const repo=gitRepo();
+ const acceptance=Array.from({length:11},(_,i)=>`criterion ${i}`);
+ const cfg=mkdtempSync(join(tmpdir(),'junior-warn-'));
+ const taskPath=join(cfg,'t.json');
+ writeFileSync(taskPath,JSON.stringify({id:'warn-acc',deliverable:'x',cwd:repo.dir,acceptance,checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
+ assert.match(JSON.parse(v.stdout).warnings[0],/chained contracts/);
 });

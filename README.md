@@ -31,6 +31,39 @@ reports readiness (Node, Pi, credentials, model, skill and companion tools);
 `junior handoff` runs one contract and prints a compact handoff object. `--mock`
 performs no provider call.
 
+## Readiness and execution
+
+`junior doctor` adds a `companionSkills` report beside its `companions` report:
+each companion's agent skills read as `present`, `missing`,
+`modified`, `unknown` or `not_installed`, and an unready one carries a complete
+`junior init --target ...` remediation command. Skill readiness is reported
+separately and never gates `ok`.
+
+Execution settings live on the contract:
+
+- `maxOutputBytes` (1-32 MiB, default 8 MiB) bounds the retained worker output.
+  Pi events are compacted and oversized tool text is replaced by a head/tail
+  marker, with the full text written once to `tool-output/<toolCallId>.txt`.
+- `continuations` (0-3, default 1) starts an automatic fresh-session
+  continuation after an output-capped segment, writing `checkpoint-<n>.md` and
+  `events-<n>.jsonl`.
+
+A Pi guard extension (`pi-guard.ts`) makes each bash tool call read stdin from
+`/dev/null` and caps its timeout ten seconds under `execution.toolTimeoutMs`
+(half the budget below 20s), so a slow or interactive command fails only that
+call and the model continues. Junior's per-tool watchdog stays as the backstop;
+if any tool outlasts it, the run stops and the receipt names it as
+`timedOutTool`.
+
+`junior validate` adds non-blocking warnings when a contract names more than six
+distinct context paths or more than ten acceptance criteria, suggesting chained
+contracts.
+
+The cpm tool's `plan.review` uses Junior's managed OpenRouter key when the
+process and hop env set neither `OPENROUTER_API_KEY` nor
+`CPM_OPENROUTER_KEY_FILE`; `junior tools inspect` reports whether a review key
+is visible as `cpmReview` (`available` or `unavailable`) and never its value.
+
 ## What's in the box
 
 - **[Getting started](docs/getting-started.md)** — setup, the `doctor`/`init`

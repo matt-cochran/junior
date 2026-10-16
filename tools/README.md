@@ -121,6 +121,17 @@ never change plan or analysis state, so they are snapshotted as reads and do not
 invalidate manager acceptance; `plan.schedule`, `plan.simulate`, and `plan.lint`
 persist nothing, while `plan.export` writes files and stays a command.
 
+### OpenRouter key for `cpm` `plan.review`
+
+`plan.review` needs an OpenRouter key. When neither the process env nor the
+hop's `tools.cpm.env` sets `OPENROUTER_API_KEY` or `CPM_OPENROUTER_KEY_FILE`, the
+wrapper reads the key Pi manages in `$PI_CODING_AGENT_DIR/auth.json` (default
+`~/.pi/agent/auth.json`) and injects it into the cpm child as
+`OPENROUTER_API_KEY`. An explicit process or hop value always wins, and
+`CPM_OPENROUTER_KEY_FILE` suppresses the derived key. The value is passed to the
+child spawn only and is never written to the HOP, argv or evidence; `inspect`
+reports only `cpmReview` (`available` or `unavailable`).
+
 The success envelope is JSON:
 
 ```json

@@ -38,6 +38,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { isDirectEntry } from "../cli-entry.ts";
+import { openRouterAuthPath, readOpenRouterAuthFile } from "../billing.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -757,6 +758,37 @@ export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManif
   return fs.existsSync(store) ? { CROSSMATRIX_DIR: store } : {};
 }
 
+/** Env var names that, when set, already direct the cpm tool at a review key. */
+const CPM_REVIEW_ENV_KEYS = ["OPENROUTER_API_KEY", "CPM_OPENROUTER_KEY_FILE"] as const;
+
+/** Whether the process or hop env already names a review key (or key file). */
+function explicitCpmReviewEnv(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv): boolean {
+  for (const name of CPM_REVIEW_ENV_KEYS) {
+    if (typeof env[name] === "string" && env[name]!.trim()) return true;
+    if (typeof hopEnv?.[name] === "string" && hopEnv[name]!.trim()) return true;
+  }
+  return false;
+}
+
+/**
+ * Extra env for a cpm spawn. When neither the process env nor the hop's
+ * `tools.cpm.env` names a review key, fall back to the OpenRouter credential
+ * Pi manages in its auth file (via billing.ts's reader, so the path/parse rules
+ * stay in one place) and inject it as OPENROUTER_API_KEY. The value is for the
+ * child spawn only and is never persisted by the caller.
+ */
+function cpmReviewEnv(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  if (explicitCpmReviewEnv(hopEnv, env)) return {};
+  const key = readOpenRouterAuthFile(openRouterAuthPath(env));
+  return key ? { OPENROUTER_API_KEY: key } : {};
+}
+
+/** Whether a review key would be visible to the cpm tool, without exposing it. */
+export function cpmReviewStatus(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env): "available" | "unavailable" {
+  if (explicitCpmReviewEnv(hopEnv, env)) return "available";
+  return readOpenRouterAuthFile(openRouterAuthPath(env)) ? "available" : "unavailable";
+}
+
 interface Semver {
   major: number;
   minor: number;
@@ -963,6 +995,7 @@ export async function callHop(
     const cfg = hop.tools[tool];
     const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
     const env = { ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
+    if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env));
 
     let outcome: CallOutcome;
     try {
@@ -1099,6 +1132,8 @@ export interface InspectReport {
   unresolved: UnresolvedEntry[];
   recommendedNext: string;
   note: string;
+  /** Whether the cpm tool would see an OpenRouter review key, never its value. */
+  cpmReview: "available" | "unavailable";
 }
 
 /**
@@ -1146,6 +1181,7 @@ export function inspectHop(hopPath: string): InspectReport {
     evidenceCount: hop.evidence.length,
     unresolved: hop.unresolved,
     recommendedNext,
+    cpmReview: cpmReviewStatus(hop.tools.cpm.env),
     note: "Jev recommends the next MCP call from this context; the executor executes it. Worker completion is never manager acceptance — acceptance only changes via recordManagerAcceptance().",
   };
 }

@@ -20,8 +20,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
-import { inspectCompanions, installCompanions, installCompanionSkills, installationDisabled,
- type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
+import { inspectCompanions, inspectCompanionSkills, installCompanions, installCompanionSkills, installationDisabled,
+ type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport, type CompanionSkillsReport } from './companions.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 
@@ -371,6 +371,8 @@ export type DoctorResult = {
  skill:SkillReadiness;
  /** npm companion tools (fmeca, cpm, jevitate); reported separately, never gating Pi readiness. */
  companions:CompanionsReport;
+ /** Companion agent-skill readiness; reported separately, never gating Pi readiness. */
+ companionSkills:CompanionSkillsReport;
  /** Prebuilt integration readiness is reported separately from Pi execution/auth readiness. */
  integrations:IntegrationsResult;
  integrationsReady:boolean;
@@ -448,7 +450,9 @@ export function doctor(deps:SetupDeps = {}):DoctorResult {
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  const retention=retainedWorktreeSummary(cwd);
  const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
- return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
+ const companionSkills=inspectCompanionSkills({ env, exists:deps.exists, readFile:deps.readFile }, { target:'both', scope:'project', cwd });
+ if (companionSkills.remediation.length) remediation.push(...companionSkills.remediation);
+ return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };

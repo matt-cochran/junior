@@ -54,13 +54,17 @@ function writeJson(file, value) {
   return file;
 }
 
-function runCli(args, timeout = 30000) {
-  return spawnSync(NODE, [TOOLS, ...args], {
-    encoding: "utf8",
-    timeout,
-    // Keep the CLI independent of the developer's real managed install.
-    env: { ...process.env, JUNIOR_TOOLS_ROOT: path.join(os.tmpdir(), "junior-no-managed-tools") },
-  });
+function runCli(args, timeout = 30000, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    // Keep the CLI independent of the developer's real managed install and auth.
+    JUNIOR_TOOLS_ROOT: path.join(os.tmpdir(), "junior-no-managed-tools"),
+    PI_CODING_AGENT_DIR: path.join(os.tmpdir(), "junior-tools-no-auth"),
+  };
+  delete env.OPENROUTER_API_KEY;
+  delete env.CPM_OPENROUTER_KEY_FILE;
+  Object.assign(env, extraEnv);
+  return spawnSync(NODE, [TOOLS, ...args], { encoding: "utf8", timeout, env });
 }
 
 function cliJson(result) {
@@ -626,4 +630,193 @@ test("a 0.3.0 store call reports the command's own result", () => {
   const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
   const out = cliJson(runCli(["call", hop, "crossmatrix", req]));
   assert.equal(out.result.op, "dimension.register");
+});
+
+// --- cpm review key derivation -----------------------------------------------
+//
+// cpm's `plan.review` may need the OpenRouter key Pi manages in auth.json. The
+// wrapper derives it into the cpm child spawn env only — never the HOP, argv or
+// evidence — and an explicit OPENROUTER_API_KEY / CPM_OPENROUTER_KEY_FILE in
+// the process or hop env always wins. A probe MCP server records the review env
+// it received so each scenario asserts exactly one child-environment outcome.
+
+const PROBE_SOURCE = String.raw`
+import fs from "node:fs";
+const log = process.env.JUNIOR_TEST_ENV_LOG;
+if (log) {
+  fs.writeFileSync(log, JSON.stringify({
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null,
+    CPM_OPENROUTER_KEY_FILE: process.env.CPM_OPENROUTER_KEY_FILE ?? null,
+  }));
+}
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf("\n")) !== -1) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (line) handle(line);
+  }
+});
+function send(obj) { process.stdout.write(JSON.stringify(obj) + "\n"); }
+function handle(line) {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.method === "initialize") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "env-probe", version: "0.0.1" } } });
+    return;
+  }
+  if (msg.method === "notifications/initialized") return;
+  if (msg.method === "tools/call") {
+    send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "{}" }], structuredContent: { ok: true }, isError: false } });
+    return;
+  }
+  if (msg.id !== undefined) send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
+}
+`;
+
+function writeAuthJson(dir, key) {
+  fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key } }));
+}
+
+function probeEntry(dir, log, env = {}) {
+  const probe = path.join(dir, "env-probe.mjs");
+  fs.writeFileSync(probe, PROBE_SOURCE);
+  return {
+    command: NODE,
+    args: [probe],
+    env: { JUNIOR_TEST_ENV_LOG: log, ...env },
+    sourceVersion: "0.0.1",
+    sourceSha: "0".repeat(64),
+  };
+}
+
+function probeHop(dir, log, { tool = "cpm", probeEnv = {} } = {}) {
+  const tools = {
+    fmeca: toolEntry("echo"),
+    cpm: toolEntry("echo"),
+    crossmatrix: toolEntry("crossmatrix"),
+  };
+  tools[tool] = probeEntry(dir, log, probeEnv);
+  const cfg = path.join(dir, "config.json");
+  fs.writeFileSync(cfg, JSON.stringify({ projectId: "test-project", timeoutMs: 20000, lockTimeoutMs: 5000, tools }));
+  const hop = path.join(dir, "hop.json");
+  runCli(["init", hop, cfg]);
+  return hop;
+}
+
+function readProbeEnv(log) {
+  return JSON.parse(fs.readFileSync(log, "utf8"));
+}
+
+test("cpm spawn receives the OpenRouter key Pi manages in auth.json", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.review", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, "sk-derived-from-auth");
+});
+
+test("an explicit process OPENROUTER_API_KEY is not overridden by auth.json", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.review", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir, OPENROUTER_API_KEY: "sk-explicit-process" });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, "sk-explicit-process");
+});
+
+test("an explicit hop OPENROUTER_API_KEY is not overridden by auth.json", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log, { probeEnv: { OPENROUTER_API_KEY: "sk-explicit-hop" } });
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.review", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, "sk-explicit-hop");
+});
+
+test("an explicit process CPM_OPENROUTER_KEY_FILE suppresses the derived key", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.review", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir, CPM_OPENROUTER_KEY_FILE: "/tmp/review-key" });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+});
+
+test("an explicit hop CPM_OPENROUTER_KEY_FILE suppresses the derived key", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log, { probeEnv: { CPM_OPENROUTER_KEY_FILE: "/tmp/review-key" } });
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.review", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+});
+
+test("fmeca spawn does not receive the derived OpenRouter key", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log, { tool: "fmeca" });
+  const req = writeJson(path.join(dir, "req.json"), { tool: "state.get", arguments: { session_id: "s1" } });
+  runCli(["call", hop, "fmeca", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+});
+
+test("crossmatrix spawn does not receive the derived OpenRouter key", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log, { tool: "crossmatrix" });
+  const req = writeJson(path.join(dir, "req.json"), {
+    tool: "crossmatrix.query",
+    arguments: { request: { requestId: "q1", query: { kind: "validate" } } },
+  });
+  runCli(["call", hop, "crossmatrix", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+});
+
+test("the derived review key is never written to the hop or its snapshots", () => {
+  const dir = tmpdir();
+  writeAuthJson(dir, "sk-canary-secret-value");
+  const hop = initHop(dir);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.status", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  const artifacts = [fs.readFileSync(hop, "utf8")];
+  const snapshots = path.join(dir, "snapshots");
+  if (fs.existsSync(snapshots)) {
+    for (const name of fs.readdirSync(snapshots)) artifacts.push(fs.readFileSync(path.join(snapshots, name), "utf8"));
+  }
+  assert.equal(artifacts.join("\n").includes("sk-canary-secret-value"), false);
+});
+
+test("tools inspect reports cpmReview available when auth.json holds an OpenRouter key", () => {
+  const dir = tmpdir();
+  writeAuthJson(dir, "sk-inspect-value");
+  const hop = initHop(dir);
+  const out = cliJson(runCli(["inspect", hop], 30000, { PI_CODING_AGENT_DIR: dir }));
+  assert.equal(out.cpmReview, "available");
+});
+
+test("tools inspect reports cpmReview unavailable without any OpenRouter key", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const out = cliJson(runCli(["inspect", hop], 30000, { PI_CODING_AGENT_DIR: path.join(dir, "empty-agent") }));
+  assert.equal(out.cpmReview, "unavailable");
+});
+
+test("tools inspect output does not contain the OpenRouter key value", () => {
+  const dir = tmpdir();
+  writeAuthJson(dir, "sk-inspect-secret-canary");
+  const hop = initHop(dir);
+  const result = runCli(["inspect", hop], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(result.stdout.includes("sk-inspect-secret-canary"), false);
 });

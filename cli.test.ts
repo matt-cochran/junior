@@ -262,3 +262,16 @@ test('junior status --live prints the phase from runtime.json', () => {
   writeFileSync(join(dir, 'runtime.json'), JSON.stringify({ phase: 'worker', state: 'running', elapsedMs: 12, remainingMs: 34, currentTool: 'bash' }));
   assert.equal(JSON.parse(runJunior(['status', dir, '--live'], dir).stdout).phase, 'worker');
 });
+
+// --- doctor companion-skill readiness (issue #39) ---------------------------
+
+test('junior doctor reports companionSkills as a separate report', () => {
+  const out = JSON.parse(runJunior(['doctor'], workdir()).stdout);
+  assert.ok(Array.isArray(out.companionSkills.skills));
+});
+
+test('junior doctor writes nothing to the working directory', () => {
+  const dir = workdir();
+  runJunior(['doctor'], dir);
+  assert.deepEqual(readdirSync(dir), []);
+});
