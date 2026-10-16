@@ -51,8 +51,9 @@ successful commands exit `0`.
 `config.json` is optional. Omitted fields fall back to the built-in defaults. For
 provenance, without a config override `init` records the version and source SHA
 of Junior's managed install (`~/.junior/tools/installed.json`) when the tool's
-command is that managed binary; otherwise it falls back to the last-known
-release table.
+command is that managed binary. Any other command records the version it
+prints for `--version` (`"unknown"` when it prints none) and an empty source
+SHA. There is no built-in release table; `junior update` installs new releases.
 
 ```json
 {

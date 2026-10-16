@@ -35,7 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The fallback tool provenance recorded when no managed install exists is cpm-planner 0.3.0 and Crossmatrix 0.3.2.
+- A tool command that is not Junior's managed binary records the version it
+  reports through `--version` (`unknown` when none) and an empty source SHA,
+  instead of a built-in last-known release table that went stale with every
+  upstream release.
 
 ### Fixed
 
