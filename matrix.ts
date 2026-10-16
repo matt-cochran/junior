@@ -611,11 +611,18 @@ interface MatrixOptions {
   hop?: string;
   plan?: string;
   session?: string;
+  fmecaSession?: string;
+  elicitationSession?: string;
+  spSession?: string;
+  jevitateResults?: string;
   model?: string;
 }
 
-const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca', 'playbooks'];
-const VALUE_FLAGS = ['--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model'];
+const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca', 'playbooks', 'state'];
+const VALUE_FLAGS = [
+  '--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model',
+  '--fmeca-session', '--elicitation-session', '--sp-session', '--jevitate-results',
+];
 
 export const MATRIX_USAGE = [
   'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
@@ -625,6 +632,9 @@ export const MATRIX_USAGE = [
   'Usage: junior matrix init [--dir <project>]',
   'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
+  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source state',
+  '       [--plan <plan_id>] [--fmeca-session <id>] [--elicitation-session <id>]',
+  '       [--sp-session <id>] [--jevitate-results <dir|file>] [--dir <project>]',
   'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
   'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
   'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
@@ -659,6 +669,10 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     hop: values['--hop'],
     plan: values['--plan'],
     session: values['--session'],
+    fmecaSession: values['--fmeca-session'],
+    elicitationSession: values['--elicitation-session'],
+    spSession: values['--sp-session'],
+    jevitateResults: values['--jevitate-results'],
     model: values['--model'],
   };
 }
@@ -803,6 +817,21 @@ export async function main(argv: string[]): Promise<number> {
       const options = parseMatrixArgs(argv.slice(1));
       if (!options.hop) throw new Error('matrix sync requires --hop <hop.json>');
       if (!options.model) throw new Error('matrix sync requires --model <modelId>');
+      if (options.sources.includes('state')) {
+        const { syncState } = await import('./state-sync.ts');
+        const result = await syncState({
+          hopPath: options.hop,
+          modelId: options.model,
+          planId: options.plan,
+          fmecaSession: options.fmecaSession,
+          elicitationSession: options.elicitationSession,
+          spSession: options.spSession,
+          jevitateResults: options.jevitateResults,
+          dir: options.dir,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
       const dimensions: MatrixDimension[] = [];
       for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
       const { syncDimensions } = await import('./matrix-sync.ts');

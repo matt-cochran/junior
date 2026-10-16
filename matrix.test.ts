@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import {
   buildDimensionSet,
   codeLocations,
+  parseMatrixArgs,
   cpmDeliverables,
   fmecaFailureModes,
   jevitateJobs,
@@ -307,4 +308,18 @@ test('test artifact member ids do not collide with code location ids', () => {
 test('the tests dimension lists test files without directory members', () => {
   const files = [{ path: 'test/login.test.ts', content: 'x' }, { path: 'test/fixture.json', content: '{}' }];
   assert.equal(testsAdapter(files).members.some((m) => m.attributes?.type === 'dir'), false);
+});
+
+// --- CLI: matrix sync --source state ----------------------------------------
+
+test('parseMatrixArgs accepts the state source with its companion session flags', () => {
+  const parsed = parseMatrixArgs([
+    '--source', 'state', '--hop', 'hop.json', '--model', 'm1',
+    '--plan', 'p1', '--fmeca-session', 'f1', '--elicitation-session', 'e1',
+    '--sp-session', 's1', '--jevitate-results', 'results/',
+  ]);
+  assert.deepEqual(
+    [parsed.sources, parsed.plan, parsed.fmecaSession, parsed.elicitationSession, parsed.spSession, parsed.jevitateResults],
+    [['state'], 'p1', 'f1', 'e1', 's1', 'results/'],
+  );
 });
