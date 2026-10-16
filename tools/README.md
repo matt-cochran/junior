@@ -51,8 +51,9 @@ successful commands exit `0`.
 `config.json` is optional. Omitted fields fall back to the built-in defaults. For
 provenance, without a config override `init` records the version and source SHA
 of Junior's managed install (`~/.junior/tools/installed.json`) when the tool's
-command is that managed binary; otherwise it falls back to the last-known
-release table.
+command is that managed binary. Any other command records the version it
+prints for `--version` (`"unknown"` when it prints none) and an empty source
+SHA. There is no built-in release table; `junior update` installs new releases.
 
 ```json
 {
@@ -71,15 +72,15 @@ release table.
       "command": "/opt/praxec/bin/cpm-planner",
       "args": [],
       "env": {},
-      "sourceVersion": "0.2.2",
-      "sourceSha": "1fdd3afbce3302d5aad19895bddc26eb54fd7aea"
+      "sourceVersion": "0.3.0",
+      "sourceSha": "c05a30809ea28fecd4f3c28b47c90890b0711701"
     },
     "crossmatrix": {
       "command": "/opt/praxec/bin/crossmatrix-mcp",
       "args": [],
       "env": {},
-      "sourceVersion": "0.3.0",
-      "sourceSha": "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef"
+      "sourceVersion": "0.3.2",
+      "sourceSha": "81a8fbec6af8350c9377479d9b904c7c5d321d12"
     }
   }
 }

@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -397,33 +397,47 @@ test("init keeps the PATH command for a tool with no managed install", () => {
   assert.equal(hop.tools.cpm.command, "cpm-planner");
 });
 
-// --- fallback provenance ------------------------------------------------------
+// --- probed provenance --------------------------------------------------------
 //
-// With no managed install recorded, a fresh HOP records the last-known upstream
-// release, not a built-in pin. A config command override that points away from
-// the managed binary also falls back to that release.
+// A command that is not Junior's managed binary records the version it reports
+// through `--version` and an unknown source SHA; there is no built-in release
+// table to go stale.
 
-test("init with no managed install state records crossmatrix sourceVersion 0.3.0", () => {
+test("init with no managed install records the version the tool command reports", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
-  const hop = initHopManifest(path.join(dir, "hop.json"), {});
-  assert.equal(hop.tools.crossmatrix.sourceVersion, "0.3.0");
+  const hop = initHopManifest(path.join(dir, "hop.json"), { probeVersion: () => "9.8.7" });
+  assert.equal(hop.tools.cpm.sourceVersion, "9.8.7");
 });
 
-test("init with no managed install state records the cpm 0.2.2 source sha", () => {
+test("init with no managed install records an unknown source sha", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
-  const hop = initHopManifest(path.join(dir, "hop.json"), {});
-  assert.equal(hop.tools.cpm.sourceSha, "1fdd3afbce3302d5aad19895bddc26eb54fd7aea");
+  const hop = initHopManifest(path.join(dir, "hop.json"), { probeVersion: () => "9.8.7" });
+  assert.equal(hop.tools.cpm.sourceSha, "");
 });
 
-test("a config command override pointing away from the managed binary records the fallback source sha", () => {
+test("init records sourceVersion unknown when the tool command reports no version", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
+  const hop = initHopManifest(path.join(dir, "hop.json"), { probeVersion: () => null });
+  assert.equal(hop.tools.crossmatrix.sourceVersion, "unknown");
+});
+
+test("a config command override pointing away from the managed binary records that command's reported version", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
   const { statePath } = managedState(dir);
   const otherBinary = path.join(dir, "other-fmeca-mcp");
   const hop = initHopManifest(path.join(dir, "hop.json"), {
     managedStatePath: statePath,
     tools: { fmeca: { command: otherBinary } },
+    probeVersion: (command) => (command === otherBinary ? "0.2.5" : null),
   });
-  assert.equal(hop.tools.fmeca.sourceSha, "83d16022ff03fa6725c5ed517ea75caa5bce8694");
+  assert.equal(hop.tools.fmeca.sourceVersion, "0.2.5");
+});
+
+test("probeToolVersion reads the semver a command prints for --version", { skip: process.platform === "win32" }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-probe-"));
+  const script = path.join(dir, "fake-tool.mjs");
+  fs.writeFileSync(script, "#!/usr/bin/env node\nconsole.log('fake-tool 1.4.2');\n", { mode: 0o755 });
+  assert.equal(probeToolVersion(script), "1.4.2");
 });
 
 // --- crossmatrix project store (0.3.0+) ---------------------------------------

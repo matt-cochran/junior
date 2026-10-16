@@ -162,13 +162,24 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
-// Fallback provenance when no managed install is recorded: the last-known
-// upstream releases (not a pin). These are updated as new releases ship.
-const KNOWN_SOURCE: Record<ToolName, { version: string; sha: string }> = {
-  fmeca: { version: "0.2.0", sha: "83d16022ff03fa6725c5ed517ea75caa5bce8694" },
-  cpm: { version: "0.2.2", sha: "1fdd3afbce3302d5aad19895bddc26eb54fd7aea" },
-  crossmatrix: { version: "0.3.0", sha: "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef" },
-};
+// Provenance for a command that is not Junior's managed binary: the version
+// the binary reports through `--version`. No release table is kept here, so a
+// new upstream release never needs a Junior change; `junior update` installs it.
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
+const UNKNOWN_SOURCE_VERSION = "unknown";
+
+/** Run `<command> --version` and return the first semver it prints, or null. */
+export function probeToolVersion(command: string): string | null {
+  const res = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    timeout: VERSION_PROBE_TIMEOUT_MS,
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  if (res.error || res.status !== 0 || typeof res.stdout !== "string") return null;
+  const match = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/.exec(res.stdout);
+  return match ? match[0] : null;
+}
 
 const DEFAULT_COMMAND: Record<ToolName, string> = {
   fmeca: "fmeca-mcp",
@@ -390,6 +401,9 @@ export interface InitOptions {
   /** Junior's managed install state (`~/.junior/tools/installed.json`). A tool
    * installed there defaults to that binary and its recorded version. */
   managedStatePath?: string;
+  /** Reports the version of a command that is not the managed binary
+   * (default: `probeToolVersion`, which runs `<command> --version`). */
+  probeVersion?: (command: string) => string | null;
 }
 
 /** Default managed install state, honoring `JUNIOR_TOOLS_ROOT`. */
@@ -428,14 +442,21 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
   const tools = {} as Record<ToolName, ToolConfig>;
   const native = {} as Record<ToolName, NativeStateRef>;
   const managed = readManagedTools(options.managedStatePath);
+  const probe = options.probeVersion ?? probeToolVersion;
   for (const tool of TOOL_NAMES) {
     const override = options.tools?.[tool] ?? {};
     const installed = managed[tool];
     const command = override.command ?? installed?.path ?? DEFAULT_COMMAND[tool];
     // A managed install's provenance only applies when the resolved command is
-    // that binary; an override pointing elsewhere uses the last-known release.
+    // that binary. Any other command records the version it reports (not
+    // probed when the config sets sourceVersion) and an unknown source SHA.
     const usesManagedBinary = installed !== undefined && command === installed.path;
-    const known = usesManagedBinary ? { version: installed.version, sha: installed.sourceSha } : KNOWN_SOURCE[tool];
+    const known = usesManagedBinary
+      ? { version: installed.version, sha: installed.sourceSha }
+      : {
+          version: override.sourceVersion ?? probe(command) ?? UNKNOWN_SOURCE_VERSION,
+          sha: "",
+        };
     tools[tool] = {
       command,
       args: override.args ?? [],
