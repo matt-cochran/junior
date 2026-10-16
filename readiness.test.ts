@@ -7,10 +7,18 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectReadiness, type ReadinessDeps } from './readiness.ts';
+import {
+  inspectReadiness,
+  planSetup,
+  runSetup,
+  type ReadinessDeps,
+  type ReadinessItem,
+  type ReadinessResult,
+} from './readiness.ts';
+import type { Harness } from './harness.ts';
 import { doctor } from './setup.ts';
 
 const SOURCE = '# junior delegation skill\n';
@@ -183,4 +191,185 @@ test('doctor honours the harness override in readiness', () => {
 test('doctor ok is unchanged when readiness is not ready', () => {
   const result = doctor(doctorDeps(), { harness: 'claude' });
   assert.equal(result.ok, true);
+});
+
+// --- setup planning ---------------------------------------------------------
+
+/** Write a minimal valid HOP on disk so `planSetup` can derive MCP argv. */
+function hopOnDisk(dir: string, opts: { secret?: string } = {}): string {
+  const hopPath = join(dir, '.delivery', 'setup', 'hop.json');
+  mkdirSync(join(dir, '.delivery', 'setup'), { recursive: true });
+  const tool = (command: string, env: Record<string, string> = {}) => ({ command, args: [], env, sourceVersion: '1.0.0', sourceSha: '' });
+  writeFileSync(hopPath, JSON.stringify({
+    schemaVersion: 1,
+    projectId: 'prj_test',
+    revision: 0,
+    managerAcceptance: 'pending',
+    timeoutMs: 1000,
+    lockTimeoutMs: 1000,
+    tools: {
+      fmeca: tool('fmeca-mcp', opts.secret ? { FMECA_TOKEN: opts.secret } : {}),
+      cpm: tool('cpm'),
+      crossmatrix: tool('crossmatrix-mcp'),
+    },
+    native: {
+      fmeca: { statePath: '.fmeca/state' },
+      cpm: { statePath: '.cpm/planner.db' },
+      crossmatrix: { statePath: '.crossmatrix/model.json' },
+    },
+    snapshots: [],
+    evidence: [],
+    unresolved: [],
+  }, null, 2));
+  return hopPath;
+}
+
+function readinessWith(items: Array<Partial<ReadinessItem>>, harness: Harness = 'codex'): ReadinessResult {
+  return {
+    harness,
+    evidence: [],
+    ready: false,
+    items: items.map((item, index) => ({
+      id: item.id ?? `item:${index}`,
+      kind: item.kind ?? 'mcp',
+      name: item.name ?? `name-${index}`,
+      status: item.status ?? 'missing',
+      required: item.required ?? false,
+    })),
+    summary: 'not ready',
+  };
+}
+
+function tempDir(): string {
+  return mkdtempSync(join(tmpdir(), 'junior-setup-'));
+}
+
+const SILENT = { stderr: () => {}, stdout: () => {} };
+
+test('planSetup turns a missing Codex MCP server into a codex mcp add command', () => {
+  const dir = tempDir();
+  const hopPath = hopOnDisk(dir);
+  const readiness = readinessWith([{ id: 'mcp:fmeca-mcp', kind: 'mcp', name: 'fmeca-mcp', status: 'missing' }], 'codex');
+  const action = planSetup(readiness, { harness: 'codex', hopPath, cwd: dir }).find((entry) => entry.id === 'mcp:fmeca-mcp');
+  assert.deepEqual(action?.command, [
+    'codex', 'mcp', 'add', 'fmeca-mcp',
+    '--env', `FMECA_STATE_DIR=${join(dir, '.delivery', 'setup', '.fmeca', 'state')}`,
+    '--', 'fmeca-mcp',
+  ]);
+});
+
+test('planSetup registers a missing Claude MCP server with project scope', () => {
+  const dir = tempDir();
+  const hopPath = hopOnDisk(dir);
+  const readiness = readinessWith([{ id: 'mcp:fmeca-mcp', kind: 'mcp', name: 'fmeca-mcp', status: 'missing' }], 'claude');
+  const action = planSetup(readiness, { harness: 'claude', hopPath, cwd: dir }).find((entry) => entry.id === 'mcp:fmeca-mcp');
+  assert.deepEqual(action?.command?.slice(0, 6), ['claude', 'mcp', 'add', 'fmeca-mcp', '--scope', 'project']);
+});
+
+test('runSetup backs up .cursor/mcp.json before the cursor registration writes it', async () => {
+  const dir = tempDir();
+  const hopPath = hopOnDisk(dir);
+  mkdirSync(join(dir, '.cursor'), { recursive: true });
+  writeFileSync(join(dir, '.cursor', 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const readiness = readinessWith([{ id: 'mcp:fmeca-mcp', kind: 'mcp', name: 'fmeca-mcp', status: 'missing' }], 'cursor');
+  await runSetup(
+    { readiness, inspect: () => readinessWith([], 'cursor'), exec: () => ({ status: 0 }), env: { PATH: '', HOME: dir }, ...SILENT },
+    { cwd: dir, harness: 'cursor', hopPath, yes: true },
+  );
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, '.cursor', 'mcp.json.bak'), 'utf8')), { mcpServers: {} });
+});
+
+test('runSetup --dry-run runs no commands', async () => {
+  const dir = tempDir();
+  const calls: string[] = [];
+  const readiness = readinessWith([{ id: 'tool:fmeca', kind: 'tool', name: 'fmeca', status: 'missing', required: true }], 'codex');
+  await runSetup(
+    { readiness, exec: (command) => { calls.push(command); return { status: 0 }; }, ...SILENT },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir), dryRun: true },
+  );
+  assert.deepEqual(calls, []);
+});
+
+test('runSetup exits 2 without confirmation on a non-TTY', async () => {
+  const dir = tempDir();
+  const readiness = readinessWith([{ id: 'tool:fmeca', kind: 'tool', name: 'fmeca', status: 'missing', required: true }], 'codex');
+  const result = await runSetup(
+    { readiness, isTTY: false, exec: () => ({ status: 0 }), ...SILENT },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir) },
+  );
+  assert.equal(result.exitCode, 2);
+});
+
+test('runSetup runs no commands without confirmation on a non-TTY', async () => {
+  const dir = tempDir();
+  const calls: string[] = [];
+  const readiness = readinessWith([{ id: 'tool:fmeca', kind: 'tool', name: 'fmeca', status: 'missing', required: true }], 'codex');
+  await runSetup(
+    { readiness, isTTY: false, exec: (command) => { calls.push(command); return { status: 0 }; }, ...SILENT },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir) },
+  );
+  assert.deepEqual(calls, []);
+});
+
+test('runSetup reports the action id that --yes applied', async () => {
+  const dir = tempDir();
+  const readiness = readinessWith([{ id: 'tool:fmeca', kind: 'tool', name: 'fmeca', status: 'missing', required: true }], 'codex');
+  const result = await runSetup(
+    { readiness, inspect: () => readinessWith([], 'codex'), exec: () => ({ status: 0 }), ...SILENT },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir), yes: true },
+  );
+  assert.ok(result.report?.applied.includes('tool:managed'));
+});
+
+test('runSetup reports the action id of a command that failed', async () => {
+  const dir = tempDir();
+  const readiness = readinessWith([{ id: 'tool:fmeca', kind: 'tool', name: 'fmeca', status: 'missing', required: true }], 'codex');
+  const result = await runSetup(
+    { readiness, inspect: () => readinessWith([], 'codex'), exec: () => ({ status: 1, stderr: 'boom' }), ...SILENT },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir), yes: true },
+  );
+  assert.deepEqual(result.report?.failed.map((entry) => entry.id), ['tool:managed']);
+});
+
+test('runSetup prints nothing to do when the harness is already ready', async () => {
+  const dir = tempDir();
+  const ready = readinessWith([], 'codex');
+  ready.ready = true;
+  let err = '';
+  await runSetup(
+    { readiness: ready, exec: () => ({ status: 0 }), stderr: (text) => { err += text; }, stdout: () => {} },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir), yes: true },
+  );
+  assert.match(err, /nothing to do/);
+});
+
+test('runSetup never prints an MCP env value in the dry-run preview', async () => {
+  const dir = tempDir();
+  const secret = 'super-secret-token';
+  const readiness = readinessWith([{ id: 'mcp:fmeca-mcp', kind: 'mcp', name: 'fmeca-mcp', status: 'missing' }], 'codex');
+  let err = '';
+  await runSetup(
+    { readiness, exec: () => ({ status: 0 }), stderr: (text) => { err += text; }, stdout: () => {} },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir, { secret }), dryRun: true },
+  );
+  assert.doesNotMatch(err, new RegExp(secret));
+});
+
+test('runSetup previews an MCP env value as a redacted variable name', async () => {
+  const dir = tempDir();
+  const readiness = readinessWith([{ id: 'mcp:fmeca-mcp', kind: 'mcp', name: 'fmeca-mcp', status: 'missing' }], 'codex');
+  let err = '';
+  await runSetup(
+    { readiness, exec: () => ({ status: 0 }), stderr: (text) => { err += text; }, stdout: () => {} },
+    { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir, { secret: 'super-secret-token' }), dryRun: true },
+  );
+  assert.match(err, /FMECA_TOKEN=\*\*\*/);
+});
+
+test('planSetup runs the given Junior command for its own actions', () => {
+  const actions = planSetup(
+    { harness: 'claude', evidence: [], ready: false, items: [{ id: 'tool:elicitation', kind: 'tool', name: 'elicitation', status: 'missing', required: true }], fixCommand: 'junior setup', summary: '' } as any,
+    { harness: 'claude', cwd: '/p', juniorCommand: ['/usr/bin/node', '/src/junior.ts'] },
+  );
+  assert.deepEqual(actions[0].command?.slice(0, 2), ['/usr/bin/node', '/src/junior.ts']);
 });

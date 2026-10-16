@@ -31,7 +31,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'init', 'update', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -160,6 +160,18 @@ test('junior init --no-install reports an unattempted install summary', () => {
 
 test('junior doctor rejects an unknown option', () => {
   assert.notEqual(runJunior(['doctor', '--bogus'], workdir()).status, 0);
+});
+
+test('junior setup --dry-run executes no managed-tool install', () => {
+  const dir = workdir();
+  const res = runJunior(['setup', '--harness', 'codex', '--dry-run'], dir);
+  assert.equal(res.status, 0);
+});
+
+test('junior setup --dry-run writes nothing to the working directory', () => {
+  const dir = workdir();
+  runJunior(['setup', '--harness', 'codex', '--dry-run'], dir);
+  assert.deepEqual(readdirSync(dir), []);
 });
 
 test('junior prune rejects an unknown option', () => {

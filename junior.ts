@@ -32,7 +32,7 @@ function usage(): string {
   '  tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
-  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained Junior worktrees',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
@@ -78,6 +78,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
+ setup: { flags: ['--yes', '--dry-run'], valueFlags: ['--harness', '--hop'], min: 0, max: 0,
+  help: 'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]' },
  update: {
   flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -170,6 +172,19 @@ async function main(argv: string[]): Promise<void> {
  const updateCheck = await import('./update-check.ts');
  await updateCheck.startupNotice(command, { env: process.env, checkUpdates: parsed.flags.has('--check-updates') });
 
+ if (command === 'setup') {
+  const setup = await import('./readiness.ts');
+  const result = await setup.runSetup({}, {
+   cwd: process.cwd(),
+   harness: parsed.values['--harness'],
+   hopPath: parsed.values['--hop'],
+   yes: parsed.flags.has('--yes'),
+   dryRun: parsed.flags.has('--dry-run'),
+   juniorCommand: [process.execPath, process.argv[1]],
+  });
+  process.exitCode = result.exitCode;
+  return;
+ }
  if (command === 'doctor') {
   const result:any = doctor({}, { harness: parsed.values['--harness'] });
   if (parsed.flags.has('--online')) {
