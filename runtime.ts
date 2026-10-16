@@ -34,6 +34,9 @@ export type ExecutionSettings = {
  /** Cap on retained (compacted) bytes persisted from the worker's stdout. The
   * raw stream has a separate hard ceiling of 8x this value. */
  maxOutputBytes: number;
+ /** Maximum automatic continuation segments after an output-capped worker
+  * segment (0 disables continuation). Integer 0..3. */
+ continuations: number;
 };
 
 export const EXECUTION_DEFAULTS: ExecutionSettings = {
@@ -44,6 +47,7 @@ export const EXECUTION_DEFAULTS: ExecutionSettings = {
  checkTimeoutMs: 120000,
  checkReserveMs: 120000,
  maxOutputBytes: 8 * 1024 * 1024,
+ continuations: 1,
 };
 
 /** Positive finite bounds. Values outside a bound are rejected, not coerced. */
@@ -55,6 +59,7 @@ export const EXECUTION_BOUNDS: Record<keyof ExecutionSettings, { min: number; ma
  checkTimeoutMs: { min: 1, max: 24 * 60 * 60 * 1000 },
  checkReserveMs: { min: 0, max: 24 * 60 * 60 * 1000 },
  maxOutputBytes: { min: 1024 * 1024, max: 32 * 1024 * 1024 },
+ continuations: { min: 0, max: 3 },
 };
 
 export const EXECUTION_FIELDS = Object.keys(EXECUTION_DEFAULTS) as (keyof ExecutionSettings)[];
@@ -81,6 +86,9 @@ export function resolveExecutionSettings(t: any): ExecutionSettings {
   const bound = EXECUTION_BOUNDS[key];
   if (typeof v !== 'number' || !Number.isFinite(v) || v < bound.min || v > bound.max) {
    throw Error(`Invalid execution.${key} (expected a finite number in [${bound.min}, ${bound.max}])`);
+  }
+  if (key === 'continuations' && !Number.isInteger(v)) {
+   throw Error(`Invalid execution.continuations (expected an integer in [${bound.min}, ${bound.max}])`);
   }
   out[key] = v;
  }

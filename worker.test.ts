@@ -650,6 +650,128 @@ test('A tool timeout names the tool and truncated command in the compact handoff
  const r=await p;
  assert.ok(compactHandoff(r).unresolved.some((u)=>u.includes(`bash: ${command.slice(0,200)}`)));
 });
+// --- Step 3 automatic continuation (offline; fake segments that hit the cap) ---
+const CONTINUATION_CAP=1024;
+const until=async(fn:()=>boolean,ms=8000)=>{const start=Date.now();while(!fn()){if(Date.now()-start>ms)throw Error('timed out waiting for condition');await delay(20);}};
+const continuationFixture=(repo:any,continuations=1,extra:any={})=>{
+ const fakes:any[]=[];const argvs:string[][]=[];
+ const spawnChild=(_c:string,args:string[])=>{argvs.push(args);const f=makeFakeChild();fakes.push(f);return f.child;};
+ const t=okTask(repo,{id:'cont',acceptance:['distinctive acceptance phrase'],execution:{continuations,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000},...extra});
+ const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP});
+ return {t,p,fakes,argvs};
+};
+const firstAssistant=(f:any,text:string,usage:any=U(1,2,3))=>f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'stop',content:[{type:'text',text}]}});
+const exhaustCap=(f:any)=>f.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command:'z'.repeat(4000)}});
+const completeSegment=(f:any,usage:any=U(1,1,2))=>{f.emit({type:'session',id:'seg-session'});f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'stop'}});f.emit({type:'agent_settled'});f.end(0);};
+const driveToContinuation=async(fakes:any[],argvs:string[][],firstUsage:any=U(1,2,3))=>{
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-one'});
+ firstAssistant(fakes[0],'work done in the first segment',firstUsage);
+ exhaustCap(fakes[0]);
+ await until(()=>fakes.length>=2);
+};
+test('Execution settings default continuations to one',()=>{
+ assert.equal(resolveExecutionSettings({}).continuations,1);
+});
+test('A capped segment with a continuation completes ready_for_review',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.status,'ready_for_review');
+});
+test('A continued run records two segments',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
+});
+test('A continuation segment starts with no --session',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(!argvs[1].includes('--session'));
+});
+test('A continuation prompt carries the checkpoint text',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(argvs[1][argvs[1].length-1].includes('distinctive acceptance phrase'));
+});
+test('A continuation checkpoint records the git status',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ writeFileSync(join(repo.dir,'a.txt'),'modified\n');
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.match(readFileSync(join(r.artifactDir,'checkpoint-1.md'),'utf8'),/a\.txt/);
+});
+test('A continuation checkpoint records the acceptance list',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.match(readFileSync(join(r.artifactDir,'checkpoint-1.md'),'utf8'),/distinctive acceptance phrase/);
+});
+test('Result usage sums tokens across continuation segments',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveToContinuation(fakes,argvs,U(1,2,3));
+ completeSegment(fakes[1],U(10,20,30));
+ const r=await p;
+ assert.equal(r.receipt.usage.totalTokens,33);
+});
+test('A capped run with continuations 0 ends output_truncated',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,0);
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-only'});
+ firstAssistant(fakes[0],'capped work');
+ exhaustCap(fakes[0]);
+ const r=await p;
+ assert.equal(r.status,'output_truncated');
+});
+test('A capped run with continuations 0 records exactly one segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,0);
+ await until(()=>fakes.length>=1);
+ fakes[0].emit({type:'session',id:'seg-only'});
+ firstAssistant(fakes[0],'capped work');
+ exhaustCap(fakes[0]);
+ const r=await p;
+ assert.equal(r.segments.length,1);
+});
+test('Compact handoff reports the segment count',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const r=await run(okTask(repo,{id:'seg-count'}),false,{spawnPi:okSpawn()});
+ assert.equal(compactHandoff(r).segments,1);
+});
+test('Continuations above three are rejected by validate',()=>{
+ assert.throws(()=>validate(task(0,{execution:{continuations:4}})),/Invalid execution\.continuations/);
+});
+test('A fractional continuations value is rejected by validate',()=>{
+ assert.throws(()=>validate(task(0,{execution:{continuations:1.5}})),/Invalid execution\.continuations/);
+});
+test('A top-level continuations setting enables a continuation segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fakes:any[]=[];const argvs:string[][]=[];
+ const spawnChild=(_c:string,args:string[])=>{argvs.push(args);const f=makeFakeChild();fakes.push(f);return f.child;};
+ const t=okTask(repo,{id:'cont-top',acceptance:['distinctive acceptance phrase'],continuations:1});
+ const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP});
+ await driveToContinuation(fakes,argvs);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
+});
 const SESSION_A='123e4567-e89b-12d3-a456-426614174000';
 const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A},...over});
 test('Resume validation rejects cwd, provider/model and invalid session',()=>{

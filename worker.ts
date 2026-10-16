@@ -1,6 +1,7 @@
 import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, loadDefaults, parseInitOptions } from './setup.ts';
@@ -33,7 +34,7 @@ export const TASK_FIELDS = [
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
  'hopFrom','hopRevision','hopContext',
- 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','isolationSetup',
+ 'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
@@ -1387,6 +1388,97 @@ function raceAbort<T>(p:Promise<T>, timeoutMs:number, signal?:AbortSignal):Promi
  });
 }
 
+// ---------------------------------------------------------------------------
+// Automatic continuation (step 3)
+//
+// A live worker segment that hits the output cap leaves the model without room
+// to finish. Junior writes a bounded checkpoint (git status/diff-stat, the
+// acceptance list and the segment's last assistant text) and starts a fresh Pi
+// session in the same checkout with that checkpoint appended to the normal
+// prompt. The receipt always reflects the final segment; token usage and cost
+// sum every segment.
+// ---------------------------------------------------------------------------
+
+/** Each git command captured into a checkpoint is bounded to this many bytes. */
+export const CHECKPOINT_GIT_MAX_BYTES = 8 * 1024;
+/** The previous segment's last assistant text is bounded to this many bytes. */
+export const CHECKPOINT_ASSISTANT_MAX_BYTES = 4 * 1024;
+
+/** Run one bounded git command for a checkpoint, returning stdout/stderr text
+ * (never throwing). Output beyond `maxBytes` is explicitly truncated. */
+function boundedGitCapture(cwd:string, args:string[], maxBytes:number):string {
+ try {
+  const r=spawnSync('git', args, {cwd, encoding:'utf8', maxBuffer: Math.max(maxBytes*8, 1024*1024)});
+  if (r.error) return `(git ${args.join(' ')} unavailable: ${r.error.message})`;
+  const text=`${r.stdout || ''}${r.stderr || ''}`;
+  return text.length > maxBytes ? `${text.slice(0,maxBytes)}\n[... ${text.length-maxBytes} bytes omitted ...]` : text;
+ } catch(e) { return `(git ${args.join(' ')} failed: ${msg(e)})`; }
+}
+
+/** The last text block of the last assistant `message_end` in a segment's
+ * retained events, or '' when the segment produced none. */
+export function lastAssistantText(eventsText:string):string {
+ const lines=String(eventsText ?? '').split('\n');
+ for (let i=lines.length-1;i>=0;i--) {
+  const raw=lines[i].trim();
+  if (!raw) continue;
+  let ev:any;
+  try { ev=JSON.parse(raw); } catch { continue; }
+  if (!ev || ev.type !== 'message_end') continue;
+  const m=ev.message;
+  if (!m || typeof m !== 'object' || m.role !== 'assistant') continue;
+  const blocks = Array.isArray(m.content) ? m.content
+   : (typeof m.content === 'string' ? [{type:'text', text:m.content}] : []);
+  for (let j=blocks.length-1;j>=0;j--) {
+   const b=blocks[j];
+   if (b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string') return b.text;
+  }
+  if (typeof m.text === 'string') return m.text;
+ }
+ return '';
+}
+
+/** Build the bounded checkpoint text written between continuation segments:
+ * `git status --short` and `git diff --stat` of the execution checkout (each
+ * bounded to 8 KiB), the contract acceptance list and the previous segment's
+ * last assistant text (bounded to 4 KiB). */
+export function buildContinuationCheckpoint(executionCwd:string, t:any, eventsPath:string, maxGitBytes=CHECKPOINT_GIT_MAX_BYTES, maxAssistantBytes=CHECKPOINT_ASSISTANT_MAX_BYTES):string {
+ const status=boundedGitCapture(executionCwd,['status','--short'],maxGitBytes);
+ const diffStat=boundedGitCapture(executionCwd,['diff','--stat'],maxGitBytes);
+ let eventsText='';
+ try { eventsText=readFileSync(eventsPath,'utf8'); } catch { /* an unreadable events file yields no assistant text */ }
+ let assistant=lastAssistantText(eventsText);
+ if (assistant.length > maxAssistantBytes) assistant=`${assistant.slice(0,maxAssistantBytes)}\n[... ${assistant.length-maxAssistantBytes} bytes omitted ...]`;
+ const acceptance=acceptanceTexts(t?.acceptance);
+ const acceptanceList=acceptance.length ? acceptance.map((a)=>`- ${a}`).join('\n') : '(none)';
+ return [
+  '# Continuation checkpoint',
+  '',
+  '## git status --short',
+  '```',
+  status.trimEnd(),
+  '```',
+  '',
+  '## git diff --stat',
+  '```',
+  diffStat.trimEnd(),
+  '```',
+  '',
+  '## Acceptance criteria',
+  acceptanceList,
+  '',
+  '## Last assistant text (previous segment)',
+  '```',
+  assistant.trimEnd(),
+  '```',
+  '',
+ ].join('\n');
+}
+
+/** The first line of the continuation block appended to a continuation
+ * segment's prompt. Exported so tests and the prompt builder share one text. */
+export const CONTINUATION_PROMPT_LEAD = 'A previous worker segment stopped at the output budget. Its edits are already in this checkout. Continue from this checkpoint; do not redo finished work:';
+
 export async function run(t:any, mock=false, deps:GateDeps = {}) {
  validate(t);
  const runStartedAt=Date.now();
@@ -1696,6 +1788,9 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let stdout='', stderr='', legacyError:string|undefined;
   let workerStatus=0;
   let streamResult:WorkerStreamResult|undefined;
+  type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; checkpointPath:string|null};
+  const segments:SegmentRecord[]=[];
+  const segmentReceipts:Receipt[]=[];
   const preInterrupt = !!signal?.aborted;
   const preDeadline = !preInterrupt && workerOutOfTime();
   // Pi's own bash timeout must fire before Junior's watchdog so a slow command
@@ -1705,6 +1800,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
    writeFileSync(logPath,'');
+   segments.push({index:0,eventsPath,stopReason:'mock',outputTruncated:false,checkpointPath:null});
   } else if (preInterrupt || preDeadline) {
    // The wall deadline (or an interruption) elapsed during readiness, isolation
    // or the classifier. Never start the paid worker; keep an inspectable handback.
@@ -1713,6 +1809,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    streamResult = { stdout:'', stderr:'', exitCode:null, signal:null,
     interrupted:preInterrupt, timedOut:false, deadlineExceeded:preDeadline, outputTruncated:false,
     stopReason: preInterrupt ? 'interrupted' : 'deadline_exceeded', runtime:heartbeat.snapshot() };
+   segments.push({index:0,eventsPath,stopReason:streamResult.stopReason,outputTruncated:false,checkpointPath:null});
   } else if (deps.spawnPi) {
    const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
    const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432,env:piBashEnv});
@@ -1721,20 +1818,68 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    legacyError=r.error?.message;
    writeFileSync(eventsPath,stdout);
    writeFileSync(logPath,stderr);
+   segments.push({index:0,eventsPath,stopReason:'legacy',outputTruncated:false,checkpointPath:null});
   } else {
    const spawnChild = deps.spawnChild ?? spawnChildDetached;
-   streamResult = await executeWorkerStreaming({
-    spawnChild, command:'pi',
-    args:[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],
-    cwd:executionCwd, env:piBashEnv, eventsPath, logPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
-    phase:'worker', signal, heartbeat, maxOutputBytes: deps.maxOutputBytes ?? settings.maxOutputBytes,
-   });
-   stdout=streamResult.stdout; stderr=streamResult.stderr;
-   workerStatus=streamResult.exitCode ?? 1;
-   legacyError=streamResult.error;
+   const maxSegmentOutputBytes = deps.maxOutputBytes ?? settings.maxOutputBytes;
+   let segmentPrompt = prompt;
+   let continuationIndex = 0;
+   for (;;) {
+    // Continuation segments are new sessions (no --session) so a capped model
+    // gets a fresh context with the checkpoint instead of a truncated history.
+    const segEventsPath = continuationIndex === 0 ? eventsPath : join(dir, `events-${continuationIndex}.jsonl`);
+    const segLogPath = continuationIndex === 0 ? logPath : join(dir, `worker-${continuationIndex}.log`);
+    const sessionId = continuationIndex === 0 ? (resume?.parentSessionId ?? null) : null;
+    const segResult = await executeWorkerStreaming({
+     spawnChild, command:'pi',
+     args:[...buildPiArgs(requested, sessionId, t.thinking ?? 'low'),segmentPrompt],
+     cwd:executionCwd, env:piBashEnv, eventsPath:segEventsPath, logPath:segLogPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
+     phase:'worker', signal, heartbeat, maxOutputBytes: maxSegmentOutputBytes,
+    });
+    stdout=segResult.stdout; stderr=segResult.stderr;
+    workerStatus=segResult.exitCode ?? 1;
+    legacyError=segResult.error;
+    streamResult=segResult;
+    segments.push({index:continuationIndex,eventsPath:segEventsPath,stopReason:segResult.stopReason,outputTruncated:!!segResult.outputTruncated,checkpointPath:null});
+    segmentReceipts.push(parseReceipt(segResult.stdout ?? '', requested, {outputTruncated: !!segResult.outputTruncated}));
+    if (!segResult.outputTruncated) break;
+    if (continuationIndex >= settings.continuations) break;
+    if (workerRemainingMs() < 60000) break;
+    const nextIndex = continuationIndex + 1;
+    const checkpointPath = join(dir, `checkpoint-${nextIndex}.md`);
+    const checkpointText = buildContinuationCheckpoint(executionCwd, t, segEventsPath);
+    writeFileSync(checkpointPath, checkpointText);
+    segments[segments.length-1].checkpointPath = checkpointPath;
+    segmentPrompt = `${prompt}\n\n${CONTINUATION_PROMPT_LEAD}\n\n${checkpointText}`;
+    continuationIndex = nextIndex;
+    // The next segment starts clean: clear the previous segment's cap stop so
+    // runtime.json reflects only the segment that actually ends the run.
+    heartbeat.setState('running', { outputTruncated: false, stopReason: null } as any);
+   }
   }
-  const receipt=mock ? mockReceipt(requested) : parseReceipt(stdout,requested,{outputTruncated: !!streamResult?.outputTruncated});
-  if (streamResult?.outputTruncated) receipt.outputTruncated = true;
+  // The receipt reflects the final segment so readiness/validity is judged on
+  // what the last segment actually completed; token usage and cost sum every
+  // segment so the run is not under-reported.
+  let receipt:Receipt;
+  if (mock) {
+   receipt=mockReceipt(requested);
+  } else if (segmentReceipts.length) {
+   receipt=segmentReceipts[segmentReceipts.length-1];
+   const totalUsage=emptyUsage();
+   for (const r of segmentReceipts) addUsage(totalUsage, r.usage);
+   receipt.usage=totalUsage;
+   const ids=new Set<string>();
+   const generations:Receipt['generations']=[];
+   for (const r of segmentReceipts) {
+    for (const id of r.responseIds) ids.add(id);
+    for (const g of r.generations) generations.push(g);
+   }
+   receipt.responseIds=[...ids];
+   receipt.generations=generations;
+  } else {
+   receipt=parseReceipt(stdout,requested,{outputTruncated: !!streamResult?.outputTruncated});
+   if (streamResult?.outputTruncated) receipt.outputTruncated = true;
+  }
   const receiptOk=mock || receiptValid(receipt);
 
   // Independent checks run only after a clean worker, and each is bounded by
@@ -1873,7 +2018,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   }
 
   const runtime=heartbeat.snapshot();
-  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false};
+  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments};
   result.unresolved=[];
   if (streamResult?.timedOut && streamResult.timedOutTool) {
    result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
