@@ -18,6 +18,7 @@ import { run, validate, contractWarnings, status, type GateDeps } from './worker
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
 import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
+import { refreshUpdateCache } from './update-check.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
 import { chooseBrief, readLatestBrief } from './prepare.ts';
@@ -274,6 +275,9 @@ async function main(argv: string[]): Promise<void> {
    if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
    if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
   }
+  // Drop the stale update summary so the next startup notice stops reporting
+  // the components just adopted. Never fail an update because of the cache.
+  if (command === 'update') await refreshUpdateCache({});
   console.log(JSON.stringify(result, null, 2));
   if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;
   return;

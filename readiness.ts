@@ -24,6 +24,7 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { join, resolve, dirname, delimiter } from 'node:path';
+import { ensureLocalExcludes } from './isolation.ts';
 
 export type ReadinessItemKind = 'skill' | 'mcp' | 'tool' | 'update';
 export type ReadinessItem = {
@@ -425,6 +426,14 @@ async function defaultPrompt(question: string): Promise<string> {
   return answer;
 }
 
+/** Repo-relative untracked files, or null outside a Git checkout (a git
+ * failure is treated as "not a repository" so exclusion stays silent). */
+function gitUntracked(cwd: string): string[] | null {
+  const r = spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd, encoding: 'utf8' });
+  if (r.error || r.status !== 0) return null;
+  return String(r.stdout ?? '').split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
 function binaryOnPath(deps: SetupDeps, name: string): boolean {
   const env = deps.env ?? process.env;
   const exists = deps.exists ?? existsSync;
@@ -533,9 +542,23 @@ export async function runSetup(deps: SetupDeps = {}, opts: RunSetupOptions): Pro
       continue;
     }
     const [command, ...args] = action.command;
+    // A companion skill installer writes new skill files; record exactly the
+    // paths it created in the repo-local exclude, as `junior init` does.
+    const tracksSkills = action.kind === 'skill' && action.id !== 'skill:junior';
+    const untrackedBefore = tracksSkills ? gitUntracked(cwd) : null;
     const result = exec(command, args, { timeout: timeoutMs, env, cwd });
-    if (result.status === 0) applied.push(action.id);
-    else failed.push({ id: action.id, error: result.error || result.stderr || `exited ${result.status}` });
+    if (result.status === 0) {
+      applied.push(action.id);
+      if (tracksSkills && untrackedBefore) {
+        const untrackedAfter = gitUntracked(cwd);
+        if (untrackedAfter) {
+          const created = untrackedAfter.filter((path) => !untrackedBefore.includes(path));
+          if (created.length) ensureLocalExcludes(cwd, created.map((path) => `/${path}`));
+        }
+      }
+    } else {
+      failed.push({ id: action.id, error: result.error || result.stderr || `exited ${result.status}` });
+    }
   }
 
   const after = inspect();
