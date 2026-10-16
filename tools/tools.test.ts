@@ -403,16 +403,16 @@ test("init keeps the PATH command for a tool with no managed install", () => {
 // release, not a built-in pin. A config command override that points away from
 // the managed binary also falls back to that release.
 
-test("init with no managed install state records crossmatrix sourceVersion 0.3.0", () => {
+test("init with no managed install state records crossmatrix sourceVersion 0.3.2", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
   const hop = initHopManifest(path.join(dir, "hop.json"), {});
-  assert.equal(hop.tools.crossmatrix.sourceVersion, "0.3.0");
+  assert.equal(hop.tools.crossmatrix.sourceVersion, "0.3.2");
 });
 
-test("init with no managed install state records the cpm 0.2.2 source sha", () => {
+test("init with no managed install state records the cpm 0.3.0 source sha", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hop-provenance-"));
   const hop = initHopManifest(path.join(dir, "hop.json"), {});
-  assert.equal(hop.tools.cpm.sourceSha, "1fdd3afbce3302d5aad19895bddc26eb54fd7aea");
+  assert.equal(hop.tools.cpm.sourceSha, "c05a30809ea28fecd4f3c28b47c90890b0711701");
 });
 
 test("a config command override pointing away from the managed binary records the fallback source sha", () => {

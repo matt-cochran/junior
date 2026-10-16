@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
 ### Added
 
 - `junior doctor` reports companion agent-skill readiness as `companionSkills`:
@@ -30,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cpm tool's `plan.review` sees Junior's managed OpenRouter key when no
   explicit key is set, and `junior tools inspect` reports review-key visibility
   as `cpmReview` without its value (praxec/cpm-planner#72).
+
+### Changed
+
+- The fallback tool provenance recorded when no managed install exists is cpm-planner 0.3.0 and Crossmatrix 0.3.2.
 
 ### Fixed
 
@@ -130,7 +136,9 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[0.3.2]: https://github.com/matt-cochran/junior/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/matt-cochran/junior/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/matt-cochran/junior/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/matt-cochran/junior/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/matt-cochran/junior/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/matt-cochran/junior/compare/v0.2.0...v0.2.1

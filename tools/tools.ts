@@ -166,8 +166,8 @@ const MCP_PROTOCOL_VERSION = "2024-11-05";
 // upstream releases (not a pin). These are updated as new releases ship.
 const KNOWN_SOURCE: Record<ToolName, { version: string; sha: string }> = {
   fmeca: { version: "0.2.0", sha: "83d16022ff03fa6725c5ed517ea75caa5bce8694" },
-  cpm: { version: "0.2.2", sha: "1fdd3afbce3302d5aad19895bddc26eb54fd7aea" },
-  crossmatrix: { version: "0.3.0", sha: "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef" },
+  cpm: { version: "0.3.0", sha: "c05a30809ea28fecd4f3c28b47c90890b0711701" },
+  crossmatrix: { version: "0.3.2", sha: "81a8fbec6af8350c9377479d9b904c7c5d321d12" },
 };
 
 const DEFAULT_COMMAND: Record<ToolName, string> = {

@@ -71,15 +71,15 @@ release table.
       "command": "/opt/praxec/bin/cpm-planner",
       "args": [],
       "env": {},
-      "sourceVersion": "0.2.2",
-      "sourceSha": "1fdd3afbce3302d5aad19895bddc26eb54fd7aea"
+      "sourceVersion": "0.3.0",
+      "sourceSha": "c05a30809ea28fecd4f3c28b47c90890b0711701"
     },
     "crossmatrix": {
       "command": "/opt/praxec/bin/crossmatrix-mcp",
       "args": [],
       "env": {},
-      "sourceVersion": "0.3.0",
-      "sourceSha": "ef0fda63f362ceeaa91f15b032ddbd721f5d29ef"
+      "sourceVersion": "0.3.2",
+      "sourceSha": "81a8fbec6af8350c9377479d9b904c7c5d321d12"
     }
   }
 }
