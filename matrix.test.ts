@@ -95,6 +95,29 @@ test('jevitateJobs reads the {jobs:[...]} envelope form', () => {
   assert.equal(dim.members.length, 1);
 });
 
+test('jevitateJobs emits desired outcomes as weighted requirement members', () => {
+  const dim = jevitateJobs([{ id: 'j1', priority: 'high', desiredOutcomes: [{ id: 'fast' }] }]);
+  assert.deepEqual(
+    dim.members.filter((m: any) => m.id.includes('outcome')).map((m: any) => m.id),
+    ['job:j1/outcome:fast'],
+  );
+});
+
+test('jevitateJobs weights a high-execution outcome above a low-evaluation one', () => {
+  const dim = jevitateJobs([
+    {
+      id: 'j1',
+      priority: 'high',
+      desiredOutcomes: [
+        { id: 'fast', priority: 'high', gulf: 'execution' },
+        { id: 'cheap', priority: 'low', gulf: 'evaluation' },
+      ],
+    },
+  ]);
+  const weights = dim.members.filter((m: any) => m.id.includes('outcome')).map((m: any) => m.weight);
+  assert.deepEqual(weights, [6, 1]);
+});
+
 test('jevitatePersonas collects distinct personas from the job catalog', () => {
   const dim = jevitatePersonas({
     jobs: [
@@ -202,6 +225,13 @@ test('validateDimensionSet accepts the tests dimension', () => {
 
 test('validateDimensionSet accepts the jevitate jobs dimension', () => {
   const doc = buildDimensionSet('s', [jevitateJobs([{ id: 'j1', name: 'Sign up', priority: 'high' }])]);
+  assert.deepEqual(validateDimensionSet(doc), []);
+});
+
+test('validateDimensionSet accepts weighted desired outcomes', () => {
+  const doc = buildDimensionSet('s', [
+    jevitateJobs([{ id: 'j1', priority: 'high', desiredOutcomes: [{ id: 'fast', gulf: 'execution' }] }]),
+  ]);
   assert.deepEqual(validateDimensionSet(doc), []);
 });
 

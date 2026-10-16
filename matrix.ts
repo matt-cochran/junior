@@ -253,9 +253,19 @@ function personaAttributes(persona: unknown): Record<string, unknown> {
   return rest;
 }
 
+/** Numeric weight for a desired outcome from its priority and gulf. */
+const OUTCOME_PRIORITY_WEIGHT: Record<string, number> = { high: 3, medium: 2, low: 1 };
+const OUTCOME_GULF_WEIGHT: Record<string, number> = { execution: 2, evaluation: 1 };
+
+function desiredOutcomeWeight(priority: unknown, gulf: unknown): number {
+  const priorityScore = OUTCOME_PRIORITY_WEIGHT[String(priority ?? '')] ?? 1;
+  const gulfScore = OUTCOME_GULF_WEIGHT[String(gulf ?? '')] ?? 1;
+  return priorityScore * gulfScore;
+}
+
 /** Customer requirements from `.jevitate/jobs.json`; priority is categorical. */
 export function jevitateJobs(json: unknown): MatrixDimension {
-  const members: MatrixMember[] = jobsFrom(json).map((job) => {
+  const jobMembers: MatrixMember[] = jobsFrom(json).map((job) => {
     const id = String(job.id ?? job.name ?? '');
     const member: MatrixMember = {
       id: `job:${id}`,
@@ -276,6 +286,41 @@ export function jevitateJobs(json: unknown): MatrixDimension {
     if (typeof job.priority === 'string' && job.priority) member.weightObservation = job.priority;
     return member;
   });
+  // Desired outcomes are requirement members of the same dimension, weighted
+  // deterministically from their (or the job's) priority and gulf.
+  const outcomeMembers: MatrixMember[] = [];
+  for (const job of jobsFrom(json)) {
+    const jobId = String(job.id ?? job.name ?? '');
+    for (const outcome of Array.isArray(job.desiredOutcomes) ? job.desiredOutcomes : []) {
+      if (!isRecord(outcome)) continue;
+      const outcomeId = String(outcome.id ?? outcome.name ?? '');
+      if (!outcomeId) continue;
+      const member: MatrixMember = {
+        id: `job:${jobId}/outcome:${outcomeId}`,
+        label: String(outcome.object ?? outcome.measure ?? outcomeId),
+        status: 'active',
+        attributes: {
+          job: jobId,
+          direction: outcome.direction ?? null,
+          measure: outcome.measure ?? null,
+          object: outcome.object ?? null,
+          gulf: outcome.gulf ?? null,
+          target: outcome.target ?? null,
+          guardrail: outcome.guardrail ?? false,
+        },
+        sourceRef: {
+          system: 'jevitate',
+          sourceType: 'desired_outcome',
+          sourceRef: `jevitate:${jobId}/outcome:${outcomeId}`,
+          locator: '.jevitate/jobs.json',
+          contentHash: stableHash(outcome),
+        },
+      };
+      member.weight = desiredOutcomeWeight(outcome.priority ?? job.priority, outcome.gulf);
+      outcomeMembers.push(member);
+    }
+  }
+  const members: MatrixMember[] = [...jobMembers, ...outcomeMembers];
   return { id: 'jevitate-jobs', label: 'Jevitate jobs', kind: 'customer_requirement', order: 0, system: 'jevitate', members };
 }
 
@@ -893,6 +938,10 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
       return 1;
     }
+  }
+  if (argv[0] === 'jtbd') {
+    const { runJtbd } = await import('./jtbd-bridge.ts');
+    return runJtbd(argv.slice(1));
   }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);
