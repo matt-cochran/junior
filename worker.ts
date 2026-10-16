@@ -11,6 +11,7 @@ import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStrea
 import { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture, type BillingFetch } from './billing.ts';
 import { loadPlaybooks } from './playbooks.ts';
 import { routeTools, type ToolRoute } from './tool-routing.ts';
+import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
 export { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_MODES, BILLING_ENDPOINT, BILLING_MAX_TIMEOUT_MS, BILLING_DEFAULT_TIMEOUT_MS, BILLING_MAX_GENERATIONS } from './billing.ts';
@@ -34,7 +35,7 @@ export const TASK_FIELDS = [
  'id','deliverable','cwd','acceptance','checks','constraints','context',
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
- 'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs',
+ 'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
  'hopFrom','hopRevision','hopContext',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
@@ -220,7 +221,8 @@ export function validate(t: any) {
  }
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
  if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
- if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, discover, investigate, qa or auto)');
+ if (t.checkBack !== undefined && !['auto','always','off'].includes(t.checkBack)) throw Error('Invalid checkBack (expected auto, always or off)');
+ if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','prepare','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, discover, investigate, prepare, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
@@ -228,6 +230,7 @@ export function validate(t: any) {
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');
  if (t.maxRepairs !== undefined && (typeof t.maxRepairs !== 'number' || !Number.isInteger(t.maxRepairs) || t.maxRepairs < 0)) throw Error('Invalid maxRepairs (expected a nonnegative integer)');
  if (t.lineageDeadlineMs !== undefined && (typeof t.lineageDeadlineMs !== 'number' || !Number.isFinite(t.lineageDeadlineMs) || t.lineageDeadlineMs <= 0)) throw Error('Invalid lineageDeadlineMs (expected a finite positive number)');
+ if (t.preparedFrom !== undefined && (typeof t.preparedFrom !== 'string' || !t.preparedFrom.trim())) throw Error('Invalid preparedFrom (expected the contract id of the prepare brief)');
  if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
@@ -554,19 +557,21 @@ export function estimateCost(receipt:Receipt, pricing:any, billing?:BillingCaptu
 // separate from the gate pass/block status.
 // ---------------------------------------------------------------------------
 
-export const EXPLICIT_WORKFLOWS = ['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','qa'] as const;
+export const EXPLICIT_WORKFLOWS = ['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','prepare','qa'] as const;
 export type ExplicitWorkflow = typeof EXPLICIT_WORKFLOWS[number];
 export type Workflow = ExplicitWorkflow | 'auto';
 
 /** Analysis-only workflows produce a report and never implement production
  * changes. `recon` is inspect-first analysis; `fmeca` and `evaluate` are
  * structured risk/architecture reviews; `discover` is a requirements interview
- * and `investigate` runs one scientific-process experiment per handoff. The
- * analysis-only scope is a contract boundary enforced through the required
- * report and the handback, not an OS sandbox. */
-export const ANALYSIS_WORKFLOWS = ['recon','fmeca','evaluate','discover','investigate'] as const;
+ * and `investigate` runs one scientific-process experiment per handoff.
+ * `prepare` researches the named graph slice and contract, then writes a brief
+ * with options and checks back before any implementation. The analysis-only
+ * scope is a contract boundary enforced through the required report and the
+ * handback, not an OS sandbox. */
+export const ANALYSIS_WORKFLOWS = ['recon','fmeca','evaluate','discover','investigate','prepare'] as const;
 export function isAnalysisWorkflow(w:unknown):w is typeof ANALYSIS_WORKFLOWS[number] {
- return w === 'recon' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate';
+ return w === 'recon' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate' || w === 'prepare';
 }
 
 /** The report-only QA review workflow reviews a prior deliverable in a fresh
@@ -597,6 +602,7 @@ export const WORKFLOW_TEMPLATE_IDS = {
  evaluate:'delivery-evaluate-1',
  discover:'delivery-discover-1',
  investigate:'delivery-investigate-1',
+ prepare:'delivery-prepare-1',
  qa:'delivery-qa-1',
 } as const;
 
@@ -610,6 +616,7 @@ export const WORKFLOW_DESCRIPTIONS:Record<ExplicitWorkflow,string> = {
  evaluate:'Analysis-only architecture validity review first (classification, simpler alternatives, removal/demotion proposals) then FMECA plus calibration, observability, over-engineering and incremental-delivery reality checks; no production changes.',
  discover:'Analysis-only requirements interview backed by the elicitation tool: research the repository first, record established claims with evidence, rank open questions by leverage with suggested answers, record contradictions and the readiness.assess result; no production changes.',
  investigate:'Analysis-only scientific-process experiment per handoff: state or resume a hypothesis, design the smallest refuting experiment, record the observation with raw evidence, and recommend the next experiment; never concludes Supported without supporting observations and makes no production changes.',
+ prepare:'Analysis-only preparation first: research only what the graph slice and contract context name, reproduce or measure when cheap, and write brief.json plus brief.md with numbered understanding items, options and a recommendation so the manager can choose before any implementation; no production changes.',
  qa:'Report-only independent review of a prior deliverable from its result.json: compare acceptance with the complete tracked/staged/untracked changes and checks, report missing coverage and regressions with severity, file references and acceptance IDs; no production changes.',
 };
 
@@ -671,6 +678,13 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
   'Design the smallest experiment that could refute the hypothesis, run it in the .delivery scratch area, and record the observation with raw evidence through the same scientific-process tool call.',
   'Never conclude Supported without supporting observations; a hypothesis with no supporting observation is unresolved. Write analysis-report.md with the hypothesis, experiment, prediction, observation, evidence, and the recommended next experiment or conclusion.',
  ].join('\n'),
+ prepare:[
+  'Workflow (prepare): do the legwork first and check back before acting. Do not modify production code. This is an instruction to the worker, not a sandbox guarantee.',
+  'Research only what the graph slice and contract context supplied in this prompt name; do not widen the search beyond them.',
+  'Reproduce or measure when that is cheap and safe; otherwise label the claim inferred.',
+  'Write brief.json to the artifact directory with the schema: understanding.scope/outOfScope/assumptions (each assumption status verified or guess, with path:line evidence when verified)/acceptanceProof; options with id, title, approach, files, effort (optimistic/likely/pessimistic), risks and tradeoffs (plus adrNotes and a drafted plan path when relevant); and a recommendation naming the option and why.',
+  'Write brief.md with the numbered U and A items first, then the options. The handback is needs_choice until brief.json exists.',
+ ].join('\n'),
  qa:[
   'Workflow (qa): report-only independent review of a prior deliverable. Do not modify production code, commit, push, repair, or start nested workers or paid calls. This is an instruction to the worker, not a sandbox guarantee.',
   'Review only the grounded context provided: the prior result, the original prompt/contract evidence and the complete tracked, staged and untracked change evidence. Do not load the full transcript by default.',
@@ -683,7 +697,7 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
 
 export function taskWorkflow(t:any):Workflow {
  const w=t?.workflow;
- return w === 'recon' || w === 'test_first' || w === 'checks_first' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate' || w === 'qa' || w === 'auto' ? w : 'auto';
+ return w === 'recon' || w === 'test_first' || w === 'checks_first' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate' || w === 'prepare' || w === 'qa' || w === 'auto' ? w : 'auto';
 }
 
 export type WorkflowDecision = {
@@ -951,11 +965,27 @@ export function investigateReportBlock(reportPath:string):string {
  ].join('\n');
 }
 
+/** Fixed report requirement block for the prepare workflow. It names both
+ * deterministic artifacts (brief.json and brief.md) so the handback is
+ * needs_choice only after the brief exists. This is an instruction to the
+ * worker, not a sandbox guarantee. */
+export function prepareReportBlock(reportPath:string):string {
+ const dir=dirname(reportPath);
+ return [
+  `Prepare brief requirement: write the machine-readable brief to this exact artifact path: ${briefPath(dir)}`,
+  `Write the human-readable brief to this exact artifact path: ${briefMdPath(dir)}`,
+  'Save both there before finishing. The handback is needs_choice until brief.json exists; a missing brief is never reported as completion or failure.',
+  'The brief must validate against the prepare schema: understanding.scope/outOfScope/assumptions (each assumption status verified or guess, with path:line evidence when verified)/acceptanceProof; options with id, title, approach, files, effort and risks; and a recommendation. Render the numbered U and A items before the options.',
+  'This is an instruction to the worker, not a sandbox guarantee.',
+ ].join('\n');
+}
+
 /** Select the deterministic report requirement block for a report workflow. */
 export function reportBlockFor(workflow:ExplicitWorkflow, reportPath:string):string {
  if (workflow === 'qa') return qaReportBlock(reportPath);
  if (workflow === 'discover') return discoverReportBlock(reportPath);
  if (workflow === 'investigate') return investigateReportBlock(reportPath);
+ if (workflow === 'prepare') return prepareReportBlock(reportPath);
  return analysisReportBlock(reportPath);
 }
 
@@ -1866,11 +1896,31 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    decision = {...decision, selected:'checks_first', source:'default', recommended:'qa',
     note:'qa requires reviewFrom; auto cannot authorize a QA review without a prior result' };
   }
+  // Prepare check-back gate: a capable junior does the legwork first and checks
+  // back before acting. When Jev flags an unclear contract or a blocking
+  // assumption, or the routed playbooks include a decision/plan playbook, run
+  // the prepare workflow and hand back a brief for the manager to choose from.
+  // A contract already derived from a prepare brief never checks back again.
+  const prepareHistory = loadPrepareHistory(sourceCwd);
+  const preparePlan = jev?.preflight?.attention?.toolPlan ?? null;
+  // A workflow the manager chose explicitly is never replaced (Jev is advisory,
+  // ADR-0003): the check-back applies when the contract leaves `workflow` on
+  // auto, or sets `checkBack: "always"`; `checkBack: "off"` disables it. When
+  // it is recommended but not applied, the receipt says so.
+  const checkBackMode = t.checkBack === 'always' || t.checkBack === 'off' ? t.checkBack : 'auto';
+  const checkBackRecommended = typeof t.preparedFrom !== 'string' && decision.selected !== 'prepare'
+      && shouldCheckBack(jev?.preflight?.attention ?? null, preparePlan, prepareHistory);
+  if (checkBackRecommended && jev?.preflight?.attention) jev.preflight.attention.checkBackRecommended = true;
+  if (checkBackRecommended && checkBackMode !== 'off' && (checkBackMode === 'always' || explicitWorkflow === 'auto')) {
+   decision = {...decision, selected:'prepare', source:'default', recommended:'prepare',
+    note:'Prepare check-back: the readiness assessment or routed playbooks call for researched options before implementation.'};
+  }
+  const prepareRun = decision.selected === 'prepare';
   isQa=decision.selected === 'qa';
   const reportWorkflow = isReportWorkflow(decision.selected);
   // The report path is deterministic for the run and is only appended to a
   // report-only prompt. It is never generated by Jev.
-  const reportPath = reportWorkflow ? analysisReportPath(dir) : null;
+  const reportPath = prepareRun ? briefMdPath(dir) : (reportWorkflow ? analysisReportPath(dir) : null);
   const templates={ common:WORKFLOW_TEMPLATE_IDS.common, workflow:WORKFLOW_TEMPLATE_IDS[decision.selected] };
   writeFileSync(join(dir,'workflow.json'),JSON.stringify({ promptTemplateId:WORKFLOW_TEMPLATE_IDS.common, common:templates.common, selected:decision.selected, workflowTemplateId:templates.workflow, report:reportPath, decision },null,2));
 
@@ -2096,6 +2146,24 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   else if (checks.some((c:any)=>c.exitCode !== 0 || c.error || c.timedOut || c.outputTruncated)) status='checks_failed';
   else status= mock ? 'simulation_passed' : 'ready_for_review';
 
+  // A mock prepare run has no model to author the brief, so synthesize a
+  // well-formed placeholder; a live run reads (and augments) what the worker
+  // wrote. The brief always carries the routed playbooks so the correction-rate
+  // history can be attributed to them.
+  if (prepareRun && mock && !existsSync(briefPath(dir))) {
+   const placeholder = buildPlaceholderBrief(t);
+   writeFileSync(briefPath(dir), JSON.stringify(placeholder, null, 2));
+   writeFileSync(briefMdPath(dir), renderBrief(placeholder));
+  }
+  let prepareBrief:any=null;
+  if (prepareRun && existsSync(briefPath(dir))) {
+   try { prepareBrief=JSON.parse(readFileSync(briefPath(dir),'utf8')); } catch { prepareBrief=null; }
+   if (prepareBrief) {
+    prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
+    writeFileSync(briefPath(dir), JSON.stringify(prepareBrief, null, 2));
+   }
+  }
+
   // An analysis-only workflow reports completion only when its deterministic
   // report exists in the run artifact directory. A missing report downgrades an
   // otherwise-passing run; it never upgrades a failure. This is a contract
@@ -2106,6 +2174,12 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    status='needs_review';
    workerError = workerError || `Analysis report missing: expected ${reportPath}; analysis-only workflows report completion only after the report exists.`;
   }
+  // A completed prepare run stops at a choice, not at review: the manager must
+  // pick an option before any implementation.
+  if (prepareRun && prepareBrief && (status === 'simulation_passed' || status === 'ready_for_review' || status === 'needs_review')) {
+   status='needs_choice';
+  }
+
   // QA is report-only. If the reviewer changed production files despite the
   // instruction, the existing evidence delta flags it as needs_review; there is
   // no automatic remediation.
@@ -2149,6 +2223,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const runtime=heartbeat.snapshot();
   const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments};
   result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
+  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
   result.unresolved=[];
   if (streamResult?.timedOut && streamResult.timedOutTool) {
    result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };

@@ -484,7 +484,7 @@ test('Validate accepts analysis workflows and preserves them',()=>{
  assert.equal(isAnalysisWorkflow('evaluate'),true);
  assert.equal(isAnalysisWorkflow('recon'),true);
  assert.equal(isAnalysisWorkflow('test_first'),false);
- assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate','discover','investigate']);
+ assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate','discover','investigate','prepare']);
 });
 test('fmeca and evaluate prompt blocks carry the bounded evidence contract',()=>{
  const fmeca=WORKFLOW_PROMPT_BLOCKS.fmeca;

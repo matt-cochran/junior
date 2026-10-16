@@ -214,6 +214,44 @@ test('junior validate rejects excess positional arguments', () => {
   assert.notEqual(runJunior(['validate', 'a.json', 'b.json'], workdir()).status, 0);
 });
 
+// --- prepare --choose/--correct flag handling -------------------------------
+
+function chooseTask(dir: string, id: string): string {
+  const taskPath = join(dir, `${id}.json`);
+  writeFileSync(taskPath, JSON.stringify({
+    id,
+    deliverable: 'Choose an option',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+  }));
+  return taskPath;
+}
+
+function writeBrief(dir: string, id: string): void {
+  const briefDir = join(dir, '.delivery', id, '123');
+  mkdirSync(briefDir, { recursive: true });
+  writeFileSync(join(briefDir, 'brief.json'), JSON.stringify({
+    understanding: { scope: [{ id: 'U1', text: 'Do it' }], outOfScope: [], assumptions: [{ id: 'A2', text: 'guess', status: 'guess' }], acceptanceProof: [] },
+    options: [{ id: 'B', title: 'B', approach: 'Option B approach', files: [], effort: { optimistic: 1, likely: 1, pessimistic: 1 }, risks: [], tradeoffs: 'none' }],
+    recommendation: { option: 'B', why: 'best' },
+  }));
+}
+
+test('junior handoff --choose records the choice in the prepare history', () => {
+  const dir = workdir();
+  const id = 'choose-cli';
+  const taskPath = chooseTask(dir, id);
+  writeBrief(dir, id);
+  runJunior(['handoff', taskPath, '--choose', 'B', '--correct', 'A2=x', '--mock', '--quiet'], dir);
+  assert.ok(existsSync(join(dir, '.delivery', 'prepare-history.jsonl')));
+});
+
+test('junior run rejects --choose', () => {
+  assert.notEqual(runJunior(['run', chooseTask(workdir(), 'run-cli'), '--choose', 'B'], workdir()).status, 0);
+});
+
 // --- nested tools strict flag parsing --------------------------------------
 
 test('tools inspect rejects an unknown option', () => {

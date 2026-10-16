@@ -20,6 +20,7 @@ import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { isDirectEntry, readPackageVersion } from './cli-entry.ts';
 import { parseDuration, pruneWorktrees } from './retention.ts';
+import { chooseBrief, readLatestBrief } from './prepare.ts';
 
 function usage(): string {
  return [
@@ -66,8 +67,8 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--mock] [--full] [--quiet]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct'], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
@@ -112,12 +113,15 @@ function wantsHelp(args: string[]): boolean {
 interface ParsedCommand {
  flags: Set<string>;
  values: Record<string, string>;
+ /** Every value for a repeatable value flag, in order (e.g. --correct). */
+ multi: Record<string, string[]>;
  files: string[];
 }
 
 function parseCommand(command: string, spec: CommandSpec, args: string[]): ParsedCommand {
  const flags = new Set<string>();
  const values: Record<string, string> = {};
+ const multi: Record<string, string[]> = {};
  const files: string[] = [];
  for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -139,6 +143,7 @@ function parseCommand(command: string, spec: CommandSpec, args: string[]): Parse
     if (value === undefined) value = args[++i];
     if (value === undefined || value === '' || value.startsWith('-')) throw Error(`Option ${name} requires a value`);
     values[name] = value;
+    (multi[name] ??= []).push(value);
     continue;
    }
    throw Error(`Unknown option for ${command}: ${name}`);
@@ -148,7 +153,23 @@ function parseCommand(command: string, spec: CommandSpec, args: string[]): Parse
  }
  if (files.length < spec.min) throw Error(spec.help);
  if (files.length > spec.max) throw Error(`Too many arguments for ${command}: expected at most ${spec.max}`);
- return { flags, values, files };
+ return { flags, values, multi, files };
+}
+
+/** Apply `--choose <option>` to a handoff: read the latest prepare brief for the
+ * contract, build the implementation contract with any `--correct` replacements
+ * and record the choice in the prepare history. */
+function applyChooseOption(task: any, cwd: string, parsed: ParsedCommand): any {
+ const latest = readLatestBrief(cwd, String(task?.id));
+ if (!latest) throw Error(`No prepare brief found for ${String(task?.id)}; run the prepare workflow first.`);
+ const corrections: Record<string, string> = {};
+ for (const raw of parsed.multi['--correct'] ?? []) {
+  const eq = raw.indexOf('=');
+  if (eq <= 0) throw Error(`Invalid --correct value (expected <id>=<text>): ${raw}`);
+  corrections[raw.slice(0, eq)] = raw.slice(eq + 1);
+ }
+ const { contract } = chooseBrief({ cwd, task, brief: latest.brief, choice: { option: parsed.values['--choose'], corrections } });
+ return contract;
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -280,13 +301,15 @@ async function main(argv: string[]): Promise<void> {
   return;
  }
  if (command === 'run' || command === 'handoff' || command === 'qa') {
+  if (parsed.values['--choose'] !== undefined && command !== 'handoff') throw Error('--choose is only valid for junior handoff');
   const path = parsed.files[0];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  const task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
+  let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
   if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
   const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+  if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
   const slowMount = detectSlowMount(taskCwd);
   if (slowMount) deps.progress?.(slowMount);
   const result = await run(task, mock, deps);
