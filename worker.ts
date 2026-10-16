@@ -218,7 +218,7 @@ export function validate(t: any) {
  }
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
  if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
- if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, qa or auto)');
+ if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, discover, investigate, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
@@ -552,18 +552,19 @@ export function estimateCost(receipt:Receipt, pricing:any, billing?:BillingCaptu
 // separate from the gate pass/block status.
 // ---------------------------------------------------------------------------
 
-export const EXPLICIT_WORKFLOWS = ['recon','test_first','checks_first','fmeca','evaluate','qa'] as const;
+export const EXPLICIT_WORKFLOWS = ['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','qa'] as const;
 export type ExplicitWorkflow = typeof EXPLICIT_WORKFLOWS[number];
 export type Workflow = ExplicitWorkflow | 'auto';
 
 /** Analysis-only workflows produce a report and never implement production
  * changes. `recon` is inspect-first analysis; `fmeca` and `evaluate` are
- * structured risk/architecture reviews. The analysis-only scope is a contract
- * boundary enforced through the required report and the handback, not an OS
- * sandbox. */
-export const ANALYSIS_WORKFLOWS = ['recon','fmeca','evaluate'] as const;
+ * structured risk/architecture reviews; `discover` is a requirements interview
+ * and `investigate` runs one scientific-process experiment per handoff. The
+ * analysis-only scope is a contract boundary enforced through the required
+ * report and the handback, not an OS sandbox. */
+export const ANALYSIS_WORKFLOWS = ['recon','fmeca','evaluate','discover','investigate'] as const;
 export function isAnalysisWorkflow(w:unknown):w is typeof ANALYSIS_WORKFLOWS[number] {
- return w === 'recon' || w === 'fmeca' || w === 'evaluate';
+ return w === 'recon' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate';
 }
 
 /** The report-only QA review workflow reviews a prior deliverable in a fresh
@@ -592,6 +593,8 @@ export const WORKFLOW_TEMPLATE_IDS = {
  checks_first:'delivery-checks-first-1',
  fmeca:'delivery-fmeca-1',
  evaluate:'delivery-evaluate-1',
+ discover:'delivery-discover-1',
+ investigate:'delivery-investigate-1',
  qa:'delivery-qa-1',
 } as const;
 
@@ -603,6 +606,8 @@ export const WORKFLOW_DESCRIPTIONS:Record<ExplicitWorkflow,string> = {
  checks_first:'Run the existing checks to inspect current behavior before changing anything; suited to setup and documentation work.',
  fmeca:'Analysis-only qualitative FMECA across UX, runtime, architecture and delivery: bounded high-impact failure modes with evidence labels, prevention-first mitigation, production observability and conditional residual risk; no production changes.',
  evaluate:'Analysis-only architecture validity review first (classification, simpler alternatives, removal/demotion proposals) then FMECA plus calibration, observability, over-engineering and incremental-delivery reality checks; no production changes.',
+ discover:'Analysis-only requirements interview backed by the elicitation tool: research the repository first, record established claims with evidence, rank open questions by leverage with suggested answers, record contradictions and the readiness.assess result; no production changes.',
+ investigate:'Analysis-only scientific-process experiment per handoff: state or resume a hypothesis, design the smallest refuting experiment, record the observation with raw evidence, and recommend the next experiment; never concludes Supported without supporting observations and makes no production changes.',
  qa:'Report-only independent review of a prior deliverable from its result.json: compare acceptance with the complete tracked/staged/untracked changes and checks, report missing coverage and regressions with severity, file references and acceptance IDs; no production changes.',
 };
 
@@ -652,6 +657,18 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
   'Phase 3 - reality check: explicitly assess calibration risk (are confidence or scoring signals trustworthy, and how will they be validated), observability risk (can bad decisions, incorrect extraction, premature completion and policy regressions be detected in production), over-engineering risk (does complexity exceed demonstrated value; what is the simplest viable version) and incremental-delivery risk (can this be built in phases with clean migration and rollback).',
   'Bounds and evidence discipline: at most 3 iterations and 8-15 highest-impact failure modes where the scope warrants; do not invent failure modes to meet a quota. Stop early on no improvement, a constraint violation or the deadline and report the honest unresolved outcome. Prioritize every High severity risk (including Low probability), then Medium; mitigation order prevention, then early detection, then fail-fast. Use TRIZ only for a real trade-off. If the `triz` CLI is on PATH, `triz catalog` lists the principles offline; `triz analyze` is a paid classification call, so do not run it unless the contract authorizes it, and otherwise state the contradiction for the manager. Before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report; a claim whose span was not opened and quoted is labelled inferred, not proven-here. Label evidence tested/proven-here (with concrete file/function/test), adapted or speculation; mark unknown rather than fabricate. The report is a set of leads for the manager to verify, not findings. Preserve essential capabilities and explicit user constraints.',
  ].join('\n'),
+ discover:[
+  'Workflow (discover): requirements interview backed by the elicitation tool. Do not modify production code. This is an instruction to the worker, not a sandbox guarantee.',
+  'Research the repository first and record what you can establish as claims with app_research evidence. Never invent user answers.',
+  'Open or resume an elicitation session (session_id = the contract id) through the Junior CLI: `junior tools call <hop> elicitation <request.json>`, where `<hop>` is the hop handoff path stated in this prompt. When the contract does not supply hopFrom, still produce the report and state that the tool session was not recorded.',
+  'Write analysis-report.md with: the established claims and their evidence; the open questions ranked by leverage (from question.next), each with a suggested answer and why; the contradictions found; and the readiness.assess result.',
+ ].join('\n'),
+ investigate:[
+  'Workflow (investigate): one scientific-process experiment per handoff. Do not modify production code. This is an instruction to the worker, not a sandbox guarantee.',
+  'State or resume the hypothesis (session_id = the contract id) through the Junior CLI: `junior tools call <hop> scientific-process <request.json>`, where `<hop>` is the hop handoff path stated in this prompt. When the contract does not supply hopFrom, still produce the report and state that the tool session was not recorded.',
+  'Design the smallest experiment that could refute the hypothesis, run it in the .delivery scratch area, and record the observation with raw evidence through the same scientific-process tool call.',
+  'Never conclude Supported without supporting observations; a hypothesis with no supporting observation is unresolved. Write analysis-report.md with the hypothesis, experiment, prediction, observation, evidence, and the recommended next experiment or conclusion.',
+ ].join('\n'),
  qa:[
   'Workflow (qa): report-only independent review of a prior deliverable. Do not modify production code, commit, push, repair, or start nested workers or paid calls. This is an instruction to the worker, not a sandbox guarantee.',
   'Review only the grounded context provided: the prior result, the original prompt/contract evidence and the complete tracked, staged and untracked change evidence. Do not load the full transcript by default.',
@@ -664,7 +681,7 @@ export const WORKFLOW_PROMPT_BLOCKS:Record<ExplicitWorkflow,string> = {
 
 export function taskWorkflow(t:any):Workflow {
  const w=t?.workflow;
- return w === 'recon' || w === 'test_first' || w === 'checks_first' || w === 'fmeca' || w === 'evaluate' || w === 'qa' || w === 'auto' ? w : 'auto';
+ return w === 'recon' || w === 'test_first' || w === 'checks_first' || w === 'fmeca' || w === 'evaluate' || w === 'discover' || w === 'investigate' || w === 'qa' || w === 'auto' ? w : 'auto';
 }
 
 export type WorkflowDecision = {
@@ -908,6 +925,52 @@ export function analysisReportBlock(reportPath:string):string {
  ].join('\n');
 }
 
+/** Fixed report requirement block for the discover requirements-interview
+ * workflow. It names the deterministic artifact path and the interview report
+ * contents. This is an instruction to the worker, not a sandbox guarantee. */
+export function discoverReportBlock(reportPath:string):string {
+ return [
+  `Analysis report requirement: write the complete analysis report to this exact artifact path: ${reportPath}`,
+  'Save the report there before finishing. The handback is needs_review until that file exists; a missing report is never reported as completion.',
+  'The report must contain: the established claims and their evidence; the open questions ranked by leverage (from question.next), each with a suggested answer and why; the contradictions found; and the readiness.assess result. Never invent user answers. The report is a set of leads for the manager to verify, not findings.',
+  'This is an instruction to the worker, not a sandbox guarantee.',
+ ].join('\n');
+}
+
+/** Fixed report requirement block for the investigate scientific-process
+ * workflow. It names the deterministic artifact path and the experiment report
+ * contents. This is an instruction to the worker, not a sandbox guarantee. */
+export function investigateReportBlock(reportPath:string):string {
+ return [
+  `Analysis report requirement: write the complete analysis report to this exact artifact path: ${reportPath}`,
+  'Save the report there before finishing. The handback is needs_review until that file exists; a missing report is never reported as completion.',
+  'The report must contain: the hypothesis, the experiment, the prediction, the observation, the raw evidence, and the recommended next experiment or conclusion. Never conclude Supported without supporting observations. The report is a set of leads for the manager to verify, not findings.',
+  'This is an instruction to the worker, not a sandbox guarantee.',
+ ].join('\n');
+}
+
+/** Select the deterministic report requirement block for a report workflow. */
+export function reportBlockFor(workflow:ExplicitWorkflow, reportPath:string):string {
+ if (workflow === 'qa') return qaReportBlock(reportPath);
+ if (workflow === 'discover') return discoverReportBlock(reportPath);
+ if (workflow === 'investigate') return investigateReportBlock(reportPath);
+ return analysisReportBlock(reportPath);
+}
+
+/** Fixed lines naming the hop handoff path and the Junior CLI command that the
+ * discover and investigate workflows use to reach the tool session. Present
+ * only when the contract supplies hopFrom; without it the workflow still
+ * produces the report and states that the tool session was not recorded. */
+export function hopToolBlock(t:any, workflow?:ExplicitWorkflow):string|null {
+ const from=t?.hopContext?.from ?? (typeof t?.hopFrom === 'string' && t.hopFrom.trim() ? t.hopFrom : null);
+ if (!from) return null;
+ const tool = workflow === 'investigate' ? 'scientific-process' : 'elicitation';
+ return [
+  `Hop handoff path: ${from}`,
+  `Record the tool session through the Junior CLI: junior tools call ${from} ${tool} <request.json> (session_id = the contract id).`,
+ ].join('\n');
+}
+
 /** Build the fixed prompt blocks for a workflow. The only variable content is
  * the task contract JSON, the deterministic report path and (for qa) the
  * grounded review context; no Jev-generated prose is inserted. */
@@ -920,7 +983,7 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
    'Do not treat any prior recommendation as authorization to modify production code.',
   ].join('\n');
  }
- const reportBlock = reportPath ? (workflow === 'qa' ? qaReportBlock(reportPath) : analysisReportBlock(reportPath)) : null;
+ const reportBlock = reportPath ? reportBlockFor(workflow, reportPath) : null;
  const reviewBlock = reviewContext ? reviewContext : null;
  const contextBlock = codeContext ? codeContextBlock(codeContext) : null;
  return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock, context:contextBlock};
@@ -929,6 +992,8 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
 export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null):string {
  const parts=promptParts(workflow, resume, reportPath, reviewContext, codeContext);
  const blocks=[parts.common, parts.workflow];
+ const hop = (workflow === 'discover' || workflow === 'investigate') ? hopToolBlock(t, workflow) : null;
+ if (hop) blocks.push(hop);
  if (parts.report) blocks.push(parts.report);
  if (parts.review) blocks.push(parts.review);
  if (parts.context) blocks.push(parts.context);

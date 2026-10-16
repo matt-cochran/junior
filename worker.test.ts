@@ -12,6 +12,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
+ hopToolBlock,discoverReportBlock,investigateReportBlock,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
@@ -482,7 +483,7 @@ test('Validate accepts analysis workflows and preserves them',()=>{
  assert.equal(isAnalysisWorkflow('evaluate'),true);
  assert.equal(isAnalysisWorkflow('recon'),true);
  assert.equal(isAnalysisWorkflow('test_first'),false);
- assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate']);
+ assert.deepEqual([...ANALYSIS_WORKFLOWS],['recon','fmeca','evaluate','discover','investigate']);
 });
 test('fmeca and evaluate prompt blocks carry the bounded evidence contract',()=>{
  const fmeca=WORKFLOW_PROMPT_BLOCKS.fmeca;
@@ -546,6 +547,77 @@ test('Auto workflow can select fmeca or evaluate through one Jev choice',async()
   assert.equal(r.workflow.selected,w);
   assert.equal(r.workflow.recommended,w);
  }
+});
+// --- D10 discover/investigate analysis workflows (offline; no paid calls) ---
+test('Validate accepts the discover workflow',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{workflow:'discover'})));
+});
+test('Validate accepts the investigate workflow',()=>{
+ assert.doesNotThrow(()=>validate(task(0,{workflow:'investigate'})));
+});
+test('The invalid-workflow error names discover and investigate',()=>{
+ assert.throws(()=>validate(task(0,{workflow:'bogus'})),/discover.*investigate/);
+});
+test('discover is classified as an analysis workflow',()=>{
+ assert.equal(isAnalysisWorkflow('discover'),true);
+});
+test('investigate is classified as an analysis workflow',()=>{
+ assert.equal(isAnalysisWorkflow('investigate'),true);
+});
+test('taskWorkflow preserves the discover value',()=>{
+ assert.equal(taskWorkflow({workflow:'discover'}),'discover');
+});
+test('taskWorkflow preserves the investigate value',()=>{
+ assert.equal(taskWorkflow({workflow:'investigate'}),'investigate');
+});
+test('EXPLICIT_WORKFLOWS lists discover',()=>{
+ assert.ok((EXPLICIT_WORKFLOWS as readonly string[]).includes('discover'));
+});
+test('EXPLICIT_WORKFLOWS lists investigate',()=>{
+ assert.ok((EXPLICIT_WORKFLOWS as readonly string[]).includes('investigate'));
+});
+test('WORKFLOW_DESCRIPTIONS offers discover to the Jev workflow choice',()=>{
+ assert.ok(WORKFLOW_DESCRIPTIONS.discover.length>0);
+});
+test('WORKFLOW_DESCRIPTIONS offers investigate to the Jev workflow choice',()=>{
+ assert.ok(WORKFLOW_DESCRIPTIONS.investigate.length>0);
+});
+test('The discover prompt names the elicitation CLI call',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.discover,/junior tools call/);
+});
+test('The discover prompt names the readiness.assess result',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.discover,/readiness\.assess/);
+});
+test('The investigate prompt names the scientific-process CLI call',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.investigate,/junior tools call/);
+});
+test('The investigate prompt forbids concluding Supported without observations',()=>{
+ assert.match(WORKFLOW_PROMPT_BLOCKS.investigate,/Never conclude Supported without supporting observations/);
+});
+test('The hop tool block names the hop path and the elicitation CLI call',()=>{
+ const block=hopToolBlock({hopFrom:'/tmp/handoff/hop.json'},'discover');
+ assert.match(block!,/junior tools call \/tmp\/handoff\/hop\.json elicitation/);
+});
+test('The hop tool block is absent without hopFrom',()=>{
+ assert.equal(hopToolBlock({workflow:'discover'}),null);
+});
+test('The discover prompt states the hop path when hopFrom is set',()=>{
+ const prompt=buildPrompt(task(0,{workflow:'discover',hopFrom:'/tmp/handoff/hop.json'}),'discover');
+ assert.ok(prompt.includes('junior tools call /tmp/handoff/hop.json elicitation'));
+});
+test('The discover report block requires the established claims',()=>{
+ assert.match(discoverReportBlock('/tmp/art/analysis-report.md'),/established claims/i);
+});
+test('The investigate report block requires the recommended next experiment or conclusion',()=>{
+ assert.match(investigateReportBlock('/tmp/art/analysis-report.md'),/recommended next experiment or conclusion/i);
+});
+test('A discover run reports needs_review until its analysis report exists',async()=>{
+ const r=await run(task(0,{workflow:'discover'}),true);
+ assert.equal(r.status,'needs_review');
+});
+test('An investigate run reports needs_review until its analysis report exists',async()=>{
+ const r=await run(task(0,{workflow:'investigate'}),true);
+ assert.equal(r.status,'needs_review');
 });
 test('Analysis run without its report is needs_review, not completion',async()=>{
  const r=await run(task(0,{workflow:'fmeca'}),true);
