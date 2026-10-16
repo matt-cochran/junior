@@ -978,6 +978,10 @@ export async function main(argv: string[]): Promise<number> {
     const { runJtbd } = await import('./jtbd-bridge.ts');
     return runJtbd(argv.slice(1));
   }
+  if (argv[0] === 'analyze') {
+    const { runAnalyze } = await import('./matrix-analyze.ts');
+    return runAnalyze(argv.slice(1));
+  }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 1;
