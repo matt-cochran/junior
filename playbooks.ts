@@ -194,6 +194,10 @@ export type TraitVector = Record<string, number>;
  * Rank the playbooks that the trait vector activates. A playbook is selected
  * when its weighted score is positive; ties break deterministically by id.
  */
+/** A primary trait (weight >= 1) must be at least this likely to activate a
+ * playbook; a faint primary signal never selects it on its own. */
+export const PRIMARY_TRAIT_THRESHOLD = 0.5;
+
 export function selectPlaybooks(traits: TraitVector, catalog: PlaybookCatalog = loadPlaybooks()): ScoredPlaybook[] {
   for (const [trait, value] of Object.entries(traits)) {
     if (!(TRAITS as readonly string[]).includes(trait)) throw new Error(`selectPlaybooks: unknown trait ${trait}`);
@@ -215,7 +219,7 @@ export function selectPlaybooks(traits: TraitVector, catalog: PlaybookCatalog = 
       const contribution = value * weight;
       score += contribution;
       contributions.push([trait, contribution]);
-      if (weight >= 1) primary = true;
+      if (weight >= 1 && value >= PRIMARY_TRAIT_THRESHOLD) primary = true;
     }
     if (score <= 0 || !primary) continue;
     contributions.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));

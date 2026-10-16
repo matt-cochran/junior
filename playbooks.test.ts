@@ -151,3 +151,8 @@ test('the playbook plan covers at least 27 of the 30 routing cases', () => {
   if (misses.length > 0) console.log(`routing misses:\n  ${misses.join('\n  ')}`);
   assert.ok(passes >= 27, `expected >=27 passing cases, got ${passes}`);
 });
+
+test('a faint primary trait does not activate its playbook', () => {
+  const ranked = selectPlaybooks({ vague_request: 0.1, plan_sized: 0.65, customer_job_or_outcome: 0.46 });
+  assert.equal(ranked.some((p) => p.id === 'vague-feature'), false);
+});
