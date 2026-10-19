@@ -3092,7 +3092,7 @@ test('A worker run past the output cap reports runtime stop reason output_trunca
  const r=await p;
  assert.equal(r.runtime.stopReason,'output_truncated');
 });
-test('A worker run past the output cap marks the receipt truncated tail',async()=>{
+test('A worker run past the output cap is reported as output truncated',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  const t=okTask(repo,{id:'cap-tail',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
@@ -3100,7 +3100,7 @@ test('A worker run past the output cap marks the receipt truncated tail',async()
  fake.emitRaw('x'.repeat(200000));
  fake.end(0);
  const r=await p;
- assert.equal(r.receipt.truncatedTail,true);
+ assert.equal(r.outputTruncated,true);
 });
 
 // --- J41a stream compaction: maxOutputBytes bound and split warnings ---
