@@ -207,6 +207,9 @@ function skillArgs(id: CompanionId, target: Exclude<SkillTarget, 'none'>, scope:
     const targets = target === 'both' ? 'claude-code,codex' : target === 'claude' ? 'claude-code' : 'codex';
     return ['init', '--json', '--skip-keys', '--skip-project', '--targets', targets];
   }
+  if (id === 'scientific-process' || id === 'elicitation') {
+    return ['skills', 'install', '--target', target, ...(scope === 'user' ? ['--user'] : ['--dir', cwd])];
+  }
   const t = target === 'both' ? 'all' : target;
   return ['skills', 'install', '--target', t, ...(scope === 'user' ? ['--user'] : ['--project', cwd])];
 }

@@ -38,8 +38,23 @@ active harness (`--harness claude|cursor|codex`) covering skills, MCP
 registration, managed tools and cached updates. When `readiness.ready` is false,
 `junior setup` previews an ordered repair plan and confirms before applying it
 (`--dry-run`, `--yes`). A cached 24-hour update notice may print one stderr line
-on `init`, `doctor`, `status` or `validate`; `JUNIOR_NO_UPDATE_CHECK=1` disables
-it, and `junior update` adopts newer releases.
+on `init`, `doctor`, `status` or `validate`, including an outdated Junior skill
+found by a local hash check; `JUNIOR_NO_UPDATE_CHECK=1` disables it, and
+`junior update` adopts newer releases. `doctor` names an outdated, customized or
+missing Junior skill in its `warnings` and `remediation`, and `junior init`
+refreshes an unmodified outdated copy (a customized copy is kept unless
+`--force`).
+
+After reviewing a handoff, `junior apply <id|result.json> [--dry-run] [--force]`
+applies its worktree diff (tracked and new files) to the source checkout with a
+three-way merge; it refuses a run that is not `ready_for_review`, or whose base
+commit is no longer an ancestor of `HEAD`, and leaves the tree unchanged on
+conflict. A contract with `plan: {id, deliverable}` (and `hopFrom`) leases that
+cpm deliverable before the worker starts and records its hours and evidence
+afterwards (`in_progress` on success, `failed` otherwise); the manager still
+reviews and marks it complete. `junior tools call cpm plan.status plan_id=...`
+calls a tool inline against `.delivery/setup/hop.json` and prints only the
+result.
 
 Junior routes each contract from Jev task traits to deterministic playbooks and a
 `toolPlan` (worker directions plus manager setup) that is reflected before the

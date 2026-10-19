@@ -54,7 +54,7 @@ function writeJson(file, value) {
   return file;
 }
 
-function runCli(args, timeout = 30000, extraEnv = {}) {
+function runCli(args, timeout = 30000, extraEnv = {}, opts = {}) {
   const env = {
     ...process.env,
     // Keep the CLI independent of the developer's real managed install and auth.
@@ -64,7 +64,7 @@ function runCli(args, timeout = 30000, extraEnv = {}) {
   delete env.OPENROUTER_API_KEY;
   delete env.CPM_OPENROUTER_KEY_FILE;
   Object.assign(env, extraEnv);
-  return spawnSync(NODE, [TOOLS, ...args], { encoding: "utf8", timeout, env });
+  return spawnSync(NODE, [TOOLS, ...args], { encoding: "utf8", timeout, env, cwd: opts.cwd, input: opts.input });
 }
 
 function cliJson(result) {
@@ -147,6 +147,135 @@ test("call records a read snapshot whose sha256 matches the stored file", () => 
   assert.equal(snap.sha256, digest);
 });
 
+// --- call ergonomics ----------------------------------------------------------
+//
+// `call` keeps the request-file form, defaults the hop when the first argument
+// is a tool name, accepts inline `method key=value` arguments, and prints only
+// the result value unless `--full` asks for the whole envelope.
+
+function defaultHop(dir, overrides) {
+  const hopDir = path.join(dir, ".delivery", "setup");
+  fs.mkdirSync(hopDir, { recursive: true });
+  const hop = path.join(hopDir, "hop.json");
+  const cfg = writeConfig(dir, overrides);
+  runCli(["init", hop, cfg]);
+  return hop;
+}
+
+test("call defaults the hop to .delivery/setup/hop.json under the current directory", () => {
+  const dir = tmpdir();
+  defaultHop(dir);
+  const result = runCli(["call", "fmeca", "state.get", "session_id=s1"], 30000, {}, { cwd: dir });
+  assert.equal(result.status, 0);
+});
+
+test("inline key=value arguments decode JSON values and keep bare tokens as strings", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const result = runCli([
+    "call",
+    hop,
+    "cpm",
+    "plan.status",
+    "plan_id=plan_x",
+    "max_count=1",
+    'ids=["A"]',
+    'status={"status":"complete"}',
+  ]);
+  assert.deepEqual(cliJson(result).echo, {
+    plan_id: "plan_x",
+    max_count: 1,
+    ids: ["A"],
+    status: { status: "complete" },
+  });
+});
+
+test("compact success prints only the result value", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const result = runCli(["call", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.deepEqual(cliJson(result), { ok: true, echo: { session_id: "s1" } });
+});
+
+test("compact success writes one summary line to stderr", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const result = runCli(["call", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.match(result.stderr, /^junior tools: fmeca state\.get revision 1 snapshot snap_/);
+});
+
+test("compact failure exits 1", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir, {
+    tools: {
+      fmeca: toolEntry("error"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix"),
+    },
+  });
+  const result = runCli(["call", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.equal(result.status, 1);
+});
+
+test("--full still exits 1 on a tool failure", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir, {
+    tools: {
+      fmeca: toolEntry("error"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix"),
+    },
+  });
+  const result = runCli(["call", "--full", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.equal(result.status, 1);
+});
+
+test("compact tool failure prints an ok:false error envelope", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir, {
+    tools: {
+      fmeca: toolEntry("error"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix"),
+    },
+  });
+  const result = runCli(["call", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.equal(cliJson(result).error.code, "UPSTREAM_ERROR");
+});
+
+test("a - request path reads the request from stdin", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const input = JSON.stringify({ tool: "state.get", arguments: { session_id: "s1" } });
+  const result = runCli(["call", hop, "fmeca", "-"], 30000, {}, { input });
+  assert.deepEqual(cliJson(result), { ok: true, echo: { session_id: "s1" } });
+});
+
+test("the request-file form still works", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const req = writeJson(path.join(dir, "req.json"), {
+    tool: "state.get",
+    arguments: { session_id: "s1" },
+  });
+  const result = runCli(["call", hop, "fmeca", req]);
+  assert.deepEqual(cliJson(result), { ok: true, echo: { session_id: "s1" } });
+});
+
+test("--full prints the full call envelope", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const result = runCli(["call", "--full", hop, "fmeca", "state.get", "session_id=s1"]);
+  assert.equal(cliJson(result).kind, "read");
+});
+
+test("an unknown call option fails with USAGE", () => {
+  const dir = tmpdir();
+  const hop = initHop(dir);
+  const result = runCli(["call", "--nope", hop, "fmeca", "state.get"]);
+  assert.equal(cliJson(result).error.code, "USAGE");
+});
+
 // --- failure surfaces ---------------------------------------------------------
 
 test("missing MCP binary is reported as a spawn error", () => {
@@ -189,7 +318,7 @@ test("an old hop without the new tools still runs a cpm call", () => {
   const dir = tmpdir();
   const hop = legacyHop(dir);
   const req = writeJson(path.join(dir, "req.json"), { tool: "plan.status", arguments: {} });
-  const out = cliJson(runCli(["call", hop, "cpm", req]));
+  const out = cliJson(runCli(["call", "--full", hop, "cpm", req]));
   assert.equal(out.ok, true);
 });
 
@@ -249,7 +378,7 @@ test("upstream tool isError is propagated", () => {
     tool: "state.get",
     arguments: { session_id: "s1" },
   });
-  const out = cliJson(runCli(["call", hop, "fmeca", req]));
+  const out = cliJson(runCli(["call", "--full", hop, "fmeca", req]));
   assert.equal(out.isError, true);
 });
 
@@ -260,7 +389,7 @@ test("unsupported operation note is surfaced even when upstream ok is true", () 
     tool: "crossmatrix.command",
     arguments: { request: { requestId: "r1", op: { kind: "observe" } } },
   });
-  const out = cliJson(runCli(["call", hop, "crossmatrix", req]));
+  const out = cliJson(runCli(["call", "--full", hop, "crossmatrix", req]));
   assert.equal(out.unsupported, true);
 });
 
@@ -302,7 +431,7 @@ test("crossmatrix query sees the model imported in an earlier process", () => {
     tool: "crossmatrix.query",
     arguments: { request: { requestId: "q1", query: { kind: "validate" } } },
   });
-  const out = cliJson(runCli(["call", hop, "crossmatrix", queryReq]));
+  const out = cliJson(runCli(["call", "--full", hop, "crossmatrix", queryReq]));
   assert.equal(out.result.validated, true);
 });
 
@@ -702,7 +831,7 @@ test("a 0.3.0 store call reports the command's own result", () => {
   const log = path.join(dir, "writes.log");
   const hop = storeHop(dir, log, "0.3.0");
   const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
-  const out = cliJson(runCli(["call", hop, "crossmatrix", req]));
+  const out = cliJson(runCli(["call", "--full", hop, "crossmatrix", req]));
   assert.equal(out.result.op, "dimension.register");
 });
 

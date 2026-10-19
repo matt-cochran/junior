@@ -45,6 +45,7 @@ export const TASK_FIELDS = [
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
  'approveModel','approvedProfiles','modelProfile',
+ 'plan',
  'hopFrom','hopRevision','hopContext',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
@@ -52,6 +53,10 @@ export const TASK_FIELDS = [
 /** Every field a single check object may carry. `cwd` is optional and defaults
  * to the execution checkout. */
 export const CHECK_FIELDS = ['command','args','cwd'] as const;
+
+/** Every field a `plan` object may carry. The plan links a contract to the cpm
+ * plan deliverable it executes; `callerId` is the optional cpm caller identity. */
+export const PLAN_FIELDS = ['id','deliverable','callerId'] as const;
 
 /** True when `child` is the same path as or lexically inside `parent`. */
 export function withinWorkspace(parent:string, child:string):boolean {
@@ -134,6 +139,17 @@ export function validateContext(context:unknown, cwd:string):void {
   if (e.end !== undefined && (typeof e.end !== 'number' || !Number.isInteger(e.end) || e.end < 1)) throw Error('Invalid context.end (expected a positive integer)');
   if (e.start !== undefined && e.end !== undefined && e.start > e.end) throw Error('Invalid context range (context start must not exceed end)');
  }
+}
+
+/** Validate the optional `plan` link to a cpm plan deliverable. `id` and
+ * `deliverable` identify the deliverable; `callerId` is an optional identity.
+ * Unknown keys are rejected so a typo fails before the worker starts. */
+export function validatePlan(plan:any):void {
+ if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw Error('Invalid plan (expected an object)');
+ if (typeof plan.id !== 'string' || !plan.id.trim()) throw Error('Invalid plan.id (expected a non-empty string)');
+ if (typeof plan.deliverable !== 'string' || !plan.deliverable.trim()) throw Error('Invalid plan.deliverable (expected a non-empty string)');
+ if (plan.callerId !== undefined && (typeof plan.callerId !== 'string' || !plan.callerId.trim())) throw Error('Invalid plan.callerId (expected a non-empty string)');
+ for (const k of Object.keys(plan)) if (!(PLAN_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown plan field: ${k}`);
 }
 
 /** Resolve the contract `context` entries from the contract cwd into bounded
@@ -252,6 +268,10 @@ export function validate(t: any) {
   if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
  }
  if (t.modelProfile !== undefined && (typeof t.modelProfile !== 'string' || !t.modelProfile.trim())) throw Error('Invalid modelProfile (expected a roster profile id)');
+ if (t.plan !== undefined) {
+  validatePlan(t.plan);
+  if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');
+ }
  if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {

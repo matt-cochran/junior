@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
-import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, type InitOptions } from './setup.ts';
+import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, inspectSkill, type InitOptions } from './setup.ts';
 import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { refreshUpdateCache } from './update-check.ts';
@@ -29,8 +29,8 @@ function usage(): string {
   '  handoff <task.json> [--mock] [--full]   run a task and print the compact handoff (default isolation=worktree; qa defaults to none)',
   '  qa      <task.json> [--mock] [--full]   run the report-only QA review workflow in place (fresh reviewer session)',
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
-  '  validate <task.json>                    validate a task contract',
-  '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
+  '  apply   <id|result.json> [--dry-run] [--force]   apply a reviewed handoff to this checkout',
+  '  validate <task.json>; status <result.json> [--full]   validate a contract or print a receipt',
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
@@ -74,6 +74,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--approve-model'], min: 1, max: 1,
   help: 'Usage: junior run <task.json> [--approve-model <key>] [--mock] [--full] [--quiet]' },
+ apply: { flags: ['--dry-run', '--force'], valueFlags: [], min: 1, max: 1,
+  help: 'Usage: junior apply <id|result.json> [--dry-run] [--force]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
@@ -211,7 +213,14 @@ async function main(argv: string[]): Promise<void> {
  // Best-effort upgrade notice: must never throw and must never change the exit
  // code. It is skipped entirely for commands where an upgrade is not useful.
  const updateCheck = await import('./update-check.ts');
- await updateCheck.startupNotice(command, { env: process.env, checkUpdates: parsed.flags.has('--check-updates') });
+ await updateCheck.startupNotice(command, {
+  env: process.env,
+  checkUpdates: parsed.flags.has('--check-updates'),
+  localOutdated: () => {
+   const managers = inspectSkill().targets.filter((t) => t.status === 'outdated').map((t) => t.manager).sort();
+   return managers.length ? [`junior skill (${managers.join(', ')})`] : [];
+  },
+ });
 
  if (command === 'setup') {
   const setup = await import('./readiness.ts');
@@ -333,6 +342,13 @@ async function main(argv: string[]): Promise<void> {
   }
   return;
  }
+ if (command === 'apply') {
+  const { applyHandoff } = await import('./apply.ts');
+  const result = applyHandoff(parsed.files[0], { cwd: process.cwd(), dryRun: parsed.flags.has('--dry-run'), force: parsed.flags.has('--force') });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.error) process.exitCode = 1;
+  return;
+ }
  if (command === 'run' || command === 'handoff' || command === 'qa') {
   if (parsed.values['--choose'] !== undefined && command !== 'handoff') throw Error('--choose is only valid for junior handoff');
   const path = parsed.files[0];
@@ -356,8 +372,30 @@ async function main(argv: string[]): Promise<void> {
   if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
   const slowMount = detectSlowMount(taskCwd);
   if (slowMount) deps.progress?.(slowMount);
-  const result = await run(task, mock, deps);
-  console.log(JSON.stringify(parsed.flags.has('--full') ? result : compactHandoff(result), null, 2));
+  let result: any;
+  let plan: any;
+  if (task.plan !== undefined && command !== 'qa') {
+   validate(task);
+   const { withPlanLease } = await import('./plan-handoff.ts');
+   const { callHop } = await import('./tools/tools.ts');
+   const hopPath = resolve(taskCwd, String(task.hopFrom));
+   const lease = await withPlanLease(task, () => run(task, mock, deps), {
+    callHop: (tool, request) => callHop(hopPath, tool, request),
+    deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
+    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: r.status === 'needs_answers' || r.status === 'needs_choice', artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+   });
+   if (!lease.plan.leased) {
+    console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));
+    process.exitCode = 1;
+    return;
+   }
+   result = lease.result;
+   plan = lease.plan;
+  } else {
+   result = await run(task, mock, deps);
+  }
+  const receipt = parsed.flags.has('--full') ? result : compactHandoff(result);
+  console.log(JSON.stringify(plan ? { ...receipt, plan } : receipt, null, 2));
   if (!isSuccessOutcome(result.status)) process.exitCode = 1;
   return;
  }

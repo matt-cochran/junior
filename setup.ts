@@ -518,6 +518,12 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
   exec: deps.exec,
   integrations,
  }, { cwd, harness: opts.harness });
+ // A skill installed at user level is absent from the project roots; report it
+ // missing only when the harness-aware readiness check cannot find it either.
+ const juniorSkillFound=readiness.items.some((i)=>i.id === 'skill:junior' && i.status !== 'missing');
+ const skillLines=skillMessageLines(skill).filter((line)=>!(juniorSkillFound && line.startsWith('Junior skill is not installed')));
+ warnings.push(...skillLines);
+ remediation.push(...skillLines);
  return { command:'doctor', ok:checks.every((c)=>c.ok) && policyOk, warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, checks, remediation };
 }
 
@@ -740,7 +746,8 @@ function readSkillSource(deps:SetupDeps):{ path:string; text:string } {
 
 /** Install the packaged skill for the selected managers. Missing copies are
  * created; identical copies are left alone; an unmodified but outdated copy is
- * only replaced with `upgrade`; a customized copy is preserved unless `force`. */
+ * refreshed by default (pass `upgrade:false` to leave it); a customized copy is
+ * preserved unless `force`. */
 export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {}):SkillResult {
  const target=opts.target ?? 'both';
  const scope=opts.scope ?? 'project';
@@ -767,11 +774,11 @@ export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
   }
   const recorded=readManifestHash(deps,manifestPath);
   if (recorded && currentHash === recorded) {
-   if (opts.upgrade) {
+   if (opts.upgrade !== false) {
     write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
     actions.push({manager,path,status:'upgraded',message:`upgraded the ${manager} skill from its recorded version`});
    } else {
-    actions.push({manager,path,status:'outdated',message:`the ${manager} skill is outdated; re-run with --upgrade to replace the unmodified installed copy`});
+    actions.push({manager,path,status:'outdated',message:`the ${manager} skill is outdated; re-run \`junior init\` to replace the unmodified installed copy`});
    }
    continue;
   }
@@ -823,6 +830,20 @@ export function inspectSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
  }
  const ready=roots ? targets.some((t)=>t.status === 'current') : targets.every((t)=>t.status === 'current');
  return { ready, source:sourcePath, targets };
+}
+
+/** One plain-language doctor line per affected skill state, grouped by status
+ * and naming the affected managers (sorted) so the remedy is unambiguous. */
+function skillMessageLines(skill:SkillReadiness):string[] {
+ const managers=(status:SkillReadiness['targets'][number]['status'])=>skill.targets.filter((t)=>t.status === status).map((t)=>t.manager).sort().join(', ');
+ const states:Array<[SkillReadiness['targets'][number]['status'],(m:string)=>string]>=[
+  ['outdated',(m)=>`Junior skill is outdated (${m}); run \`junior update\``],
+  ['customized',(m)=>`Junior skill is customized (${m}); it is preserved; \`junior init --force\` replaces it`],
+  ['missing',(m)=>`Junior skill is not installed (${m}); run \`junior init\``],
+ ];
+ const lines:string[]=[];
+ for (const [status,format] of states) { const affected=managers(status); if (affected) lines.push(format(affected)); }
+ return lines;
 }
 
 const SKILL_TARGETS:SkillTargetSelection[]=['codex','claude','both','none'];

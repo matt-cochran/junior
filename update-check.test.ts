@@ -314,6 +314,78 @@ test('startupNotice resolves without throwing when the refresh fails', async () 
   await assert.doesNotReject(promise);
 });
 
+test('startupNotice appends local outdated entries after the cached entries', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: ['crossmatrix'], remediation: '' }));
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => ['junior skill (claude, codex)'],
+  });
+  assert.equal(line, 'junior: 2 updates available (crossmatrix, junior skill (claude, codex)); run `junior update`');
+});
+
+test('startupNotice prints a notice when only the local entries are outdated', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: [], remediation: '' }));
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => ['junior skill (claude, codex)'],
+  });
+  assert.equal(line, 'junior: 1 update available (junior skill (claude, codex)); run `junior update`');
+});
+
+test('startupNotice prints a notice when there is no cache but local entries are outdated', async () => {
+  const fs = memoryFs();
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs, writeNotice: () => {},
+    collect: async () => { throw new Error('offline'); },
+    localOutdated: () => ['junior skill (claude, codex)'],
+  });
+  assert.equal(line, 'junior: 1 update available (junior skill (claude, codex)); run `junior update`');
+});
+
+test('startupNotice ignores a throwing localOutdated callback and still prints the cached notice', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: ['junior'], remediation: '' }));
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => { throw new Error('skill scan failed'); },
+  });
+  assert.equal(line, 'junior: 1 update available (junior); run `junior update`');
+});
+
+test('startupNotice stays silent when a throwing localOutdated callback is the only source', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: [], remediation: '' }));
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => { throw new Error('skill scan failed'); },
+  });
+  assert.equal(line, null);
+});
+
+test('startupNotice does not call localOutdated for an ineligible command', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: ['junior'], remediation: '' }));
+  let called = false;
+  await (await import('./update-check.ts')).startupNotice('handoff', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => { called = true; return ['junior skill (claude, codex)']; },
+  });
+  assert.equal(called, false);
+});
+
+test('startupNotice does not call localOutdated when JUNIOR_NO_UPDATE_CHECK is set', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: ['junior'], remediation: '' }));
+  let called = false;
+  await (await import('./update-check.ts')).startupNotice('validate', {
+    env: { JUNIOR_NO_UPDATE_CHECK: '1' }, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+    localOutdated: () => { called = true; return ['junior skill (claude, codex)']; },
+  });
+  assert.equal(called, false);
+});
+
 // --- model update detection -------------------------------------------------
 
 test('collectUpdates exposes an injected model update under models.updates', async () => {

@@ -83,10 +83,66 @@ test('the new companions install their agent skills through their own binary', (
       .filter((c) => (c.command.endsWith('scientific-process') || c.command.endsWith('elicitation')) && c.args[0] === 'skills')
       .map((c) => [c.command.split('/').pop(), ...c.args]),
     [
-      ['scientific-process', 'skills', 'install', '--target', 'claude', '--project', '/repo'],
-      ['elicitation', 'skills', 'install', '--target', 'claude', '--project', '/repo'],
+      ['scientific-process', 'skills', 'install', '--target', 'claude', '--dir', '/repo'],
+      ['elicitation', 'skills', 'install', '--target', 'claude', '--dir', '/repo'],
     ],
   );
+});
+
+test('scientific-process skills install passes target both unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [SCIENTIFIC_PROCESS]: '0.2.0' } });
+  installCompanionSkills(deps, { target: 'both', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('scientific-process') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'both', '--dir', '/repo']);
+});
+
+test('scientific-process skills install passes target claude unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [SCIENTIFIC_PROCESS]: '0.2.0' } });
+  installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('scientific-process') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'claude', '--dir', '/repo']);
+});
+
+test('scientific-process skills install passes target codex unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [SCIENTIFIC_PROCESS]: '0.2.0' } });
+  installCompanionSkills(deps, { target: 'codex', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('scientific-process') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'codex', '--dir', '/repo']);
+});
+
+test('scientific-process skills install uses --user for user scope', () => {
+  const { deps, calls } = world({ installed: { [SCIENTIFIC_PROCESS]: '0.2.0' } });
+  installCompanionSkills(deps, { target: 'both', scope: 'user', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('scientific-process') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'both', '--user']);
+});
+
+test('elicitation skills install passes target both unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [ELICITATION]: '0.1.0' } });
+  installCompanionSkills(deps, { target: 'both', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('elicitation') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'both', '--dir', '/repo']);
+});
+
+test('elicitation skills install passes target claude unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [ELICITATION]: '0.1.0' } });
+  installCompanionSkills(deps, { target: 'claude', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('elicitation') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'claude', '--dir', '/repo']);
+});
+
+test('elicitation skills install passes target codex unchanged in project scope', () => {
+  const { deps, calls } = world({ installed: { [ELICITATION]: '0.1.0' } });
+  installCompanionSkills(deps, { target: 'codex', scope: 'project', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('elicitation') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'codex', '--dir', '/repo']);
+});
+
+test('elicitation skills install uses --user for user scope', () => {
+  const { deps, calls } = world({ installed: { [ELICITATION]: '0.1.0' } });
+  installCompanionSkills(deps, { target: 'both', scope: 'user', cwd: '/repo' });
+  assert.deepEqual(calls.find((c) => c.command.endsWith('elicitation') && c.args[0] === 'skills')?.args,
+    ['skills', 'install', '--target', 'both', '--user']);
 });
 
 test('the companion catalog describes crossmatrix with its npm package and MCP launcher', () => {

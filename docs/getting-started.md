@@ -200,11 +200,13 @@ operations are explicitly scoped:
   manager user directory) and overrides the resolved root.
 
 Reruns are safe: an identical copy is left as-is, a missing copy is created, an
-unmodified but outdated copy is reported and preserved until `--upgrade`, and a
+unmodified but outdated copy is refreshed (reported as `upgraded`), and a
 customized copy is reported as a conflict and preserved unless `--force` is
 given. Junior records the hash it wrote in a `.junior-manifest.json` beside the
-installed skill; `--upgrade` only replaces a file whose current hash still
-matches that manifest, so a customization is never silently overwritten.
+installed skill and only refreshes a file whose current hash still matches that
+manifest, so a customization is never silently overwritten. `junior doctor`
+reports each state in `warnings` and `remediation`, naming the affected managers
+(for example "Junior skill is outdated (claude, codex); run `junior update`").
 
 ##### Installing Pi (`init`)
 `init` installs Pi when it is missing (opt out with `--no-install`; the older

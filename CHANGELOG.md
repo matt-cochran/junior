@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-19
+
+### Added
+
+- `junior apply <id|result.json> [--dry-run] [--force]` applies a reviewed
+  handoff's worktree diff, including new files, to the source checkout with a
+  three-way merge. It refuses a run that is not `ready_for_review` or whose base
+  is no longer an ancestor of `HEAD`, and leaves the tree unchanged on conflict.
+- Plan-aware handoff: a contract with `plan: {id, deliverable, callerId?}` and
+  `hopFrom` leases that cpm deliverable before the worker starts (refusing with
+  `plan_lease_refused`), then records wall hours and evidence with
+  `plan.mark_status` (`in_progress` on success, `failed` otherwise). A lease the
+  same caller already holds is re-entered for repairs and clarify re-runs, and
+  `needs_answers`/`needs_choice` keep the lease without marking. The receipt
+  gains a `plan` block; the manager still reviews and completes.
+- `junior tools call` takes an optional hop (default
+  `.delivery/setup/hop.json`) and an inline form,
+  `junior tools call cpm plan.status plan_id=...`, whose values are JSON when
+  they parse.
+
+### Changed
+
+- `junior tools call` prints only the tool result by default, writes the
+  revision and snapshot id to stderr and exits 1 on a tool or RPC failure;
+  `--full` prints the previous envelope.
+- `junior init` refreshes an unmodified outdated Junior skill copy without
+  `--upgrade` (a customized copy is still preserved unless `--force`) (#55).
+
+### Fixed
+
+- `junior doctor` names an outdated, customized or missing Junior skill and the
+  affected managers in `warnings` and `remediation` instead of only reporting
+  `readiness.summary`, and the startup update notice includes an outdated
+  Junior skill (#55).
+
+- Companion skill installs build their argv per companion: scientific-process
+  and elicitation now receive `--target claude|codex|both` (never `all`) and
+  `--dir <cwd>` for project scope, so `junior update` installs their skills
+  (#52, #53).
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
@@ -298,7 +338,9 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/matt-cochran/junior/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/matt-cochran/junior/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/matt-cochran/junior/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/matt-cochran/junior/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/matt-cochran/junior/compare/v0.3.2...v0.4.0
