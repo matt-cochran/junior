@@ -25,6 +25,7 @@ const config = { mode: 'openrouter' as const, timeoutMs: 1000 };
 const budget = () => ({ timeoutMs: 1000, deadlineAt: Date.now() + 5000 });
 const apiKey = () => 'sk-secret-key';
 const okBody = (id: string, model: string, total: number) => ({ ok: true, status: 200, json: async () => ({ data: { id, model, total_cost: total } }) });
+const okBodyExtra = (id: string, model: string, total: number, extra: any) => ({ ok: true, status: 200, json: async () => ({ data: { id, model, total_cost: total, ...extra } }) });
 const U = { input: 1, output: 2, totalTokens: 3, cost: { total: 0 } };
 const assistant = (over: any = {}) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', provider: 'openrouter', model: 'm', usage: U, stopReason: 'stop', ...over } });
 const stream = (...records: any[]) => records.map((r: any) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n';
@@ -244,4 +245,36 @@ test('Billing rejects one generation attributed to conflicting models', async ()
  const result = await captureBilling(receiptFor([gen(), gen({ model: 'other' })]), config, budget(),
   { resolveApiKey: apiKey, fetch: async () => okBody('gen-1', 'm', 1) });
  assert.equal(result.billedUsd, null);
+});
+
+// --- upstream provider and cache observability ---
+test('Capture aggregates two generations from the same upstream provider', async () => {
+ const cap = await captureBilling(receiptFor([gen(), gen({ responseId: 'gen-2' })]), config, budget(), {
+  resolveApiKey: apiKey,
+  fetch: async (url) => url.includes('gen-2')
+   ? okBodyExtra('gen-2', 'm', 0.75, { provider_name: 'DeepInfra' })
+   : okBodyExtra('gen-1', 'm', 0.25, { provider_name: 'DeepInfra' }),
+ });
+ assert.deepEqual(cap.providers, [{ provider: 'DeepInfra', generations: 2, cachedTokens: 0 }]);
+});
+test('Capture records the upstream provider name', async () => {
+ const cap = await captureBilling(receiptFor([gen()]), config, budget(), {
+  resolveApiKey: apiKey,
+  fetch: async () => okBodyExtra('gen-1', 'm', 0.1, { provider_name: 'Together' }),
+ });
+ assert.equal(cap.providers[0].provider, 'Together');
+});
+test('Capture records native_tokens_cached into cachedTokens', async () => {
+ const cap = await captureBilling(receiptFor([gen()]), config, budget(), {
+  resolveApiKey: apiKey,
+  fetch: async () => okBodyExtra('gen-1', 'm', 0.1, { native_tokens_cached: 300 }),
+ });
+ assert.equal(cap.providers[0].cachedTokens, 300);
+});
+test('A live billing run records the upstream provider aggregate', async () => {
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, {
+  spawnPi: spawnOk('gen-1'), billingResolveApiKey: apiKey,
+  billingFetch: async () => okBodyExtra('gen-1', 'm', 1.25, { provider_name: 'DeepInfra', native_tokens_cached: 42 }),
+ });
+ assert.deepEqual(r.billing.providers, [{ provider: 'DeepInfra', generations: 1, cachedTokens: 42 }]);
 });

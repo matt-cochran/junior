@@ -2633,7 +2633,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
      resolveApiKey:deps.billingResolveApiKey ?? resolveOpenRouterKey,
     }), signal);
    } catch {
-    billing = { billedUsd:null, source:null, reason:'billing lookup interrupted', generationCount:0, capturedCount:0 };
+    billing = { billedUsd:null, source:null, reason:'billing lookup interrupted', generationCount:0, capturedCount:0, providers:[] };
    }
   }
 
@@ -2647,7 +2647,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));
   }
   if (receipt.outputLimited) result.unresolved.push(OUTPUT_LIMIT_ERROR);
-  if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount };
+  if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount, providers:billing.providers ?? [] };
   result.sourceCwd=sourceCwd;
   result.executionCwd=executionCwd;
   result.isolation={ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) };

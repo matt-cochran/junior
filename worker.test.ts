@@ -2520,6 +2520,33 @@ test('Compact receipt exposes the output token count',()=>{
  const h=compactHandoff(handoffResult());
  assert.equal(h.model.output,22);
 });
+test('Compact receipt reports a 0.75 cache hit rate for 100 input and 300 cache reads',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:0,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.hitRate,0.75);
+});
+test('Compact receipt reports a null cache hit rate when input and cache reads are both zero',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:0,cacheRead:0,cacheWrite:0,totalTokens:0,available:true}}});
+ assert.equal(h.model.cache.hitRate,null);
+});
+test('Compact receipt exposes the input token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:0,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.input,100);
+});
+test('Compact receipt exposes the cache-read token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:4,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.cacheRead,300);
+});
+test('Compact receipt exposes the cache-write token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:4,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.cacheWrite,4);
+});
+test('Compact handoff exposes the upstream provider aggregate from billing',()=>{
+ const providers=[{provider:'DeepInfra',generations:2,cachedTokens:10}];
+ assert.deepEqual(compactHandoff({id:'c',status:'ready_for_review',billing:{providers}}).model.upstream,providers);
+});
+test('Compact handoff reports a null upstream when billing captured no providers',()=>{
+ assert.equal(compactHandoff({id:'c',status:'ready_for_review'}).model.upstream,null);
+});
 test('Parser records the provider response id from an assistant message_end',()=>{
  const r=parseReceipt(stream(assistant({responseId:'gen-abc'}),{type:'agent_settled'}));
  assert.deepEqual(r.responseIds,['gen-abc']);

@@ -71,6 +71,13 @@ export type BillingDeps = {
  now?: () => number;
 };
 
+/** One upstream provider observed across captured generation lookups. */
+export type BillingProvider = {
+ provider: string | null;
+ generations: number;
+ cachedTokens: number;
+};
+
 export type BillingCapture = {
  /** Authoritative summed `total_cost`, or null when any generation could not
   * be accounted for. Zero is a valid captured bill. */
@@ -83,6 +90,9 @@ export type BillingCapture = {
  generationCount: number;
  /** Number successfully captured before any failure. */
  capturedCount: number;
+ /** Captured generations aggregated by upstream provider name, ordered by
+  * generation count descending. Empty when nothing was captured. */
+ providers: BillingProvider[];
 };
 
 const REASONS = {
@@ -103,7 +113,22 @@ const REASONS = {
 } as const;
 
 function fail(reason: string, generationCount = 0, capturedCount = 0): BillingCapture {
- return { billedUsd: null, source: null, reason, generationCount, capturedCount };
+ return { billedUsd: null, source: null, reason, generationCount, capturedCount, providers: [] };
+}
+
+/** Merge one captured generation into the provider aggregate. A null provider
+ * name is its own entry; cached tokens default to zero when absent. */
+function addProvider(providers: Map<string, BillingProvider>, provider: string | null, cachedTokens: number | null): void {
+ const key = provider ?? '';
+ const entry = providers.get(key) ?? { provider, generations: 0, cachedTokens: 0 };
+ entry.generations++;
+ if (typeof cachedTokens === 'number' && Number.isFinite(cachedTokens)) entry.cachedTokens += cachedTokens;
+ providers.set(key, entry);
+}
+
+/** Provider aggregate ordered by generation count descending (stable on ties). */
+function providerList(providers: Map<string, BillingProvider>): BillingProvider[] {
+ return [...providers.values()].sort((a, b) => b.generations - a.generations);
 }
 
 function finiteNonnegative(v: any): v is number {
@@ -225,10 +250,13 @@ export async function captureBilling(
  if (!key) return fail(REASONS.noKey, ids.length);
 
  const doFetch: BillingFetch = deps.fetch ?? ((url, init) => (globalThis.fetch as any)(url, init));
+ const providers = new Map<string, BillingProvider>();
+ const failed = (reason: string, generationCount: number, capturedCount: number): BillingCapture =>
+  ({ ...fail(reason, generationCount, capturedCount), providers: providerList(providers) });
  let sum = 0;
  let captured = 0;
  for (const id of ids) {
-  if (endAt - now() <= 0) return fail(REASONS.deadline, ids.length, captured);
+  if (endAt - now() <= 0) return failed(REASONS.deadline, ids.length, captured);
   // One request per unique id, bounded by the remaining total budget. On
   // timeout the request is aborted and no second attempt is made.
   const controller = new AbortController();
@@ -248,18 +276,19 @@ export async function captureBilling(
     () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ timeout: controller.signal.aborted, failed: true }); } },
    );
   });
-  if (outcome.timeout || (outcome.failed && controller.signal.aborted)) return fail(REASONS.timeout, ids.length, captured);
+  if (outcome.timeout || (outcome.failed && controller.signal.aborted)) return failed(REASONS.timeout, ids.length, captured);
   const response = outcome.response;
-  if (!response || response.ok !== true) return fail(REASONS.requestFailed, ids.length, captured);
+  if (!response || response.ok !== true) return failed(REASONS.requestFailed, ids.length, captured);
   let body: any;
-  try { body = await withDeadline(Promise.resolve().then(() => response.json()), endAt, now); } catch { controller.abort(); return fail(endAt <= now() ? REASONS.timeout : REASONS.badResponse, ids.length, captured); }
+  try { body = await withDeadline(Promise.resolve().then(() => response.json()), endAt, now); } catch { controller.abort(); return failed(endAt <= now() ? REASONS.timeout : REASONS.badResponse, ids.length, captured); }
   const data = body?.data;
-  if (!data || data.id !== id) return fail(REASONS.idMismatch, ids.length, captured);
-  if (data.model !== modelById.get(id)) return fail(REASONS.modelMismatch, ids.length, captured);
-  if (!finiteNonnegative(data.total_cost)) return fail(REASONS.invalidCost, ids.length, captured);
+  if (!data || data.id !== id) return failed(REASONS.idMismatch, ids.length, captured);
+  if (data.model !== modelById.get(id)) return failed(REASONS.modelMismatch, ids.length, captured);
+  if (!finiteNonnegative(data.total_cost)) return failed(REASONS.invalidCost, ids.length, captured);
   sum += data.total_cost;
-  if (!Number.isFinite(sum)) return fail(REASONS.invalidCost, ids.length, captured);
+  if (!Number.isFinite(sum)) return failed(REASONS.invalidCost, ids.length, captured);
+  addProvider(providers, typeof data.provider_name === 'string' ? data.provider_name : null, typeof data.native_tokens_cached === 'number' ? data.native_tokens_cached : null);
   captured++;
  }
- return { billedUsd: sum, source: 'provider', generationCount: ids.length, capturedCount: captured };
+ return { billedUsd: sum, source: 'provider', generationCount: ids.length, capturedCount: captured, providers: providerList(providers) };
 }
