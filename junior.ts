@@ -31,7 +31,7 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
-  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]',
+  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
@@ -93,6 +93,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
  model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 1,
   help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes]' },
+ plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
+  help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
  init: {
   flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -195,6 +197,13 @@ async function main(argv: string[]): Promise<void> {
   const modelCli = await import('./model-cli.ts');
   const { exitCode, result } = await modelCli.runModelCommand(rest, { cwd: process.cwd(), env: process.env });
   console.log(JSON.stringify(result, null, 2));
+  process.exitCode = exitCode;
+  return;
+ }
+
+ if (command === 'plan') {
+  const planCli = await import('./plan-junior.ts');
+  const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
   process.exitCode = exitCode;
   return;
  }

@@ -134,6 +134,11 @@ test('buildPlanFromSpec records the elicitation session and requirement id as th
   assert.equal(deliverable(plan, 'r-auth')?.metadata.source, 'elicitation:s1/r-auth');
 });
 
+test('buildPlanFromSpec carries the requirement acceptance criteria as junior acceptance', () => {
+  const plan = buildPlanFromSpec(READY_SPEC);
+  assert.deepEqual(deliverable(plan, 'r-auth')?.metadata.junior?.acceptance, ['token issued']);
+});
+
 test('buildPlanFromSpec adds a prerequisite when a condition names another capability', () => {
   const plan = buildPlanFromSpec(READY_SPEC);
   const edge = deliverable(plan, 'r-api')?.prerequisites?.find((p: any) => p.id === 'r-auth');

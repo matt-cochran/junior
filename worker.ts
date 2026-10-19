@@ -310,6 +310,13 @@ export type Receipt = {
  assistantMessages:number;
  messageEnds:number;
  stopReasons:string[];
+ /** Stop reason of the last assistant message (null when the stream held none). */
+ finalStopReason:string|null;
+ /** Count of error/length assistant messages that a later assistant message followed. */
+ recoveredErrors:number;
+ /** True when the final assistant message stopped at the per-message output limit. */
+ outputLimited:boolean;
+ /** True only when the final assistant message stopped with a genuine error. */
  errored:boolean;
  aborted:boolean;
  settled:boolean;
@@ -393,10 +400,16 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   malformed:false,
   malformedLines:[],
   malformedCount:0,
+  finalStopReason:null,
+  recoveredErrors:0,
+  outputLimited:false,
   truncatedTail:false,
   outputTruncated:!!opts.outputTruncated,
  };
  const seen = new Set<string>();
+ // Stop reason per assistant message in stream order (null when Pi reported
+ // none), used to decide recovery and the final outcome.
+ const assistantStops:(string|null)[]=[];
  // Strict JSONL framing: split on LF only and strip an optional trailing CR.
  const lines = String(eventsText ?? '').split('\n');
  // Locate the last non-blank line so a cap-cut final record can be recognized.
@@ -433,11 +446,19 @@ export function parseReceipt(eventsText:string, requested:{provider?:string;mode
   if (responseId && !receipt.responseIds.includes(responseId)) receipt.responseIds.push(responseId);
   if (typeof m.stopReason === 'string') {
    receipt.stopReasons.push(m.stopReason);
-   if (m.stopReason === 'error' || m.stopReason === 'length') receipt.errored = true;
    if (m.stopReason === 'aborted') receipt.aborted = true;
   }
+  assistantStops.push(typeof m.stopReason === 'string' ? m.stopReason : null);
   addUsage(receipt.usage, m.usage);
  }
+ // A transient error/length stop is recovered when a later assistant message
+ // follows; only a final error invalidates the run, and a final length stop is
+ // surfaced as outputLimited so it can drive a continuation instead.
+ const lastStop = assistantStops.length ? assistantStops[assistantStops.length-1] : null;
+ receipt.finalStopReason = lastStop;
+ receipt.recoveredErrors = assistantStops.filter((s,i)=>i < assistantStops.length-1 && (s==='error'||s==='length')).length;
+ receipt.outputLimited = lastStop === 'length';
+ receipt.errored = lastStop === 'error';
  receipt.malformed = receipt.malformedCount > 0;
  receipt.observedUnknown = receipt.observed.length === 0;
  return receipt;
@@ -464,6 +485,9 @@ export function mockReceipt(requested:{provider?:string;model?:string;source?:Re
   malformed:false,
   malformedLines:[],
   malformedCount:0,
+  finalStopReason:null,
+  recoveredErrors:0,
+  outputLimited:false,
   truncatedTail:false,
  };
 }
@@ -472,7 +496,7 @@ export function mockReceipt(requested:{provider?:string;model?:string;source?:Re
  * message completed, the assistant turns completed cleanly, and Pi reported
  * agent_settled. A settled stream with no assistant message is not a receipt. */
 export function receiptValid(r:Receipt) {
- return r.source === 'pi_message_end' && r.assistantMessages > 0 && !r.malformed && !r.errored && !r.aborted && r.settled && !r.outputTruncated && !r.truncatedTail;
+ return r.source === 'pi_message_end' && r.assistantMessages > 0 && !r.malformed && !r.errored && !r.aborted && !r.outputLimited && r.settled && !r.outputTruncated && !r.truncatedTail;
 }
 
 // ---------------------------------------------------------------------------
@@ -1722,6 +1746,14 @@ export function buildContinuationCheckpoint(executionCwd:string, t:any, eventsPa
  * segment's prompt. Exported so tests and the prompt builder share one text. */
 export const CONTINUATION_PROMPT_LEAD = 'A previous worker segment stopped at the output budget. Its edits are already in this checkout. Continue from this checkpoint; do not redo finished work:';
 
+/** Extra continuation instruction appended when a segment ends at the model's
+ * per-message output limit rather than the accumulation cap. */
+export const OUTPUT_LIMIT_CONTINUATION_LINE = 'The previous turn hit the model per-message output limit. Work incrementally: write results to files as you go and keep each message short.';
+
+/** Terminal error when the final segment still stopped at the per-message
+ * output limit after the continuation budget was exhausted. */
+export const OUTPUT_LIMIT_ERROR = 'Model hit its per-message output limit (stopReason length); split the deliverable or reduce per-message work.';
+
 export async function run(t:any, mock=false, deps:GateDeps = {}) {
  validate(t);
  const runStartedAt=Date.now();
@@ -2133,7 +2165,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   let stdout='', stderr='', legacyError:string|undefined;
   let workerStatus=0;
   let streamResult:WorkerStreamResult|undefined;
-  type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; checkpointPath:string|null};
+  type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; outputLimited:boolean; checkpointPath:string|null};
   const segments:SegmentRecord[]=[];
   const segmentReceipts:Receipt[]=[];
   const preInterrupt = !!signal?.aborted;
@@ -2145,7 +2177,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
    writeFileSync(logPath,'');
-   segments.push({index:0,eventsPath,stopReason:'mock',outputTruncated:false,checkpointPath:null});
+   segments.push({index:0,eventsPath,stopReason:'mock',outputTruncated:false,outputLimited:false,checkpointPath:null});
   } else if (preInterrupt || preDeadline) {
    // The wall deadline (or an interruption) elapsed during readiness, isolation
    // or the classifier. Never start the paid worker; keep an inspectable handback.
@@ -2154,7 +2186,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    streamResult = { stdout:'', stderr:'', exitCode:null, signal:null,
     interrupted:preInterrupt, timedOut:false, deadlineExceeded:preDeadline, outputTruncated:false,
     stopReason: preInterrupt ? 'interrupted' : 'deadline_exceeded', runtime:heartbeat.snapshot() };
-   segments.push({index:0,eventsPath,stopReason:streamResult.stopReason,outputTruncated:false,checkpointPath:null});
+   segments.push({index:0,eventsPath,stopReason:streamResult.stopReason,outputTruncated:false,outputLimited:false,checkpointPath:null});
   } else if (deps.spawnPi) {
    const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
    const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432,env:piBashEnv});
@@ -2163,7 +2195,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    legacyError=r.error?.message;
    writeFileSync(eventsPath,stdout);
    writeFileSync(logPath,stderr);
-   segments.push({index:0,eventsPath,stopReason:'legacy',outputTruncated:false,checkpointPath:null});
+   segments.push({index:0,eventsPath,stopReason:'legacy',outputTruncated:false,outputLimited:false,checkpointPath:null});
   } else {
    const spawnChild = deps.spawnChild ?? spawnChildDetached;
    const maxSegmentOutputBytes = deps.maxOutputBytes ?? settings.maxOutputBytes;
@@ -2185,9 +2217,12 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     workerStatus=segResult.exitCode ?? 1;
     legacyError=segResult.error;
     streamResult=segResult;
-    segments.push({index:continuationIndex,eventsPath:segEventsPath,stopReason:segResult.stopReason,outputTruncated:!!segResult.outputTruncated,checkpointPath:null});
-    segmentReceipts.push(parseReceipt(segResult.stdout ?? '', {...requested,source:requestedSource}, {outputTruncated: !!segResult.outputTruncated}));
-    if (!segResult.outputTruncated) break;
+    const segReceipt=parseReceipt(segResult.stdout ?? '', {...requested,source:requestedSource}, {outputTruncated: !!segResult.outputTruncated});
+    segmentReceipts.push(segReceipt);
+    segments.push({index:continuationIndex,eventsPath:segEventsPath,stopReason:segResult.stopReason,outputTruncated:!!segResult.outputTruncated,outputLimited:segReceipt.outputLimited,checkpointPath:null});
+    // Continue when the segment hit the accumulation cap or the model's
+    // per-message output limit; both leave the deliverable unfinished.
+    if (!segResult.outputTruncated && !segReceipt.outputLimited) break;
     if (continuationIndex >= settings.continuations) break;
     if (workerRemainingMs() < 60000) break;
     const nextIndex = continuationIndex + 1;
@@ -2196,6 +2231,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     writeFileSync(checkpointPath, checkpointText);
     segments[segments.length-1].checkpointPath = checkpointPath;
     segmentPrompt = `${prompt}\n\n${CONTINUATION_PROMPT_LEAD}\n\n${checkpointText}`;
+    if (segReceipt.outputLimited) segmentPrompt += `\n\n${OUTPUT_LIMIT_CONTINUATION_LINE}`;
     continuationIndex = nextIndex;
     // The next segment starts clean: clear the previous segment's cap stop so
     // runtime.json reflects only the segment that actually ends the run.
@@ -2272,6 +2308,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   if (!workerError && streamResult?.persistError) workerError=`Could not persist worker logs/events: ${streamResult.persistError}`;
   if (!workerError && streamResult?.outputTruncated) workerError='Worker output exceeded the accumulation cap; the worker was stopped.';
   if (!workerError && workerStatus !== 0) workerError=String(stderr).includes('No API key found for openrouter') ? 'OpenRouter authentication missing. Start pi and use /login to configure OpenRouter, then retry.' : 'Pi failed; inspect worker.log.';
+  if (!workerError && receipt.outputLimited) workerError=OUTPUT_LIMIT_ERROR;
   if (!workerError && !receiptOk) workerError = receipt.malformed ? 'Pi event stream contained malformed JSONL; inspect events.jsonl.' : receipt.errored || receipt.aborted ? 'Pi assistant message did not complete cleanly.' : receipt.assistantMessages === 0 ? 'Pi settled with no assistant messages.' : 'Pi never reported agent_settled; inspect events.jsonl.';
 
   // Capture post-run evidence and the run-only delta even after a timeout,
@@ -2395,6 +2432,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
    result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));
   }
+  if (receipt.outputLimited) result.unresolved.push(OUTPUT_LIMIT_ERROR);
   if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount };
   result.sourceCwd=sourceCwd;
   result.executionCwd=executionCwd;

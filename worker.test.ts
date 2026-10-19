@@ -118,6 +118,22 @@ test('Parser flags error, aborted and missing settlement',()=>{
  assert.equal(unsettled.settled,false);
  assert.equal(receiptValid(unsettled),false);
 });
+test('Parser counts an error recovered by a later assistant message',()=>{
+ const r=parseReceipt(stream(assistant({stopReason:'error'}),assistant({stopReason:'toolUse'}),assistant(),{type:'agent_settled'}));
+ assert.equal(r.recoveredErrors,1);
+});
+test('Parser accepts a settled stream whose recovered error was followed cleanly',()=>{
+ const r=parseReceipt(stream(assistant({stopReason:'error'}),assistant({stopReason:'toolUse'}),assistant(),{type:'agent_settled'}));
+ assert.equal(receiptValid(r),true);
+});
+test('Parser marks a final length stop as output-limited',()=>{
+ const r=parseReceipt(stream(assistant(),assistant({stopReason:'length'}),{type:'agent_settled'}));
+ assert.equal(r.outputLimited,true);
+});
+test('Parser rejects a settled stream whose final message hit the length limit',()=>{
+ const r=parseReceipt(stream(assistant(),assistant({stopReason:'length'}),{type:'agent_settled'}));
+ assert.equal(receiptValid(r),false);
+});
 test('Mock receipt never claims an observed model',async()=>{
  const r=mockReceipt({provider:'openrouter',model:'requested-model'});
  assert.equal(r.source,'mock');
@@ -745,6 +761,14 @@ const driveToContinuation=async(fakes:any[],argvs:string[][],firstUsage:any=U(1,
  exhaustCap(fakes[0]);
  await until(()=>fakes.length>=2);
 };
+// A segment that ends at the model's per-message output limit (no accumulation cap).
+const lengthSegment=(f:any,usage:any=U(1,1,2))=>{f.emit({type:'session',id:'seg-session'});f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'length'}});f.emit({type:'agent_settled'});f.end(0);};
+const driveLengthToContinuation=async(fakes:any[])=>{
+ await until(()=>fakes.length>=1);
+ firstAssistant(fakes[0],'partial work in the first segment');
+ lengthSegment(fakes[0]);
+ await until(()=>fakes.length>=2);
+};
 test('Execution settings default continuations to one',()=>{
  assert.equal(resolveExecutionSettings({}).continuations,1);
 });
@@ -804,6 +828,50 @@ test('Result usage sums tokens across continuation segments',async()=>{
  completeSegment(fakes[1],U(10,20,30));
  const r=await p;
  assert.equal(r.receipt.usage.totalTokens,33);
+});
+test('A length-limited first segment starts a continuation segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
+});
+test('A length-limited first segment continues to a valid receipt',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(receiptValid(r.receipt),true);
+});
+test('A length-limited continuation prompt names the per-message output limit',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(argvs[1][argvs[1].length-1].includes('per-message output limit'));
+});
+test('An exhausted length-limited run reports the per-message output limit error',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,1);
+ await until(()=>fakes.length>=1);
+ lengthSegment(fakes[0]);
+ await until(()=>fakes.length>=2);
+ lengthSegment(fakes[1]);
+ const r=await p;
+ assert.match(r.workerError,/per-message output limit/);
+});
+test('An exhausted length-limited run names the output limit in unresolved',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,1);
+ await until(()=>fakes.length>=1);
+ lengthSegment(fakes[0]);
+ await until(()=>fakes.length>=2);
+ lengthSegment(fakes[1]);
+ const r=await p;
+ assert.ok((r.unresolved as string[]).some((u)=>u.includes('per-message output limit')));
 });
 test('A capped run with continuations 0 ends output_truncated',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
