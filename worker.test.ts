@@ -1335,6 +1335,17 @@ test('The model-approval request falls back to cached online catalog prices',asy
  const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{JUNIOR_HOME:home,PI_CODING_AGENT_DIR:join(home,'empty-agent')}});
  assert.equal(approvalFile(r).price.outputRatio,3);
 });
+test('The model-approval request prefers cached online prices over the local catalog',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'delivery-cache-'));
+ writeFileSync(join(home,'model-catalog.json'),JSON.stringify({checkedAt:Date.now(),ids:[COMMODITY_MODEL,ROUTED_MODEL],prices:{[COMMODITY_MODEL]:{inputPerM:0.03,outputPerM:0.08,cacheReadPerM:null},[ROUTED_MODEL]:{inputPerM:0.09,outputPerM:0.4,cacheReadPerM:null}}}));
+ const agent=pricedAgent({[COMMODITY_MODEL]:{input:0.03,output:0.72},[ROUTED_MODEL]:{input:0.09,output:0.24}});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{JUNIOR_HOME:home,PI_CODING_AGENT_DIR:agent}});
+ assert.equal(approvalFile(r).price.outputRatio,5);
+});
+test('The model-approval request explains how to decline and run on the default model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.match(approvalFile(r).decline,/"modelProfile": "general"/);
+});
 test('A routed profile approved for the run applies the routed model',async()=>{
  const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
  assert.equal(r.receipt.requested.model,ROUTED_MODEL);

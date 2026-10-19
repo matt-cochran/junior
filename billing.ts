@@ -24,6 +24,10 @@ export type BillingMode = typeof BILLING_MODES[number];
 
 /** Official documented generation lookup endpoint. */
 export const BILLING_ENDPOINT = 'https://openrouter.ai/api/v1/generation';
+/** Retries for a generation OpenRouter has not recorded yet (HTTP 404 for
+ * about five seconds after it finishes), always bounded by the billing budget. */
+export const BILLING_NOT_READY_RETRIES = 8;
+export const BILLING_NOT_READY_DELAY_MS = 1000;
 /** Upper bound accepted for `billing.timeoutMs`. */
 export const BILLING_MAX_TIMEOUT_MS = 600000;
 /** Default per-run billing budget when `timeoutMs` is omitted. */
@@ -69,6 +73,10 @@ export type BillingDeps = {
  resolveApiKey?: () => string | null | Promise<string | null>;
  /** Injected clock for deterministic bounding. */
  now?: () => number;
+ /** Injected wait between not-yet-recorded (404) retries. */
+ sleep?: (ms: number) => Promise<void>;
+ /** Delay between 404 retries (default BILLING_NOT_READY_DELAY_MS). */
+ retryDelayMs?: number;
 };
 
 /** One upstream provider observed across captured generation lookups. */
@@ -219,6 +227,15 @@ function selectGenerations(receipt: BillingReceipt): { ids: string[]; modelById:
  return { ids, modelById };
 }
 
+/** OpenRouter records a generation under the model's dated canonical slug
+ * (`deepseek/deepseek-v4.1-flash-20260910` for `deepseek/deepseek-v4.1-flash`),
+ * so a requested id matches its own slug plus one `-YYYYMMDD` snapshot suffix. */
+export function sameBilledModel(billed: unknown, requested: string | undefined): boolean {
+ if (typeof billed !== 'string' || typeof requested !== 'string' || !requested) return false;
+ if (billed === requested) return true;
+ return billed.startsWith(`${requested}-`) && /^\d{8}$/.test(billed.slice(requested.length + 1));
+}
+
 /** Look up authoritative OpenRouter generation billing, bounded by the task's
  * remaining deadline and the configured timeout. At most one request is made
  * per unique generation id and there are no retries. Any incomplete accounting
@@ -250,6 +267,8 @@ export async function captureBilling(
  if (!key) return fail(REASONS.noKey, ids.length);
 
  const doFetch: BillingFetch = deps.fetch ?? ((url, init) => (globalThis.fetch as any)(url, init));
+ const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+ const retryDelayMs = deps.retryDelayMs ?? BILLING_NOT_READY_DELAY_MS;
  const providers = new Map<string, BillingProvider>();
  const failed = (reason: string, generationCount: number, capturedCount: number): BillingCapture =>
   ({ ...fail(reason, generationCount, capturedCount), providers: providerList(providers) });
@@ -258,9 +277,12 @@ export async function captureBilling(
  for (const id of ids) {
   if (endAt - now() <= 0) return failed(REASONS.deadline, ids.length, captured);
   // One request per unique id, bounded by the remaining total budget. On
-  // timeout the request is aborted and no second attempt is made.
-  const controller = new AbortController();
-  const outcome = await new Promise<{ response?: BillingResponse; timeout: boolean; failed: boolean }>((resolve) => {
+  // timeout the request is aborted and no second attempt is made. A 404 means
+  // OpenRouter has not recorded a just-finished generation yet, so it is retried
+  // a bounded number of times while the budget allows.
+  let controller = new AbortController();
+  const fetchOnce = () => new Promise<{ response?: BillingResponse; timeout: boolean; failed: boolean }>((resolve) => {
+   controller = new AbortController();
    let settled = false;
    const timer = setTimeout(() => {
     if (settled) return;
@@ -268,7 +290,7 @@ export async function captureBilling(
     controller.abort();
     resolve({ timeout: true, failed: false });
    }, Math.max(1, endAt - now()));
-    doFetch(`${BILLING_ENDPOINT}?id=${encodeURIComponent(id)}`, {
+   doFetch(`${BILLING_ENDPOINT}?id=${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
     signal: controller.signal,
    }).then(
@@ -276,6 +298,12 @@ export async function captureBilling(
     () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ timeout: controller.signal.aborted, failed: true }); } },
    );
   });
+  let outcome = await fetchOnce();
+  for (let retry = 0; retry < BILLING_NOT_READY_RETRIES; retry++) {
+   if (outcome.response?.status !== 404 || endAt - now() <= retryDelayMs) break;
+   await sleep(retryDelayMs);
+   outcome = await fetchOnce();
+  }
   if (outcome.timeout || (outcome.failed && controller.signal.aborted)) return failed(REASONS.timeout, ids.length, captured);
   const response = outcome.response;
   if (!response || response.ok !== true) return failed(REASONS.requestFailed, ids.length, captured);
@@ -283,7 +311,7 @@ export async function captureBilling(
   try { body = await withDeadline(Promise.resolve().then(() => response.json()), endAt, now); } catch { controller.abort(); return failed(endAt <= now() ? REASONS.timeout : REASONS.badResponse, ids.length, captured); }
   const data = body?.data;
   if (!data || data.id !== id) return failed(REASONS.idMismatch, ids.length, captured);
-  if (data.model !== modelById.get(id)) return failed(REASONS.modelMismatch, ids.length, captured);
+  if (!sameBilledModel(data.model, modelById.get(id))) return failed(REASONS.modelMismatch, ids.length, captured);
   if (!finiteNonnegative(data.total_cost)) return failed(REASONS.invalidCost, ids.length, captured);
   sum += data.total_cost;
   if (!Number.isFinite(sum)) return failed(REASONS.invalidCost, ids.length, captured);

@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validate, run, parseReceipt, estimateCost } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
-import { captureBilling, validateBilling, resolveOpenRouterApiKey, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, BILLING_MAX_GENERATIONS, BILLING_MAX_TIMEOUT_MS } from './billing.ts';
+import { captureBilling, validateBilling, resolveOpenRouterApiKey, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, BILLING_MAX_GENERATIONS, BILLING_MAX_TIMEOUT_MS, sameBilledModel } from './billing.ts';
 
 // --- fixtures and injected seams ---
 const gen = (over: any = {}) => ({ provider: 'openrouter', model: 'm', responseId: 'gen-1', ...over });
@@ -277,4 +277,24 @@ test('A live billing run records the upstream provider aggregate', async () => {
   billingFetch: async () => okBodyExtra('gen-1', 'm', 1.25, { provider_name: 'DeepInfra', native_tokens_cached: 42 }),
  });
  assert.deepEqual(r.billing.providers, [{ provider: 'DeepInfra', generations: 1, cachedTokens: 42 }]);
+});
+test('A generation billed under the dated canonical slug matches the requested model', () => {
+ assert.equal(sameBilledModel('deepseek/deepseek-v4.1-flash-20260910', 'deepseek/deepseek-v4.1-flash'), true);
+});
+
+test('A generation billed under a different model does not match the requested model', () => {
+ assert.equal(sameBilledModel('deepseek/deepseek-v4.1-flash-1017', 'deepseek/deepseek-v4.1-flash'), false);
+});
+
+test('A generation that is not recorded yet is retried and then captured', async () => {
+ let calls = 0;
+ const fetch = async () => (++calls === 1 ? { ok: false, status: 404, json: async () => ({}) } : okBody('gen-1', 'm', 0.5));
+ const cap = await captureBilling(receiptFor([gen()]), config, budget(), { resolveApiKey: apiKey, fetch, sleep: async () => {}, retryDelayMs: 1 });
+ assert.equal(cap.billedUsd, 0.5);
+});
+
+test('A generation still missing after the retries leaves billedUsd null', async () => {
+ const fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+ const cap = await captureBilling(receiptFor([gen()]), config, budget(), { resolveApiKey: apiKey, fetch, sleep: async () => {}, retryDelayMs: 1 });
+ assert.equal(cap.billedUsd, null);
 });

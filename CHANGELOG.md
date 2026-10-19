@@ -68,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenRouter billing capture matches a generation recorded under the model's
+  dated canonical slug (for example `deepseek/deepseek-v4.1-flash-20260910`),
+  so `billedUsd` is captured again instead of failing with a model mismatch.
+- Billing capture retries a generation OpenRouter has not recorded yet (HTTP 404
+  for about five seconds after it finishes), within the billing budget.
+- The model-approval request names how to decline: pin
+  `"modelProfile": "general"` to run on the default model.
+
 - Output cap retains whole lines and reports an `outputBreakdown` in the compact
   `output` (#44).
 - A final per-message output-limit stop (`stopReason: length`) continues in a

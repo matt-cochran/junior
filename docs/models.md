@@ -224,7 +224,7 @@ A deliverable keeps one model and one upstream provider:
 - `requested`: the provider/model passed to Pi, plus `source` (`task`, `routed`,
   `project` or `builtin`).
 - `modelRouting`: the route record above, including `approval`, `needsApproval`
-  or `declined` when they apply.
+  or `declined` when they apply. The approval request also carries `decline`: pin `"modelProfile": "general"` in the contract to run on the default instead.
 - `modelApproval`: the consent request on a `needs_model_approval` result.
 - `providerRouting`: `{ affinityKey, openrouter }` (both null for a
   non-OpenRouter run).

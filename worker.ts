@@ -1231,6 +1231,8 @@ export type ModelApprovalRequest = {
  reason:string;
  price:ReturnType<typeof priceDelta>;
  approve:{run:string; project:string};
+ /** How to run on the default model instead (declining the recommendation). */
+ decline:string;
 };
 
 /** The run/plan/project approval for one of `keys`, most specific scope first.
@@ -1276,7 +1278,12 @@ export function buildModelApprovalRequest(opts:{
  const local=readLocalCatalog(piAgentDir(opts.env));
  const cached=readCachedCatalog(opts.env);
  const localPrices:Record<string,ModelPrice>=Object.fromEntries(local.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
- const priceOf=(id:string):ModelPrice|null => localPrices[id] ?? cached?.prices?.[id] ?? null;
+ // Compare both models from one source: the cached OpenRouter catalog (what a
+ // run is billed at) first, then Pi's local catalog, whose cost data can lag.
+ const online=cached?.prices ?? {};
+ const source=(online[opts.config.model] && online[opts.target.model]) ? online
+  : (localPrices[opts.config.model] && localPrices[opts.target.model]) ? localPrices : null;
+ const priceOf=(id:string):ModelPrice|null => source ? source[id] : (online[id] ?? localPrices[id] ?? null);
  const key=opts.target.profile ?? opts.target.model;
  return {
   profile:opts.target.profile,
@@ -1291,6 +1298,7 @@ export function buildModelApprovalRequest(opts:{
    run:`junior handoff <task> --approve-model ${key}`,
    project:`junior model approve ${key}`,
   },
+  decline:`Run on the default model ${opts.config.model}: set "modelProfile": "${opts.config.defaultProfile}" in the contract (or models.unapproved: "default" for the project).`,
  };
 }
 
