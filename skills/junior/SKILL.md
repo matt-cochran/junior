@@ -108,8 +108,6 @@ Create a JSON contract in the target workspace:
   "id": "unique-deliverable-id",
   "deliverable": "A precise artifact and resulting behavior",
   "cwd": "/absolute/target/checkout",
-  "provider": "openrouter",
-  "model": "deepseek/deepseek-v4.1-flash",
   "workflow": "test_first",
   "acceptance": ["Observable behavior to verify"],
   "constraints": ["Allowed files and explicit exclusions; no commits or pushes unless authorized", "Restrict searches to the checkout and named dependency paths; no nested workers"],
@@ -120,8 +118,9 @@ Create a JSON contract in the target workspace:
 ```
 
 `cwd` is where edits and checks run; task paths passed to the CLI should be
-absolute. `isolation` defaults to `worktree` for `handoff`; pass `"none"` to run
-in place. To ground the readiness classifier and worker in existing code, add a
+absolute. The example omits `provider`/`model` so Jev routing applies; an
+explicit model must be a commodity/open-weight model. `isolation` defaults to
+`worktree` for `handoff`; pass `"none"` to run in place. To ground the readiness classifier and worker in existing code, add a
 `context` array of `{path, start?, end?}` entries (relative to `cwd`, 1-based
 inclusive lines) for bounded excerpts. Contract scope is instruction, not a
 sandbox guarantee.
@@ -139,6 +138,44 @@ so a fresh project is immediately ready for a `worktree` handoff without a
 manual commit or stash. Set `JUNIOR_NO_INSTALL=1` (or `true`) to make `init`
 and `update` skip the Pi, managed-tool and companion installers entirely and
 report them as skipped.
+
+## Models
+
+Junior executes only on commodity/open-weight models. `model-policy.ts` accepts
+the commodity vendors (DeepSeek, Moonshot, Z.ai, Qwen, MiniMax, Meta Llama, plus
+`openai/gpt-oss*`) and refuses a frontier vendor (Anthropic, OpenAI, Google, xAI
+and their floating aliases) or an unrecognized vendor or direct host before any
+spend. A refusal is `frontier_model_refused` or `unknown_model_refused`, with a
+`modelPolicy` record on the result and `model.policy` on the compact receipt.
+
+`delivery.config.json` holds `models.routing` (`off|shadow|auto`, default
+`auto`), `models.roster` (overrides, additions or `disabled`),
+`models.autoUpgrade`, `models.approved`/`models.unapproved` and
+`models.priceTolerance`. Built-in profiles are `general` (default, DeepSeek V4.1
+Flash), `deep-reasoning`, `long-horizon`, `agentic-tools` and `fast-mechanical`.
+When the contract names no model and is not a resume, Jev asks one
+`model_profile` choice; `auto` applies a non-default profile at confidence >=
+0.6, `shadow` records it without applying. Precedence is task model > routed
+profile > project pin > built-in. The receipt records `requested.source` and
+`modelRouting`; `junior model status|list|upgrade` reports the roster and plans
+or applies same-lineage upgrades (an explicit target must be commodity).
+
+Junior never switches away from the default model without a human approval. A
+non-default profile or contract model stops the run at `needs_model_approval`
+with a `model-approval.json` rationale (pick, confidence, strengths, price vs
+the default). Relay that rationale to the human.
+Never approve a model on the human's behalf: consent is a per-run
+`--approve-model <key>`, a plan's `approvedProfiles`, or a project
+`junior model approve <key>` (with `junior model revoke <key>` to withdraw it).
+`models.unapproved: default` runs on the default instead of asking. Adoption is
+price-gated: `models.autoUpgrade` applies only a newer same-lineage version
+within `models.priceTolerance`
+(default 1.25x on input and output, measured on the cheapest tool-capable
+endpoint); a pricier version is listed as waiting for price parity. The compact
+receipt's `model.cache.hitRate` is the prompt-cache read share, and
+`model.upstream` lists the captured upstream providers. Treat a model
+output-limit stop as incomplete work, regardless of passing checks. Inspect
+`junior model status` before a paid run when routing matters.
 
 ## Runtime and isolation guarantees
 
@@ -226,6 +263,14 @@ so it is recorded as evidence (reads become immutable snapshots):
 
 1. Plan: `plan.submit` deliverables with `owned_files` and prerequisites;
    `plan.lint`, `plan.simulate` and `plan.status` (critical path, ready set) are reads.
+   Shape the plan for Junior with `junior plan check <plan.json>`: one
+   handoff-sized deliverable each, disjoint `owned_files` for parallel cohorts,
+   explicit `consumes` text for interfaces, and `metadata.junior`
+   acceptance/checks. Its `cohorts` are the safe parallel sets; keep hot
+   registration files (`package.json`, `package-lock.json`, `scripts/build.mjs`,
+   `CHANGELOG.md`, `README.md`) in one final deliverable. Write skeletons with
+   `junior plan contracts <plan.json> --out <dir>`; they omit `provider`/`model`
+   so routing applies. Manager-owned review/verify steps stay outside cohorts.
 2. Risk: an FMECA session (`session.open`, `append`), then `risk.next` and
    `readiness.assess` before risky work.
 3. Lease: `plan.acquire_cohort` returns non-conflicting ready deliverables;

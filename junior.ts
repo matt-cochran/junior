@@ -31,7 +31,7 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  validate <task.json>                    validate a task contract',
   '  status  <result.json> [--full]          print a compact handoff, or the full status with --full',
-  '  tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]',
+  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
@@ -68,12 +68,12 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers'], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers', '--approve-model'], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--approve-model <key>] [--mock] [--full] [--quiet]' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
- run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior run <task.json> [--mock] [--full] [--quiet]' },
+ run: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--approve-model'], min: 1, max: 1,
+  help: 'Usage: junior run <task.json> [--approve-model <key>] [--mock] [--full] [--quiet]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
@@ -91,6 +91,10 @@ const COMMANDS: Record<string, CommandSpec> = {
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
+ model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
+  help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes] | approve|revoke <key>' },
+ plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
+  help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
  init: {
   flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -189,6 +193,21 @@ async function main(argv: string[]): Promise<void> {
  if (wantsHelp(rest)) { console.log(spec.help); return; }
  const parsed = parseCommand(command, spec, rest);
 
+ if (command === 'model') {
+  const modelCli = await import('./model-cli.ts');
+  const { exitCode, result } = await modelCli.runModelCommand(rest, { cwd: process.cwd(), env: process.env });
+  console.log(JSON.stringify(result, null, 2));
+  process.exitCode = exitCode;
+  return;
+ }
+
+ if (command === 'plan') {
+  const planCli = await import('./plan-junior.ts');
+  const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
+  process.exitCode = exitCode;
+  return;
+ }
+
  // Best-effort upgrade notice: must never throw and must never change the exit
  // code. It is skipped entirely for commands where an upgrade is not useful.
  const updateCheck = await import('./update-check.ts');
@@ -275,6 +294,16 @@ async function main(argv: string[]): Promise<void> {
    if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
    if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
   }
+  // Adopt newer commodity models when the project opted in. A model-config
+  // failure must never fail the update.
+  if (command === 'update') {
+   try {
+    const modelCli = await import('./model-cli.ts');
+    result.models = await modelCli.adoptModelUpdates(process.cwd(), {});
+   } catch (e) {
+    result.models = { error: String(e) };
+   }
+  }
   // Drop the stale update summary so the next startup notice stops reporting
   // the components just adopted. Never fail an update because of the cache.
   if (command === 'update') await refreshUpdateCache({});
@@ -309,6 +338,7 @@ async function main(argv: string[]): Promise<void> {
   const path = parsed.files[0];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
+  if (parsed.values['--approve-model'] !== undefined) task = { ...task, approveModel: parsed.values['--approve-model'] };
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
   if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };

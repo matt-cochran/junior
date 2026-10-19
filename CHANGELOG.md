@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- Commodity-only executor policy (`model-policy.ts`): Junior executes only on a
+  recognized commodity/open-weight vendor (DeepSeek, Moonshot, Z.ai, Qwen,
+  MiniMax, Meta Llama), treats `openai/gpt-oss*` as commodity, and refuses a
+  frontier vendor (Anthropic, OpenAI, Google, xAI and their floating aliases) or
+  an unrecognized vendor or direct host before any spend. A refusal carries
+  `workerError` `frontier_model_refused` or `unknown_model_refused` with a
+  `modelPolicy` record; Jev (typesafe) is a classifier only.
+- Commodity model roster and routing (`roster.ts`, `worker.ts`): built-in
+  profiles `general` (default, DeepSeek V4.1 Flash), `deep-reasoning`,
+  `long-horizon`, `agentic-tools` and `fast-mechanical`; `delivery.config.json`
+  `models.routing` (`off|shadow|auto`, default `auto`), `models.roster`
+  overrides/additions/disabled and `models.autoUpgrade`.
+- Model visibility: a `junior doctor` model section (pin, policy, roster
+  availability, newer releases, warnings); the cached startup update check lists
+  `model:<id>` entries and suggests `junior model upgrade`.
+- `junior model status|list|upgrade` (`model-cli.ts`) with `--online`,
+  `--vendor`, `--profile`, `--to`, `--dry-run`, `--yes` and TTY confirmation.
+- Junior-ready planning (`plan-junior.ts`): `junior plan check <plan.json>
+  [--max-hours N]` and `junior plan contracts <plan.json> --out <dir>`;
+  `plan-from-spec` emits `metadata.junior`.
+- Human consent before any non-default model: a run stops with
+  `needs_model_approval` and a `model-approval.json` rationale, granted per run
+  (`--approve-model`), per plan (`approvedProfiles`) or per project
+  (`models.approved` via `junior model approve|revoke`); `models.unapproved`
+  (`ask|default`) controls whether an unapproved target asks or falls back.
+- Model pricing in catalogs and plans (USD per million `inputPerM`/
+  `outputPerM`/`cacheReadPerM`, and a `priceDelta` on every planned change) and
+  price-gated adoption: `models.priceTolerance` (default 1.25x on input and
+  output), measured on the cheapest tool-capable OpenRouter endpoint, so
+  `models.autoUpgrade` adopts only price-comparable versions and pricier ones
+  are listed as waiting for price parity in `doctor`, the startup notice and
+  `junior model upgrade`.
+- Prompt-cache hit rate and upstream provider visibility on the compact receipt
+  (`model.cache.hitRate` and `model.upstream` from authoritative billing
+  capture).
+- Sticky per-deliverable model routing via `.delivery/<id>/route.json` and the
+  contract `modelProfile`; a per-deliverable OpenRouter affinity key and
+  per-profile `openrouter` provider routing keep a deliverable on one upstream
+  provider and its warm prompt cache.
+- Plan-level model approval: `junior plan check` flags `NEEDS_MODEL_APPROVAL`
+  for a non-default `metadata.junior.profile`, and `junior plan contracts`
+  carries `modelProfile` and plan-level `approvedProfiles`.
+
+### Changed
+
+- Jev asks one `model_profile` choice in the readiness call when the contract
+  names no model and is not a resume; `auto` applies a non-default profile at
+  confidence >= 0.6. Receipts record `requested.source` and
+  `result.modelRouting`, and the compact handoff exposes `model.routing` and
+  `model.policy`.
+- Model precedence is task model > routed profile > project pin > built-in.
+- `junior update` adopts newer same-lineage commodity models at price parity
+  when `models.autoUpgrade` is true; price-comparable ones are applied and the
+  rest are reported (with `waiting`) as `result.models`.
+
+### Fixed
+
+- OpenRouter billing capture matches a generation recorded under the model's
+  dated canonical slug (for example `deepseek/deepseek-v4.1-flash-20260910`),
+  so `billedUsd` is captured again instead of failing with a model mismatch.
+- Billing capture retries a generation OpenRouter has not recorded yet (HTTP 404
+  for about five seconds after it finishes), within the billing budget.
+- The model-approval request names how to decline: pin
+  `"modelProfile": "general"` to run on the default model.
+
+- Output cap retains whole lines and reports an `outputBreakdown` in the compact
+  `output` (#44).
+- A final per-message output-limit stop (`stopReason: length`) continues in a
+  fresh segment and is named in the receipt, and a recovered transient error no
+  longer fails a run (#46).
+- Analysis workflows judge acceptance with a report outline and excerpt and
+  settle no-other-file-changed criteria deterministically (#49).
+
 ## [0.5.1] - 2026-10-16
 
 ### Fixed

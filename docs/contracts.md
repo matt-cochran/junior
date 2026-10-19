@@ -17,6 +17,28 @@ field: <key>` rather than silently ignored, and each check accepts only
 check field: <key>`). Nested known fields (for example `execution.quietMs`,
 `jev.mode` and `pricing.source`) remain supported.
 
+A contract should normally omit `provider` and `model` so the commodity roster
+and Jev routing choose the executor:
+
+```json
+{
+  "id": "unique-deliverable-id",
+  "deliverable": "A precise artifact and resulting behavior",
+  "cwd": "/absolute/target/checkout",
+  "workflow": "test_first",
+  "acceptance": ["Observable behavior to verify"],
+  "checks": [{ "command": "node", "args": ["--test", "relevant.test.ts"] }],
+  "constraints": ["Only modify the named files; no commits or pushes"],
+  "isolation": "worktree",
+  "jev": { "mode": "shadow" }
+}
+```
+
+Provider/model resolution, the roster and routing are in [Models](models.md);
+shaping a cpm plan into these contracts is in
+[Planning for Junior](planning.md). An explicit task `model` always wins and
+must be a commodity/open-weight model.
+
 #### Check working directory (`checks[].cwd`)
 Each check may set an optional `cwd`. It defaults to the execution checkout
 (`executionCwd`). A relative `cwd` resolves under the execution checkout and is

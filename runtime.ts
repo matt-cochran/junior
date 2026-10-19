@@ -315,6 +315,15 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 type StreamStopReason = 'tool_timeout' | 'deadline' | 'interrupt' | 'startup_error' | 'stream_error' | 'output_truncated';
 
+/** Per-run output accounting: total raw stdout bytes, retained (compacted)
+ * bytes, per-event-type raw byte counts, and the three largest tool results. */
+export type OutputBreakdown = {
+ rawBytes: number;
+ retainedBytes: number;
+ byType: Record<string, number>;
+ largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[];
+};
+
 export type WorkerStreamResult = {
  stdout: string;
  stderr: string;
@@ -335,6 +344,7 @@ export type WorkerStreamResult = {
   * on `tool_timeout`. `command` is the `tool_execution_start` `args.command`. */
  timedOutTool?: { name: string; command?: string };
  runtime: RuntimeSnapshot;
+ outputBreakdown: OutputBreakdown;
 };
 
 export type ExecuteWorkerOptions = {
@@ -468,6 +478,8 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  let exitCode: number | null = null;
  let exitSignal: string | null = null;
  let timedOutTool: { name: string; command?: string } | undefined;
+ const byType: Record<string, number> = {};
+ const largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[] = [];
  let finished = false;
  let killTimer: ReturnType<typeof setTimeout> | undefined;
  let killEscalationComplete = false;
@@ -506,7 +518,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   else heartbeat.setState(exitCode === 0 ? 'running' : 'failed', { stopReason: exitCode === 0 ? 'completed' : 'failed', exitCode, signal: exitSignal });
   const runtime = heartbeat.snapshot();
   const reason = runtime.stopReason ?? (exitCode === 0 ? 'completed' : 'failed');
-  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated, stopReason: reason, timedOutTool, runtime });
+  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated, stopReason: reason, timedOutTool, runtime, outputBreakdown: { rawBytes: rawStdoutBytes, retainedBytes: stdout.length, byType, largestToolResults } });
  }
 
  function requestStop(reason: StreamStopReason): void {
@@ -539,25 +551,57 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   opts.onActivity?.(heartbeat.snapshot());
  }
 
- // Retain one compacted line under the cap and persist it. The cap is a stop
- // condition: once retained output reaches it the process group is torn down
- // exactly like a wall-deadline breach, so a runaway child cannot keep
- // producing after the cap.
+ // Retain one compacted line under the cap and persist it, whole or not at all.
+ // The cap is a stop condition: once a line cannot fit in the remaining budget
+ // the process group is torn down exactly like a wall-deadline breach, so a
+ // runaway child cannot keep producing after the cap and events.jsonl always
+ // ends on a complete JSON line plus a newline.
  function retainStdout(line: string): void {
-  if (stdout.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
-  const remaining = maxOutputBytes - stdout.length;
   const text = line + '\n';
-  let accepted = text;
-  if (accepted.length > remaining) { accepted = text.slice(0, remaining); outputTruncated = true; }
-  stdout += accepted;
-  append(eventsPath, accepted);
-  if (outputTruncated) requestStop('output_truncated');
+  if (stdout.length + text.length > maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
+  stdout += text;
+  append(eventsPath, text);
  }
 
- // Feed every raw line to the watchdog/heartbeat, then persist its compacted
- // form. Dropped events (message_update, tool_execution_update) are not kept.
+ const jsonBytes = (v: any): number => { const s = JSON.stringify(v); return typeof s === 'string' ? s.length : 0; };
+
+ function recordToolResult(r: { toolCallId: string; toolName: string | null; bytes: number }): void {
+  // A tool result arrives as tool_execution_end and as a toolResult message;
+  // keep one entry per call with the larger size.
+  const prior = largestToolResults.find((e) => e.toolCallId === r.toolCallId);
+  if (prior) { if (r.bytes > prior.bytes) prior.bytes = r.bytes; if (!prior.toolName) prior.toolName = r.toolName; }
+  else largestToolResults.push(r);
+  largestToolResults.sort((a, b) => b.bytes - a.bytes);
+  if (largestToolResults.length > 3) largestToolResults.length = 3;
+ }
+
+ // Account for every raw line, including dropped message_update and
+ // tool_execution_update events, before compaction or retention.
+ function recordBreakdown(rawLine: string): void {
+  let ev: any;
+  try { ev = JSON.parse(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine); }
+  catch { return; }
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return;
+  const type = typeof ev.type === 'string' ? ev.type : null;
+  if (type) byType[type] = (byType[type] ?? 0) + rawLine.length;
+  if (type === 'tool_execution_end') {
+   const toolCallId = typeof ev.toolCallId === 'string' && ev.toolCallId ? ev.toolCallId : (typeof ev.toolName === 'string' ? ev.toolName : 'unknown');
+   recordToolResult({ toolCallId, toolName: typeof ev.toolName === 'string' && ev.toolName ? ev.toolName : null, bytes: jsonBytes(ev.result) });
+  } else if (type === 'message_end') {
+   const m = ev.message;
+   if (m && typeof m === 'object' && m.role === 'toolResult') {
+    const toolCallId = typeof m.toolCallId === 'string' && m.toolCallId ? m.toolCallId : (typeof ev.toolCallId === 'string' ? ev.toolCallId : 'unknown');
+    recordToolResult({ toolCallId, toolName: typeof m.toolName === 'string' && m.toolName ? m.toolName : null, bytes: jsonBytes(m) });
+   }
+  }
+ }
+
+ // Feed every raw line to the watchdog/heartbeat and breakdown, then persist
+ // its compacted form. Dropped events (message_update, tool_execution_update)
+ // are not kept.
  function processStdoutLine(rawLine: string): void {
   handleLine(rawLine);
+  recordBreakdown(rawLine);
   const compacted = compactEventLine(rawLine, eventsPath, writtenToolOutput);
   if (compacted === null) return;
   retainStdout(compacted);
@@ -660,6 +704,7 @@ export type CheckResult = {
  timedOut: boolean;
  deadlineExceeded: boolean;
  outputTruncated: boolean;
+ outputBreakdown: OutputBreakdown;
 };
 
 export type ExecuteCheckOptions = {
@@ -691,6 +736,7 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
  let timedOut = false;
  let deadlineExceeded = false;
  let outputTruncated = false;
+ let rawBytes = 0;
  let finished = false;
  let killTimer: ReturnType<typeof setTimeout> | undefined;
  let killEscalationComplete = false;
@@ -705,6 +751,7 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
 
  function push(kind: 'stdout' | 'stderr', chunk: any): void {
   const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+  if (kind === 'stdout') rawBytes += text.length;
   const current = kind === 'stdout' ? stdout : stderr;
   if (current.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
   const remaining = maxOutputBytes - current.length;
@@ -723,7 +770,7 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
   // Do not clear killTimer: a TERM-ignoring descendant must still be SIGKILLed
   // even after the direct child exits.
   opts.signal?.removeEventListener?.('abort', onAbort);
-  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error, interrupted, timedOut, deadlineExceeded, outputTruncated });
+  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error, interrupted, timedOut, deadlineExceeded, outputTruncated, outputBreakdown: { rawBytes, retainedBytes: stdout.length, byType: {}, largestToolResults: [] } });
  }
 
  function requestStop(reason: 'timeout' | 'deadline' | 'interrupt' | 'output_truncated'): void {

@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
-import { CONFIDENCE_THRESHOLD } from './worker.ts';
+import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -40,8 +40,19 @@ export type CompactHandoff = {
  changedFiles: string[];
  checks: { command: string; exitCode: number | null; passed: boolean; error?: string }[];
  unresolved: string[];
+ /** Streaming output accounting: raw versus retained bytes and the largest
+  * tool results. Null when the result has no stream breakdown (mock/legacy). */
+ output: { rawBytes: number; retainedBytes: number; largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[] } | null;
  model: {
-  requested: { provider: string; model: string } | null;
+  requested: { provider: string; model: string; source?: string } | null;
+  /** The Jev model-routing record, or null when this result predates routing. */
+  routing: ModelRoute | null;
+  /** The run/plan/project consent that allowed the routed model, or null. */
+  approval: { source: string; key: string } | null;
+  /** The human consent request written when a run stopped for approval. */
+  approvalRequest: any | null;
+  /** The commodity-policy refusal record, or null when no model was refused. */
+  policy: ModelPolicyRecord | null;
   observed: { provider: string; model: string }[];
   observedUnknown: boolean;
   tokens: number;
@@ -50,6 +61,12 @@ export type CompactHandoff = {
   cacheRead: number;
   cacheWrite: number;
   usageAvailable: boolean;
+  /** Prompt-cache accounting for this run. `hitRate` is cacheRead divided by
+   * input plus cacheRead, or null when there was no activity to measure. */
+  cache: { input: number; cacheRead: number; cacheWrite: number; hitRate: number | null };
+  /** Captured upstream provider aggregates from billing, or null when this run
+   * captured no provider billing. */
+  upstream: { provider: string | null; generations: number; cachedTokens: number }[] | null;
   /** Provider response IDs preserved by Pi (OpenRouter generation IDs). The
    * handle for obtaining authoritative provider billing. When the task opts in
    * to bounded billing capture the worker fetches the matching generation and
@@ -220,6 +237,10 @@ export function compactHandoff(result: any): CompactHandoff {
   .map((f: any) => (typeof f === 'string' ? f : f?.path))
   .filter((p: any) => typeof p === 'string');
  const cost = compactCost(r);
+ const cacheInput = r.receipt?.usage?.input ?? 0;
+ const cacheRead = r.receipt?.usage?.cacheRead ?? 0;
+ const cacheTotal = cacheInput + cacheRead;
+ const hitRate = cacheTotal > 0 ? Math.round((cacheRead / cacheTotal) * 100) / 100 : null;
  const report = typeof r.analysis?.report === 'string' ? r.analysis.report : null;
  const analysis = r.analysis && typeof r.analysis === 'object' ? {
   workflow: String(r.analysis.workflow ?? ''),
@@ -253,8 +274,13 @@ export function compactHandoff(result: any): CompactHandoff {
    ...(c?.error ? { error: String(c.error) } : {}),
   })),
   unresolved: unresolvedIssues(r),
+  output: r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults } : null,
   model: {
    requested: r.receipt?.requested ?? null,
+   routing: r.modelRouting ?? null,
+   approval: r.modelRouting?.approval ?? null,
+   approvalRequest: r.modelApproval ?? null,
+   policy: r.modelPolicy ?? null,
    observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
    observedUnknown: r.receipt?.observedUnknown ?? true,
    tokens: r.receipt?.usage?.totalTokens ?? 0,
@@ -263,6 +289,8 @@ export function compactHandoff(result: any): CompactHandoff {
    cacheRead: r.receipt?.usage?.cacheRead ?? 0,
    cacheWrite: r.receipt?.usage?.cacheWrite ?? 0,
    usageAvailable: r.receipt?.usage?.available ?? false,
+   cache: { input: cacheInput, cacheRead, cacheWrite: r.receipt?.usage?.cacheWrite ?? 0, hitRate },
+   upstream: r.billing?.providers ?? null,
    responseIds: Array.isArray(r.receipt?.responseIds) ? r.receipt.responseIds : [],
    cost,
   },

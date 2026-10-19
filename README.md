@@ -57,6 +57,19 @@ each companion's agent skills read as `present`, `missing`,
 `junior init --target ...` remediation command. Skill readiness is reported
 separately and never gates `ok`.
 
+Junior executes only on commodity/open-weight models. A built-in roster
+(`general`, `deep-reasoning`, `long-horizon`, `agentic-tools`,
+`fast-mechanical`) and `delivery.config.json` `models.routing`/`models.roster`
+select the executor; Jev asks one model-profile choice when the contract names
+no model. A non-default model needs a human approval, so a run without one stops
+at `needs_model_approval` (`--approve-model`, plan `approvedProfiles`, or
+`junior model approve`). `models.autoUpgrade` lets `junior update` adopt a newer
+same-lineage commodity model only at price parity (`models.priceTolerance`).
+`junior model status|list|upgrade` reports and adopts the roster, and
+`junior plan check`/`junior plan contracts` shape a cpm plan into bounded
+handoffs. See [Models](docs/models.md) and
+[Planning for Junior](docs/planning.md).
+
 Execution settings live on the contract:
 
 - `maxOutputBytes` (1-32 MiB, default 8 MiB) bounds the retained worker output.
@@ -91,6 +104,10 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
   stages, workflow templates, session continuation and the Jev gates.
 - **[Runtime](docs/runtime.md)** — execution receipts, cost and billing, Git
   worktree isolation, change evidence, deadlines and the compact handoff.
+- **[Models](docs/models.md)** — the commodity-only policy, roster, routing,
+  detection and the `junior model` commands.
+- **[Planning for Junior](docs/planning.md)** — shaping a cpm plan into safe,
+  bounded handoffs with `junior plan check` and `junior plan contracts`.
 - **[Tools](docs/tools.md)** — common tool handoffs, `junior report-issue`, MCP
   registration and frontier-attention classification.
 - **[Crossmatrix state graph](skills/junior/SKILL.md)** — the `matrix` commands
@@ -109,6 +126,8 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
 | [docs/getting-started.md](docs/getting-started.md) | Install, quickstart, `doctor` and `init`. |
 | [docs/contracts.md](docs/contracts.md) | Contract fields, workflows, sessions and Jev gates. |
 | [docs/runtime.md](docs/runtime.md) | Receipts, cost, isolation, evidence and the handoff. |
+| [docs/models.md](docs/models.md) | Commodity-only policy, roster, routing and `junior model`. |
+| [docs/planning.md](docs/planning.md) | Junior-ready cpm plans, `plan check` and `plan contracts`. |
 | [docs/tools.md](docs/tools.md) | Companion tools, `report-issue` and MCP registration. |
 | [docs/releasing.md](docs/releasing.md) | Packing and publishing. |
 | [docs/adr/](docs/adr/) | Architecture decision records (MADR) and their conformance rules, checked by `junior matrix adr`. |

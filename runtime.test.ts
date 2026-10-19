@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { executeWorkerStreaming, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES } from './runtime.ts';
+import { executeWorkerStreaming, executeCheck, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
 
 const fakeChild = () => {
@@ -206,4 +206,96 @@ test('Twenty MiB of dropped update events completes without output truncation', 
   fake.end(0);
   const res = await promise;
   assert.equal(res.outputTruncated, false);
+});
+
+test('A line that exceeds the remaining budget is retained whole or not at all', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-atomic-line-'));
+  const { fake, promise } = runStream(dir, { maxOutputBytes: 1024 });
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'a'.repeat(200) }) + '\n');
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'b'.repeat(900) }) + '\n');
+  fake.end(0);
+  await promise;
+  const lines = readEvents(dir).split('\n').filter((l: string) => l.length > 0);
+  assert.ok(lines.every((l: string) => { try { JSON.parse(l); return true; } catch { return false; } }));
+});
+
+test('A line that exceeds the remaining budget marks the result output_truncated', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-trunc-flag-'));
+  const { fake, promise } = runStream(dir, { maxOutputBytes: 1024 });
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'a'.repeat(200) }) + '\n');
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'b'.repeat(900) }) + '\n');
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputTruncated, true);
+});
+
+test('A line that exceeds the remaining budget reports output_truncated as the stop reason', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-trunc-reason-'));
+  const { fake, promise } = runStream(dir, { maxOutputBytes: 1024 });
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'a'.repeat(200) }) + '\n');
+  fake.emitRaw(JSON.stringify({ type: 'agent_settled', pad: 'b'.repeat(900) }) + '\n');
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.stopReason, 'output_truncated');
+});
+
+test('outputBreakdown.byType counts dropped message_update bytes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-bytype-'));
+  const { fake, promise } = runStream(dir);
+  const raw = JSON.stringify({ type: 'message_update', message: { role: 'assistant' } });
+  for (let i = 0; i < 100; i++) fake.emitRaw(raw + '\n');
+  fake.emit({ type: 'agent_settled' });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.byType.message_update, 100 * raw.length);
+});
+
+test('outputBreakdown.largestToolResults keeps the three largest results, largest first', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-largest-'));
+  const { fake, promise } = runStream(dir);
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'small', toolName: 'read', result: { content: [{ type: 'text', text: 'a'.repeat(100) }] } });
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'mid', toolName: 'read', result: { content: [{ type: 'text', text: 'b'.repeat(300) }] } });
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'big', toolName: 'read', result: { content: [{ type: 'text', text: 'c'.repeat(500) }] } });
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'huge', toolName: 'read', result: { content: [{ type: 'text', text: 'd'.repeat(700) }] } });
+  fake.end(0);
+  const res = await promise;
+  assert.deepEqual(res.outputBreakdown.largestToolResults.map((r: any) => r.toolCallId), ['huge', 'big', 'mid']);
+});
+
+test('outputBreakdown.retainedBytes equals the retained stdout length', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-retained-'));
+  const { fake, promise } = runStream(dir);
+  fake.emit({ type: 'agent_settled' });
+  fake.emit({ type: 'session', id: 's' });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.retainedBytes, res.stdout.length);
+});
+
+test('executeCheck counts raw stdout bytes in its outputBreakdown', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-check-bd-'));
+  const fake = fakeChild();
+  const promise = executeCheck({
+    spawnChild: () => fake.child,
+    command: 'pi',
+    args: [],
+    cwd: dir,
+    timeoutMs: 5000,
+    deadlineAt: Date.now() + 60000,
+  });
+  fake.emitRaw('line one\n');
+  fake.emitRaw('line two\n');
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.rawBytes, 18);
+});
+
+test('outputBreakdown.largestToolResults lists a tool call once when it also arrives as a toolResult message', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'junior-rt-'));
+  const { fake, promise } = runStream(dir);
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'bash', result: { content: [{ type: 'text', text: 'x'.repeat(500) }] } });
+  fake.emit({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: [{ type: 'text', text: 'x'.repeat(500) }] } });
+  fake.end(0);
+  const res: any = await promise;
+  assert.deepEqual(res.outputBreakdown.largestToolResults.map((r: any) => r.toolCallId), ['c1']);
 });

@@ -127,10 +127,15 @@ function earningRuleFor(estimate: PlanEstimate): string {
   return estimate.likely <= 2 ? 'zero_hundred' : 'fifty_fifty';
 }
 
+/** The requirement acceptance criteria texts, normalized to non-empty strings. */
+function acceptanceFor(requirement: Record<string, any>): string[] {
+  return asArray(requirement.acceptance_criteria).map(text).filter(Boolean);
+}
+
 /** The inspectable artifact string for one requirement. */
 export function artifactFor(requirement: Record<string, any>): string {
   const statement = text(requirement.statement ?? requirement.capability ?? requirement.id);
-  const criteria = asArray(requirement.acceptance_criteria).map(text).filter(Boolean);
+  const criteria = acceptanceFor(requirement);
   return criteria.length > 0 ? `${statement}, verified by: ${criteria.join('; ')}` : statement;
 }
 
@@ -145,6 +150,7 @@ function requirementDeliverable(
     artifact: artifactFor(requirement),
     owner: text(requirement.owner) || 'agent',
     source: `elicitation:${sessionId}/${text(requirement.id)}`,
+    junior: { workflow: 'test_first', acceptance: acceptanceFor(requirement), checks: [] },
   };
   const priority = text(requirement.priority).toLowerCase();
   if (priority) metadata.priority = priority;
