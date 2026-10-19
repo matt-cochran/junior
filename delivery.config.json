@@ -4,5 +4,8 @@
   "pi": {
     "name": "@earendil-works/pi-coding-agent",
     "testedVersion": "1.0.3"
+  },
+  "models": {
+    "routing": "auto"
   }
 }
