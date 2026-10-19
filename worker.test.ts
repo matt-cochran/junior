@@ -2013,7 +2013,7 @@ test('Session lock key is derived from the parent session id, not a post-run ses
 
 // --- D08 runtime handoff: streaming lifecycle, deadlines, repair lineage (offline; no paid calls) ---
 const delay=(ms:number)=>new Promise((r)=>setTimeout(r,ms));
-const artifactFor=(repo:any,id:string)=>{const base=join(repo.dir,'.delivery',id);const stamps=readdirSync(base).sort();return join(base,stamps[stamps.length-1]);};
+const artifactFor=(repo:any,id:string)=>{const base=join(repo.dir,'.delivery',id);const stamps=readdirSync(base,{withFileTypes:true}).filter((e)=>e.isDirectory()).map((e)=>e.name).sort();return join(base,stamps[stamps.length-1]);};
 const readRuntime=(art:string)=>JSON.parse(readFileSync(join(art,'runtime.json'),'utf8'));
 
 const makeFakeChild=()=>{
@@ -3419,4 +3419,70 @@ test('The readiness request omits trait questions when they would exceed the per
  const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
  await assessPreflight(task(),classifier,{maxQuestions:3});
  assert.equal(Object.keys(questions).filter((k)=>k.startsWith('trait_')).length,0);
+});
+
+// --- sticky per-deliverable model routing ----------------------------------
+const stickyCwd=()=>mkdtempSync(join(tmpdir(),'delivery-sticky-'));
+const stickyFile=(cwd:string)=>JSON.parse(readFileSync(join(cwd,'.delivery','smoke','route.json'),'utf8'));
+
+test('A run writes a sticky route record for its task id',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd}),true);
+ assert.equal(existsSync(join(cwd,'.delivery','smoke','route.json')),true);
+});
+test('The sticky route record names the model the run used',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(stickyFile(cwd).model,ROUTED_MODEL);
+});
+test('The sticky route record carries the approval that allowed the model',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(stickyFile(cwd).approval,{source:'run',key:'long-horizon'});
+});
+test('A second run with the same id reuses the approved routed model',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('A second run with the same id is not asked a model_profile question',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ let preflight:any;
+ const classifier:any=async({questions:q}:any)=>{if(Object.prototype.hasOwnProperty.call(q,'contract_clear'))preflight=q;return {stopReason:'stop',answers:JEVPASS};};
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:classifier});
+ assert.equal(Object.prototype.hasOwnProperty.call(preflight,'model_profile'),false);
+});
+test('The sticky reuse is recorded as not eligible for re-routing',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.eligible,false);
+});
+test('The sticky reuse reports the sticky reason',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.match(r.modelRouting.reason,/^sticky:/);
+});
+test('The sticky reuse marks the routed model as applied',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,true);
+});
+test('The sticky record is ignored when its approval was revoked',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A contract modelProfile without approval stops with needs_model_approval',async()=>{
+ const r=await run(task(0,{modelProfile:'long-horizon'}),true);
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A contract modelProfile approved for the run applies the pinned model',async()=>{
+ const r=await run(task(0,{modelProfile:'long-horizon',approveModel:'long-horizon'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
 });

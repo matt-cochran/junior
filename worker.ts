@@ -43,7 +43,7 @@ export const TASK_FIELDS = [
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
- 'approveModel','approvedProfiles',
+ 'approveModel','approvedProfiles','modelProfile',
  'hopFrom','hopRevision','hopContext',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
@@ -250,6 +250,7 @@ export function validate(t: any) {
  if (t.approvedProfiles !== undefined) {
   if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
  }
+ if (t.modelProfile !== undefined && (typeof t.modelProfile !== 'string' || !t.modelProfile.trim())) throw Error('Invalid modelProfile (expected a roster profile id)');
  if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
@@ -1299,6 +1300,68 @@ export type ModelPolicyRecord = {
  code:'frontier_model_refused'|'unknown_model_refused';
 };
 
+/** The per-deliverable model decision recorded after a run finalizes its
+ * model. A later non-resume run with the same id reuses it so one deliverable
+ * keeps one model. */
+export type StickyRoute = {
+ profile:string|null;
+ provider:string;
+ model:string;
+ approval:ModelApproval|null;
+ decidedAt:string;
+};
+
+/** The sticky route file for one task id, above the per-run timestamp dir. */
+export function stickyRoutePath(cwd:string, id:string):string {
+ return join(cwd,'.delivery',id,'route.json');
+}
+
+/** Read and shape-check the sticky route for `id`, or null when it is absent or
+ * malformed. Approval is only kept when it is a well-formed consent record. */
+export function readStickyRoute(cwd:string, id:string):StickyRoute|null {
+ let raw:string;
+ try { raw=readFileSync(stickyRoutePath(cwd,id),'utf8'); } catch { return null; }
+ let parsed:any;
+ try { parsed=JSON.parse(raw); } catch { return null; }
+ if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+ if (typeof parsed.provider !== 'string' || !parsed.provider.trim()) return null;
+ if (typeof parsed.model !== 'string' || !parsed.model.trim()) return null;
+ const approval=parsed.approval && typeof parsed.approval === 'object'
+  && (parsed.approval.source === 'run' || parsed.approval.source === 'plan' || parsed.approval.source === 'project')
+  && typeof parsed.approval.key === 'string'
+  ? { source:parsed.approval.source, key:parsed.approval.key } as ModelApproval
+  : null;
+ return {
+  profile:typeof parsed.profile === 'string' && parsed.profile.trim() ? parsed.profile : null,
+  provider:parsed.provider,
+  model:parsed.model,
+  approval,
+  decidedAt:typeof parsed.decidedAt === 'string' ? parsed.decidedAt : '',
+ };
+}
+
+/** True when a sticky decision may still be applied: the model is the current
+ * default, or its recorded approval key is still granted via run, plan or
+ * project consent. A revoked approval makes the record inert. */
+export function stickyApprovalHolds(config:ModelConfig, t:any, sticky:StickyRoute):boolean {
+ if (sticky.model === config.model) return true;
+ if (!sticky.approval) return false;
+ const key=sticky.approval.key;
+ const run=typeof t?.approveModel === 'string' && t.approveModel.trim() ? t.approveModel.trim() : null;
+ const plan=Array.isArray(t?.approvedProfiles)
+  ? t.approvedProfiles.filter((k:any):k is string => typeof k === 'string' && !!k.trim()).map((k:string)=>k.trim())
+  : [];
+ const project=Array.isArray(config.approved) ? config.approved : [];
+ return run === key || plan.includes(key) || project.includes(key);
+}
+
+/** Write the finalized model decision for a deliverable. */
+export function writeStickyRoute(cwd:string, id:string, route:{ profile:string|null; provider:string; model:string; approval:ModelApproval|null }):void {
+ const record:StickyRoute={ profile:route.profile, provider:route.provider, model:route.model, approval:route.approval, decidedAt:new Date().toISOString() };
+ mkdirSync(join(cwd,'.delivery',id),{recursive:true});
+ writeFileSync(stickyRoutePath(cwd,id),JSON.stringify(record,null,2));
+}
+
 function modelProfileChoice(answer:GateAnswer):{ profile:string|null; confidence:number|null } {
  if (!answer || typeof answer !== 'object') return { profile:null, confidence:null };
  const picked=[answer.value, answer.choice, answer.label]
@@ -1930,6 +1993,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  const modelConfig=loadModelConfig(sourceCwd);
  const explicitProvider=typeof t.provider==='string' && t.provider.trim() ? t.provider : null;
  const explicitModel=typeof t.model==='string' && t.model.trim() ? t.model : null;
+ const modelProfile=typeof t.modelProfile==='string' && t.modelProfile.trim() ? t.modelProfile.trim() : null;
  let requested={ provider:explicitProvider ?? modelConfig.provider, model:explicitModel ?? modelConfig.model };
  let requestedSource:ReceiptModelSource=explicitProvider || explicitModel ? 'task' : modelConfig.source;
  const mode=jevMode(t);
@@ -1977,6 +2041,15 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   return out;
  };
 
+ // A contract may pin a roster profile. The pin still needs human consent when
+ // it differs from the project default, exactly like an explicit model.
+ const pinnedProfile=modelProfile ? findProfile(modelConfig, modelProfile) : null;
+ if (modelProfile && !pinnedProfile) return blocked(`modelProfile '${modelProfile}' is not in the roster`);
+ if (pinnedProfile) {
+  requested={ provider:pinnedProfile.provider, model:pinnedProfile.model };
+  requestedSource='task';
+ }
+
  // Commodity-only executor policy: refuse a frontier or unknown requested
  // model before any classifier or worker cost, including mock runs.
  let modelPolicy:ModelPolicyRecord|undefined;
@@ -1992,8 +2065,24 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  // with Jev and routing both enabled and at least two roster profiles.
  const resumeRequested=(typeof t.resumeFrom==='string' && !!t.resumeFrom.trim())
   || (typeof t.repairFrom==='string' && !!t.repairFrom.trim());
+ // Sticky routing: one model per deliverable. A non-resume run with no explicit
+ // model reuses the model an earlier run with the same id recorded, provided
+ // the recorded approval still holds or the model is the current default.
+ const sticky=!explicitProvider && !explicitModel && !pinnedProfile && !resumeRequested
+  ? readStickyRoute(sourceCwd, t.id) : null;
+ let stickyRoute:ModelRoute|undefined;
+ if (sticky && stickyApprovalHolds(modelConfig, t, sticky)) {
+  requested={ provider:sticky.provider, model:sticky.model };
+  requestedSource='routed';
+  stickyRoute={ mode, eligible:false, profile:sticky.profile, confidence:null,
+   applied:sticky.model !== modelConfig.model, provider:sticky.provider, model:sticky.model,
+   reason:"sticky: reused the deliverable's earlier model",
+   ...(sticky.approval?{approval:sticky.approval}:{}) };
+ }
  const routingSkipped=explicitProvider || explicitModel ? 'explicit task model'
+  : pinnedProfile ? 'explicit task model'
   : resumeRequested ? 'resume keeps the prior model'
+  : stickyRoute ? "sticky: reused the deliverable's earlier model"
   : mode === 'off' ? 'jev off'
   : modelConfig.routing === 'off' ? 'routing off'
   : modelConfig.roster.length < 2 ? 'roster has fewer than two profiles'
@@ -2199,8 +2288,8 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
 
   // Model routing is decided before the worker spawns, so every receipt and
   // argv builder below sees the final requested model.
-  let modelRoute=decideModelRoute(modelConfig, jev?.preflight?.answers?.model_profile, { eligible:routingEligible, skipped:routingSkipped, approveModel:t.approveModel, approvedProfiles:t.approvedProfiles });
-  if (modelRoute.applied) {
+  let modelRoute=stickyRoute ?? decideModelRoute(modelConfig, jev?.preflight?.answers?.model_profile, { eligible:routingEligible, skipped:routingSkipped, approveModel:t.approveModel, approvedProfiles:t.approvedProfiles });
+  if (modelRoute.applied && !stickyRoute) {
    requested={ provider:modelRoute.provider, model:modelRoute.model };
    requestedSource='routed';
   }
@@ -2244,6 +2333,15 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     return out;
    }
   }
+
+  // The model is final and consented: remember it for the next run of this
+  // deliverable so the deliverable keeps one model.
+  writeStickyRoute(sourceCwd, t.id, {
+   profile:modelRoute.profile ?? null,
+   provider:requested.provider,
+   model:requested.model,
+   approval:modelRoute.approval ?? null,
+  });
 
   // Workflow selection is deterministic and kept separate from gate status.
   const classifierRan = mode !== 'off' && !!classify && !!jev!.preflight && !jev!.preflight.error;

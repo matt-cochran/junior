@@ -75,6 +75,22 @@ function deliverablesOf(plan: unknown): Array<Record<string, any>> {
   return [];
 }
 
+/** Plan-level `metadata.junior` block, shared by the linter and the contract
+ * builder. A bare deliverables array has none. */
+function planJunior(plan: unknown): Record<string, any> {
+  return isRecord(plan) && isRecord(plan.metadata?.junior) ? plan.metadata.junior : {};
+}
+
+/** Plan-level approved model profile ids, trimmed and de-duplicated. */
+function approvedProfilesOf(plan: unknown): string[] {
+  const out: string[] = [];
+  for (const entry of asArray(planJunior(plan).approvedProfiles)) {
+    const profile = text(entry).trim();
+    if (profile && !out.includes(profile)) out.push(profile);
+  }
+  return out;
+}
+
 /** Deliverables Junior can execute: not a milestone, not manager/owner-run and
  * not a manual `kind`. `metadata.kind === 'manual'` and owner `manager`/`owner`
  * are manager-controlled, so the linter leaves them alone. */
@@ -195,6 +211,7 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
   const agent = deliverables.filter(isAgentDeliverable);
   // Ancestry spans every deliverable, so an order through a manager-owned step still counts.
   const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
+  const planApprovedProfiles = approvedProfilesOf(plan);
   const findings: PlanFinding[] = [];
 
   for (const deliverable of agent) {
@@ -221,6 +238,16 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
     const hot = files.filter((file) => hotFiles.includes(file));
     if (hot.length > 0) {
       findings.push(finding('HOT_FILE', 'info', [id, ...hot], `${id} owns hot file(s) ${hot.join(', ')}; prefer one final registration deliverable`));
+    }
+
+    const requestedProfile = text(junior.profile).trim();
+    if (requestedProfile && requestedProfile !== 'general' && !planApprovedProfiles.includes(requestedProfile)) {
+      findings.push(finding(
+        'NEEDS_MODEL_APPROVAL',
+        'warning',
+        [id, requestedProfile],
+        `${id} pins model profile '${requestedProfile}'; split or tighten it to fit the default model, or record the approval in plan.metadata.junior.approvedProfiles`,
+      ));
     }
 
     for (const edge of asArray(deliverable.prerequisites)) {
@@ -265,6 +292,7 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
 /** One Junior contract skeleton per agent deliverable; provider/model are only
  * included when explicitly given so Jev routing applies by default. */
 export function planContracts(plan: unknown, opts: ContractOptions): JuniorContract[] {
+  const planApprovedProfiles = approvedProfilesOf(plan);
   return deliverablesOf(plan).filter(isAgentDeliverable).map((deliverable) => {
     const id = text(deliverable.id);
     const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
@@ -283,6 +311,9 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
       isolation: 'worktree',
       jev: { mode: 'shadow' },
     };
+    const requestedProfile = text(junior.profile).trim();
+    if (requestedProfile) contract.modelProfile = requestedProfile;
+    if (planApprovedProfiles.length > 0) contract.approvedProfiles = planApprovedProfiles;
     if (opts.provider !== undefined) contract.provider = opts.provider;
     if (opts.model !== undefined) contract.model = opts.model;
     return { id, contract };

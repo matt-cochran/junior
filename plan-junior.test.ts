@@ -219,6 +219,48 @@ test('cohorts keep a dependency that runs through a manager-owned deliverable', 
   assert.deepEqual(checkPlanForJunior(plan).cohorts, [['a'], ['b']]);
 });
 
+// --- model profile findings and contracts ----------------------------------
+
+function planWithJunior(deliverables: any[], junior: any): any {
+  return { deliverables, metadata: { junior } };
+}
+
+const profiledAgent = (id: string, profile: string): any => agent(id, {
+  owned_files: ['src/x.ts'],
+  junior: { workflow: 'test_first', profile, acceptance: ['ok'], checks: [{ command: 'true' }] },
+});
+
+test('checkPlanForJunior flags a deep-reasoning profile without plan approval', () => {
+  const result = checkPlanForJunior(plan(profiledAgent('a', 'deep-reasoning')));
+  assert.ok(codes(result).includes('NEEDS_MODEL_APPROVAL'));
+});
+
+test('checkPlanForJunior does not flag a deep-reasoning profile the plan approves', () => {
+  const value = planWithJunior([profiledAgent('a', 'deep-reasoning')], { approvedProfiles: ['deep-reasoning'] });
+  assert.equal(codes(checkPlanForJunior(value)).includes('NEEDS_MODEL_APPROVAL'), false);
+});
+
+test('checkPlanForJunior does not flag the default general profile', () => {
+  const result = checkPlanForJunior(plan(profiledAgent('a', 'general')));
+  assert.equal(codes(result).includes('NEEDS_MODEL_APPROVAL'), false);
+});
+
+test('planContracts carries the deliverable profile as modelProfile', () => {
+  const [{ contract }] = planContracts(plan(profiledAgent('a', 'deep-reasoning')), { cwd: '/repo' });
+  assert.equal(contract.modelProfile, 'deep-reasoning');
+});
+
+test('planContracts carries the plan approved profiles', () => {
+  const value = planWithJunior([agent('a', { owned_files: ['src/x.ts'] })], { approvedProfiles: ['deep-reasoning'] });
+  const [{ contract }] = planContracts(value, { cwd: '/repo' });
+  assert.deepEqual(contract.approvedProfiles, ['deep-reasoning']);
+});
+
+test('planContracts omits approvedProfiles when the plan approves none', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.equal('approvedProfiles' in contract, false);
+});
+
 test('a shared file ordered through a manager-owned deliverable is not a parallel conflict', () => {
   const plan = { deliverables: [
     { id: 'a', owned_files: ['x.ts'], prerequisites: [], metadata: { artifact: 'a', owner: 'agent' } },
