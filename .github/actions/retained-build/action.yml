@@ -1,0 +1,50 @@
+name: Retained staging build
+description: Record successful build evidence or verify it for an identical production tree.
+inputs:
+  mode:
+    description: resolve or record
+    required: true
+  workflow:
+    description: Calling workflow filename, for example ci.yml
+    required: true
+  token:
+    description: Read-only token with contents, actions and pull-requests read access (resolve verifies staging PR provenance)
+    required: true
+  runner-mode:
+    description: Existing CI_RUNNER_MODE resolved by the calling workflow
+    default: github
+  runner-label:
+    description: Selected runner label resolved by the calling workflow
+    default: github
+outputs:
+  build-required:
+    description: Whether the original build checks must run
+    value: ${{ steps.evidence.outputs.build-required }}
+  run-id:
+    description: Successful original build run
+    value: ${{ steps.evidence.outputs.run-id }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/validate-ci-runner
+      with:
+        mode: ${{ inputs.runner-mode }}
+        runner-label: ${{ inputs.runner-label }}
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: '24'
+    - id: evidence
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        RETAINED_BUILD_MODE: ${{ inputs.mode }}
+        RETAINED_BUILD_WORKFLOW: ${{ inputs.workflow }}
+        RETAINED_BUILD_SCRIPT: ${{ github.action_path }}/retained-build.ts
+      run: node "$RETAINED_BUILD_SCRIPT"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: inputs.mode == 'record'
+      with:
+        name: retained-build-${{ inputs.workflow }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/retained-build/build-result.json
+        retention-days: 90
+        if-no-files-found: error
