@@ -1,58 +1,82 @@
+# Build on Blacksmith once for staging; verify retained results on production promotion.
 name: Test
-
 on:
   push:
-    branches: [main]
+    branches:
+    - dev
+    - staging
+    - main
   pull_request:
+    branches:
+    - dev
+    - staging
+    - main
+  workflow_dispatch: null
+  workflow_call:
 
 permissions:
   contents: read
-
+  actions: read
+  pull-requests: read
+concurrency:
+  group: retained-test.yml-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  # The full behavioral suite runs on Ubuntu 22.04 because several scenarios
-  # assert POSIX process-group cancellation (TERM then SIGKILL) and signals.
-  # Those guarantees are intentionally not claimed on Windows, where the
-  # installed CLI smoke below is the supported check instead.
-  full:
-    name: Full suite (ubuntu-22.04, Node ${{ matrix.node }})
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [24, 26]
+  resolve:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft != true }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      build-required: ${{ steps.resolve.outputs.build-required }}
+      run-id: ${{ steps.resolve.outputs.run-id }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm test
-
-  # Lightweight, native installed-CLI smoke on six OS/arch targets and both
-  # supported Node lines. It builds, packs and installs the tarball with
-  # lifecycle scripts ignored, then runs the installed `junior` shim. It does
-  # not exercise POSIX-only behavior, so it is safe on every platform.
-  smoke:
-    name: Installed CLI smoke (${{ matrix.os }}, Node ${{ matrix.node }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-22.04      # linux x64
-          - ubuntu-22.04-arm   # linux arm64
-          - macos-15-intel           # darwin x64
-          - macos-15           # darwin arm64
-          - windows-latest     # windows x64
-          - windows-11-arm     # windows arm64
-        node: [24, 26]
-    runs-on: ${{ matrix.os }}
+          persist-credentials: false
+      - id: resolve
+        uses: ./.github/actions/retained-build
+        with:
+          mode: resolve
+          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+          workflow: test.yml
+          token: ${{ github.token }}
+  checks:
+    needs: resolve
+    if: needs.resolve.outputs.build-required == 'true'
+    uses: ./.github/workflows/test-checks.yml
+    secrets: inherit
+  build-gate:
+    name: Build gate
+    needs: [resolve, checks]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true) }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Require full checks or verified retained staging results
+        env:
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RESOLVE_RESULT" = success
+          if [ "$BUILD_REQUIRED" = true ]; then
+            test "$CHECKS_RESULT" = success
+          else
+            test "$BUILD_REQUIRED" = false
+            test -n "$SOURCE_RUN"
+            test "$CHECKS_RESULT" = skipped
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: needs.resolve.outputs.build-required == 'true'
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: node scripts/smoke-installed.mjs
+          persist-credentials: false
+      - uses: ./.github/actions/retained-build
+        if: needs.resolve.outputs.build-required == 'true'
+        with:
+          mode: record
+          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+          workflow: test.yml
+          token: ${{ github.token }}
