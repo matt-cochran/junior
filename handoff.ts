@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
-import { CONFIDENCE_THRESHOLD } from './worker.ts';
+import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -41,7 +41,11 @@ export type CompactHandoff = {
  checks: { command: string; exitCode: number | null; passed: boolean; error?: string }[];
  unresolved: string[];
  model: {
-  requested: { provider: string; model: string } | null;
+  requested: { provider: string; model: string; source?: string } | null;
+  /** The Jev model-routing record, or null when this result predates routing. */
+  routing: ModelRoute | null;
+  /** The commodity-policy refusal record, or null when no model was refused. */
+  policy: ModelPolicyRecord | null;
   observed: { provider: string; model: string }[];
   observedUnknown: boolean;
   tokens: number;
@@ -255,6 +259,8 @@ export function compactHandoff(result: any): CompactHandoff {
   unresolved: unresolvedIssues(r),
   model: {
    requested: r.receipt?.requested ?? null,
+   routing: r.modelRouting ?? null,
+   policy: r.modelPolicy ?? null,
    observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
    observedUnknown: r.receipt?.observedUnknown ?? true,
    tokens: r.receipt?.usage?.totalTokens ?? 0,

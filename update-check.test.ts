@@ -9,8 +9,28 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { UpdateCheckDeps, UpdateCheckFs, CollectedUpdates } from './update-check.ts';
+import type { ModelUpdate } from './model-updates.ts';
 
 const HOUR = 60 * 60 * 1000;
+
+const DEEPSEEK_UPDATE: ModelUpdate = {
+  profile: 'general',
+  provider: 'openrouter',
+  current: 'deepseek/deepseek-v4.1-flash',
+  newer: ['deepseek/deepseek-v4.1-flash-1017'],
+  latest: 'deepseek/deepseek-v4.1-flash-1017',
+  isDefault: true,
+};
+
+/** A model-detection seam that reports nothing, keeping tests offline. */
+const NO_MODEL_UPDATES = async () => ({ catalog: null as const, updates: [] as ModelUpdate[] });
+
+/** Offline self/tool/companion probes so only the model seam under test runs. */
+const OFFLINE_PROBES = {
+  checkSelf: () => ({ installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' }),
+  checkTools: async () => ({ tools: [], outdated: [] }),
+  inspect: () => ({ ready: true, checkedUpdates: true, remediation: [], companions: [] }),
+};
 
 function memoryFs(): UpdateCheckFs & { files: Map<string, string> } {
   const files = new Map<string, string>();
@@ -41,6 +61,7 @@ function emptyUpdates(overrides: Partial<CollectedUpdates> = {}): CollectedUpdat
     junior: { installed: '1.0.0', latest: '1.1.0', outdated: true, kind: 'npm-global' },
     managed: { tools: [], outdated: [] },
     companions: [],
+    models: { catalog: null, updates: [] },
     ...overrides,
   };
 }
@@ -54,6 +75,9 @@ function deps(partial: Partial<UpdateCheckDeps> = {}): UpdateCheckDeps {
 test('collectUpdates reports the outdated companion packages', async () => {
   const { collectUpdates } = await import('./update-check.ts');
   const updates = await collectUpdates({
+    modelUpdates: NO_MODEL_UPDATES,
+    checkSelf: () => ({ installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' }),
+    checkTools: async () => ({ tools: [], outdated: [] }),
     inspect: () => ({
       ready: true,
       checkedUpdates: true,
@@ -70,6 +94,8 @@ test('collectUpdates reports the outdated companion packages', async () => {
 test('collectUpdates describes the source-checkout remediation', async () => {
   const { collectUpdates } = await import('./update-check.ts');
   const updates = await collectUpdates({
+    modelUpdates: NO_MODEL_UPDATES,
+    checkTools: async () => ({ tools: [], outdated: [] }),
     checkSelf: () => ({ installed: '1.0.0', latest: '1.1.0', outdated: true, kind: 'source' }),
     inspect: () => ({ ready: true, checkedUpdates: true, remediation: [], companions: [] }),
   });
@@ -79,16 +105,19 @@ test('collectUpdates describes the source-checkout remediation', async () => {
 test('collectUpdates exposes the doctor update keys', async () => {
   const { collectUpdates } = await import('./update-check.ts');
   const updates = await collectUpdates({
+    modelUpdates: NO_MODEL_UPDATES,
     checkSelf: () => ({ installed: '1.0.0', latest: '1.1.0', outdated: true, kind: 'npm-global' }),
     checkTools: async () => ({ tools: [], outdated: [] }),
     inspect: () => ({ ready: true, checkedUpdates: true, remediation: [], companions: [] }),
   });
-  assert.deepEqual(Object.keys(updates).sort(), ['companions', 'junior', 'managed', 'remediation']);
+  assert.deepEqual(Object.keys(updates).sort(), ['companions', 'junior', 'managed', 'models', 'remediation']);
 });
 
 test('collectUpdates lists the outdated managed tools', async () => {
   const { collectUpdates } = await import('./update-check.ts');
   const updates = await collectUpdates({
+    modelUpdates: NO_MODEL_UPDATES,
+    checkSelf: () => ({ installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' }),
     checkTools: async () => ({ tools: [], outdated: ['crossmatrix'] }),
     inspect: () => ({ ready: true, checkedUpdates: true, remediation: [], companions: [] }),
   });
@@ -259,6 +288,116 @@ test('startupNotice resolves without throwing when the refresh fails', async () 
     collect: async () => { throw new Error('offline'); },
   });
   await assert.doesNotReject(promise);
+});
+
+// --- model update detection -------------------------------------------------
+
+test('collectUpdates exposes an injected model update under models.updates', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [DEEPSEEK_UPDATE] }),
+  });
+  assert.deepEqual(updates.models.updates, [DEEPSEEK_UPDATE]);
+});
+
+test('collectUpdates reports the catalog that produced the model updates', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [DEEPSEEK_UPDATE] }),
+  });
+  assert.equal(updates.models.catalog, 'online');
+});
+
+test('collectUpdates survives a throwing model detection', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => { throw new Error('offline'); },
+  });
+  assert.deepEqual(updates.models, { catalog: null, updates: [] });
+});
+
+test('collectUpdates keeps the companion results when model detection throws', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => { throw new Error('offline'); },
+    inspect: () => ({
+      ready: true,
+      checkedUpdates: true,
+      remediation: [],
+      companions: [{ id: 'jevitate', package: '@jevitate/cli', installed: true, executable: null, version: '1.0.0', outdated: true, mcpRegister: '' }],
+    }),
+  });
+  assert.deepEqual(updates.companions, ['@jevitate/cli']);
+});
+
+test('collectUpdates points remediation at junior model upgrade', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [DEEPSEEK_UPDATE] }),
+  });
+  assert.match(String(updates.remediation), /junior model upgrade/);
+});
+
+test('collectUpdates adds no model remediation when no model is newer', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [] }),
+  });
+  assert.doesNotMatch(String(updates.remediation ?? ''), /junior model upgrade/);
+});
+
+test('cachedUpdateSummary records a model update in the outdated list', async () => {
+  const fs = memoryFs();
+  await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({
+      junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' },
+      models: { catalog: 'online', updates: [DEEPSEEK_UPDATE] },
+    }),
+  });
+  const stored = JSON.parse(fs.files.get(CACHE) ?? 'null');
+  assert.ok(stored.outdated.includes('model:deepseek/deepseek-v4.1-flash-1017'));
+});
+
+test('cachedUpdateSummary omits model entries when no model is newer', async () => {
+  const fs = memoryFs();
+  await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({
+      models: { catalog: 'online', updates: [] },
+      junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' },
+    }),
+  });
+  const stored = JSON.parse(fs.files.get(CACHE) ?? 'null');
+  assert.equal(stored.outdated.some((entry: string) => entry.startsWith('model:')), false);
+});
+
+test('cachedUpdateSummary writes a summary when only the online catalog resolved', async () => {
+  const fs = memoryFs();
+  const summary = await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({
+      junior: { installed: '1.0.0', latest: null, outdated: null, kind: 'source' },
+      managed: { tools: [{ tool: 'crossmatrix', installed: null, latest: null, outdated: null }], outdated: [] },
+      models: { catalog: 'online', updates: [] },
+    }),
+  });
+  assert.notEqual(summary, null);
+});
+
+test('startupNotice names the model update in its one line', async () => {
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 1_000 * HOUR, outdated: ['model:deepseek/deepseek-v4.1-flash-1017'], remediation: '' }));
+  const line = await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 1_000 * HOUR, fs, writeNotice: () => {},
+  });
+  assert.match(String(line), /model:deepseek\/deepseek-v4\.1-flash-1017/);
 });
 
 // --- cache path convention --------------------------------------------------

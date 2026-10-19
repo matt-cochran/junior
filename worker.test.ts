@@ -16,11 +16,13 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 import { loadPlaybooks } from './playbooks.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
+const COMMODITY_MODEL='deepseek/deepseek-v4.1-flash';
+const ROUTED_MODEL='moonshotai/kimi-k2.7-code';
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
 const resultFile=(value:any)=>{const f=join(mkdtempSync(join(tmpdir(),'delivery-')),'result.json');writeFileSync(f,typeof value==='string'?value:JSON.stringify(value));return f;};
 const saved=(status:string)=>({id:'smoke',status,checks:[{command:'node',args:['-e',''],exitCode:status==='checks_failed'?1:0}],artifactDir:'/tmp/artifact'});
@@ -61,7 +63,7 @@ test('Status rejects malformed result',()=>{const r=cli(['status',resultFile({id
 test('Status exposes receipt when present',()=>{const receipt=mockReceipt({provider:'openrouter',model:'m'});const r=cli(['status',resultFile({...saved('simulation_passed'),receipt})]);assert.equal(r.status,0);const o=JSON.parse(r.stdout);assert.equal(o.receipt.source,'mock');assert.equal(o.receipt.requested.model,'m');});
 
 test('Parser dedupes repeated observed events and sums usage',()=>{
- const r=parseReceipt(stream({type:'session',id:'sess-1'},assistant(),assistant(),{type:'agent_settled'}),{provider:'openrouter',model:'m'});
+ const r=parseReceipt(stream({type:'session',id:'sess-1'},assistant(),assistant(),{type:'agent_settled'}),{provider:'openrouter',model:COMMODITY_MODEL});
  assert.equal(r.sessionId,'sess-1');
  assert.equal(r.assistantMessages,2);
  assert.deepEqual(r.observed,[{provider:'openrouter',model:'m'}]);
@@ -641,7 +643,7 @@ test('Analysis run with its report in the artifactDir is ready_for_review',async
   if(m){captured.report=m[1];writeFileSync(m[1],'# Analysis report\n');}
   return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};
  };
- const r=await run(task(0,{workflow:'evaluate',provider:'openrouter',model:'m'}),false,{spawnPi});
+ const r=await run(task(0,{workflow:'evaluate',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.analysis.workflow,'evaluate');
  assert.equal(r.analysis.reportPresent,true);
@@ -668,7 +670,7 @@ test('Analysis-to-implementation requires an explicit workflow',async()=>{
  mkdirSync(parentDir,{recursive:true});
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd,{workflow:{selected:'fmeca'}})));
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,true,{classify:classifier});
  assert.equal(r.workflow.selected,'checks_first');
  assert.equal(r.workflow.recommended,'test_first');
@@ -846,16 +848,16 @@ test('A top-level continuations setting enables a continuation segment',async()=
  assert.equal(r.segments.length,2);
 });
 const SESSION_A='123e4567-e89b-12d3-a456-426614174000';
-const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A},...over});
+const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A},...over});
 test('Resume validation rejects cwd, provider/model and invalid session',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
  const prior=priorResult(cwd);
- assert.ok(resolveResume(prior,{provider:'openrouter',model:'m'},cwd,'p').info);
- assert.match(resolveResume(prior,{provider:'openrouter',model:'m'},join(cwd,'other'),'p').error,/cwd mismatch/);
+ assert.ok(resolveResume(prior,{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').info);
+ assert.match(resolveResume(prior,{provider:'openrouter',model:COMMODITY_MODEL},join(cwd,'other'),'p').error,/cwd mismatch/);
  assert.match(resolveResume(prior,{provider:'openrouter',model:'other'},cwd,'p').error,/provider\/model mismatch/);
- assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:''}},{provider:'openrouter',model:'m'},cwd,'p').error,/no Pi session ID/);
- assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:'bad id!'}},{provider:'openrouter',model:'m'},cwd,'p').error,/not valid/);
- assert.match(resolveResume({...prior,receipt:undefined},{provider:'openrouter',model:'m'},cwd,'p').error,/no receipt/);
+ assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:''}},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/no Pi session ID/);
+ assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:'bad id!'}},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/not valid/);
+ assert.match(resolveResume({...prior,receipt:undefined},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/no receipt/);
 });
 test('Resume mismatch blocks before the worker starts',async()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
@@ -865,7 +867,7 @@ test('Resume mismatch blocks before the worker starts',async()=>{
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
  const spawnPi=()=>{spawned=true;return {status:0,stdout:'',stderr:''};};
- const r=await run(task(0,{cwd,provider:'openrouter',model:'m',resumeFrom:join(parentDir,'result.json')}),false,{spawnPi});
+ const r=await run(task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:join(parentDir,'result.json')}),false,{spawnPi});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/resumeFrom rejected/);
  assert.match(r.resume.error,/cwd mismatch/);
@@ -883,7 +885,7 @@ test('Resume passes explicit --session, appends the contract and records the par
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));
  let captured:any;
  const spawnPi=(command:string,args:string[])=>{captured={command,args};return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'checks_first',deliverable:'Continue work',resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'checks_first',deliverable:'Continue work',resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,false,{spawnPi});
  assert.equal(captured.command,'pi');
  assert.equal(captured.args[captured.args.indexOf('--session')+1],SESSION_A);
@@ -908,7 +910,7 @@ test('Resume from a prior recon run never auto-approves test_first',async()=>{
  let spawned=false;
  const spawnPi=(_c:string,args:string[])=>{spawned=true;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,false,{spawnPi,classify:classifier});
  assert.equal(spawned,true);
  assert.equal(r.workflow.selected,'checks_first');
@@ -1039,9 +1041,104 @@ test('Run consumes project defaults and an explicit task provider/model wins',as
  const r=await run(task(0,{cwd}),true);
  assert.equal(r.receipt.requested.provider,'openrouter');
  assert.equal(r.receipt.requested.model,'deepseek/deepseek-v4.1-flash');
- const r2=await run(task(0,{cwd,provider:'anthropic',model:'claude'}),true);
- assert.equal(r2.receipt.requested.provider,'anthropic');
- assert.equal(r2.receipt.requested.model,'claude');
+ const r2=await run(task(0,{cwd,provider:'openrouter',model:'moonshotai/kimi-k3'}),true);
+ assert.equal(r2.receipt.requested.provider,'openrouter');
+ assert.equal(r2.receipt.requested.model,'moonshotai/kimi-k3');
+});
+
+// --- commodity-only executor policy and Jev model routing ---
+const modelGate=(profile:string|null,confidence:number):any=>async({questions}:any)=>{
+ const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+ const answers:any={...(isPre?JEVPASS:{AC1:bool(0.95)})};
+ if(isPre && profile && Object.prototype.hasOwnProperty.call(questions,'model_profile')) answers.model_profile={type:'choice',value:profile,confidence};
+ return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers,usage:gateUsage};
+};
+const routingCwd=(routing:string)=>{const cwd=mkdtempSync(join(tmpdir(),'delivery-routing-'));writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({models:{routing}}));return cwd;};
+const routeConfig=(routing:string='auto'):any=>({provider:'openrouter',model:COMMODITY_MODEL,source:'builtin',path:null,pinnedVerdict:{},routing,autoUpgrade:false,defaultProfile:'general',rejected:[],roster:[
+ {id:'general',provider:'openrouter',model:COMMODITY_MODEL,default:true,strengths:'default'},
+ {id:'long-horizon',provider:'openrouter',model:ROUTED_MODEL,strengths:'long autonomous sessions'},
+]});
+
+test('A mock run with an explicit frontier model is refused for review',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.equal(r.status,'needs_review');
+});
+test('A refused frontier model leaves the worker exit code unset',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.equal(r.workerExitCode,null);
+});
+test('A refused frontier model reports the frontier policy code',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.match(r.workerError,/^frontier_model_refused/);
+});
+test('An unknown explicit model is refused with the unknown policy code',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:'acme/unknown-1'}),true);
+ assert.match(r.workerError,/^unknown_model_refused/);
+});
+test('A frontier model pinned in project config never reaches the worker',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-frontier-pin-'));
+ writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({provider:'anthropic',model:'claude-opus'}));
+ let spawned=false;
+ await run(task(0,{cwd}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ assert.equal(spawned,false);
+});
+test('A run with no explicit model and no config records the builtin default and source',async()=>{
+ const r=await run(task(),true);
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:COMMODITY_MODEL,source:'builtin'});
+});
+test('Auto routing applies a confident non-default model profile',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:ROUTED_MODEL,source:'routed'});
+});
+test('Auto routing records that the model route was applied',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,true);
+});
+test('Shadow routing keeps the default requested model',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('Shadow routing records the recommended model profile',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.profile,'long-horizon');
+});
+test('Shadow routing records the recommendation as not applied',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,false);
+});
+test('A routed answer below the confidence threshold keeps the default model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.5)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('An explicit task model makes model routing ineligible',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:'moonshotai/kimi-k3',jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.eligible,false);
+});
+test('An explicit task model is not asked a model profile question',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await run(task(0,{provider:'openrouter',model:'moonshotai/kimi-k3',jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.equal(Object.prototype.hasOwnProperty.call(questions,'model_profile'),false);
+});
+test('decideModelRoute applies a confident non-default profile in auto mode',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,true);
+});
+test('decideModelRoute records but does not apply a recommendation in shadow mode',()=>{
+ assert.equal(decideModelRoute(routeConfig('shadow'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,false);
+});
+test('decideModelRoute keeps the default below the confidence threshold',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.5},{eligible:true}).model,COMMODITY_MODEL);
+});
+test('decideModelRoute ignores an unknown model profile',()=>{
+ assert.match(decideModelRoute(routeConfig('auto'),{type:'choice',value:'missing',confidence:0.9},{eligible:true}).reason,/not in the roster/);
+});
+test('compactHandoff exposes the model routing record',()=>{
+ const route={mode:'auto',eligible:true,profile:'long-horizon',confidence:0.9,applied:true,provider:'openrouter',model:ROUTED_MODEL,reason:'auto-routed'};
+ assert.deepEqual(compactHandoff({modelRouting:route}).model.routing,route);
+});
+test('compactHandoff exposes the model policy record',()=>{
+ const policy={provider:'anthropic',model:'claude-opus',class:'frontier',reason:'vendor anthropic is frontier',code:'frontier_model_refused'};
+ assert.deepEqual(compactHandoff({modelPolicy:policy}).model.policy,policy);
 });
 test('CLI doctor needs no task file and exits nonzero when prerequisites fail',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-cli-'));
@@ -1500,10 +1597,10 @@ test('Resume rejects incompatible isolation before paid calls',async()=>{
  const repo=gitRepo();
  commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','1');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume',provider:'openrouter',model:'m',isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/isolation/i);
  assert.equal(spawned,false);
@@ -1515,11 +1612,11 @@ test('Resume with worktree isolation reuses the prior execution checkout',async(
  const wtPath=join(repo.dir,'.delivery','prior-wt');
  assert.equal(createDetachedWorktree(repo.dir,wtPath).ok,true);
  const priorDir=join(repo.dir,'.delivery','prior','2');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:wtPath,isolation:{mode:'worktree'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:wtPath,isolation:{mode:'worktree'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawnedCwd:string|undefined;
  const spawnPi=(command:string,args:string[],opts:any)=>{spawnedCwd=opts.cwd;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
- const r=await run(okTask(repo,{id:'resume-wt',provider:'openrouter',model:'m',isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi});
+ const r=await run(okTask(repo,{id:'resume-wt',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.executionCwd,wtPath);
  assert.equal(spawnedCwd,wtPath);
@@ -1558,7 +1655,7 @@ test('Blocked enforce preflight releases the checkout lock',async()=>{
  assert.ok(!existsSync(lockPath),'lock released on blocked preflight');
 });
 
-const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));return join(priorDir,'result.json');};
+const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));return join(priorDir,'result.json');};
 
 test('Held Pi session lock rejects a resume before paid calls and is not auto-deleted',async()=>{
  const repo=gitRepo();
@@ -1568,7 +1665,7 @@ test('Held Pi session lock rejects a resume before paid calls and is not auto-de
  const held=acquireLock(lockDir,`session:${SESSION_A}`,{purpose:'test'});
  assert.ok(held.handle);
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume-lock',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume-lock',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/lock/i);
  assert.equal(spawned,false);
@@ -1581,7 +1678,7 @@ test('Pi session lock is released after a resume run',async()=>{
  commitFile(repo,'a.txt','base\n');
  const from=priorNone(repo,'4');
  const lockPath=lockPathFor(join(repo.dir,'.delivery','locks'),`session:${SESSION_A}`);
- const r=await run(okTask(repo,{id:'resume-rel',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:okSpawn()});
+ const r=await run(okTask(repo,{id:'resume-rel',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:okSpawn()});
  assert.equal(r.status,'ready_for_review');
  assert.ok(!existsSync(lockPath),'session lock released after resume');
 });
@@ -1621,7 +1718,7 @@ test('Failed session lock acquisition releases the already-acquired checkout loc
  assert.ok(held.handle);
  const checkoutLockPath=lockPathFor(lockDir,`checkout:${repo.dir}`);
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume-lock-gap',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume-lock-gap',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/lock/i);
  assert.equal(spawned,false);
@@ -1801,10 +1898,10 @@ test('SIGINT-style interruption yields an interrupted handback, preserves artifa
 test('Repair over budget is rejected before any paid call',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','budget');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:1,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:1,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
- const r=await run(okTask(repo,{id:'repair-rej',provider:'openrouter',model:'m',repairFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'repair-rej',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(spawned,false,'rejected before the worker starts');
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/repair rejected/);
@@ -1815,10 +1912,10 @@ test('Repair over budget is rejected before any paid call',async()=>{
 test('Repair within budget reuses the session and persists the lineage counter',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','okrepair');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  const from=join(priorDir,'result.json');
- const r=await run(okTask(repo,{id:'repair-ok',provider:'openrouter',model:'m',repairFrom:from}),false,{spawnPi:okSpawn()});
+ const r=await run(okTask(repo,{id:'repair-ok',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:from}),false,{spawnPi:okSpawn()});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.lineage.repairs,1);
  assert.equal(r.lineage.maxRepairs,1);
@@ -2615,7 +2712,7 @@ test('isolationSetup is ignored when isolation is none',async()=>{
 
 test('delivery.config.json isolationSetup provisions the worktree',async()=>{
  const repo=gitRepo();
- commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
  const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('setup-marker.txt')"]}];
  const r=await run(okTask(repo,{isolation:'worktree',checks}),true);
  assert.equal(r.checks[0].exitCode,0);
@@ -2623,7 +2720,7 @@ test('delivery.config.json isolationSetup provisions the worktree',async()=>{
 
 test('a contract isolationSetup takes precedence over delivery.config.json',async()=>{
  const repo=gitRepo();
- commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
  const isolationSetup={commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('contract-marker.txt','1')"]}]};
  const r=await run(okTask(repo,{isolation:'worktree',isolationSetup}),true);
  assert.equal(r.status,'simulation_passed');

@@ -25,6 +25,10 @@ import { inspectCompanions, inspectCompanionSkills, installCompanions, installCo
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 import { inspectReadiness, type ReadinessResult } from './readiness.ts';
+import { classifyModel } from './model-policy.ts';
+import { readLocalCatalog } from './models.ts';
+import { loadModelConfig, type ModelConfig } from './roster.ts';
+import { modelUpdates } from './model-updates.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -298,6 +302,17 @@ export type ModelCheck = {
  /** Whether the local catalog files are absent, present but empty, or hold models. */
  storeStatus:ModelStoreStatus;
  note?:string;
+ /** Project/builtin pin Junior would execute, and where it came from. */
+ pinned?:{provider:string; id:string; source:'project'|'builtin'; path:string|null};
+ /** Offline policy classification of the pinned model. */
+ policy?:{class:'commodity'|'frontier'|'unknown'; reason:string};
+ routing?:'off'|'shadow'|'auto';
+ autoUpgrade?:boolean;
+ /** Roster profiles with local-catalog availability and default marking. */
+ roster?:{profile:string; provider:string; model:string; available:boolean; default:boolean}[];
+ rejected?:{id:string; model:string; reason:string}[];
+ /** Roster profiles with newer commodity releases in the local catalog. */
+ newer?:{profile:string; current:string; newer:string[]}[];
 };
 
 /** Count model entries for one provider in a parsed catalog object. Other
@@ -338,6 +353,22 @@ export function checkModel(provider:string, id:string, deps:SetupDeps = {}):Mode
   ? `Model ${provider}/${id} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`
   : `The ${provider} model catalog is missing or empty; it fills after a credential is present. Start \`pi\` and run \`/login\` first, then refresh with \`pi update --models\`.`;
  return { provider, id, available:false, source:null, storeStatus, note };
+}
+
+/** Attach the offline pin, policy, roster and update context to a model check.
+ * `catalogIds` are the local Pi catalog ids only; nothing here touches the
+ * network and nothing writes. */
+function describeModel(config:ModelConfig, catalogIds:string[]):Required<Pick<ModelCheck,'pinned'|'policy'|'routing'|'autoUpgrade'|'roster'|'rejected'|'newer'>> {
+ const policy=classifyModel(config.provider,config.model);
+ return {
+  pinned:{ provider:config.provider, id:config.model, source:config.source, path:config.path },
+  policy:{ class:policy.class, reason:policy.reason },
+  routing:config.routing,
+  autoUpgrade:config.autoUpgrade,
+  roster:config.roster.map((p)=>({ profile:p.id, provider:p.provider, model:p.model, available:catalogIds.includes(p.model), default:p.id===config.defaultProfile })),
+  rejected:config.rejected.map((r)=>({ id:r.id, model:r.model, reason:r.reason })),
+  newer:modelUpdates(config,catalogIds).filter((u)=>u.newer.length>0).map((u)=>({ profile:u.profile, current:u.current, newer:u.newer })),
+ };
 }
 
 export type TestedPi = { name:string; version:string; source:'project'|'builtin' };
@@ -425,7 +456,10 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const defaults=loadDefaults(cwd,deps);
  const provider=defaults.provider;
  const credentials=checkCredentials(provider,deps);
- const model=checkModel(provider,defaults.model,deps);
+ const config=loadModelConfig(cwd);
+ const catalog=readLocalCatalog(agentDir(deps));
+ const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalog.entries.map((e)=>e.id)) };
+ const policyOk=model.policy ? model.policy.class === 'commodity' : true;
 
  const remediation:string[]=[];
  if (!supported) remediation.push(`Install Node ${SUPPORTED_NODE_MIN} or newer (for example \`nvm install 24\`) and re-run \`doctor\`.`);
@@ -438,10 +472,13 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
   if (model.storeStatus === 'populated') remediation.push(`Model ${provider}/${defaults.model} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`);
   else remediation.push(`The ${provider} model catalog is missing or empty; run \`pi update --models\` to refresh it after \`/login\`.`);
  }
+ if (model.policy && !policyOk) remediation.push(`Junior executes only commodity/open-weight models: ${model.policy.reason}. Pin a commodity model in delivery.config.json (see \`junior model status\`).`);
 
  const warnings:string[]=[];
  const slowMount=detectSlowMount(cwd,deps);
  if (slowMount) warnings.push(slowMount);
+ for (const update of model.newer ?? []) warnings.push(`Newer commodity models available: ${update.profile} ${update.current} -> ${update.newer[0]}; run \`junior model upgrade\`.`);
+ for (const rejected of model.rejected ?? []) warnings.push(`Roster profile '${rejected.id}' rejected: ${rejected.reason}`);
 
  const checks:DoctorCheck[]=[
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
@@ -465,7 +502,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
   exec: deps.exec,
   integrations,
  }, { cwd, harness: opts.harness });
- return { command:'doctor', ok:checks.every((c)=>c.ok), warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, checks, remediation };
+ return { command:'doctor', ok:checks.every((c)=>c.ok) && policyOk, warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };

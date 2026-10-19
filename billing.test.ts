@@ -205,32 +205,32 @@ test('Estimate never promotes an unavailable estimate to a bill', () => {
 // --- run integration (injected seams only) ---
 test('A run without billing config makes no billing request', async () => {
  let calls = 0;
- await run(task({ provider: 'openrouter', model: 'm' }), false, { spawnPi: spawnOk('gen-1'), billingFetch: async () => { calls++; return okBody('gen-1', 'm', 1); } });
+ await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' }), false, { spawnPi: spawnOk('gen-1'), billingFetch: async () => { calls++; return okBody('gen-1', 'm', 1); } });
  assert.equal(calls, 0);
 });
 test('A mock run never makes a billing request', async () => {
  let calls = 0;
- await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), true, { billingFetch: async () => { calls++; return okBody('gen-1', 'm', 1); } });
+ await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), true, { billingFetch: async () => { calls++; return okBody('gen-1', 'm', 1); } });
  assert.equal(calls, 0);
 });
 test('A live run with billing captures the authoritative total_cost', async () => {
- const r = await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk('gen-1'), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1.25) });
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk('gen-1'), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1.25) });
  assert.equal(r.cost.billedUsd, 1.25);
 });
 test('A live run with a missing generation id leaves billedUsd null', async () => {
- const r = await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
  assert.equal(r.cost.billedUsd, null);
 });
 test('A live run with a missing generation id records the billing limitation', async () => {
- const r = await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
  assert.match(String(r.cost.billingReason), /missing a response id/i);
 });
 test('Compact handoff labels a captured bill as provider cost', async () => {
- const r = await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk('gen-1'), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1.25) });
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk('gen-1'), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1.25) });
  assert.equal(compactHandoff(r).model.cost.source, 'provider');
 });
 test('Compact handoff surfaces the billing limitation when capture fails', async () => {
- const r = await run(task({ provider: 'openrouter', model: 'm', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
+ const r = await run(task({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', billing: { mode: 'openrouter' } }), false, { spawnPi: spawnOk(), billingResolveApiKey: apiKey, billingFetch: async () => okBody('gen-1', 'm', 1) });
  assert.match(String(compactHandoff(r).model.cost.billingReason), /missing a response id/i);
 });
 test('Billing times out when response JSON never resolves', async () => {

@@ -24,6 +24,9 @@ import { spawnSpec } from './cli-entry.ts';
 import { checkSelfUpdate, type SelfUpdateCheck, type SelfUpdateDeps } from './self-update.ts';
 import { checkToolUpdates, type InstallerDeps, type ToolUpdateStatus, type ToolName } from './installer.ts';
 import { inspectCompanions, type CompanionDeps, type CompanionsReport } from './companions.ts';
+import { catalogIds, modelUpdates as detectModelUpdates, type ModelUpdate } from './model-updates.ts';
+import type { CatalogFetch } from './models.ts';
+import { loadModelConfig } from './roster.ts';
 
 export const UPDATE_CHECK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_CHECK_REFRESH_TIMEOUT_MS = 3000;
@@ -34,6 +37,8 @@ export interface CollectedUpdates {
   managed: { tools: ToolUpdateStatus[]; outdated: Array<ToolName | 'triz'> };
   /** Packages of the companions that are behind their latest release. */
   companions: string[];
+  /** Newer commodity models detected for the project roster. */
+  models: { catalog: 'online' | 'local' | null; updates: ModelUpdate[] };
   remediation?: string;
 }
 
@@ -82,6 +87,12 @@ export interface UpdateCheckDeps {
   companionDeps?: CompanionDeps;
   /** Caps forwarded to the default probes during a refresh. */
   budgetMs?: number;
+  /** Project directory whose `delivery.config.json` drives model detection. */
+  cwd?: string;
+  /** Injectable OpenRouter catalog fetch for model detection. */
+  modelFetch?: CatalogFetch;
+  /** Full model-detection override; tests inject it. */
+  modelUpdates?: (deps: UpdateCheckDeps) => Promise<CollectedUpdates['models']>;
 }
 
 const NOTICE_COMMANDS = new Set(['init', 'doctor', 'status', 'validate']);
@@ -142,7 +153,30 @@ function remediationFor(updates: CollectedUpdates): string | null {
       ? 'Run `junior update --with-triz` to adopt the newer releases.'
       : 'Run `junior update` to adopt the newer releases.');
   }
+  if (updates.models.updates.length) {
+    parts.push('Run `junior model upgrade` to adopt newer models.');
+  }
   return parts.length ? parts.join(' ') : null;
+}
+
+/** Detect newer commodity models for the project roster. Never throws: a
+ * failure degrades to an empty, catalog-less result so the rest of the update
+ * collection is unaffected. */
+async function collectModelUpdates(deps: UpdateCheckDeps): Promise<CollectedUpdates['models']> {
+  try {
+    if (deps.modelUpdates) return await deps.modelUpdates(deps);
+    const config = loadModelConfig(deps.cwd ?? process.cwd());
+    const { ids, catalog } = await catalogIds({
+      online: true,
+      fetch: deps.modelFetch,
+      timeoutMs: deps.budgetMs,
+      env: deps.env,
+    });
+    const updates = detectModelUpdates(config, ids).filter((update) => update.newer.length > 0);
+    return { catalog, updates };
+  } catch {
+    return { catalog: null, updates: [] };
+  }
 }
 
 /**
@@ -169,7 +203,8 @@ export async function collectUpdateCheck(deps: UpdateCheckDeps = {}): Promise<{ 
 
   deps.onCompanions?.(report);
   const companions = report.companions.filter((c) => c.outdated === true).map((c) => c.package);
-  const updates: CollectedUpdates = { junior, managed, companions };
+  const models = await collectModelUpdates(deps);
+  const updates: CollectedUpdates = { junior, managed, companions, models };
   const remediation = remediationFor(updates);
   if (remediation) updates.remediation = remediation;
   return { updates, companions: report };
@@ -214,6 +249,7 @@ function removeCache(fs: UpdateCheckFs, path: string): void {
  * failure (all `latest` null) must not overwrite the cache with "nothing". */
 function collectionResolved(updates: CollectedUpdates): boolean {
   if (updates.junior.latest !== null) return true;
+  if (updates.models.catalog === 'online') return true;
   return updates.managed.tools.some((tool) => tool.latest !== null);
 }
 
@@ -222,6 +258,7 @@ function summarize(updates: CollectedUpdates, checkedAt: number): UpdateSummary 
   if (updates.junior.outdated === true) outdated.push('junior');
   outdated.push(...updates.managed.outdated);
   outdated.push(...updates.companions);
+  outdated.push(...updates.models.updates.map((update) => `model:${update.latest}`));
   const summary: UpdateSummary = { checkedAt, outdated };
   if (updates.remediation) summary.remediation = updates.remediation;
   return summary;

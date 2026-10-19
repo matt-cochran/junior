@@ -32,7 +32,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "pretest": "npm run build",
-    "test": "node --test companions.test.ts worker.test.ts runtime.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts harness.test.ts update-check.test.ts matrix-autopilot.test.ts readiness.test.ts jtbd-bridge.test.ts state-sync.test.ts tool-routing.test.ts context-graph.test.ts matrix-analyze.test.ts link-qc.test.ts adr.test.ts prepare.test.ts spec-bridge.test.ts clarify.test.ts playbooks.test.ts",
+    "test": "node --test companions.test.ts worker.test.ts runtime.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts harness.test.ts update-check.test.ts matrix-autopilot.test.ts readiness.test.ts jtbd-bridge.test.ts state-sync.test.ts tool-routing.test.ts context-graph.test.ts matrix-analyze.test.ts link-qc.test.ts adr.test.ts prepare.test.ts spec-bridge.test.ts clarify.test.ts playbooks.test.ts model-policy.test.ts models.test.ts roster.test.ts model-updates.test.ts model-cli.test.ts doctor-model.test.ts",
     "pack": "npm pack",
     "prepack": "npm run build",
     "release": "npm publish --access public"
