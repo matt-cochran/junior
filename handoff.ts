@@ -40,6 +40,9 @@ export type CompactHandoff = {
  changedFiles: string[];
  checks: { command: string; exitCode: number | null; passed: boolean; error?: string }[];
  unresolved: string[];
+ /** Streaming output accounting: raw versus retained bytes and the largest
+  * tool results. Null when the result has no stream breakdown (mock/legacy). */
+ output: { rawBytes: number; retainedBytes: number; largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[] } | null;
  model: {
   requested: { provider: string; model: string; source?: string } | null;
   /** The Jev model-routing record, or null when this result predates routing. */
@@ -257,6 +260,7 @@ export function compactHandoff(result: any): CompactHandoff {
    ...(c?.error ? { error: String(c.error) } : {}),
   })),
   unresolved: unresolvedIssues(r),
+  output: r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults } : null,
   model: {
    requested: r.receipt?.requested ?? null,
    routing: r.modelRouting ?? null,

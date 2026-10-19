@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -477,6 +477,23 @@ test('Prompt is fixed common + workflow blocks plus the task contract',()=>{
  assert.ok(WORKFLOW_PROMPT_BLOCKS.recon.includes('.delivery'));
  assert.ok(WORKFLOW_PROMPT_BLOCKS.recon.includes('not a sandbox guarantee'));
 });
+test('buildPrompt shows the execution checkout as the contract cwd',()=>{
+ const source='/source/repo';
+ const execution='/source/repo/.delivery/wt';
+ const prompt=buildPrompt(task(0,{cwd:source,workflow:'test_first'}),'test_first',null,null,null,null,null,execution);
+ const contract=JSON.parse(prompt.slice(prompt.indexOf('Task contract (JSON):\n')+'Task contract (JSON):\n'.length));
+ assert.equal(contract.cwd,execution);
+});
+test('buildPrompt never embeds the source checkout as the contract cwd',()=>{
+ const source='/source/repo';
+ const execution='/source/repo/.delivery/wt';
+ const prompt=buildPrompt(task(0,{cwd:source,workflow:'test_first'}),'test_first',null,null,null,null,null,execution);
+ assert.ok(!prompt.includes(`"cwd":${JSON.stringify(source)}`));
+});
+test('buildPrompt names the execution checkout and the off-limits source',()=>{
+ const t=task(0,{workflow:'test_first'});
+ assert.ok(buildPrompt(t,'test_first').includes(`Execution checkout: ${t.cwd}. Read and write files only inside it (use relative paths); the source checkout is off limits.`));
+});
 test('Prompt and selected template IDs are saved as artifacts',async()=>{
  const r=await run(task(0,{workflow:'recon'}),true);
  const prompt=readFileSync(join(r.artifactDir,'prompt.txt'),'utf8');
@@ -773,6 +790,22 @@ test('Live Pi child environment carries the derived bash timeout',async()=>{
  fake.end(0);
  await p;
  assert.equal(seen.env.JUNIOR_PI_BASH_TIMEOUT_S,'4');
+});
+test('A live run reports the streaming output breakdown',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'breakdown',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'session',id:'s'});
+ fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});
+ fake.emit({type:'agent_settled'});
+ fake.end(0);
+ const r=await p;
+ assert.ok(r.outputBreakdown && r.outputBreakdown.retainedBytes>0);
+});
+test('A mock run reports a null output breakdown',async()=>{
+ const r=await run(task(),true);
+ assert.equal(r.outputBreakdown,null);
 });
 test('A tool timeout names the tool and truncated command in the result unresolved list',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
@@ -1261,6 +1294,13 @@ test('compactHandoff exposes the model policy record',()=>{
  const policy={provider:'anthropic',model:'claude-opus',class:'frontier',reason:'vendor anthropic is frontier',code:'frontier_model_refused'};
  assert.deepEqual(compactHandoff({modelPolicy:policy}).model.policy,policy);
 });
+test('compactHandoff exposes the retained output breakdown',()=>{
+ const h=compactHandoff({outputBreakdown:{rawBytes:100,retainedBytes:40,byType:{message_update:60},largestToolResults:[{toolCallId:'c1',toolName:'bash',bytes:9}]}});
+ assert.deepEqual(h.output,{rawBytes:100,retainedBytes:40,largestToolResults:[{toolCallId:'c1',toolName:'bash',bytes:9}]});
+});
+test('compactHandoff reports a null output breakdown when the result has none',()=>{
+ assert.equal(compactHandoff({}).output,null);
+});
 test('CLI doctor needs no task file and exits nonzero when prerequisites fail',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-cli-'));
  const r=spawnSync(process.execPath,['worker.ts','doctor'],{encoding:'utf8',cwd:process.cwd(),env:{...process.env,PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent')}});
@@ -1653,6 +1693,30 @@ test('worktree isolation executes Pi and checks in the isolated checkout, leavin
  assert.ok(existsSync(join(r.executionCwd,'check-marker.txt')));
  assert.ok(existsSync(r.executionCwd));
  assert.equal(r.checks[0].exitCode,0);
+});
+test('worktree isolation sets JUNIOR_PI_SOURCE_ROOT to the source checkout',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(wtTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,repo.dir);
+});
+test('worktree isolation scopes JUNIOR_PI_WRITE_ROOTS to the execution checkout and artifact dir',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const r=await run(wtTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_WRITE_ROOTS,[r.executionCwd,r.artifactDir].join(delimiter));
+});
+test('isolation none scopes JUNIOR_PI_WRITE_ROOTS to the source checkout and artifact dir',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const r=await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_WRITE_ROOTS,[repo.dir,r.artifactDir].join(delimiter));
+});
+test('isolation none leaves JUNIOR_PI_SOURCE_ROOT unset',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,undefined);
 });
 
 test('Run captures before/after evidence artifact and run-change summary',async()=>{

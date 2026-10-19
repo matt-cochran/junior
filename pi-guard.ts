@@ -10,8 +10,60 @@
 // without loading Pi. Pi loads the default export via `pi -e <path>`.
 // ---------------------------------------------------------------------------
 
+import { resolve, relative, isAbsolute, delimiter } from 'node:path';
+
 /** Everything `guardBashInput` may read from the environment. */
 export type GuardEnv = Record<string, string | undefined>;
+
+/** True when `target` resolves to `root` itself or a descendant of it. */
+function within(root:string, target:string):boolean {
+ const rel=relative(resolve(root), resolve(target));
+ return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/** The configured absolute write directories, in order. An absent or blank
+ * value means no write restriction. */
+function writeRoots(env:GuardEnv|undefined):string[] {
+ const raw=env?.JUNIOR_PI_WRITE_ROOTS;
+ if (typeof raw !== 'string' || !raw.trim()) return [];
+ return raw.split(delimiter).map((p)=>p.trim()).filter(Boolean);
+}
+
+/** Enforce worktree isolation at the tool boundary. Returns a blocking
+ * instruction for a write/edit outside the configured write roots, or for a
+ * bash command that reaches into the source checkout outside `.delivery`.
+ * Everything else (including any tool when its guard variable is unset) is
+ * allowed via null. */
+export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:string):{block:true; reason:string}|null {
+ if (toolName === 'write' || toolName === 'edit') {
+  const roots=writeRoots(env);
+  if (!roots.length) return null;
+  const path=input && typeof input === 'object' ? input.path : undefined;
+  if (typeof path !== 'string' || !path.trim()) return null;
+  const resolved=resolve(cwd, path);
+  if (!roots.some((root)=>within(root, resolved))) {
+   return { block:true, reason:`Junior isolation: writes are limited to the execution checkout (${roots[0]}); use a relative path.` };
+  }
+  return null;
+ }
+ if (toolName === 'bash') {
+  const source=env?.JUNIOR_PI_SOURCE_ROOT;
+  if (typeof source !== 'string' || !source.trim()) return null;
+  const command=input && typeof input === 'object' ? input.command : undefined;
+  if (typeof command !== 'string') return null;
+  const root=resolve(source);
+  const reason='Junior isolation: the source checkout is off limits; run commands inside the execution checkout.';
+  for (let at=command.indexOf(root); at !== -1; at=command.indexOf(root, at+root.length)) {
+   const next=command.charAt(at+root.length);
+   // The bare root (`cd /src`, `"/src"`) is the source checkout itself.
+   if (next !== '/') { if (next === '' || !/[\w.-]/.test(next)) return { block:true, reason }; continue; }
+   const segment=command.slice(at+root.length+1).split(/[\/\s'"]/)[0];
+   if (segment !== '.delivery') return { block:true, reason };
+  }
+  return null;
+ }
+ return null;
+}
 
 /** Parse `JUNIOR_PI_BASH_TIMEOUT_S` as a positive whole number of seconds.
  * Anything else (absent, blank, zero, negative, fractional, non-numeric)
@@ -40,9 +92,13 @@ export function guardBashInput<T>(input: T, env: GuardEnv | undefined = process.
  return input;
 }
 
-/** Pi extension entry point: rewrite every bash `tool_call` before execution. */
+/** Pi extension entry point: rewrite every bash `tool_call` before execution,
+ * then block a call that would escape the execution checkout. Pi blocks the
+ * call when the handler returns `{block:true, reason}`. */
 export default function (pi: any): void {
  pi.on('tool_call', (event: any) => {
-  if (event && event.toolName === 'bash') event.input = guardBashInput(event.input, process.env);
+  if (!event) return;
+  if (event.toolName === 'bash') event.input = guardBashInput(event.input, process.env);
+  return guardPathAccess(event.toolName, event.input, process.env, process.cwd()) ?? undefined;
  });
 }

@@ -2,7 +2,7 @@ import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { resolve, join, dirname, relative, isAbsolute, sep } from 'node:path';
+import { resolve, join, dirname, relative, isAbsolute, sep, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
@@ -1109,7 +1109,7 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
  return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock, context:contextBlock};
 }
 
-export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null, routing?:ToolRoute|null):string {
+export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null, routing?:ToolRoute|null, executionCwd?:string|null):string {
  const parts=promptParts(workflow, resume, reportPath, reviewContext, codeContext);
  const blocks=[parts.common, parts.workflow];
  const hop = (workflow === 'discover' || workflow === 'investigate') ? hopToolBlock(t, workflow) : null;
@@ -1120,7 +1120,11 @@ export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo
  if (parts.review) blocks.push(parts.review);
  if (parts.context) blocks.push(parts.context);
  if (parts.resume) blocks.push(parts.resume);
- blocks.push(`Task contract (JSON):\n${JSON.stringify(t)}`);
+ // The contract must name the checkout the worker actually runs in, never the
+ // source checkout a worktree run is isolated from.
+ const execCwd = executionCwd ?? t?.cwd;
+ blocks.push(`Execution checkout: ${execCwd}. Read and write files only inside it (use relative paths); the source checkout is off limits.`);
+ blocks.push(`Task contract (JSON):\n${JSON.stringify({...t, cwd:execCwd})}`);
  return blocks.join('\n\n');
 }
 
@@ -2208,7 +2212,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    }
   }
 
-  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext, codeContext, jev?.preflight?.attention?.toolPlan ?? null);
+  const prompt=buildPrompt(t, decision.selected, resume, reportPath, reviewContext, codeContext, jev?.preflight?.attention?.toolPlan ?? null, executionCwd);
   writeFileSync(join(dir,'prompt.txt'),prompt);
   if (reviewContext) writeFileSync(join(dir,REVIEW_CONTEXT_FILENAME),reviewContext);
 
@@ -2227,8 +2231,17 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const preInterrupt = !!signal?.aborted;
   const preDeadline = !preInterrupt && workerOutOfTime();
   // Pi's own bash timeout must fire before Junior's watchdog so a slow command
-  // fails only that tool call and returns a tool error to the model.
-  const piBashEnv = { ...process.env, JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
+  // fails only that tool call and returns a tool error to the model. The guard
+  // also confines writes to the execution checkout and keeps a worktree run out
+  // of the source checkout.
+  const piBashEnv:any = { ...process.env, JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
+  if (isolation === 'worktree') {
+   piBashEnv.JUNIOR_PI_WRITE_ROOTS = [executionCwd, dir].join(delimiter);
+   piBashEnv.JUNIOR_PI_SOURCE_ROOT = sourceCwd;
+  } else {
+   piBashEnv.JUNIOR_PI_WRITE_ROOTS = [sourceCwd, dir].join(delimiter);
+   delete piBashEnv.JUNIOR_PI_SOURCE_ROOT;
+  }
   if (mock) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
@@ -2485,7 +2498,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   }
 
   const runtime=heartbeat.snapshot();
-  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute};
+  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,outputBreakdown: streamResult?.outputBreakdown ?? null};
   result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
   if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
   result.unresolved=[];
