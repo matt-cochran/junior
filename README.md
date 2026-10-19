@@ -38,8 +38,23 @@ active harness (`--harness claude|cursor|codex`) covering skills, MCP
 registration, managed tools and cached updates. When `readiness.ready` is false,
 `junior setup` previews an ordered repair plan and confirms before applying it
 (`--dry-run`, `--yes`). A cached 24-hour update notice may print one stderr line
-on `init`, `doctor`, `status` or `validate`; `JUNIOR_NO_UPDATE_CHECK=1` disables
-it, and `junior update` adopts newer releases.
+on `init`, `doctor`, `status` or `validate`, including an outdated Junior skill
+found by a local hash check; `JUNIOR_NO_UPDATE_CHECK=1` disables it, and
+`junior update` adopts newer releases. `doctor` names an outdated, customized or
+missing Junior skill in its `warnings` and `remediation`, and `junior init`
+refreshes an unmodified outdated copy (a customized copy is kept unless
+`--force`).
+
+After reviewing a handoff, `junior apply <id|result.json> [--dry-run] [--force]`
+applies its worktree diff (tracked and new files) to the source checkout with a
+three-way merge; it refuses a run that is not `ready_for_review`, or whose base
+commit is no longer an ancestor of `HEAD`, and leaves the tree unchanged on
+conflict. A contract with `plan: {id, deliverable}` (and `hopFrom`) leases that
+cpm deliverable before the worker starts and records its hours and evidence
+afterwards (`in_progress` on success, `failed` otherwise); the manager still
+reviews and marks it complete. `junior tools call cpm plan.status plan_id=...`
+calls a tool inline against `.delivery/setup/hop.json` and prints only the
+result.
 
 Junior routes each contract from Jev task traits to deterministic playbooks and a
 `toolPlan` (worker directions plus manager setup) that is reflected before the
@@ -56,6 +71,19 @@ each companion's agent skills read as `present`, `missing`,
 `modified`, `unknown` or `not_installed`, and an unready one carries a complete
 `junior init --target ...` remediation command. Skill readiness is reported
 separately and never gates `ok`.
+
+Junior executes only on commodity/open-weight models. A built-in roster
+(`general`, `deep-reasoning`, `long-horizon`, `agentic-tools`,
+`fast-mechanical`) and `delivery.config.json` `models.routing`/`models.roster`
+select the executor; Jev asks one model-profile choice when the contract names
+no model. A non-default model needs a human approval, so a run without one stops
+at `needs_model_approval` (`--approve-model`, plan `approvedProfiles`, or
+`junior model approve`). `models.autoUpgrade` lets `junior update` adopt a newer
+same-lineage commodity model only at price parity (`models.priceTolerance`).
+`junior model status|list|upgrade` reports and adopts the roster, and
+`junior plan check`/`junior plan contracts` shape a cpm plan into bounded
+handoffs. See [Models](docs/models.md) and
+[Planning for Junior](docs/planning.md).
 
 Execution settings live on the contract:
 
@@ -91,6 +119,10 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
   stages, workflow templates, session continuation and the Jev gates.
 - **[Runtime](docs/runtime.md)** — execution receipts, cost and billing, Git
   worktree isolation, change evidence, deadlines and the compact handoff.
+- **[Models](docs/models.md)** — the commodity-only policy, roster, routing,
+  detection and the `junior model` commands.
+- **[Planning for Junior](docs/planning.md)** — shaping a cpm plan into safe,
+  bounded handoffs with `junior plan check` and `junior plan contracts`.
 - **[Tools](docs/tools.md)** — common tool handoffs, `junior report-issue`, MCP
   registration and frontier-attention classification.
 - **[Crossmatrix state graph](skills/junior/SKILL.md)** — the `matrix` commands
@@ -109,6 +141,8 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
 | [docs/getting-started.md](docs/getting-started.md) | Install, quickstart, `doctor` and `init`. |
 | [docs/contracts.md](docs/contracts.md) | Contract fields, workflows, sessions and Jev gates. |
 | [docs/runtime.md](docs/runtime.md) | Receipts, cost, isolation, evidence and the handoff. |
+| [docs/models.md](docs/models.md) | Commodity-only policy, roster, routing and `junior model`. |
+| [docs/planning.md](docs/planning.md) | Junior-ready cpm plans, `plan check` and `plan contracts`. |
 | [docs/tools.md](docs/tools.md) | Companion tools, `report-issue` and MCP registration. |
 | [docs/releasing.md](docs/releasing.md) | Packing and publishing. |
 | [docs/adr/](docs/adr/) | Architecture decision records (MADR) and their conformance rules, checked by `junior matrix adr`. |

@@ -16,7 +16,8 @@ and check evidence.
 
 Start every session with `junior doctor`; it is read-only and prints a
 `readiness` object for the active harness (`--harness claude|cursor|codex`
-forces one). Read `readiness.ready` and its `items` (Junior and companion
+forces one); its `warnings` and `remediation` name an outdated, customized or
+missing Junior skill. Read `readiness.ready` and its `items` (Junior and companion
 skills, MCP registration, managed tools, cached updates). If `ready` is false,
 offer `junior setup`: it prints the ordered repair plan and, on a TTY, asks for
 confirmation before applying it. `--dry-run` prints the plan only; `--yes`
@@ -108,8 +109,6 @@ Create a JSON contract in the target workspace:
   "id": "unique-deliverable-id",
   "deliverable": "A precise artifact and resulting behavior",
   "cwd": "/absolute/target/checkout",
-  "provider": "openrouter",
-  "model": "deepseek/deepseek-v4.1-flash",
   "workflow": "test_first",
   "acceptance": ["Observable behavior to verify"],
   "constraints": ["Allowed files and explicit exclusions; no commits or pushes unless authorized", "Restrict searches to the checkout and named dependency paths; no nested workers"],
@@ -120,8 +119,9 @@ Create a JSON contract in the target workspace:
 ```
 
 `cwd` is where edits and checks run; task paths passed to the CLI should be
-absolute. `isolation` defaults to `worktree` for `handoff`; pass `"none"` to run
-in place. To ground the readiness classifier and worker in existing code, add a
+absolute. The example omits `provider`/`model` so Jev routing applies; an
+explicit model must be a commodity/open-weight model. `isolation` defaults to
+`worktree` for `handoff`; pass `"none"` to run in place. To ground the readiness classifier and worker in existing code, add a
 `context` array of `{path, start?, end?}` entries (relative to `cwd`, 1-based
 inclusive lines) for bounded excerpts. Contract scope is instruction, not a
 sandbox guarantee.
@@ -139,6 +139,44 @@ so a fresh project is immediately ready for a `worktree` handoff without a
 manual commit or stash. Set `JUNIOR_NO_INSTALL=1` (or `true`) to make `init`
 and `update` skip the Pi, managed-tool and companion installers entirely and
 report them as skipped.
+
+## Models
+
+Junior executes only on commodity/open-weight models. `model-policy.ts` accepts
+the commodity vendors (DeepSeek, Moonshot, Z.ai, Qwen, MiniMax, Meta Llama, plus
+`openai/gpt-oss*`) and refuses a frontier vendor (Anthropic, OpenAI, Google, xAI
+and their floating aliases) or an unrecognized vendor or direct host before any
+spend. A refusal is `frontier_model_refused` or `unknown_model_refused`, with a
+`modelPolicy` record on the result and `model.policy` on the compact receipt.
+
+`delivery.config.json` holds `models.routing` (`off|shadow|auto`, default
+`auto`), `models.roster` (overrides, additions or `disabled`),
+`models.autoUpgrade`, `models.approved`/`models.unapproved` and
+`models.priceTolerance`. Built-in profiles are `general` (default, DeepSeek V4.1
+Flash), `deep-reasoning`, `long-horizon`, `agentic-tools` and `fast-mechanical`.
+When the contract names no model and is not a resume, Jev asks one
+`model_profile` choice; `auto` applies a non-default profile at confidence >=
+0.6, `shadow` records it without applying. Precedence is task model > routed
+profile > project pin > built-in. The receipt records `requested.source` and
+`modelRouting`; `junior model status|list|upgrade` reports the roster and plans
+or applies same-lineage upgrades (an explicit target must be commodity).
+
+Junior never switches away from the default model without a human approval. A
+non-default profile or contract model stops the run at `needs_model_approval`
+with a `model-approval.json` rationale (pick, confidence, strengths, price vs
+the default). Relay that rationale to the human.
+Never approve a model on the human's behalf: consent is a per-run
+`--approve-model <key>`, a plan's `approvedProfiles`, or a project
+`junior model approve <key>` (with `junior model revoke <key>` to withdraw it).
+`models.unapproved: default` runs on the default instead of asking. Adoption is
+price-gated: `models.autoUpgrade` applies only a newer same-lineage version
+within `models.priceTolerance`
+(default 1.25x on input and output, measured on the cheapest tool-capable
+endpoint); a pricier version is listed as waiting for price parity. The compact
+receipt's `model.cache.hitRate` is the prompt-cache read share, and
+`model.upstream` lists the captured upstream providers. Treat a model
+output-limit stop as incomplete work, regardless of passing checks. Inspect
+`junior model status` before a paid run when routing matters.
 
 ## Runtime and isolation guarantees
 
@@ -188,7 +226,8 @@ Inspect `artifactDir/result.json`, the check logs and the changed files.
 Change evidence covers the complete tracked, staged and untracked changes; a
 `truncated` diff or receipt means the reviewer saw an explicit prefix, not the
 whole change, so treat the run as incomplete. Confirm the observed model matches
-the request. For a specific repair, issue a new bounded contract with
+the request. Apply an accepted run with `junior apply <id|result.json>`
+(`--dry-run` to check first) instead of copying files. For a specific repair, issue a new bounded contract with
 `resumeFrom` pointing at the prior `result.json` and the same
 cwd/provider/model. Allow at most one automatic repair unless the user
 authorizes more; escalate an unresolved blocker with evidence. Never treat a
@@ -221,17 +260,33 @@ For a clarify, `probability` is the P(true) of the triggering question (`contrac
 ## Manager loop with CPM and FMECA
 
 You (the frontier model) coordinate; commodity workers execute. Route every
-tool call through `node <cli> tools call /absolute/hop.json <fmeca|cpm|crossmatrix> request.json`
-so it is recorded as evidence (reads become immutable snapshots):
+tool call through `node <cli> tools call [/absolute/hop.json] <fmeca|cpm|crossmatrix> <request.json | method key=value ...>`
+so it is recorded as evidence (reads become immutable snapshots). The hop
+defaults to `.delivery/setup/hop.json`; inline values are JSON when they parse
+(`junior tools call cpm plan.status plan_id=plan_123`). Output is the bare
+result; a failure exits 1; `--full` prints the envelope:
 
 1. Plan: `plan.submit` deliverables with `owned_files` and prerequisites;
    `plan.lint`, `plan.simulate` and `plan.status` (critical path, ready set) are reads.
+   Shape the plan for Junior with `junior plan check <plan.json>`: one
+   handoff-sized deliverable each, disjoint `owned_files` for parallel cohorts,
+   explicit `consumes` text for interfaces, and `metadata.junior`
+   acceptance/checks. Its `cohorts` are the safe parallel sets; keep hot
+   registration files (`package.json`, `package-lock.json`, `scripts/build.mjs`,
+   `CHANGELOG.md`, `README.md`) in one final deliverable. Write skeletons with
+   `junior plan contracts <plan.json> --out <dir>`; they omit `provider`/`model`
+   so routing applies. Manager-owned review/verify steps stay outside cohorts.
 2. Risk: an FMECA session (`session.open`, `append`), then `risk.next` and
    `readiness.assess` before risky work.
-3. Lease: `plan.acquire_cohort` returns non-conflicting ready deliverables;
-   dispatch each as one Junior contract (pass `hopFrom` to share state).
-4. Review the receipt, diff and checks yourself, then `plan.mark_status`
-   complete (with `evidence`) or failed with a reason; repair at most once.
+3. Lease: give each contract `plan: {id, deliverable}` with `hopFrom`;
+   `handoff` leases the deliverable (refusing with `plan_lease_refused` when it
+   is not ready), runs it, and records hours and evidence (`in_progress` on
+   success, `failed` otherwise). Or lease a cohort yourself with
+   `plan.acquire_cohort` (`caller_id`, `ids`, `max_count`).
+4. Review the receipt, diff and checks yourself, apply the worktree with
+   `junior apply <id>` (three-way, refuses unsafe states), then
+   `plan.mark_status` complete (with `evidence`) or failed with a reason;
+   repair at most once.
 5. Repeat until `plan.status` shows the plan complete.
 
 The companion cpm skills follow the plan's life: `cpm-plan` (author, lint, sync,

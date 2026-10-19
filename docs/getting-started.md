@@ -45,10 +45,26 @@ malformed results print a concise error and exit nonzero.
 
 Live execution: install/authenticate Pi with OpenRouter (`init`, then `pi` and
 `/login`/`/model`), then opt in to the paid smoke test by omitting `--mock`.
-Tasks declare id, deliverable, cwd, acceptance, checks (command + args), optional
-constraints, model and `jev`. Provider/model come from `delivery.config.json`
-when present, otherwise they default to openrouter and
-deepseek/deepseek-v4.1-flash; an explicit task value always wins.
+Tasks declare id, deliverable, cwd, acceptance, checks (command + args),
+optional constraints and `jev`. Provider/model come from `delivery.config.json`
+(or the built-in commodity roster) and Jev routing; a contract should normally
+omit `provider`/`model` so routing applies. An explicit task value always wins,
+and an explicit model must be a commodity/open-weight model (see
+[Models](models.md)). Plan a cpm plan into bounded handoffs with `junior plan
+check` and `junior plan contracts` (see [Planning for Junior](planning.md)).
+
+```json
+{
+  "id": "unique-deliverable-id",
+  "deliverable": "A precise artifact and resulting behavior",
+  "cwd": "/absolute/target/checkout",
+  "workflow": "test_first",
+  "acceptance": ["Observable behavior to verify"],
+  "checks": [{ "command": "node", "args": ["--test", "relevant.test.ts"] }],
+  "isolation": "worktree",
+  "jev": { "mode": "shadow" }
+}
+```
 
 
 ### Setup
@@ -184,11 +200,13 @@ operations are explicitly scoped:
   manager user directory) and overrides the resolved root.
 
 Reruns are safe: an identical copy is left as-is, a missing copy is created, an
-unmodified but outdated copy is reported and preserved until `--upgrade`, and a
+unmodified but outdated copy is refreshed (reported as `upgraded`), and a
 customized copy is reported as a conflict and preserved unless `--force` is
 given. Junior records the hash it wrote in a `.junior-manifest.json` beside the
-installed skill; `--upgrade` only replaces a file whose current hash still
-matches that manifest, so a customization is never silently overwritten.
+installed skill and only refreshes a file whose current hash still matches that
+manifest, so a customization is never silently overwritten. `junior doctor`
+reports each state in `warnings` and `remediation`, naming the affected managers
+(for example "Junior skill is outdated (claude, codex); run `junior update`").
 
 ##### Installing Pi (`init`)
 `init` installs Pi when it is missing (opt out with `--no-install`; the older

@@ -23,6 +23,13 @@ Each result carries a `receipt` parsed from authoritative assistant
   0 only as placeholders. An empty cost object does not count as a report.
 - `malformed`/`malformedLines`: JSONL records that failed to parse.
 - `settled`: whether Pi emitted `agent_settled`.
+- `finalStopReason`/`stopReasons`: the stop reason of the last assistant message
+  and the ordered list for the segment. `outputLimited` is true when that final
+  stop is the per-message output limit (`length`), and `errored` is true only
+  when it is a genuine `error`.
+- `recoveredErrors`: the count of `error`/`length` stops that a later assistant
+  message followed. A recovered transient error does not fail the run; only a
+  final `error` does.
 - `responseIds`: unique provider response IDs Pi preserved on assistant
   `message_end` records (`message.responseId`). A live OpenRouter run populates
   these as `gen-...` generation IDs. They are the handle for obtaining
@@ -32,8 +39,9 @@ Each result carries a `receipt` parsed from authoritative assistant
 Receipt metadata is Pi-reported, not independent upstream attestation. Mock runs
 set `receipt.source` to `mock`, observe no model, and never claim an observed
 model. A live run is `ready_for_review` only when Pi exits zero, the stream
-parses, at least one assistant message ended, no assistant message ended
-`error`/`aborted`, Pi reported `agent_settled`, and all independent checks pass.
+parses, at least one assistant message ended, the final assistant message did
+not stop `error`/`aborted` (a transient error followed by a later message is
+recovered), Pi reported `agent_settled`, and all independent checks pass.
 Otherwise the run reports `receipt_failed` even when Pi exits zero; a settled
 stream with no assistant messages is rejected.
 
@@ -154,7 +162,11 @@ keeps artifacts in the source `.delivery/` directory. The result records
 `sourceCwd`, `executionCwd` and `isolation`. The worktree is **retained for
 review**; the worker never merges, removes, commits or pushes it. Review the
 isolated checkout and integrate it yourself (use `git worktree list` to find it,
-then inspect/diff or merge it manually).
+then inspect/diff or merge it manually). In `worktree` mode the worker prompt
+names only the execution checkout, and the Pi guard extension (`pi-guard.ts`)
+blocks `write`/`edit` tools whose resolved path leaves the configured write
+roots and blocks a `bash` command that reaches into the source checkout outside
+`.delivery`. This is a tool-boundary guard, not an OS sandbox.
 
 `isolation=worktree` refuses to start when the source checkout is dirty
 (staged, unstaged or nonignored untracked changes) and reports an actionable
@@ -333,6 +345,53 @@ States: `running`, `quiet`, `tool_timed_out`, `deadline_exceeded`, `failed`,
 Malformed or partial event lines, and child startup errors, still produce an
 inspectable failed result with the artifacts on disk.
 
+#### Model approval
+A non-default model is never used without human consent. After the readiness
+classifier recommends a model profile, or when the contract names a model that
+differs from the project default, a run without a matching approval stops with
+the terminal status `needs_model_approval` before the Pi worker starts. The run
+writes `model-approval.json` in its artifact directory and mirrors it on the
+result as `modelApproval` (`profile`, `provider`, `model`, `defaultModel`,
+`confidence`, `strengths`, `reason`, `price`, and `approve.run`/`approve.project`
+commands), leaves `workerExitCode` unset, records the pending route on
+`modelRouting`, and exposes the request to the compact handoff as
+`model.approvalRequest`. Consent can be granted for one run
+(`--approve-model <key>` on `handoff`/`run`), for a plan (`approvedProfiles`), or
+for the project (`models.approved` via `junior model approve`); an applied
+consent is recorded as `modelRouting.approval` `{ source, key }`. With
+`models.unapproved: default`, the recommendation is instead recorded without
+running it (`modelRouting.declined: true`) and the run uses the default model.
+
+#### Output cap, breakdown and continuation
+The retained worker output is line-atomic: the cap is measured in bytes, but the
+last accepted line that fits is kept whole rather than sliced mid-record, so
+`events.jsonl` stays strict JSONL. Once the cap is reached the process group is
+stopped exactly like a wall-deadline breach, `outputTruncated` is set, and the
+run is reported as `output_truncated`; its checks never run because the receipt
+is incomplete. A non-blank final line cut by the cap is reported as
+`truncatedTail`, not as a malformed line.
+
+Each stream result also carries an `outputBreakdown` (`rawBytes`, `retainedBytes`,
+`byType` per event type, and the largest tool results). The compact handoff
+projects it as `output` (`rawBytes`, `retainedBytes`, `largestToolResults`), or
+`null` when the result has no stream breakdown (mock or legacy runs).
+
+A segment that hits the accumulation cap or a final per-message output limit
+(`stopReason: length`, surfaced as `receipt.outputLimited`) starts an automatic
+continuation when `execution.continuations` (0-3, default 1) allows and at least
+the remaining budget threshold is available. Junior writes a bounded
+`checkpoint-<n>.md` (git status and diff-stat, the acceptance list and the
+segment's last assistant text), starts a fresh Pi session in the same checkout
+with the checkpoint appended to the prompt, and writes `events-<n>.jsonl` and
+`worker-<n>.log` for the new segment. The output-limit continuation adds an
+instruction to work incrementally. The receipt reflects the final segment, while
+token usage, cost and provider response ids sum every segment. If the
+continuation budget is exhausted and the final segment still stopped at the
+per-message limit, the run records `unresolved` as
+`Model hit its per-message output limit (stopReason length); split the deliverable
+or reduce per-message work.` A segment stopped at the accumulation cap that
+cannot continue still ends the run as `output_truncated`.
+
 #### Repair lineage
 There are **no automatic retries or restarts**. A repair is an explicit task
 with `repairFrom` (a prior `result.json`) instead of `resumeFrom`. It reuses the
@@ -342,13 +401,31 @@ result. A repair over budget, or one whose inherited lineage deadline has
 already elapsed, is rejected **before any paid call**. An optional
 `lineageDeadlineMs` sets one absolute lineage deadline for the whole chain.
 
+#### Provider routing and affinity
+A deliverable stays on one model and, on OpenRouter, one upstream provider. Once
+the final model is chosen and consented, the run records it in
+`.delivery/<id>/route.json` (with the approval that allowed it); a later
+non-resume run with the same id reuses that decision while the approval still
+holds. For OpenRouter runs the run also derives a stable affinity key from the
+source checkout and the lineage root id (never the deliverable id), passes it to
+Pi as the `x-session-id` request header, and records it as
+`providerRouting.affinityKey`, so continuation segments, repairs and
+re-dispatches of one deliverable keep the same provider and its warm prompt
+cache. A selected roster profile's `openrouter` provider routing (`order`,
+`only`, `ignore`, `allow_fallbacks`, `sort`) is merged into the request's
+provider settings and recorded as `providerRouting.openrouter`; both are null or
+absent for a non-OpenRouter run.
+
 #### Compact handoff
 `junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
 `outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact
 location, changed file paths, compact check results, unresolved issues,
-requested/observed model, token totals (`input`, `output`, `cacheRead`,
-`cacheWrite` and the observed `tokens` total), the labelled compact cost
-(`cost.amountUsd`/`cost.source`/`cost.available`, preferring an authoritative
+requested/observed model, the model `routing`/`approval`/`approvalRequest` and
+its `policy`, token totals (`input`, `output`, `cacheRead`, `cacheWrite` and the
+observed `tokens` total), the `cache` projection (`input`, `cacheRead`,
+`cacheWrite` and the `hitRate` of cache reads over input plus cache reads), the
+`upstream` provider aggregate captured by billing capture, and the labelled
+compact cost (`cost.amountUsd`/`cost.source`/`cost.available`, preferring an authoritative
 provider bill, then a finite Pi-reported total including a reported zero, then a
 configured estimate), the preserved provider `responseIds`, and the runtime stop
 reason. Pi's catalog estimate is never labelled as provider billing

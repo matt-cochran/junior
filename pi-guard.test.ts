@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import guardBash, { guardBashInput } from './pi-guard.ts';
+import guardBash, { guardBashInput, guardPathAccess, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
 
 const env = (value?: string) => (value === undefined ? {} : { JUNIOR_PI_BASH_TIMEOUT_S: value });
 
@@ -59,4 +59,78 @@ test('The extension ignores a non-bash tool_call', () => {
   const event: any = { toolName: 'read', input: { path: '/tmp/file' } };
   handlers.tool_call(event);
   assert.deepEqual(event.input, { path: '/tmp/file' });
+});
+
+test('guardPathAccess blocks a write to an absolute path outside the write roots', () => {
+ const result = guardPathAccess('write', { path: '/tmp/escape.txt' }, { JUNIOR_PI_WRITE_ROOTS: '/exec:/art' }, '/exec');
+ assert.deepEqual(result, { block: true, reason: 'Junior isolation: writes are limited to the execution checkout (/exec); use a relative path.' });
+});
+
+test('guardPathAccess allows a relative write inside the execution checkout', () => {
+ assert.equal(guardPathAccess('write', { path: 'src/a.ts' }, { JUNIOR_PI_WRITE_ROOTS: '/exec:/art' }, '/exec'), null);
+});
+
+test('guardPathAccess allows an edit whose absolute path is inside a write root', () => {
+ assert.equal(guardPathAccess('edit', { path: '/art/notes.md' }, { JUNIOR_PI_WRITE_ROOTS: '/exec:/art' }, '/exec'), null);
+});
+
+test('guardPathAccess blocks a bash command that reads the source checkout outside .delivery', () => {
+ const result = guardPathAccess('bash', { command: 'cat /src/a.txt' }, { JUNIOR_PI_SOURCE_ROOT: '/src' }, '/exec');
+ assert.equal(result?.block, true);
+});
+
+test('guardPathAccess allows a bash command under the source checkout .delivery tree', () => {
+ assert.equal(guardPathAccess('bash', { command: 'cat /src/.delivery/wt/a.txt' }, { JUNIOR_PI_SOURCE_ROOT: '/src' }, '/exec'), null);
+});
+
+test('guardPathAccess returns null for a write when no write roots are configured', () => {
+ assert.equal(guardPathAccess('write', { path: '/tmp/x' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess returns null for bash when no source root is configured', () => {
+ assert.equal(guardPathAccess('bash', { command: 'cat /src/a.txt' }, {}, '/exec'), null);
+});
+
+test('The extension blocks a write outside the execution checkout through the registered handler', () => {
+ const handlers: Record<string, (event: any) => any> = {};
+ guardBash({ on: (name: string, fn: (event: any) => any) => { handlers[name] = fn; } });
+ const previous = process.env.JUNIOR_PI_WRITE_ROOTS;
+ process.env.JUNIOR_PI_WRITE_ROOTS = process.cwd();
+ try {
+  assert.equal(handlers.tool_call({ toolName: 'write', input: { path: '/tmp/escape.txt' } })?.block, true);
+ } finally {
+  if (previous === undefined) delete process.env.JUNIOR_PI_WRITE_ROOTS; else process.env.JUNIOR_PI_WRITE_ROOTS = previous;
+ }
+});
+
+test('guardPathAccess blocks a bash command that names the bare source root', () => {
+ const r = guardPathAccess('bash', { command: 'cd /src/repo && ls' }, { JUNIOR_PI_SOURCE_ROOT: '/src/repo' }, '/src/repo/.delivery/x/1/worktree');
+ assert.equal(r?.block, true);
+});
+
+test('guardPathAccess allows a bash command naming a sibling directory that shares the source prefix', () => {
+ const r = guardPathAccess('bash', { command: 'ls /src/repo-site' }, { JUNIOR_PI_SOURCE_ROOT: '/src/repo' }, '/src/repo/.delivery/x/1/worktree');
+ assert.equal(r, null);
+});
+
+test('applyAffinityHeader sets x-session-id from JUNIOR_PI_AFFINITY_KEY', () => {
+ const headers: Record<string, string | null> = {};
+ applyAffinityHeader(headers, { JUNIOR_PI_AFFINITY_KEY: 'junior:deliverable-1' });
+ assert.equal(headers['x-session-id'], 'junior:deliverable-1');
+});
+
+test('applyAffinityHeader leaves headers unchanged without the variable', () => {
+ const headers: Record<string, string | null> = {};
+ applyAffinityHeader(headers, {});
+ assert.deepEqual(headers, {});
+});
+
+test('applyProviderRouting merges the configured provider routing into the payload', () => {
+ const routed = applyProviderRouting({ model: 'm' }, { JUNIOR_PI_OPENROUTER_ROUTING: JSON.stringify({ order: ['deepinfra'], allow_fallbacks: false }) });
+ assert.deepEqual(routed.provider, { order: ['deepinfra'], allow_fallbacks: false });
+});
+
+test('applyProviderRouting ignores invalid JSON', () => {
+ const payload = { model: 'm' };
+ assert.deepEqual(applyProviderRouting(payload, { JUNIOR_PI_OPENROUTER_ROUTING: '{not json' }), payload);
 });

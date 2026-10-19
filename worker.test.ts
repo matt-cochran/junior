@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
- jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
+ jevMode,assessPreflight,assessPostflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,reportEvidence,deterministicCriterion,
  estimateCost,validatePricing,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
@@ -16,11 +16,13 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat } from './worker.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 import { loadPlaybooks } from './playbooks.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
+const COMMODITY_MODEL='deepseek/deepseek-v4.1-flash';
+const ROUTED_MODEL='moonshotai/kimi-k2.7-code';
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
 const resultFile=(value:any)=>{const f=join(mkdtempSync(join(tmpdir(),'delivery-')),'result.json');writeFileSync(f,typeof value==='string'?value:JSON.stringify(value));return f;};
 const saved=(status:string)=>({id:'smoke',status,checks:[{command:'node',args:['-e',''],exitCode:status==='checks_failed'?1:0}],artifactDir:'/tmp/artifact'});
@@ -61,7 +63,7 @@ test('Status rejects malformed result',()=>{const r=cli(['status',resultFile({id
 test('Status exposes receipt when present',()=>{const receipt=mockReceipt({provider:'openrouter',model:'m'});const r=cli(['status',resultFile({...saved('simulation_passed'),receipt})]);assert.equal(r.status,0);const o=JSON.parse(r.stdout);assert.equal(o.receipt.source,'mock');assert.equal(o.receipt.requested.model,'m');});
 
 test('Parser dedupes repeated observed events and sums usage',()=>{
- const r=parseReceipt(stream({type:'session',id:'sess-1'},assistant(),assistant(),{type:'agent_settled'}),{provider:'openrouter',model:'m'});
+ const r=parseReceipt(stream({type:'session',id:'sess-1'},assistant(),assistant(),{type:'agent_settled'}),{provider:'openrouter',model:COMMODITY_MODEL});
  assert.equal(r.sessionId,'sess-1');
  assert.equal(r.assistantMessages,2);
  assert.deepEqual(r.observed,[{provider:'openrouter',model:'m'}]);
@@ -115,6 +117,22 @@ test('Parser flags error, aborted and missing settlement',()=>{
  const unsettled=parseReceipt(stream(assistant()));
  assert.equal(unsettled.settled,false);
  assert.equal(receiptValid(unsettled),false);
+});
+test('Parser counts an error recovered by a later assistant message',()=>{
+ const r=parseReceipt(stream(assistant({stopReason:'error'}),assistant({stopReason:'toolUse'}),assistant(),{type:'agent_settled'}));
+ assert.equal(r.recoveredErrors,1);
+});
+test('Parser accepts a settled stream whose recovered error was followed cleanly',()=>{
+ const r=parseReceipt(stream(assistant({stopReason:'error'}),assistant({stopReason:'toolUse'}),assistant(),{type:'agent_settled'}));
+ assert.equal(receiptValid(r),true);
+});
+test('Parser marks a final length stop as output-limited',()=>{
+ const r=parseReceipt(stream(assistant(),assistant({stopReason:'length'}),{type:'agent_settled'}));
+ assert.equal(r.outputLimited,true);
+});
+test('Parser rejects a settled stream whose final message hit the length limit',()=>{
+ const r=parseReceipt(stream(assistant(),assistant({stopReason:'length'}),{type:'agent_settled'}));
+ assert.equal(receiptValid(r),false);
 });
 test('Mock receipt never claims an observed model',async()=>{
  const r=mockReceipt({provider:'openrouter',model:'requested-model'});
@@ -459,6 +477,23 @@ test('Prompt is fixed common + workflow blocks plus the task contract',()=>{
  assert.ok(WORKFLOW_PROMPT_BLOCKS.recon.includes('.delivery'));
  assert.ok(WORKFLOW_PROMPT_BLOCKS.recon.includes('not a sandbox guarantee'));
 });
+test('buildPrompt shows the execution checkout as the contract cwd',()=>{
+ const source='/source/repo';
+ const execution='/source/repo/.delivery/wt';
+ const prompt=buildPrompt(task(0,{cwd:source,workflow:'test_first'}),'test_first',null,null,null,null,null,execution);
+ const contract=JSON.parse(prompt.slice(prompt.indexOf('Task contract (JSON):\n')+'Task contract (JSON):\n'.length));
+ assert.equal(contract.cwd,execution);
+});
+test('buildPrompt never embeds the source checkout as the contract cwd',()=>{
+ const source='/source/repo';
+ const execution='/source/repo/.delivery/wt';
+ const prompt=buildPrompt(task(0,{cwd:source,workflow:'test_first'}),'test_first',null,null,null,null,null,execution);
+ assert.ok(!prompt.includes(`"cwd":${JSON.stringify(source)}`));
+});
+test('buildPrompt names the execution checkout and the off-limits source',()=>{
+ const t=task(0,{workflow:'test_first'});
+ assert.ok(buildPrompt(t,'test_first').includes(`Execution checkout: ${t.cwd}. Read and write files only inside it (use relative paths); the source checkout is off limits.`));
+});
 test('Prompt and selected template IDs are saved as artifacts',async()=>{
  const r=await run(task(0,{workflow:'recon'}),true);
  const prompt=readFileSync(join(r.artifactDir,'prompt.txt'),'utf8');
@@ -641,7 +676,7 @@ test('Analysis run with its report in the artifactDir is ready_for_review',async
   if(m){captured.report=m[1];writeFileSync(m[1],'# Analysis report\n');}
   return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};
  };
- const r=await run(task(0,{workflow:'evaluate',provider:'openrouter',model:'m'}),false,{spawnPi});
+ const r=await run(task(0,{workflow:'evaluate',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.analysis.workflow,'evaluate');
  assert.equal(r.analysis.reportPresent,true);
@@ -653,6 +688,59 @@ test('Analysis run with its report in the artifactDir is ready_for_review',async
  assert.equal(h.analysis.reportPresent,true);
  assert.equal(h.artifacts.report,r.analysis.report);
  assert.deepEqual(h.unresolved,[]);
+});
+test('reportEvidence lists markdown headings in order',()=>{
+ const r=reportEvidence('# Report\nintro\n## Risk\nbody\n### Detail\nend\n','/tmp/report.md');
+ assert.deepEqual(r.outline,['# Report','## Risk','### Detail']);
+});
+test('reportEvidence truncates the excerpt at a line boundary',()=>{
+ const r=reportEvidence('# R\nline-1\nline-2\nline-3\n','/tmp/report.md',{maxExcerptBytes:12});
+ assert.deepEqual({excerpt:r.excerpt,truncated:r.truncated},{excerpt:'# R\nline-1\n',truncated:true});
+});
+test('assessPostflight puts a supplied analysis report in the classifier state',async()=>{
+ let seen:any;
+ const classify:any=async({state}:any)=>{seen=state;return {answers:{AC1:bool(0.95)}};};
+ const report={path:'/tmp/report.md',outline:['# Report'],excerpt:'# Report\n',bytes:9,truncated:false};
+ await assessPostflight({deliverable:'Review',acceptance:['Report exists']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}},undefined,undefined,{report});
+ assert.deepEqual(seen.report,report);
+});
+test('assessPostflight instructions name the analysis report when supplied',async()=>{
+ let questions:any;
+ const classify:any=async({questions:q}:any)=>{questions=q;return {answers:{AC1:bool(0.95)}};};
+ const report={path:'/tmp/report.md',outline:['# Report'],excerpt:'# Report\n',bytes:9,truncated:false};
+ await assessPostflight({deliverable:'Review',acceptance:['Report exists']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}},undefined,undefined,{report});
+ assert.match(questions.AC1.instructions,/analysis report outline and excerpt/);
+});
+test('deterministicCriterion marks an unchanged report-only change set met',()=>{
+ assert.equal(deterministicCriterion('No file other than the report is changed',{changedFiles:[],allowed:[]}),'met');
+});
+test('deterministicCriterion marks a non-allowed changed file as a gap',()=>{
+ assert.equal(deterministicCriterion('no other files are changed',{changedFiles:['src/worker.ts'],allowed:[]}),'gap');
+});
+test('deterministicCriterion ignores an unrelated acceptance criterion',()=>{
+ assert.equal(deterministicCriterion('The report explains every risk',{changedFiles:['src/worker.ts'],allowed:[]}),null);
+});
+test('assessPostflight does not send a deterministic criterion to the classifier',async()=>{
+ let calls=0;
+ const classify:any=async()=>{calls++;return {answers:{}};};
+ await assessPostflight({deliverable:'Review',acceptance:['changes no files']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(calls,0);
+});
+test('An fmeca run passes its written report to the postflight classifier',async()=>{
+ let postState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  if(!isPre) postState=state;
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ const spawnPi=(_c:string,args:string[])=>{
+  const prompt=args[args.length-1];
+  const m=/exact artifact path: ([^\n]+)/.exec(prompt);
+  if(m) writeFileSync(m[1],'# Analysis report\n## Risks\n');
+  return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};
+ };
+ await run(task(0,{workflow:'fmeca',provider:'openrouter',model:COMMODITY_MODEL,jev:{mode:'shadow'}}),false,{spawnPi,classify:classifier});
+ assert.deepEqual(postState.report.outline,['# Analysis report','## Risks']);
 });
 test('Implementation workflows have no analysis report requirement',async()=>{
  const r=await run(task(0,{workflow:'checks_first'}),true);
@@ -668,7 +756,7 @@ test('Analysis-to-implementation requires an explicit workflow',async()=>{
  mkdirSync(parentDir,{recursive:true});
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd,{workflow:{selected:'fmeca'}})));
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,true,{classify:classifier});
  assert.equal(r.workflow.selected,'checks_first');
  assert.equal(r.workflow.recommended,'test_first');
@@ -702,6 +790,22 @@ test('Live Pi child environment carries the derived bash timeout',async()=>{
  fake.end(0);
  await p;
  assert.equal(seen.env.JUNIOR_PI_BASH_TIMEOUT_S,'4');
+});
+test('A live run reports the streaming output breakdown',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const t=okTask(repo,{id:'breakdown',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>fake.child});
+ fake.emit({type:'session',id:'s'});
+ fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});
+ fake.emit({type:'agent_settled'});
+ fake.end(0);
+ const r=await p;
+ assert.ok(r.outputBreakdown && r.outputBreakdown.retainedBytes>0);
+});
+test('A mock run reports a null output breakdown',async()=>{
+ const r=await run(task(),true);
+ assert.equal(r.outputBreakdown,null);
 });
 test('A tool timeout names the tool and truncated command in the result unresolved list',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
@@ -741,6 +845,14 @@ const driveToContinuation=async(fakes:any[],argvs:string[][],firstUsage:any=U(1,
  fakes[0].emit({type:'session',id:'seg-one'});
  firstAssistant(fakes[0],'work done in the first segment',firstUsage);
  exhaustCap(fakes[0]);
+ await until(()=>fakes.length>=2);
+};
+// A segment that ends at the model's per-message output limit (no accumulation cap).
+const lengthSegment=(f:any,usage:any=U(1,1,2))=>{f.emit({type:'session',id:'seg-session'});f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'length'}});f.emit({type:'agent_settled'});f.end(0);};
+const driveLengthToContinuation=async(fakes:any[])=>{
+ await until(()=>fakes.length>=1);
+ firstAssistant(fakes[0],'partial work in the first segment');
+ lengthSegment(fakes[0]);
  await until(()=>fakes.length>=2);
 };
 test('Execution settings default continuations to one',()=>{
@@ -803,6 +915,50 @@ test('Result usage sums tokens across continuation segments',async()=>{
  const r=await p;
  assert.equal(r.receipt.usage.totalTokens,33);
 });
+test('A length-limited first segment starts a continuation segment',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(r.segments.length,2);
+});
+test('A length-limited first segment continues to a valid receipt',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ const r=await p;
+ assert.equal(receiptValid(r.receipt),true);
+});
+test('A length-limited continuation prompt names the per-message output limit',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes,argvs}=continuationFixture(repo);
+ await driveLengthToContinuation(fakes);
+ completeSegment(fakes[1]);
+ await p;
+ assert.ok(argvs[1][argvs[1].length-1].includes('per-message output limit'));
+});
+test('An exhausted length-limited run reports the per-message output limit error',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,1);
+ await until(()=>fakes.length>=1);
+ lengthSegment(fakes[0]);
+ await until(()=>fakes.length>=2);
+ lengthSegment(fakes[1]);
+ const r=await p;
+ assert.match(r.workerError,/per-message output limit/);
+});
+test('An exhausted length-limited run names the output limit in unresolved',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const {p,fakes}=continuationFixture(repo,1);
+ await until(()=>fakes.length>=1);
+ lengthSegment(fakes[0]);
+ await until(()=>fakes.length>=2);
+ lengthSegment(fakes[1]);
+ const r=await p;
+ assert.ok((r.unresolved as string[]).some((u)=>u.includes('per-message output limit')));
+});
 test('A capped run with continuations 0 ends output_truncated',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const {p,fakes}=continuationFixture(repo,0);
@@ -846,16 +1002,16 @@ test('A top-level continuations setting enables a continuation segment',async()=
  assert.equal(r.segments.length,2);
 });
 const SESSION_A='123e4567-e89b-12d3-a456-426614174000';
-const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A},...over});
+const priorResult=(cwd:string,over:any={}):any=>({id:'prior',status:'ready_for_review',cwd,artifactDir:join(cwd,'.delivery','prior','1'),workflow:{selected:'recon'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A},...over});
 test('Resume validation rejects cwd, provider/model and invalid session',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
  const prior=priorResult(cwd);
- assert.ok(resolveResume(prior,{provider:'openrouter',model:'m'},cwd,'p').info);
- assert.match(resolveResume(prior,{provider:'openrouter',model:'m'},join(cwd,'other'),'p').error,/cwd mismatch/);
+ assert.ok(resolveResume(prior,{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').info);
+ assert.match(resolveResume(prior,{provider:'openrouter',model:COMMODITY_MODEL},join(cwd,'other'),'p').error,/cwd mismatch/);
  assert.match(resolveResume(prior,{provider:'openrouter',model:'other'},cwd,'p').error,/provider\/model mismatch/);
- assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:''}},{provider:'openrouter',model:'m'},cwd,'p').error,/no Pi session ID/);
- assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:'bad id!'}},{provider:'openrouter',model:'m'},cwd,'p').error,/not valid/);
- assert.match(resolveResume({...prior,receipt:undefined},{provider:'openrouter',model:'m'},cwd,'p').error,/no receipt/);
+ assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:''}},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/no Pi session ID/);
+ assert.match(resolveResume({...prior,receipt:{...prior.receipt,sessionId:'bad id!'}},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/not valid/);
+ assert.match(resolveResume({...prior,receipt:undefined},{provider:'openrouter',model:COMMODITY_MODEL},cwd,'p').error,/no receipt/);
 });
 test('Resume mismatch blocks before the worker starts',async()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
@@ -865,7 +1021,7 @@ test('Resume mismatch blocks before the worker starts',async()=>{
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
  const spawnPi=()=>{spawned=true;return {status:0,stdout:'',stderr:''};};
- const r=await run(task(0,{cwd,provider:'openrouter',model:'m',resumeFrom:join(parentDir,'result.json')}),false,{spawnPi});
+ const r=await run(task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:join(parentDir,'result.json')}),false,{spawnPi});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/resumeFrom rejected/);
  assert.match(r.resume.error,/cwd mismatch/);
@@ -883,7 +1039,7 @@ test('Resume passes explicit --session, appends the contract and records the par
  writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));
  let captured:any;
  const spawnPi=(command:string,args:string[])=>{captured={command,args};return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'checks_first',deliverable:'Continue work',resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'checks_first',deliverable:'Continue work',resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,false,{spawnPi});
  assert.equal(captured.command,'pi');
  assert.equal(captured.args[captured.args.indexOf('--session')+1],SESSION_A);
@@ -908,7 +1064,7 @@ test('Resume from a prior recon run never auto-approves test_first',async()=>{
  let spawned=false;
  const spawnPi=(_c:string,args:string[])=>{spawned=true;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
- const t=task(0,{cwd,provider:'openrouter',model:'m',workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
+ const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,false,{spawnPi,classify:classifier});
  assert.equal(spawned,true);
  assert.equal(r.workflow.selected,'checks_first');
@@ -1039,9 +1195,218 @@ test('Run consumes project defaults and an explicit task provider/model wins',as
  const r=await run(task(0,{cwd}),true);
  assert.equal(r.receipt.requested.provider,'openrouter');
  assert.equal(r.receipt.requested.model,'deepseek/deepseek-v4.1-flash');
- const r2=await run(task(0,{cwd,provider:'anthropic',model:'claude'}),true);
- assert.equal(r2.receipt.requested.provider,'anthropic');
- assert.equal(r2.receipt.requested.model,'claude');
+ const r2=await run(task(0,{cwd,provider:'openrouter',model:'moonshotai/kimi-k3',approveModel:'moonshotai/kimi-k3'}),true);
+ assert.equal(r2.receipt.requested.provider,'openrouter');
+ assert.equal(r2.receipt.requested.model,'moonshotai/kimi-k3');
+});
+
+// --- commodity-only executor policy and Jev model routing ---
+const modelGate=(profile:string|null,confidence:number):any=>async({questions}:any)=>{
+ const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+ const answers:any={...(isPre?JEVPASS:{AC1:bool(0.95)})};
+ if(isPre && profile && Object.prototype.hasOwnProperty.call(questions,'model_profile')) answers.model_profile={type:'choice',value:profile,confidence};
+ return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers,usage:gateUsage};
+};
+const routingCwd=(routing:string)=>{const cwd=mkdtempSync(join(tmpdir(),'delivery-routing-'));writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({models:{routing}}));return cwd;};
+const routeConfig=(routing:string='auto'):any=>({provider:'openrouter',model:COMMODITY_MODEL,source:'builtin',path:null,pinnedVerdict:{},routing,autoUpgrade:false,defaultProfile:'general',approved:[],unapproved:'ask',rejected:[],roster:[
+ {id:'general',provider:'openrouter',model:COMMODITY_MODEL,default:true,strengths:'default'},
+ {id:'long-horizon',provider:'openrouter',model:ROUTED_MODEL,strengths:'long autonomous sessions'},
+]});
+
+test('A mock run with an explicit frontier model is refused for review',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.equal(r.status,'needs_review');
+});
+test('A refused frontier model leaves the worker exit code unset',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.equal(r.workerExitCode,null);
+});
+test('A refused frontier model reports the frontier policy code',async()=>{
+ const r=await run(task(0,{provider:'anthropic',model:'claude-opus'}),true);
+ assert.match(r.workerError,/^frontier_model_refused/);
+});
+test('An unknown explicit model is refused with the unknown policy code',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:'acme/unknown-1'}),true);
+ assert.match(r.workerError,/^unknown_model_refused/);
+});
+test('A frontier model pinned in project config never reaches the worker',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-frontier-pin-'));
+ writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({provider:'anthropic',model:'claude-opus'}));
+ let spawned=false;
+ await run(task(0,{cwd}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ assert.equal(spawned,false);
+});
+test('A run with no explicit model and no config records the builtin default and source',async()=>{
+ const r=await run(task(),true);
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:COMMODITY_MODEL,source:'builtin'});
+});
+test('Auto routing applies a confident non-default model profile with a run approval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:ROUTED_MODEL,source:'routed'});
+});
+test('Auto routing records that a run-approved model route was applied',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,true);
+});
+test('Shadow routing keeps the default requested model',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('Shadow routing records the recommended model profile',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.profile,'long-horizon');
+});
+test('Shadow routing records the recommendation as not applied',async()=>{
+ const r=await run(task(0,{cwd:routingCwd('shadow'),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,false);
+});
+test('A routed answer below the confidence threshold keeps the default model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.5)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('An explicit task model makes model routing ineligible',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:'moonshotai/kimi-k3',jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.eligible,false);
+});
+test('An explicit task model is not asked a model profile question',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await run(task(0,{provider:'openrouter',model:'moonshotai/kimi-k3',jev:{mode:'shadow'}}),true,{classify:classifier});
+ assert.equal(Object.prototype.hasOwnProperty.call(questions,'model_profile'),false);
+});
+test('decideModelRoute applies a confident non-default profile with a run approval',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true,approveModel:'long-horizon'}).applied,true);
+});
+test('decideModelRoute records but does not apply a recommendation in shadow mode',()=>{
+ assert.equal(decideModelRoute(routeConfig('shadow'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,false);
+});
+test('decideModelRoute keeps the default below the confidence threshold',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.5},{eligible:true}).model,COMMODITY_MODEL);
+});
+test('decideModelRoute ignores an unknown model profile',()=>{
+ assert.match(decideModelRoute(routeConfig('auto'),{type:'choice',value:'missing',confidence:0.9},{eligible:true}).reason,/not in the roster/);
+});
+test('decideModelRoute marks a confident non-default profile as needing approval',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).needsApproval,true);
+});
+test('decideModelRoute names the missing approval in the reason',()=>{
+ assert.match(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).reason,/approval/);
+});
+test('decideModelRoute applies a confident non-default profile with a project approval',()=>{
+ assert.equal(decideModelRoute({...routeConfig('auto'),approved:['long-horizon']},{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,true);
+});
+test('decideModelRoute records the project approval source',()=>{
+ assert.deepEqual(decideModelRoute({...routeConfig('auto'),approved:['long-horizon']},{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).approval,{source:'project',key:'long-horizon'});
+});
+
+// --- human consent before a non-default model runs ---
+const approvalCwd=(models:any={})=>{const cwd=mkdtempSync(join(tmpdir(),'delivery-approval-'));writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({models:{routing:'auto',...models}}));return cwd;};
+const pricedAgent=(prices:Record<string,{input:number;output:number}>)=>{const dir=mkdtempSync(join(tmpdir(),'delivery-agent-'));writeFileSync(join(dir,'models-store.json'),JSON.stringify({openrouter:{models:Object.entries(prices).map(([id,cost])=>({id,cost}))}}));return dir;};
+const approvalFile=(r:any)=>JSON.parse(readFileSync(join(r.artifactDir,'model-approval.json'),'utf8'));
+
+test('A routed non-default profile without approval stops for model approval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A routed non-default profile without approval leaves the worker exit code unset',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.workerExitCode,null);
+});
+test('A routed non-default profile without approval writes the approval request artifact',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(existsSync(join(r.artifactDir,'model-approval.json')),true);
+});
+test('The model-approval request mirrors into result.modelApproval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(r.modelApproval,approvalFile(r));
+});
+test('The model-approval request carries both approve commands',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(approvalFile(r).approve,{run:'junior handoff <task> --approve-model long-horizon',project:'junior model approve long-horizon'});
+});
+test('The model-approval request carries the price delta from the local catalog',async()=>{
+ const agent=pricedAgent({[COMMODITY_MODEL]:{input:0.03,output:0.08},[ROUTED_MODEL]:{input:0.09,output:0.24}});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{PI_CODING_AGENT_DIR:agent}});
+ assert.equal(approvalFile(r).price.outputRatio,3);
+});
+test('The model-approval request falls back to cached online catalog prices',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'delivery-cache-'));
+ writeFileSync(join(home,'model-catalog.json'),JSON.stringify({checkedAt:Date.now(),ids:[COMMODITY_MODEL,ROUTED_MODEL],prices:{[COMMODITY_MODEL]:{inputPerM:0.03,outputPerM:0.08,cacheReadPerM:null},[ROUTED_MODEL]:{inputPerM:0.09,outputPerM:0.24,cacheReadPerM:null}}}));
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{JUNIOR_HOME:home,PI_CODING_AGENT_DIR:join(home,'empty-agent')}});
+ assert.equal(approvalFile(r).price.outputRatio,3);
+});
+test('The model-approval request prefers cached online prices over the local catalog',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'delivery-cache-'));
+ writeFileSync(join(home,'model-catalog.json'),JSON.stringify({checkedAt:Date.now(),ids:[COMMODITY_MODEL,ROUTED_MODEL],prices:{[COMMODITY_MODEL]:{inputPerM:0.03,outputPerM:0.08,cacheReadPerM:null},[ROUTED_MODEL]:{inputPerM:0.09,outputPerM:0.4,cacheReadPerM:null}}}));
+ const agent=pricedAgent({[COMMODITY_MODEL]:{input:0.03,output:0.72},[ROUTED_MODEL]:{input:0.09,output:0.24}});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{JUNIOR_HOME:home,PI_CODING_AGENT_DIR:agent}});
+ assert.equal(approvalFile(r).price.outputRatio,5);
+});
+test('The model-approval request explains how to decline and run on the default model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.match(approvalFile(r).decline,/"modelProfile": "general"/);
+});
+test('A routed profile approved for the run applies the routed model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('A routed profile approved for the run records the run approval source',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'run');
+});
+test('A project-approved profile is applied with the project approval source',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({approved:['long-horizon']}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'project');
+});
+test('A plan-approved profile is applied with the plan approval source',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approvedProfiles:['long-horizon']}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'plan');
+});
+test('An explicit task model without approval stops for model approval',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL}),true);
+ assert.equal(r.status,'needs_model_approval');
+});
+test('An explicit task model can be approved by its matching profile id',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL,approveModel:'long-horizon'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('An explicit task model that is run-approved runs on that model',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL,approveModel:'moonshotai/kimi-k2.7-code'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('models.unapproved default runs on the default model',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({unapproved:'default'}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('models.unapproved default records the declined recommendation',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({unapproved:'default'}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.declined,true);
+});
+test('compactHandoff exposes the approval request for a blocked run',()=>{
+ const request={profile:'long-horizon',provider:'openrouter',model:ROUTED_MODEL,defaultModel:COMMODITY_MODEL,confidence:0.9,strengths:'s',reason:'r',price:{from:null,to:null,inputRatio:null,outputRatio:null,pricier:null},approve:{run:'r',project:'p'}};
+ assert.deepEqual(compactHandoff({status:'needs_model_approval',modelApproval:request}).model.approvalRequest,request);
+});
+test('compactHandoff exposes the applied model approval',()=>{
+ const approval={source:'run',key:'long-horizon'};
+ assert.deepEqual(compactHandoff({modelRouting:{approval}}).model.approval,approval);
+});
+test('compactHandoff passes the needs_model_approval outcome through',()=>{
+ assert.equal(compactHandoff({status:'needs_model_approval'}).outcome,'needs_model_approval');
+});
+test('compactHandoff exposes the model routing record',()=>{
+ const route={mode:'auto',eligible:true,profile:'long-horizon',confidence:0.9,applied:true,provider:'openrouter',model:ROUTED_MODEL,reason:'auto-routed'};
+ assert.deepEqual(compactHandoff({modelRouting:route}).model.routing,route);
+});
+test('compactHandoff exposes the model policy record',()=>{
+ const policy={provider:'anthropic',model:'claude-opus',class:'frontier',reason:'vendor anthropic is frontier',code:'frontier_model_refused'};
+ assert.deepEqual(compactHandoff({modelPolicy:policy}).model.policy,policy);
+});
+test('compactHandoff exposes the retained output breakdown',()=>{
+ const h=compactHandoff({outputBreakdown:{rawBytes:100,retainedBytes:40,byType:{message_update:60},largestToolResults:[{toolCallId:'c1',toolName:'bash',bytes:9}]}});
+ assert.deepEqual(h.output,{rawBytes:100,retainedBytes:40,largestToolResults:[{toolCallId:'c1',toolName:'bash',bytes:9}]});
+});
+test('compactHandoff reports a null output breakdown when the result has none',()=>{
+ assert.equal(compactHandoff({}).output,null);
 });
 test('CLI doctor needs no task file and exits nonzero when prerequisites fail',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-cli-'));
@@ -1242,16 +1607,27 @@ test('Repeat init reports the already-installed skill as identical',()=>{
  init(deps,{target:'codex'});
  assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'identical');
 });
-test('Changed packaged skill leaves an unchanged installed copy in place',()=>{
+test('Changed packaged skill leaves an unchanged installed copy in place when upgrade is disabled',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
+ init(deps,{target:'codex',upgrade:false});
+ assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v1\n');
+});
+test('Changed packaged skill is reported as outdated when upgrade is disabled',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
+ assert.equal(init(deps,{target:'codex',upgrade:false}).skill.actions[0].status,'outdated');
+});
+test('Default init refreshes an unmodified outdated skill copy',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
  init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
  init(deps,{target:'codex'});
- assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v1\n');
+ assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v2\n');
 });
-test('Changed packaged skill is reported as outdated, not replaced',()=>{
+test('Default init reports an unmodified outdated skill as upgraded',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
  init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
- assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'outdated');
+ assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'upgraded');
 });
 test('Explicit upgrade replaces an unchanged installed skill with the new packaged source',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
@@ -1295,6 +1671,39 @@ test('Doctor reports an installed project skill as ready',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const bin=withPiDir(cwd); const agent=writeAgent(cwd);
  init(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent}}));
  assert.equal(doctor(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent}})).skill.ready,true);
+});
+test('Doctor warns that the Junior skill is missing with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.ok(doctor(setupDeps(cwd)).warnings.includes('Junior skill is not installed (claude, codex); run `junior init`'));
+});
+test('Doctor does not call a user-level Junior skill missing',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const home=mkdtempSync(join(tmpdir(),'delivery-home-'));
+ init(setupDeps(cwd),{scope:'user',skillRoot:join(home,'.claude','skills')});
+ assert.equal(doctor(setupDeps(cwd,{env:{HOME:home}})).warnings.some((w:string)=>w.startsWith('Junior skill is not installed')),false);
+});
+test('Doctor warns that the Junior skill is outdated with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps); writeFileSync(src,'v2\n');
+ assert.ok(doctor(deps).warnings.includes('Junior skill is outdated (claude, codex); run `junior update`'));
+});
+test('Doctor warns that a customized Junior skill is preserved with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const deps=setupDeps(cwd);
+ init(deps); writeFileSync(claudeSkill(cwd),'custom\n');
+ assert.ok(doctor(deps).warnings.includes('Junior skill is customized (claude); it is preserved; `junior init --force` replaces it'));
+});
+test('Doctor remediation repeats the missing Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.ok(doctor(setupDeps(cwd)).remediation.includes('Junior skill is not installed (claude, codex); run `junior init`'));
+});
+test('Doctor remediation repeats the outdated Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps); writeFileSync(src,'v2\n');
+ assert.ok(doctor(deps).remediation.includes('Junior skill is outdated (claude, codex); run `junior update`'));
+});
+test('Doctor remediation repeats the customized Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const deps=setupDeps(cwd);
+ init(deps); writeFileSync(claudeSkill(cwd),'custom\n');
+ assert.ok(doctor(deps).remediation.includes('Junior skill is customized (claude); it is preserved; `junior init --force` replaces it'));
 });
 test('Parse init options selects user scope and the requested target',()=>{
  assert.equal(parseInitOptions(['init','--user','--target=claude']).scope,'user');
@@ -1436,6 +1845,30 @@ test('worktree isolation executes Pi and checks in the isolated checkout, leavin
  assert.ok(existsSync(r.executionCwd));
  assert.equal(r.checks[0].exitCode,0);
 });
+test('worktree isolation sets JUNIOR_PI_SOURCE_ROOT to the source checkout',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(wtTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,repo.dir);
+});
+test('worktree isolation scopes JUNIOR_PI_WRITE_ROOTS to the execution checkout and artifact dir',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const r=await run(wtTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_WRITE_ROOTS,[r.executionCwd,r.artifactDir].join(delimiter));
+});
+test('isolation none scopes JUNIOR_PI_WRITE_ROOTS to the source checkout and artifact dir',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ const r=await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_WRITE_ROOTS,[repo.dir,r.artifactDir].join(delimiter));
+});
+test('isolation none leaves JUNIOR_PI_SOURCE_ROOT unset',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,undefined);
+});
 
 test('Run captures before/after evidence artifact and run-change summary',async()=>{
  const repo=gitRepo();
@@ -1500,10 +1933,10 @@ test('Resume rejects incompatible isolation before paid calls',async()=>{
  const repo=gitRepo();
  commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','1');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume',provider:'openrouter',model:'m',isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/isolation/i);
  assert.equal(spawned,false);
@@ -1515,11 +1948,11 @@ test('Resume with worktree isolation reuses the prior execution checkout',async(
  const wtPath=join(repo.dir,'.delivery','prior-wt');
  assert.equal(createDetachedWorktree(repo.dir,wtPath).ok,true);
  const priorDir=join(repo.dir,'.delivery','prior','2');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:wtPath,isolation:{mode:'worktree'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:wtPath,isolation:{mode:'worktree'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawnedCwd:string|undefined;
  const spawnPi=(command:string,args:string[],opts:any)=>{spawnedCwd=opts.cwd;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
- const r=await run(okTask(repo,{id:'resume-wt',provider:'openrouter',model:'m',isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi});
+ const r=await run(okTask(repo,{id:'resume-wt',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.executionCwd,wtPath);
  assert.equal(spawnedCwd,wtPath);
@@ -1558,7 +1991,7 @@ test('Blocked enforce preflight releases the checkout lock',async()=>{
  assert.ok(!existsSync(lockPath),'lock released on blocked preflight');
 });
 
-const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));return join(priorDir,'result.json');};
+const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));return join(priorDir,'result.json');};
 
 test('Held Pi session lock rejects a resume before paid calls and is not auto-deleted',async()=>{
  const repo=gitRepo();
@@ -1568,7 +2001,7 @@ test('Held Pi session lock rejects a resume before paid calls and is not auto-de
  const held=acquireLock(lockDir,`session:${SESSION_A}`,{purpose:'test'});
  assert.ok(held.handle);
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume-lock',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume-lock',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/lock/i);
  assert.equal(spawned,false);
@@ -1581,7 +2014,7 @@ test('Pi session lock is released after a resume run',async()=>{
  commitFile(repo,'a.txt','base\n');
  const from=priorNone(repo,'4');
  const lockPath=lockPathFor(join(repo.dir,'.delivery','locks'),`session:${SESSION_A}`);
- const r=await run(okTask(repo,{id:'resume-rel',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:okSpawn()});
+ const r=await run(okTask(repo,{id:'resume-rel',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:okSpawn()});
  assert.equal(r.status,'ready_for_review');
  assert.ok(!existsSync(lockPath),'session lock released after resume');
 });
@@ -1621,7 +2054,7 @@ test('Failed session lock acquisition releases the already-acquired checkout loc
  assert.ok(held.handle);
  const checkoutLockPath=lockPathFor(lockDir,`checkout:${repo.dir}`);
  let spawned=false;
- const r=await run(okTask(repo,{id:'resume-lock-gap',provider:'openrouter',model:'m',resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'resume-lock-gap',provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:from}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/lock/i);
  assert.equal(spawned,false);
@@ -1635,7 +2068,7 @@ test('Session lock key is derived from the parent session id, not a post-run ses
 
 // --- D08 runtime handoff: streaming lifecycle, deadlines, repair lineage (offline; no paid calls) ---
 const delay=(ms:number)=>new Promise((r)=>setTimeout(r,ms));
-const artifactFor=(repo:any,id:string)=>{const base=join(repo.dir,'.delivery',id);const stamps=readdirSync(base).sort();return join(base,stamps[stamps.length-1]);};
+const artifactFor=(repo:any,id:string)=>{const base=join(repo.dir,'.delivery',id);const stamps=readdirSync(base,{withFileTypes:true}).filter((e)=>e.isDirectory()).map((e)=>e.name).sort();return join(base,stamps[stamps.length-1]);};
 const readRuntime=(art:string)=>JSON.parse(readFileSync(join(art,'runtime.json'),'utf8'));
 
 const makeFakeChild=()=>{
@@ -1801,10 +2234,10 @@ test('SIGINT-style interruption yields an interrupted handback, preserves artifa
 test('Repair over budget is rejected before any paid call',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','budget');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:1,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:1,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  let spawned=false;
- const r=await run(okTask(repo,{id:'repair-rej',provider:'openrouter',model:'m',repairFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
+ const r=await run(okTask(repo,{id:'repair-rej',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(spawned,false,'rejected before the worker starts');
  assert.equal(r.status,'needs_review');
  assert.match(r.workerError,/repair rejected/);
@@ -1815,16 +2248,48 @@ test('Repair over budget is rejected before any paid call',async()=>{
 test('Repair within budget reuses the session and persists the lineage counter',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','okrepair');mkdirSync(priorDir,{recursive:true});
- const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:'m'},sessionId:SESSION_A}};
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
  writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
  const from=join(priorDir,'result.json');
- const r=await run(okTask(repo,{id:'repair-ok',provider:'openrouter',model:'m',repairFrom:from}),false,{spawnPi:okSpawn()});
+ const r=await run(okTask(repo,{id:'repair-ok',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:from}),false,{spawnPi:okSpawn()});
  assert.equal(r.status,'ready_for_review');
  assert.equal(r.lineage.repairs,1);
  assert.equal(r.lineage.maxRepairs,1);
  assert.equal(r.repair.repairs,1);
  assert.equal(r.repair.parentSessionId,SESSION_A);
  assert.ok(!existsSync(lockPathFor(join(repo.dir,'.delivery','locks'),`session:${SESSION_A}`)),'session lock released');
+});
+
+test('An openrouter run passes an affinity key derived from the lineage root to the worker env',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(okTask(repo,{id:'affinity-root',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'affinity-root'));
+});
+
+test('A repair run shares the affinity key of its root run',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const priorDir=join(repo.dir,'.delivery','prior','affinity');mkdirSync(priorDir,{recursive:true});
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'root-affinity',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ let seen:any;
+ await run(okTask(repo,{id:'repair-affinity',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'root-affinity'));
+});
+
+test('An openrouter run passes the selected profile routing to the worker env',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra']}}]}}));
+ let seen:any;
+ await run(okTask(repo,{id:'routing-env',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_OPENROUTER_ROUTING,JSON.stringify({order:['deepinfra']}));
+});
+
+test('An openrouter run records the selected profile provider routing on the result',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra']}}]}}));
+ const r=await run(okTask(repo,{id:'routing-result',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:okSpawn()});
+ assert.deepEqual(r.providerRouting,{affinityKey:affinityKeyFor(resolve(repo.dir),'routing-result'),openrouter:{order:['deepinfra']}});
 });
 
 test('Child startup error and malformed events both produce inspectable failed receipts',async()=>{
@@ -2141,6 +2606,33 @@ test('Compact receipt exposes the input token count',()=>{
 test('Compact receipt exposes the output token count',()=>{
  const h=compactHandoff(handoffResult());
  assert.equal(h.model.output,22);
+});
+test('Compact receipt reports a 0.75 cache hit rate for 100 input and 300 cache reads',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:0,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.hitRate,0.75);
+});
+test('Compact receipt reports a null cache hit rate when input and cache reads are both zero',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:0,cacheRead:0,cacheWrite:0,totalTokens:0,available:true}}});
+ assert.equal(h.model.cache.hitRate,null);
+});
+test('Compact receipt exposes the input token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:0,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.input,100);
+});
+test('Compact receipt exposes the cache-read token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:4,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.cacheRead,300);
+});
+test('Compact receipt exposes the cache-write token count in the cache projection',()=>{
+ const h=compactHandoff({id:'c',status:'ready_for_review',receipt:{usage:{input:100,cacheRead:300,cacheWrite:4,totalTokens:400,available:true}}});
+ assert.equal(h.model.cache.cacheWrite,4);
+});
+test('Compact handoff exposes the upstream provider aggregate from billing',()=>{
+ const providers=[{provider:'DeepInfra',generations:2,cachedTokens:10}];
+ assert.deepEqual(compactHandoff({id:'c',status:'ready_for_review',billing:{providers}}).model.upstream,providers);
+});
+test('Compact handoff reports a null upstream when billing captured no providers',()=>{
+ assert.equal(compactHandoff({id:'c',status:'ready_for_review'}).model.upstream,null);
 });
 test('Parser records the provider response id from an assistant message_end',()=>{
  const r=parseReceipt(stream(assistant({responseId:'gen-abc'}),{type:'agent_settled'}));
@@ -2615,7 +3107,7 @@ test('isolationSetup is ignored when isolation is none',async()=>{
 
 test('delivery.config.json isolationSetup provisions the worktree',async()=>{
  const repo=gitRepo();
- commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,isolationSetup:{commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('setup-marker.txt','1')"]}]}}));
  const checks=[{command:process.execPath,args:['-e',"require('fs').readFileSync('setup-marker.txt')"]}];
  const r=await run(okTask(repo,{isolation:'worktree',checks}),true);
  assert.equal(r.checks[0].exitCode,0);
@@ -2623,7 +3115,7 @@ test('delivery.config.json isolationSetup provisions the worktree',async()=>{
 
 test('a contract isolationSetup takes precedence over delivery.config.json',async()=>{
  const repo=gitRepo();
- commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:'m',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
+ commitFile(repo,'delivery.config.json',JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}));
  const isolationSetup={commands:[{command:process.execPath,args:['-e',"require('fs').writeFileSync('contract-marker.txt','1')"]}]};
  const r=await run(okTask(repo,{isolation:'worktree',isolationSetup}),true);
  assert.equal(r.status,'simulation_passed');
@@ -2782,7 +3274,7 @@ test('detectSlowMount ignores a native home checkout',()=>{
 test('doctor includes a slow-mount warning for a 9p checkout',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-slow-'));
  const d=doctor(setupDeps(cwd,{readMounts:()=>`client ${cwd} 9p rw 0 0\n`}));
- assert.equal(d.warnings.length,1);
+ assert.ok(d.warnings.some((w)=>w.startsWith('Slow Windows-mounted checkout')));
 });
 test('RuntimeHeartbeat emits a heartbeat line through the progress sink',()=>{
  const dir=mkdtempSync(join(tmpdir(),'delivery-hb-'));
@@ -2927,7 +3419,7 @@ test('A worker run past the output cap reports runtime stop reason output_trunca
  const r=await p;
  assert.equal(r.runtime.stopReason,'output_truncated');
 });
-test('A worker run past the output cap marks the receipt truncated tail',async()=>{
+test('A worker run past the output cap is reported as output truncated',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  const t=okTask(repo,{id:'cap-tail',execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
@@ -2935,7 +3427,7 @@ test('A worker run past the output cap marks the receipt truncated tail',async()
  fake.emitRaw('x'.repeat(200000));
  fake.end(0);
  const r=await p;
- assert.equal(r.receipt.truncatedTail,true);
+ assert.equal(r.outputTruncated,true);
 });
 
 // --- J41a stream compaction: maxOutputBytes bound and split warnings ---
@@ -3014,4 +3506,74 @@ test('The readiness request omits trait questions when they would exceed the per
  const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
  await assessPreflight(task(),classifier,{maxQuestions:3});
  assert.equal(Object.keys(questions).filter((k)=>k.startsWith('trait_')).length,0);
+});
+
+// --- sticky per-deliverable model routing ----------------------------------
+const stickyCwd=()=>mkdtempSync(join(tmpdir(),'delivery-sticky-'));
+const stickyFile=(cwd:string)=>JSON.parse(readFileSync(join(cwd,'.delivery','smoke','route.json'),'utf8'));
+
+test('A run writes a sticky route record for its task id',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd}),true);
+ assert.equal(existsSync(join(cwd,'.delivery','smoke','route.json')),true);
+});
+test('The sticky route record names the model the run used',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(stickyFile(cwd).model,ROUTED_MODEL);
+});
+test('The sticky route record carries the approval that allowed the model',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(stickyFile(cwd).approval,{source:'run',key:'long-horizon'});
+});
+test('A second run with the same id reuses the approved routed model',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('A second run with the same id is not asked a model_profile question',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ let preflight:any;
+ const classifier:any=async({questions:q}:any)=>{if(Object.prototype.hasOwnProperty.call(q,'contract_clear'))preflight=q;return {stopReason:'stop',answers:JEVPASS};};
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:classifier});
+ assert.equal(Object.prototype.hasOwnProperty.call(preflight,'model_profile'),false);
+});
+test('The sticky reuse is recorded as not eligible for re-routing',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.eligible,false);
+});
+test('The sticky reuse reports the sticky reason',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.match(r.modelRouting.reason,/^sticky:/);
+});
+test('The sticky reuse marks the routed model as applied',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.applied,true);
+});
+test('The sticky record is ignored when its approval was revoked',async()=>{
+ const cwd=stickyCwd();
+ await run(task(0,{cwd,jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A contract modelProfile without approval stops with needs_model_approval',async()=>{
+ const r=await run(task(0,{modelProfile:'long-horizon'}),true);
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A contract modelProfile approved for the run applies the pinned model',async()=>{
+ const r=await run(task(0,{modelProfile:'long-horizon',approveModel:'long-horizon'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+
+test('The affinity key never contains the deliverable id',()=>{
+ assert.equal(affinityKeyFor('/project','secret-feature-name').includes('secret-feature-name'),false);
 });
