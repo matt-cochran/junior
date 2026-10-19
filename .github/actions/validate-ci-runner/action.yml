@@ -1,0 +1,18 @@
+name: Validate CI runner switch
+description: Check the explicit runner override supplied by the calling workflow.
+inputs:
+  mode:
+    description: Organization or repository CI_RUNNER_MODE, resolved by the caller.
+    default: github
+  runner-label:
+    description: Selected provider label, resolved by the calling workflow.
+    default: github
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        POLICY_PATH: ${{ github.action_path }}
+        CI_RUNNER_MODE: ${{ inputs.mode }}
+        CI_RUNNER_LABEL: ${{ inputs.runner-label }}
+      run: python3 "$POLICY_PATH/validate.py"

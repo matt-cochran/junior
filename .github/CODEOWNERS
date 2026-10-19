@@ -1,0 +1,5 @@
+# CI and promotion policy. A pull request's own workflows produce the build
+# evidence that main reuses, so changes here need a code-owner review before
+# they can reach staging (enable "Require review from Code Owners" on the
+# dev/staging/main rulesets to enforce it).
+/.github/ @matt-cochran
