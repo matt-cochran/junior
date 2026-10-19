@@ -33,7 +33,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -402,4 +402,49 @@ test('junior validate prints no update notice when JUNIOR_NO_UPDATE_CHECK=1', ()
   const home = freshCacheHome(['junior']);
   const res = runJunior(['validate', 'missing.json'], workdir(), noticeEnv(home, '1'));
   assert.doesNotMatch(res.stderr, /updates available/);
+});
+
+// --- apply command (W1-cli-wiring) ------------------------------------------
+
+function gitRepo(): string {
+  const dir = workdir();
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  return dir;
+}
+
+test('junior apply -h prints apply usage', () => {
+  assert.match(runJunior(['apply', '-h'], workdir()).stdout, /^Usage: junior apply\b/m);
+});
+
+test('junior apply missing-id exits 1 in a temp git repo', () => {
+  assert.equal(runJunior(['apply', 'missing-id'], gitRepo()).status, 1);
+});
+
+test('junior apply missing-id reports the missing target', () => {
+  const out = JSON.parse(runJunior(['apply', 'missing-id'], gitRepo()).stdout);
+  assert.match(out.error, /missing-id/);
+});
+
+// --- plan-aware handoff (W1-cli-wiring) --------------------------------------
+
+test('junior handoff refuses a plan whose cpm lease cannot be acquired', () => {
+  const dir = workdir();
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: { cpm: { command: join(dir, 'missing-cpm'), sourceVersion: '1.0.0', sourceSha: '0'.repeat(64) } },
+  });
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id: 'plan-cli',
+    deliverable: 'Plan lease CLI',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: NODE, args: ['-e', 'process.exit(0)'] }],
+    hopFrom: hop,
+    plan: { id: 'plan_x', deliverable: 'P1b-plan-lease' },
+  }));
+  const res = runJunior(['handoff', taskPath, '--mock', '--quiet'], dir);
+  assert.equal(JSON.parse(res.stdout).status, 'plan_lease_refused');
 });

@@ -16,7 +16,8 @@ and check evidence.
 
 Start every session with `junior doctor`; it is read-only and prints a
 `readiness` object for the active harness (`--harness claude|cursor|codex`
-forces one). Read `readiness.ready` and its `items` (Junior and companion
+forces one); its `warnings` and `remediation` name an outdated, customized or
+missing Junior skill. Read `readiness.ready` and its `items` (Junior and companion
 skills, MCP registration, managed tools, cached updates). If `ready` is false,
 offer `junior setup`: it prints the ordered repair plan and, on a TTY, asks for
 confirmation before applying it. `--dry-run` prints the plan only; `--yes`
@@ -225,7 +226,8 @@ Inspect `artifactDir/result.json`, the check logs and the changed files.
 Change evidence covers the complete tracked, staged and untracked changes; a
 `truncated` diff or receipt means the reviewer saw an explicit prefix, not the
 whole change, so treat the run as incomplete. Confirm the observed model matches
-the request. For a specific repair, issue a new bounded contract with
+the request. Apply an accepted run with `junior apply <id|result.json>`
+(`--dry-run` to check first) instead of copying files. For a specific repair, issue a new bounded contract with
 `resumeFrom` pointing at the prior `result.json` and the same
 cwd/provider/model. Allow at most one automatic repair unless the user
 authorizes more; escalate an unresolved blocker with evidence. Never treat a
@@ -258,8 +260,11 @@ For a clarify, `probability` is the P(true) of the triggering question (`contrac
 ## Manager loop with CPM and FMECA
 
 You (the frontier model) coordinate; commodity workers execute. Route every
-tool call through `node <cli> tools call /absolute/hop.json <fmeca|cpm|crossmatrix> request.json`
-so it is recorded as evidence (reads become immutable snapshots):
+tool call through `node <cli> tools call [/absolute/hop.json] <fmeca|cpm|crossmatrix> <request.json | method key=value ...>`
+so it is recorded as evidence (reads become immutable snapshots). The hop
+defaults to `.delivery/setup/hop.json`; inline values are JSON when they parse
+(`junior tools call cpm plan.status plan_id=plan_123`). Output is the bare
+result; a failure exits 1; `--full` prints the envelope:
 
 1. Plan: `plan.submit` deliverables with `owned_files` and prerequisites;
    `plan.lint`, `plan.simulate` and `plan.status` (critical path, ready set) are reads.
@@ -273,10 +278,15 @@ so it is recorded as evidence (reads become immutable snapshots):
    so routing applies. Manager-owned review/verify steps stay outside cohorts.
 2. Risk: an FMECA session (`session.open`, `append`), then `risk.next` and
    `readiness.assess` before risky work.
-3. Lease: `plan.acquire_cohort` returns non-conflicting ready deliverables;
-   dispatch each as one Junior contract (pass `hopFrom` to share state).
-4. Review the receipt, diff and checks yourself, then `plan.mark_status`
-   complete (with `evidence`) or failed with a reason; repair at most once.
+3. Lease: give each contract `plan: {id, deliverable}` with `hopFrom`;
+   `handoff` leases the deliverable (refusing with `plan_lease_refused` when it
+   is not ready), runs it, and records hours and evidence (`in_progress` on
+   success, `failed` otherwise). Or lease a cohort yourself with
+   `plan.acquire_cohort` (`caller_id`, `ids`, `max_count`).
+4. Review the receipt, diff and checks yourself, apply the worktree with
+   `junior apply <id>` (three-way, refuses unsafe states), then
+   `plan.mark_status` complete (with `evidence`) or failed with a reason;
+   repair at most once.
 5. Repeat until `plan.status` shows the plan complete.
 
 The companion cpm skills follow the plan's life: `cpm-plan` (author, lint, sync,

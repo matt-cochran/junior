@@ -7,7 +7,7 @@
 `deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `context`,
 `provider`, `model`, `thinking`, `pricing`, `billing`, `jev`, `workflow`,
 `isolation`, `isolationSetup`, `resumeFrom`, `repairFrom`,
-`reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `hopFrom`, `hopRevision`,
+`reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `plan`, `hopFrom`, `hopRevision`,
 `hopContext`, `execution`, and the six execution settings directly:
 `deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`,
 `checkReserveMs`).
@@ -16,6 +16,16 @@ field: <key>` rather than silently ignored, and each check accepts only
 `command`, `args` and `cwd` (an unknown check key is rejected with `Unknown
 check field: <key>`). Nested known fields (for example `execution.quietMs`,
 `jev.mode` and `pricing.source`) remain supported.
+
+`plan: {id, deliverable, callerId?}` links the contract to a cpm plan
+deliverable and requires `hopFrom`. `handoff` then leases that deliverable
+(`plan.acquire_cohort`, caller `junior-worker` unless `callerId` is given, TTL
+the run deadline plus an hour) before the worker starts and refuses with
+`plan_lease_refused` when it is not leased. Afterwards it calls
+`plan.mark_status`: `in_progress` with the run's wall hours and an evidence line
+(artifact directory, outcome, observed model) on success, leaving the lease for
+the manager to review and complete, or `failed` with the reason. The receipt
+gains a `plan` block.
 
 A contract should normally omit `provider` and `model` so the commodity roster
 and Jev routing choose the executor:
@@ -291,8 +301,8 @@ Codex discovers project skills under `.agents/skills` (official reference:
 <https://learn.chatgpt.com/docs/build-skills>). Claude Code discovers project
 skills under `.claude/skills` and user skills under `~/.claude/skills` (the same
 locations `junior init` writes). Copies need updating when the canonical skill
-changes; `init --upgrade` replaces only the unmodified installed copy, while
-`--force` is required for a customization.
+changes; `junior init` and `junior update` replace only the unmodified installed
+copy, while `--force` is required for a customization.
 
 Invoke it explicitly with `$junior` in Codex or `/junior` in Claude Code, for
 example: “Use Junior to implement this deliverable; you manage and review it.”

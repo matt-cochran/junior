@@ -32,6 +32,8 @@ node tools.ts init ./hop.json ./config.json
 
 # 2. Run one tool call (executor path). The request file selects tool + args.
 node tools.ts call ./hop.json fmeca ./request.json
+#    Or inline, against <cwd>/.delivery/setup/hop.json:
+junior tools call cpm plan.status plan_id=plan_123
 
 # 3. Read the compact manager/Jev context.
 node tools.ts inspect ./hop.json
@@ -39,14 +41,16 @@ node tools.ts inspect ./hop.json
 
 All three commands print JSON to stdout. Failures print
 `{"ok": false, "error": {"code": "...", "message": "..."}}` and exit `1`;
-successful commands exit `0`.
+successful commands exit `0`. `call` prints only the tool result by default and
+writes one stderr line with the revision and snapshot id; a tool or RPC failure
+exits `1`; `--full` prints the whole call envelope.
 
 ## CLI reference
 
 | Command | Description |
 | --- | --- |
 | `node tools.ts init <hop.json> [config.json]` | Create a new schemaVersion 1 HOP. Refuses to overwrite an existing file. |
-| `node tools.ts call <hop.json> <fmeca\|cpm\|crossmatrix\|scientific-process\|elicitation> <request.json>` | Execute one MCP call, advance the revision, persist evidence + snapshots. |
+| `node tools.ts call [<hop.json>] <fmeca\|cpm\|crossmatrix\|scientific-process\|elicitation> <request.json\|-\|method [key=value ...]> [--full]` | Execute one MCP call, advance the revision, persist evidence + snapshots. The hop defaults to `<cwd>/.delivery/setup/hop.json`; inline values are JSON when they parse, otherwise strings. |
 | `node tools.ts inspect <hop.json>` | Emit a compact snapshot context for a manager or the Jev classifier. |
 
 ## Config file (input to `init`)
