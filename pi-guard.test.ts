@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import guardBash, { guardBashInput, guardPathAccess } from './pi-guard.ts';
+import guardBash, { guardBashInput, guardPathAccess, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
 
 const env = (value?: string) => (value === undefined ? {} : { JUNIOR_PI_BASH_TIMEOUT_S: value });
 
@@ -111,4 +111,26 @@ test('guardPathAccess blocks a bash command that names the bare source root', ()
 test('guardPathAccess allows a bash command naming a sibling directory that shares the source prefix', () => {
  const r = guardPathAccess('bash', { command: 'ls /src/repo-site' }, { JUNIOR_PI_SOURCE_ROOT: '/src/repo' }, '/src/repo/.delivery/x/1/worktree');
  assert.equal(r, null);
+});
+
+test('applyAffinityHeader sets x-session-id from JUNIOR_PI_AFFINITY_KEY', () => {
+ const headers: Record<string, string | null> = {};
+ applyAffinityHeader(headers, { JUNIOR_PI_AFFINITY_KEY: 'junior:deliverable-1' });
+ assert.equal(headers['x-session-id'], 'junior:deliverable-1');
+});
+
+test('applyAffinityHeader leaves headers unchanged without the variable', () => {
+ const headers: Record<string, string | null> = {};
+ applyAffinityHeader(headers, {});
+ assert.deepEqual(headers, {});
+});
+
+test('applyProviderRouting merges the configured provider routing into the payload', () => {
+ const routed = applyProviderRouting({ model: 'm' }, { JUNIOR_PI_OPENROUTER_ROUTING: JSON.stringify({ order: ['deepinfra'], allow_fallbacks: false }) });
+ assert.deepEqual(routed.provider, { order: ['deepinfra'], allow_fallbacks: false });
+});
+
+test('applyProviderRouting ignores invalid JSON', () => {
+ const payload = { model: 'm' };
+ assert.deepEqual(applyProviderRouting(payload, { JUNIOR_PI_OPENROUTER_ROUTING: '{not json' }), payload);
 });

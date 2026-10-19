@@ -92,10 +92,37 @@ export function guardBashInput<T>(input: T, env: GuardEnv | undefined = process.
  return input;
 }
 
-/** Pi extension entry point: rewrite every bash `tool_call` before execution,
- * then block a call that would escape the execution checkout. Pi blocks the
- * call when the handler returns `{block:true, reason}`. */
+/** Pin OpenRouter's upstream provider for a whole Junior deliverable. Pi sends
+ * `x-session-id` with `sessionAffinityFormat: openrouter`, which keeps one
+ * provider per Pi session; continuation segments, repairs and re-dispatches are
+ * new sessions, so the stable `JUNIOR_PI_AFFINITY_KEY` restores affinity. */
+export function applyAffinityHeader(headers:Record<string,string|null>, env:GuardEnv|undefined):void {
+ const key=env?.JUNIOR_PI_AFFINITY_KEY;
+ if (typeof key==='string' && key) headers['x-session-id']=key;
+}
+
+/** Merge `JUNIOR_PI_OPENROUTER_ROUTING` (a JSON object) into an object
+ * payload's `provider` settings, preserving any existing provider entries. An
+ * absent, blank, non-object or malformed value leaves the payload unchanged. */
+export function applyProviderRouting(payload:any, env:GuardEnv|undefined):any {
+ const raw=env?.JUNIOR_PI_OPENROUTER_ROUTING;
+ if (typeof raw!=='string' || !raw.trim()) return payload;
+ if (!payload || typeof payload!=='object' || Array.isArray(payload)) return payload;
+ let routing:unknown;
+ try { routing=JSON.parse(raw); } catch { return payload; }
+ if (!routing || typeof routing!=='object' || Array.isArray(routing)) return payload;
+ const target=payload as Record<string,any>;
+ const provider=target.provider && typeof target.provider==='object' && !Array.isArray(target.provider) ? target.provider : {};
+ return {...target, provider:{...provider, ...(routing as Record<string,any>)}};
+}
+
+/** Pi extension entry point: pin provider affinity and routing before the
+ * request, rewrite every bash `tool_call` before execution, then block a call
+ * that would escape the execution checkout. Pi blocks the call when the
+ * handler returns `{block:true, reason}`. */
 export default function (pi: any): void {
+ pi.on('before_provider_headers', (event: any) => { if (event) applyAffinityHeader(event.headers, process.env); });
+ pi.on('before_provider_request', (event: any) => event ? applyProviderRouting(event.payload, process.env) : event);
  pi.on('tool_call', (event: any) => {
   if (!event) return;
   if (event.toolName === 'bash') event.input = guardBashInput(event.input, process.env);

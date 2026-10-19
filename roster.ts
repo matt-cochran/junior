@@ -19,11 +19,21 @@ import { classifyModel, type ModelVerdict } from './model-policy.ts';
 
 export type RoutingMode = 'off'|'shadow'|'auto';
 
+export type OpenRouterRouting = {
+  order?:string[];
+  only?:string[];
+  ignore?:string[];
+  allow_fallbacks?:boolean;
+  sort?:string;
+};
+
 export type RosterProfile = {
   id:string;
   provider:string;
   model:string;
   strengths:string;
+  /** Optional OpenRouter provider-routing preferences for this profile. */
+  openrouter?:OpenRouterRouting;
   default?:boolean;
 };
 
@@ -139,6 +149,31 @@ function readPriceTolerance(value:unknown):number {
   return typeof value==='number' && Number.isFinite(value) && value >= 1 ? value : DEFAULT_PRICE_TOLERANCE;
 }
 
+/** Trimmed non-empty strings from an array, or undefined when none remain. */
+function readStringList(value:unknown):string[]|undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out:string[]=[];
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const key=entry.trim();
+    if (key) out.push(key);
+  }
+  return out.length ? out : undefined;
+}
+
+/** Validate a profile's OpenRouter routing: known fields with valid types are
+ * kept, invalid fields are dropped, and an empty result means no setting. */
+function readOpenRouterRouting(value:unknown):OpenRouterRouting|undefined {
+  if (!isObject(value)) return undefined;
+  const out:OpenRouterRouting={};
+  const order=readStringList(value.order); if (order) out.order=order;
+  const only=readStringList(value.only); if (only) out.only=only;
+  const ignore=readStringList(value.ignore); if (ignore) out.ignore=ignore;
+  if (typeof value.allow_fallbacks==='boolean') out.allow_fallbacks=value.allow_fallbacks;
+  if (typeof value.sort==='string' && value.sort.trim()) out.sort=value.sort.trim();
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Overlay one `models.roster` entry, reporting a rejection when a brand-new
  * profile is incomplete. Built-in overrides only replace provided fields. */
 function applyOverride(candidates:RosterProfile[], entry:Record<string,unknown>, rejected:RejectedProfile[]):void {
@@ -153,9 +188,11 @@ function applyOverride(candidates:RosterProfile[], entry:Record<string,unknown>,
     const provider = nonEmpty(entry.provider);
     const model = nonEmpty(entry.model);
     const strengths = nonEmpty(entry.strengths);
+    const openrouter = readOpenRouterRouting(entry.openrouter);
     if (provider) existing.provider=provider;
     if (model) existing.model=model;
     if (strengths) existing.strengths=strengths;
+    if (openrouter) existing.openrouter=openrouter;
     return;
   }
   const provider = nonEmpty(entry.provider) ?? '';
@@ -165,7 +202,8 @@ function applyOverride(candidates:RosterProfile[], entry:Record<string,unknown>,
     rejected.push({ id, provider, model, reason:`new profile '${id}' needs provider, model and strengths` });
     return;
   }
-  candidates.push({ id, provider, model, strengths });
+  const openrouter = readOpenRouterRouting(entry.openrouter);
+  candidates.push({ id, provider, model, strengths, ...(openrouter?{openrouter}:{}) });
 }
 
 /**

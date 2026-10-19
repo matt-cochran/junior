@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, delimiter } from 'node:path';
+import { join, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -16,7 +16,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute } from './worker.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 import { loadPlaybooks } from './playbooks.ts';
@@ -2205,6 +2205,38 @@ test('Repair within budget reuses the session and persists the lineage counter',
  assert.ok(!existsSync(lockPathFor(join(repo.dir,'.delivery','locks'),`session:${SESSION_A}`)),'session lock released');
 });
 
+test('An openrouter run passes an affinity key derived from the lineage root to the worker env',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ let seen:any;
+ await run(okTask(repo,{id:'affinity-root',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'affinity-root'));
+});
+
+test('A repair run shares the affinity key of its root run',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const priorDir=join(repo.dir,'.delivery','prior','affinity');mkdirSync(priorDir,{recursive:true});
+ const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'root-affinity',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ let seen:any;
+ await run(okTask(repo,{id:'repair-affinity',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'root-affinity'));
+});
+
+test('An openrouter run passes the selected profile routing to the worker env',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra']}}]}}));
+ let seen:any;
+ await run(okTask(repo,{id:'routing-env',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.equal(seen.env.JUNIOR_PI_OPENROUTER_ROUTING,JSON.stringify({order:['deepinfra']}));
+});
+
+test('An openrouter run records the selected profile provider routing on the result',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra']}}]}}));
+ const r=await run(okTask(repo,{id:'routing-result',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:okSpawn()});
+ assert.deepEqual(r.providerRouting,{affinityKey:affinityKeyFor(resolve(repo.dir),'routing-result'),openrouter:{order:['deepinfra']}});
+});
+
 test('Child startup error and malformed events both produce inspectable failed receipts',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const errFake=makeFakeChild();
@@ -3485,4 +3517,8 @@ test('A contract modelProfile without approval stops with needs_model_approval',
 test('A contract modelProfile approved for the run applies the pinned model',async()=>{
  const r=await run(task(0,{modelProfile:'long-horizon',approveModel:'long-horizon'}),true);
  assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+
+test('The affinity key never contains the deliverable id',()=>{
+ assert.equal(affinityKeyFor('/project','secret-feature-name').includes('secret-feature-name'),false);
 });

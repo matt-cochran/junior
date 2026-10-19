@@ -152,6 +152,16 @@ test('a complete new commodity roster entry is admitted', () => {
   assert.equal(findProfile(config, 'mini')?.model, 'minimax/minimax-m3');
 });
 
+test('a roster override keeps the openrouter order on the profile', () => {
+  const config = fromJson({ models: { roster: [{ id: 'general', openrouter: { order: ['deepinfra'] } }] } });
+  assert.deepEqual(findProfile(config, 'general')?.openrouter, { order: ['deepinfra'] });
+});
+
+test('a roster override drops invalid openrouter fields', () => {
+  const config = fromJson({ models: { roster: [{ id: 'general', openrouter: { order: ['deepinfra', 7, ''], bogus: true } }] } });
+  assert.deepEqual(findProfile(config, 'general')?.openrouter, { order: ['deepinfra'] });
+});
+
 test('a new roster entry missing strengths is rejected', () => {
   const config = fromJson({ models: { roster: [{ id: 'mini', provider: 'openrouter', model: 'minimax/minimax-m3' }] } });
   assert.ok(config.rejected.some((r) => r.id === 'mini'));

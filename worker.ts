@@ -2,6 +2,7 @@ import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { resolve, join, dirname, relative, isAbsolute, sep, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, parseInitOptions } from './setup.ts';
@@ -1977,6 +1978,13 @@ export const OUTPUT_LIMIT_CONTINUATION_LINE = 'The previous turn hit the model p
  * output limit after the continuation budget was exhausted. */
 export const OUTPUT_LIMIT_ERROR = 'Model hit its per-message output limit (stopReason length); split the deliverable or reduce per-message work.';
 
+/** Stable OpenRouter affinity key for one deliverable lineage. It is hashed
+ * with the project path so a descriptive deliverable id never leaves the
+ * machine and two projects never share a key. */
+export function affinityKeyFor(sourceCwd:string, rootId:string):string {
+ return `junior:${createHash('sha256').update(`${sourceCwd}\u0000${rootId}`).digest('hex').slice(0,24)}`;
+}
+
 export async function run(t:any, mock=false, deps:GateDeps = {}) {
  validate(t);
  const runStartedAt=Date.now();
@@ -2343,6 +2351,19 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    approval:modelRoute.approval ?? null,
   });
 
+  // Pin OpenRouter's upstream provider per deliverable so its prompt cache
+  // stays warm across continuation segments, repairs and re-dispatches. The
+  // affinity key is the lineage root, so a repair chain shares the provider the
+  // root run selected. The selected profile is the one whose model is the
+  // final requested model, with the routing's own profile preferred.
+  const routedProfile = modelRoute.profile ? findProfile(modelConfig, modelRoute.profile) : null;
+  const selectedProfile = routedProfile && routedProfile.model===requested.model
+   ? routedProfile
+   : (modelConfig.roster.find((profile)=>profile.model===requested.model) ?? null);
+  const affinityKey = requested.provider==='openrouter' ? affinityKeyFor(sourceCwd, lineage.rootId ?? t.id) : null;
+  const openrouterRouting = requested.provider==='openrouter' && selectedProfile?.openrouter ? selectedProfile.openrouter : null;
+  const providerRouting = { affinityKey, openrouter:openrouterRouting };
+
   // Workflow selection is deterministic and kept separate from gate status.
   const classifierRan = mode !== 'off' && !!classify && !!jev!.preflight && !jev!.preflight.error;
   let decision = decideWorkflow(t, jev?.preflight?.answers?.workflow, classifierRan, jev?.error || jev?.preflight?.error);
@@ -2480,6 +2501,10 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    piBashEnv.JUNIOR_PI_WRITE_ROOTS = [sourceCwd, dir].join(delimiter);
    delete piBashEnv.JUNIOR_PI_SOURCE_ROOT;
   }
+  if (affinityKey) piBashEnv.JUNIOR_PI_AFFINITY_KEY = affinityKey;
+  else delete piBashEnv.JUNIOR_PI_AFFINITY_KEY;
+  if (openrouterRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(openrouterRouting);
+  else delete piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING;
   if (mock) {
    stdout='Simulation only; no implementation performed.';
    writeFileSync(eventsPath,stdout);
@@ -2736,7 +2761,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   }
 
   const runtime=heartbeat.snapshot();
-  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,outputBreakdown: streamResult?.outputBreakdown ?? null};
+  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null};
   result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
   if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
   result.unresolved=[];
