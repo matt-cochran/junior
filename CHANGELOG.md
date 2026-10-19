@@ -31,6 +31,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Junior-ready planning (`plan-junior.ts`): `junior plan check <plan.json>
   [--max-hours N]` and `junior plan contracts <plan.json> --out <dir>`;
   `plan-from-spec` emits `metadata.junior`.
+- Human consent before any non-default model: a run stops with
+  `needs_model_approval` and a `model-approval.json` rationale, granted per run
+  (`--approve-model`), per plan (`approvedProfiles`) or per project
+  (`models.approved` via `junior model approve|revoke`); `models.unapproved`
+  (`ask|default`) controls whether an unapproved target asks or falls back.
+- Model pricing in catalogs and plans (USD per million `inputPerM`/
+  `outputPerM`/`cacheReadPerM`, and a `priceDelta` on every planned change) and
+  price-gated adoption: `models.priceTolerance` (default 1.25x on input and
+  output), measured on the cheapest tool-capable OpenRouter endpoint, so
+  `models.autoUpgrade` adopts only price-comparable versions and pricier ones
+  are listed as waiting for price parity in `doctor`, the startup notice and
+  `junior model upgrade`.
+- Prompt-cache hit rate and upstream provider visibility on the compact receipt
+  (`model.cache.hitRate` and `model.upstream` from authoritative billing
+  capture).
+- Sticky per-deliverable model routing via `.delivery/<id>/route.json` and the
+  contract `modelProfile`; a per-deliverable OpenRouter affinity key and
+  per-profile `openrouter` provider routing keep a deliverable on one upstream
+  provider and its warm prompt cache.
+- Plan-level model approval: `junior plan check` flags `NEEDS_MODEL_APPROVAL`
+  for a non-default `metadata.junior.profile`, and `junior plan contracts`
+  carries `modelProfile` and plan-level `approvedProfiles`.
 
 ### Changed
 
@@ -40,8 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `result.modelRouting`, and the compact handoff exposes `model.routing` and
   `model.policy`.
 - Model precedence is task model > routed profile > project pin > built-in.
-- `junior update` adopts newer same-lineage commodity models when
-  `models.autoUpgrade` is true and otherwise reports them as `result.models`.
+- `junior update` adopts newer same-lineage commodity models at price parity
+  when `models.autoUpgrade` is true; price-comparable ones are applied and the
+  rest are reported (with `waiting`) as `result.models`.
 
 ### Fixed
 

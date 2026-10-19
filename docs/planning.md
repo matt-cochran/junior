@@ -25,6 +25,12 @@ independently:
   non-empty list of observable outcomes; checks are independent, runnable
   commands. `metadata.junior.workflow` optionally sets the workflow template
   (`test_first` is the contract default).
+- **Design for the default model.** `general` (DeepSeek V4.1 Flash) is the
+  default executor and needs no approval. A deliverable that sets
+  `metadata.junior.profile` to another profile must have that profile approved:
+  `junior plan check` reports `NEEDS_MODEL_APPROVAL` until the plan lists it in
+  plan-level `metadata.junior.approvedProfiles`. Prefer splitting or tightening a
+  deliverable so it fits the default model over reaching for a bigger one.
 - **Hot registration files in one final deliverable.** `package.json`,
   `package-lock.json`, `scripts/build.mjs`, `CHANGELOG.md` and `README.md` are
   registration files whose edits serialize otherwise independent cohorts; keep
@@ -48,6 +54,7 @@ independently:
 | `NO_CHECKS` | warning | missing `metadata.junior.checks` |
 | `INTERFACE_UNSPECIFIED` | warning | a prerequisite edge has no `consumes` text |
 | `HOT_FILE` | info | the deliverable owns one or more hot registration files |
+| `NEEDS_MODEL_APPROVAL` | warning | an agent deliverable pins a non-default profile that plan-level `metadata.junior.approvedProfiles` does not approve |
 
 `cohorts` are Kahn-layered and then greedily split so no cohort holds two
 deliverables that share an owned file. A manager-owned or milestone deliverable
@@ -62,8 +69,12 @@ skeleton per agent deliverable to `<dir>/<id>.json`. The skeleton sets `id`,
 `deliverable` (from `metadata.artifact`), `cwd`, `workflow` (from
 `metadata.junior.workflow`, default `test_first`), `acceptance`, `constraints`
 (the owned files plus the standard scope constraint), `checks`,
-`isolation: "worktree"` and `jev: { "mode": "shadow" }`.
+`isolation: "worktree"` and `jev: { "mode": "shadow" }`. When the deliverable
+sets `metadata.junior.profile`, the skeleton carries it as `modelProfile`; a
+plan-level `metadata.junior.approvedProfiles` list is copied to every skeleton
+as `approvedProfiles`.
 
 The skeleton omits `provider` and `model`, so Jev routing applies by default.
-An explicit model added by hand must be a commodity model (see
-[Models](models.md)).
+`modelProfile` pins a roster profile and `approvedProfiles` grants plan-scope
+consent to it; both are subject to the human-approval rules in
+[Models](models.md). An explicit model added by hand must be a commodity model.

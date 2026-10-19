@@ -345,6 +345,23 @@ States: `running`, `quiet`, `tool_timed_out`, `deadline_exceeded`, `failed`,
 Malformed or partial event lines, and child startup errors, still produce an
 inspectable failed result with the artifacts on disk.
 
+#### Model approval
+A non-default model is never used without human consent. After the readiness
+classifier recommends a model profile, or when the contract names a model that
+differs from the project default, a run without a matching approval stops with
+the terminal status `needs_model_approval` before the Pi worker starts. The run
+writes `model-approval.json` in its artifact directory and mirrors it on the
+result as `modelApproval` (`profile`, `provider`, `model`, `defaultModel`,
+`confidence`, `strengths`, `reason`, `price`, and `approve.run`/`approve.project`
+commands), leaves `workerExitCode` unset, records the pending route on
+`modelRouting`, and exposes the request to the compact handoff as
+`model.approvalRequest`. Consent can be granted for one run
+(`--approve-model <key>` on `handoff`/`run`), for a plan (`approvedProfiles`), or
+for the project (`models.approved` via `junior model approve`); an applied
+consent is recorded as `modelRouting.approval` `{ source, key }`. With
+`models.unapproved: default`, the recommendation is instead recorded without
+running it (`modelRouting.declined: true`) and the run uses the default model.
+
 #### Output cap, breakdown and continuation
 The retained worker output is line-atomic: the cap is measured in bytes, but the
 last accepted line that fits is kept whole rather than sliced mid-record, so
@@ -384,13 +401,31 @@ result. A repair over budget, or one whose inherited lineage deadline has
 already elapsed, is rejected **before any paid call**. An optional
 `lineageDeadlineMs` sets one absolute lineage deadline for the whole chain.
 
+#### Provider routing and affinity
+A deliverable stays on one model and, on OpenRouter, one upstream provider. Once
+the final model is chosen and consented, the run records it in
+`.delivery/<id>/route.json` (with the approval that allowed it); a later
+non-resume run with the same id reuses that decision while the approval still
+holds. For OpenRouter runs the run also derives a stable affinity key from the
+source checkout and the lineage root id (never the deliverable id), passes it to
+Pi as the `x-session-id` request header, and records it as
+`providerRouting.affinityKey`, so continuation segments, repairs and
+re-dispatches of one deliverable keep the same provider and its warm prompt
+cache. A selected roster profile's `openrouter` provider routing (`order`,
+`only`, `ignore`, `allow_fallbacks`, `sort`) is merged into the request's
+provider settings and recorded as `providerRouting.openrouter`; both are null or
+absent for a non-OpenRouter run.
+
 #### Compact handoff
 `junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
 `outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact
 location, changed file paths, compact check results, unresolved issues,
-requested/observed model, token totals (`input`, `output`, `cacheRead`,
-`cacheWrite` and the observed `tokens` total), the labelled compact cost
-(`cost.amountUsd`/`cost.source`/`cost.available`, preferring an authoritative
+requested/observed model, the model `routing`/`approval`/`approvalRequest` and
+its `policy`, token totals (`input`, `output`, `cacheRead`, `cacheWrite` and the
+observed `tokens` total), the `cache` projection (`input`, `cacheRead`,
+`cacheWrite` and the `hitRate` of cache reads over input plus cache reads), the
+`upstream` provider aggregate captured by billing capture, and the labelled
+compact cost (`cost.amountUsd`/`cost.source`/`cost.available`, preferring an authoritative
 provider bill, then a finite Pi-reported total including a reported zero, then a
 configured estimate), the preserved provider `responseIds`, and the runtime stop
 reason. Pi's catalog estimate is never labelled as provider billing

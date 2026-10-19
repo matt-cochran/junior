@@ -149,15 +149,31 @@ spend. A refusal is `frontier_model_refused` or `unknown_model_refused`, with a
 `modelPolicy` record on the result and `model.policy` on the compact receipt.
 
 `delivery.config.json` holds `models.routing` (`off|shadow|auto`, default
-`auto`), `models.roster` (overrides, additions or `disabled`) and
-`models.autoUpgrade`. Built-in profiles are `general` (default),
-`deep-reasoning`, `long-horizon`, `agentic-tools` and `fast-mechanical`. When
-the contract names no model and is not a resume, Jev asks one `model_profile`
-choice; `auto` applies a non-default profile at confidence >= 0.6, `shadow`
-records it without applying. Precedence is task model > routed profile > project
-pin > built-in. The receipt records `requested.source` and `modelRouting`;
-`junior model status|list|upgrade` reports the roster and plans or applies
-same-lineage upgrades (an explicit target must be commodity). Treat a model
+`auto`), `models.roster` (overrides, additions or `disabled`),
+`models.autoUpgrade`, `models.approved`/`models.unapproved` and
+`models.priceTolerance`. Built-in profiles are `general` (default, DeepSeek V4.1
+Flash), `deep-reasoning`, `long-horizon`, `agentic-tools` and `fast-mechanical`.
+When the contract names no model and is not a resume, Jev asks one
+`model_profile` choice; `auto` applies a non-default profile at confidence >=
+0.6, `shadow` records it without applying. Precedence is task model > routed
+profile > project pin > built-in. The receipt records `requested.source` and
+`modelRouting`; `junior model status|list|upgrade` reports the roster and plans
+or applies same-lineage upgrades (an explicit target must be commodity).
+
+Junior never switches away from the default model without a human approval. A
+non-default profile or contract model stops the run at `needs_model_approval`
+with a `model-approval.json` rationale (pick, confidence, strengths, price vs
+the default). Relay that rationale to the human.
+Never approve a model on the human's behalf: consent is a per-run
+`--approve-model <key>`, a plan's `approvedProfiles`, or a project
+`junior model approve <key>` (with `junior model revoke <key>` to withdraw it).
+`models.unapproved: default` runs on the default instead of asking. Adoption is
+price-gated: `models.autoUpgrade` applies only a newer same-lineage version
+within `models.priceTolerance`
+(default 1.25x on input and output, measured on the cheapest tool-capable
+endpoint); a pricier version is listed as waiting for price parity. The compact
+receipt's `model.cache.hitRate` is the prompt-cache read share, and
+`model.upstream` lists the captured upstream providers. Treat a model
 output-limit stop as incomplete work, regardless of passing checks. Inspect
 `junior model status` before a paid run when routing matters.
 

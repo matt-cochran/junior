@@ -61,10 +61,13 @@ Junior executes only on commodity/open-weight models. A built-in roster
 (`general`, `deep-reasoning`, `long-horizon`, `agentic-tools`,
 `fast-mechanical`) and `delivery.config.json` `models.routing`/`models.roster`
 select the executor; Jev asks one model-profile choice when the contract names
-no model, and `models.autoUpgrade` lets `junior update` adopt newer
-same-lineage commodity models. `junior model status|list|upgrade` reports and
-adopts the roster, and `junior plan check`/`junior plan contracts` shape a cpm
-plan into bounded handoffs. See [Models](docs/models.md) and
+no model. A non-default model needs a human approval, so a run without one stops
+at `needs_model_approval` (`--approve-model`, plan `approvedProfiles`, or
+`junior model approve`). `models.autoUpgrade` lets `junior update` adopt a newer
+same-lineage commodity model only at price parity (`models.priceTolerance`).
+`junior model status|list|upgrade` reports and adopts the roster, and
+`junior plan check`/`junior plan contracts` shape a cpm plan into bounded
+handoffs. See [Models](docs/models.md) and
 [Planning for Junior](docs/planning.md).
 
 Execution settings live on the contract:
