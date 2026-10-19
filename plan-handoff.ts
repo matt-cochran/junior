@@ -30,6 +30,8 @@ export interface PlanLeaseSummary {
   outcome?: string;
   model?: string;
   reason?: string;
+  /** The run paused for more input; the lease is kept and nothing is marked. */
+  hold?: boolean;
 }
 
 export interface PlanLeaseDeps<R> {
@@ -46,6 +48,7 @@ export interface PlanLeaseOutcome<R> {
     deliverable: string;
     leased: boolean;
     marked: 'in_progress' | 'failed' | null;
+    reentered?: boolean;
     error?: string;
   };
 }
@@ -67,6 +70,17 @@ function cohortIds(result: unknown): string[] {
 
 function effortHours(startedAt: number, endedAt: number): number {
   return Math.max(0.01, Math.round(((endedAt - startedAt) / 3_600_000) * 100) / 100);
+}
+
+/** Deliverable locks from a cpm `plan.status` response. */
+function lockHolders(result: unknown): Array<{ deliverableId: string; callerId: string }> {
+  const locks = Array.isArray((result as any)?.locks_held) ? (result as any).locks_held : [];
+  return locks
+    .filter((lock: any) => lock && typeof lock === 'object')
+    .map((lock: any) => ({
+      deliverableId: lock.deliverable_id === null || lock.deliverable_id === undefined ? '' : String(lock.deliverable_id),
+      callerId: lock.caller_id === null || lock.caller_id === undefined ? '' : String(lock.caller_id),
+    }));
 }
 
 /** One line describing where the run landed, its outcome and its model. */
@@ -119,8 +133,23 @@ export async function withPlanLease<R>(
     return { plan };
   }
   if (!cohortIds(acquired.result).includes(plan.deliverable)) {
-    plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
-    return { plan };
+    let status: PlanHopResult;
+    try {
+      status = await deps.callHop('cpm', {
+        tool: 'plan.status',
+        arguments: { plan_id: plan.id },
+      });
+    } catch {
+      status = { ok: false };
+    }
+    const held = status.ok ? lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable) : undefined;
+    if (!held || held.callerId !== callerId) {
+      plan.error = held
+        ? `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`
+        : `plan.acquire_cohort did not lease ${plan.deliverable}`;
+      return { plan };
+    }
+    plan.reentered = true;
   }
   plan.leased = true;
 
@@ -161,6 +190,7 @@ export async function withPlanLease<R>(
   }
 
   const summary = deps.summarize(result);
+  if (summary.hold) return { result, plan };
   if (summary.success) {
     await mark('in_progress', summary);
     return { result, plan };

@@ -89,6 +89,74 @@ test('withPlanLease treats a cohort without the deliverable as unleased', async 
   assert.equal(out.plan.leased, false);
 });
 
+// --- re-entry ---------------------------------------------------------------
+
+test('withPlanLease runs when the same caller already holds the lease', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'junior-worker' }] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(out.result, 'ok');
+});
+
+test('withPlanLease marks a re-entered lease as reentered', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'junior-worker' }] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.reentered, true);
+});
+
+test('withPlanLease asks plan.status when the cohort omits the deliverable', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [] } }),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  const status = calls.find((call) => call.request.tool === 'plan.status');
+  assert.deepEqual(status?.request.arguments, { plan_id: 'plan_1' });
+});
+
+test('withPlanLease refuses a lease held by another caller', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'agent-9' }] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.leased, false);
+});
+
+test('withPlanLease names the other caller when the lease is held elsewhere', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'agent-9' }] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(out.plan.error ?? '', /agent-9/);
+});
+
+// --- hold summary -----------------------------------------------------------
+
+test('withPlanLease marks nothing when the summary reports a hold', async () => {
+  const { callHop } = harness();
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop, { summarize: () => ({ success: false, hold: true }) }));
+  assert.equal(out.plan.marked, null);
+});
+
+test('withPlanLease keeps the lease when the summary reports a hold', async () => {
+  const { callHop } = harness();
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop, { summarize: () => ({ success: false, hold: true }) }));
+  assert.equal(out.plan.leased, true);
+});
+
+test('withPlanLease sends no mark when the summary reports a hold', async () => {
+  const { calls, callHop } = harness();
+  await withPlanLease(TASK, async () => 'ok', deps(callHop, { summarize: () => ({ success: false, hold: true }) }));
+  assert.equal(markCall(calls), undefined);
+});
+
 // --- successful run ---------------------------------------------------------
 
 test('withPlanLease reports the plan leased after a successful acquire', async () => {

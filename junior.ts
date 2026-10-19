@@ -375,13 +375,14 @@ async function main(argv: string[]): Promise<void> {
   let result: any;
   let plan: any;
   if (task.plan !== undefined && command !== 'qa') {
+   validate(task);
    const { withPlanLease } = await import('./plan-handoff.ts');
    const { callHop } = await import('./tools/tools.ts');
    const hopPath = resolve(taskCwd, String(task.hopFrom));
    const lease = await withPlanLease(task, () => run(task, mock, deps), {
     callHop: (tool, request) => callHop(hopPath, tool, request),
     deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
-    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: r.status === 'needs_answers' || r.status === 'needs_choice', artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
    });
    if (!lease.plan.leased) {
     console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));

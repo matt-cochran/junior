@@ -24,8 +24,11 @@ the run deadline plus an hour) before the worker starts and refuses with
 `plan_lease_refused` when it is not leased. Afterwards it calls
 `plan.mark_status`: `in_progress` with the run's wall hours and an evidence line
 (artifact directory, outcome, observed model) on success, leaving the lease for
-the manager to review and complete, or `failed` with the reason. The receipt
-gains a `plan` block.
+the manager to review and complete, or `failed` with the reason. A lease the same
+caller already holds is re-entered (`plan.reentered`), so a repair or a re-run
+after a clarify works; a `needs_answers` or `needs_choice` result keeps the
+lease and marks nothing. The contract is validated before the plan is touched.
+The receipt gains a `plan` block.
 
 A contract should normally omit `provider` and `model` so the commodity roster
 and Jev routing choose the executor:

@@ -448,3 +448,19 @@ test('junior handoff refuses a plan whose cpm lease cannot be acquired', () => {
   const res = runJunior(['handoff', taskPath, '--mock', '--quiet'], dir);
   assert.equal(JSON.parse(res.stdout).status, 'plan_lease_refused');
 });
+
+test('junior handoff fails a plan without hopFrom before any lease attempt', () => {
+  const dir = workdir();
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({
+    id: 'plan-no-hop',
+    deliverable: 'Plan without hop',
+    cwd: dir,
+    isolation: 'none',
+    acceptance: ['ok'],
+    checks: [{ command: NODE, args: ['-e', 'process.exit(0)'] }],
+    plan: { id: 'plan_x', deliverable: 'P1b-plan-lease' },
+  }));
+  const res = runJunior(['handoff', taskPath, '--mock', '--quiet'], dir);
+  assert.doesNotMatch(res.stdout, /plan_lease_refused/);
+});
