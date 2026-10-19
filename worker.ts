@@ -632,6 +632,43 @@ export function analysisReportPath(artifactDir:string):string {
  return join(artifactDir, ANALYSIS_REPORT_FILENAME);
 }
 
+/** Bounded report evidence supplied to the completion gate for report-only
+ * workflows. The report itself is the deliverable, so its outline and a
+ * line-bounded excerpt stand in for the absent code diff. */
+export type ReportEvidence = { path:string; outline:string[]; excerpt:string; bytes:number; truncated:boolean };
+export function reportEvidence(text:string, path:string, limits?:{maxExcerptBytes?:number;maxHeadings?:number}):ReportEvidence {
+ const source=String(text ?? '');
+ const maxBytes=limits?.maxExcerptBytes ?? 24000;
+ const maxHeadings=limits?.maxHeadings ?? 200;
+ const outline=source.split(/\r?\n/).filter((line)=>/^#{1,6}(?:\s|$)/.test(line)).slice(0,maxHeadings);
+ const bytes=Buffer.byteLength(source);
+ let excerpt=source, truncated=false;
+ if (bytes>maxBytes) {
+  truncated=true;
+  let cut=source.slice(0,maxBytes);
+  while (cut && Buffer.byteLength(cut)>maxBytes) cut=cut.slice(0,-1);
+  const lineEnd=cut.lastIndexOf('\n');
+  excerpt=lineEnd>=0 ? cut.slice(0,lineEnd+1) : cut;
+ }
+ return { path, outline, excerpt, bytes, truncated };
+}
+
+/** Recognize the fixed criteria that a run's change set alone can settle:
+ * report-only changes, or no changed files at all. */
+export function deterministicCriterion(text:string, evidence:{changedFiles:any[];allowed:string[]}):'met'|'gap'|null {
+ const s=String(text ?? '');
+ const recognized = /\bno\s+(?:other\s+)?files?\b[^.]*\bchang(?:e|ed|es)\b/i.test(s)
+  || /\bno\s+files?\s+(?:is|are|was|were|has|have)?\s*changed\b/i.test(s)
+  || /\bchang(?:e|es|ed|ing)\s+no\s+files?\b/i.test(s)
+  || /\b(?:does|do|did)\s+not\s+change\s+production\s+code\b/i.test(s)
+  || /\bno\s+production\s+code\s+(?:is|was|has been)?\s*changed\b/i.test(s);
+ if (!recognized) return null;
+ const norm=(p:string)=>p.replace(/\\/g,'/').replace(/^\.\//,'');
+ const allowed=new Set((evidence.allowed ?? []).map(norm));
+ const changed=(evidence.changedFiles ?? []).map((f:any)=>typeof f === 'string' ? f : f?.path).filter((p:any)=>typeof p === 'string' && p).map(norm);
+ return changed.every((p:string)=>allowed.has(p)) ? 'met' : 'gap';
+}
+
 /** Stable identifiers saved as artifacts so a run's prompt is reproducible. */
 export const WORKFLOW_TEMPLATE_IDS = {
  common:'delivery-common-2',
@@ -1487,22 +1524,34 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
 
 /** Completion gate: is each acceptance criterion satisfied by independent
  * check results and bounded git diff evidence? */
-export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta):Promise<JevPostflight> {
+export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]}):Promise<JevPostflight> {
  const criteria:{id:string; index:number; text:string; when?:string}[] = (t.acceptance || []).map((item:any, index:number)=>{
   const when=acceptanceWhen(item);
   return when ? { id:`AC${index+1}`, index, text:acceptanceText(item), when } : { id:`AC${index+1}`, index, text:acceptanceText(item) };
  });
+ const report=opts?.report;
+ const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
+ const allowed=opts?.allowed ?? (report && !isAbsolute(report.path) ? [report.path] : []);
+ const deterministic=new Map<string,'met'|'gap'>();
+ for (const c of criteria) {
+  const settled=deterministicCriterion(c.text,{changedFiles:runChanged,allowed});
+  if (settled) deterministic.set(c.id,settled);
+ }
+ const evidencePhrase=report
+  ? 'based only on the independent check results, the bounded git diff evidence and the analysis report outline and excerpt'
+  : 'based only on the independent check results and the bounded git diff evidence';
  const questions:Record<string,GateQuestion> = {};
  for (const c of criteria) {
+  if (deterministic.has(c.id)) continue;
   questions[c.id] = {
    type:'bool',
-   instructions:`Acceptance criterion ${c.id}: "${c.text}". Is it satisfied, based only on the independent check results and the bounded git diff evidence?`,
+   instructions:`Acceptance criterion ${c.id}: "${c.text}". Is it satisfied, ${evidencePhrase}?`,
    criteria:{ true:'Satisfied', false:'Not satisfied' },
   };
   if (c.when) {
    questions[`${c.id}_when`] = {
     type:'bool',
-    instructions:`Acceptance criterion ${c.id} applies only when: "${c.when}". Was that condition exercised by this change, based only on the independent check results and the bounded git diff evidence?`,
+    instructions:`Acceptance criterion ${c.id} applies only when: "${c.when}". Was that condition exercised by this change, ${evidencePhrase}?`,
     criteria:{ true:'Condition exercised', false:'Condition not exercised' },
    };
   }
@@ -1516,11 +1565,18 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
   git: { stat:git.stat, diff:git.diff, truncated:git.truncated, unavailable:git.unavailable,
    changedFiles:git.changedFiles ?? [], limits:git.limits },
   runChanges: evidence ? { changedFiles:evidence.runChangedFiles, preexistingFiles:evidence.preexistingFiles } : undefined,
+  ...(report ? { report } : {}),
  };
- const { result, error } = await invokeClassifier(classify, state, questions, timeoutMs);
- const answers = result?.answers ?? {};
+ let result:GateClassifierResult|undefined;
+ let error:string|undefined;
+ if (Object.keys(questions).length) ({ result, error } = await invokeClassifier(classify, state, questions, timeoutMs));
+ const deterministicAnswers=Object.fromEntries([...deterministic].map(([id])=>[id,{deterministic:true}]));
+ const answers = {...(result?.answers ?? {}), ...deterministicAnswers};
  const usage = normalizeGateUsage(result?.usage);
  const out:JevCriterion[] = criteria.map((c)=>{
+  const settled=deterministic.get(c.id);
+  if (settled) return { id:c.id, index:c.index, text:c.text, ...(c.when ? { when:c.when } : {}),
+   verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true } };
   const v = boolVerdict(answers[c.id]);
   const condition = c.when ? boolVerdict(conditionAnswer(answers, c.id)) : null;
   const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
@@ -2328,8 +2384,13 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   emit('postflight');
   if (mode !== 'off' && classify && workerRan && !stopped && !outOfTime()) {
    const git = deps.git ?? after;
+   let report:ReportEvidence|undefined;
+   if (reportWorkflow && reportPath && existsSync(reportPath)) {
+    try { report=reportEvidence(readFileSync(reportPath,'utf8'),reportPath); } catch {}
+   }
+   const allowed = reportPath && withinWorkspace(executionCwd, reportPath) ? [relative(executionCwd, reportPath)] : [];
    try {
-    const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(), evidence), signal);
+    const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(), evidence, {report,allowed}), signal);
     jev!.postflight = postflight;
     if (postflight.error) jev!.error = postflight.error;
    } catch (e) {

@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
- jevMode,assessPreflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,
+ jevMode,assessPreflight,assessPostflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,reportEvidence,deterministicCriterion,
  estimateCost,validatePricing,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
@@ -671,6 +671,59 @@ test('Analysis run with its report in the artifactDir is ready_for_review',async
  assert.equal(h.analysis.reportPresent,true);
  assert.equal(h.artifacts.report,r.analysis.report);
  assert.deepEqual(h.unresolved,[]);
+});
+test('reportEvidence lists markdown headings in order',()=>{
+ const r=reportEvidence('# Report\nintro\n## Risk\nbody\n### Detail\nend\n','/tmp/report.md');
+ assert.deepEqual(r.outline,['# Report','## Risk','### Detail']);
+});
+test('reportEvidence truncates the excerpt at a line boundary',()=>{
+ const r=reportEvidence('# R\nline-1\nline-2\nline-3\n','/tmp/report.md',{maxExcerptBytes:12});
+ assert.deepEqual({excerpt:r.excerpt,truncated:r.truncated},{excerpt:'# R\nline-1\n',truncated:true});
+});
+test('assessPostflight puts a supplied analysis report in the classifier state',async()=>{
+ let seen:any;
+ const classify:any=async({state}:any)=>{seen=state;return {answers:{AC1:bool(0.95)}};};
+ const report={path:'/tmp/report.md',outline:['# Report'],excerpt:'# Report\n',bytes:9,truncated:false};
+ await assessPostflight({deliverable:'Review',acceptance:['Report exists']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}},undefined,undefined,{report});
+ assert.deepEqual(seen.report,report);
+});
+test('assessPostflight instructions name the analysis report when supplied',async()=>{
+ let questions:any;
+ const classify:any=async({questions:q}:any)=>{questions=q;return {answers:{AC1:bool(0.95)}};};
+ const report={path:'/tmp/report.md',outline:['# Report'],excerpt:'# Report\n',bytes:9,truncated:false};
+ await assessPostflight({deliverable:'Review',acceptance:['Report exists']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}},undefined,undefined,{report});
+ assert.match(questions.AC1.instructions,/analysis report outline and excerpt/);
+});
+test('deterministicCriterion marks an unchanged report-only change set met',()=>{
+ assert.equal(deterministicCriterion('No file other than the report is changed',{changedFiles:[],allowed:[]}),'met');
+});
+test('deterministicCriterion marks a non-allowed changed file as a gap',()=>{
+ assert.equal(deterministicCriterion('no other files are changed',{changedFiles:['src/worker.ts'],allowed:[]}),'gap');
+});
+test('deterministicCriterion ignores an unrelated acceptance criterion',()=>{
+ assert.equal(deterministicCriterion('The report explains every risk',{changedFiles:['src/worker.ts'],allowed:[]}),null);
+});
+test('assessPostflight does not send a deterministic criterion to the classifier',async()=>{
+ let calls=0;
+ const classify:any=async()=>{calls++;return {answers:{}};};
+ await assessPostflight({deliverable:'Review',acceptance:['changes no files']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(calls,0);
+});
+test('An fmeca run passes its written report to the postflight classifier',async()=>{
+ let postState:any;
+ const classifier:any=async({state,questions}:any)=>{
+  const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+  if(!isPre) postState=state;
+  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+ };
+ const spawnPi=(_c:string,args:string[])=>{
+  const prompt=args[args.length-1];
+  const m=/exact artifact path: ([^\n]+)/.exec(prompt);
+  if(m) writeFileSync(m[1],'# Analysis report\n## Risks\n');
+  return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};
+ };
+ await run(task(0,{workflow:'fmeca',provider:'openrouter',model:COMMODITY_MODEL,jev:{mode:'shadow'}}),false,{spawnPi,classify:classifier});
+ assert.deepEqual(postState.report.outline,['# Analysis report','## Risks']);
 });
 test('Implementation workflows have no analysis report requirement',async()=>{
  const r=await run(task(0,{workflow:'checks_first'}),true);
