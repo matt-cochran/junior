@@ -190,6 +190,32 @@ test('a valid models.routing value is honored', () => {
   assert.equal(fromJson({ models: { routing: 'shadow' } }).routing, 'shadow');
 });
 
+// --- approved models -------------------------------------------------------
+
+test('loadModelConfig reports no approved keys by default', () => {
+  assert.deepEqual(noConfig().approved, []);
+});
+
+test('loadModelConfig defaults unapproved handling to ask', () => {
+  assert.equal(noConfig().unapproved, 'ask');
+});
+
+test('loadModelConfig trims and de-duplicates models.approved keys', () => {
+  assert.deepEqual(fromJson({ models: { approved: [' long-horizon ', 'long-horizon'] } }).approved, ['long-horizon']);
+});
+
+test('loadModelConfig drops non-string models.approved entries', () => {
+  assert.deepEqual(fromJson({ models: { approved: [7, 'long-horizon', {}] } }).approved, ['long-horizon']);
+});
+
+test('loadModelConfig honors models.unapproved default', () => {
+  assert.equal(fromJson({ models: { unapproved: 'default' } }).unapproved, 'default');
+});
+
+test('loadModelConfig falls back to ask for an invalid models.unapproved value', () => {
+  assert.equal(fromJson({ models: { unapproved: 'sometimes' } }).unapproved, 'ask');
+});
+
 // --- malformed configuration ----------------------------------------------
 
 test('malformed config JSON falls back to the builtin source without throwing', () => {

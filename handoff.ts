@@ -47,6 +47,10 @@ export type CompactHandoff = {
   requested: { provider: string; model: string; source?: string } | null;
   /** The Jev model-routing record, or null when this result predates routing. */
   routing: ModelRoute | null;
+  /** The run/plan/project consent that allowed the routed model, or null. */
+  approval: { source: string; key: string } | null;
+  /** The human consent request written when a run stopped for approval. */
+  approvalRequest: any | null;
   /** The commodity-policy refusal record, or null when no model was refused. */
   policy: ModelPolicyRecord | null;
   observed: { provider: string; model: string }[];
@@ -264,6 +268,8 @@ export function compactHandoff(result: any): CompactHandoff {
   model: {
    requested: r.receipt?.requested ?? null,
    routing: r.modelRouting ?? null,
+   approval: r.modelRouting?.approval ?? null,
+   approvalRequest: r.modelApproval ?? null,
    policy: r.modelPolicy ?? null,
    observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
    observedUnknown: r.receipt?.observedUnknown ?? true,

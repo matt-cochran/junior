@@ -247,6 +247,79 @@ test('model status reports the price of each roster profile', async () => {
   assert.deepEqual(result.roster[0].price, { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null });
 });
 
+// --- model approve / revoke -------------------------------------------------
+
+test('model approve writes a profile key into models.approved', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  await runModelCommand(['approve', 'long-horizon'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.deepEqual(readConfig(dir).models.approved, ['long-horizon']);
+});
+
+test('model approve preserves existing approved keys', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto', approved: ['deep-reasoning'] } });
+  await runModelCommand(['approve', 'long-horizon'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.deepEqual(readConfig(dir).models.approved, ['deep-reasoning', 'long-horizon']);
+});
+
+test('model approve preserves unrelated config keys', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, pi: { name: 'p' }, models: { routing: 'auto' } });
+  await runModelCommand(['approve', 'long-horizon'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.equal(readConfig(dir).pi.name, 'p');
+});
+
+test('model revoke removes an approved key', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto', approved: ['long-horizon'] } });
+  await runModelCommand(['revoke', 'long-horizon'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.deepEqual(readConfig(dir).models.approved, []);
+});
+
+test('model approve refuses a frontier model id with exit code 1', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const { exitCode } = await runModelCommand(['approve', 'anthropic/claude-sonnet-4'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.equal(exitCode, 1);
+});
+
+test('model approve reports a policy reason for a refused frontier model', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const { result } = await runModelCommand(['approve', 'anthropic/claude-sonnet-4'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.match(result.error, /frontier/i);
+});
+
+test('model approve of the default profile is a no-op', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const { exitCode } = await runModelCommand(['approve', 'general'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.equal(exitCode, 0);
+});
+
+test('model approve of the default profile leaves the config unchanged', async () => {
+  const dir = workdir();
+  const path = writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const before = readFileSync(path, 'utf8');
+  await runModelCommand(['approve', 'general'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
+test('model status reports the approved keys', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto', approved: ['long-horizon'] } });
+  const { result } = await runModelCommand(['status'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.deepEqual(result.approved, ['long-horizon']);
+});
+
+test('model status reports the unapproved setting', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto', unapproved: 'default' } });
+  const { result } = await runModelCommand(['status'], { cwd: dir, env: tempEnv(), isTTY: false });
+  assert.equal(result.unapproved, 'default');
+});
+
 // --- adoptModelUpdates ------------------------------------------------------
 
 test('adoptModelUpdates applies newer commodity models when autoUpgrade is true', async () => {
@@ -299,4 +372,16 @@ test('junior model status prints JSON with the pinned model', () => {
     env: { ...process.env, JUNIOR_NO_UPDATE_CHECK: '1', PI_CODING_AGENT_DIR: agentHome() },
   });
   assert.equal(JSON.parse(res.stdout).pinned.model, general.model);
+});
+
+test('junior handoff accepts --approve-model', () => {
+  const dir = workdir();
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({ id: 'approve-cli', deliverable: 'd', cwd: dir, acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], isolation: 'none' }));
+  const res = spawnSync(process.execPath, [JUNIOR, 'handoff', taskPath, '--mock', '--quiet', '--approve-model', 'long-horizon'], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, JUNIOR_NO_UPDATE_CHECK: '1' },
+  });
+  assert.equal(JSON.parse(res.stdout).outcome, 'simulation_passed');
 });

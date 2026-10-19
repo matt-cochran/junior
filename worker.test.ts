@@ -1195,7 +1195,7 @@ test('Run consumes project defaults and an explicit task provider/model wins',as
  const r=await run(task(0,{cwd}),true);
  assert.equal(r.receipt.requested.provider,'openrouter');
  assert.equal(r.receipt.requested.model,'deepseek/deepseek-v4.1-flash');
- const r2=await run(task(0,{cwd,provider:'openrouter',model:'moonshotai/kimi-k3'}),true);
+ const r2=await run(task(0,{cwd,provider:'openrouter',model:'moonshotai/kimi-k3',approveModel:'moonshotai/kimi-k3'}),true);
  assert.equal(r2.receipt.requested.provider,'openrouter');
  assert.equal(r2.receipt.requested.model,'moonshotai/kimi-k3');
 });
@@ -1208,7 +1208,7 @@ const modelGate=(profile:string|null,confidence:number):any=>async({questions}:a
  return {stopReason:'stop',provider:'openrouter',model:'typesafe/jev-1.13',answers,usage:gateUsage};
 };
 const routingCwd=(routing:string)=>{const cwd=mkdtempSync(join(tmpdir(),'delivery-routing-'));writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({models:{routing}}));return cwd;};
-const routeConfig=(routing:string='auto'):any=>({provider:'openrouter',model:COMMODITY_MODEL,source:'builtin',path:null,pinnedVerdict:{},routing,autoUpgrade:false,defaultProfile:'general',rejected:[],roster:[
+const routeConfig=(routing:string='auto'):any=>({provider:'openrouter',model:COMMODITY_MODEL,source:'builtin',path:null,pinnedVerdict:{},routing,autoUpgrade:false,defaultProfile:'general',approved:[],unapproved:'ask',rejected:[],roster:[
  {id:'general',provider:'openrouter',model:COMMODITY_MODEL,default:true,strengths:'default'},
  {id:'long-horizon',provider:'openrouter',model:ROUTED_MODEL,strengths:'long autonomous sessions'},
 ]});
@@ -1240,12 +1240,12 @@ test('A run with no explicit model and no config records the builtin default and
  const r=await run(task(),true);
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:COMMODITY_MODEL,source:'builtin'});
 });
-test('Auto routing applies a confident non-default model profile',async()=>{
- const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+test('Auto routing applies a confident non-default model profile with a run approval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:ROUTED_MODEL,source:'routed'});
 });
-test('Auto routing records that the model route was applied',async()=>{
- const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+test('Auto routing records that a run-approved model route was applied',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
  assert.equal(r.modelRouting.applied,true);
 });
 test('Shadow routing keeps the default requested model',async()=>{
@@ -1274,8 +1274,8 @@ test('An explicit task model is not asked a model profile question',async()=>{
  await run(task(0,{provider:'openrouter',model:'moonshotai/kimi-k3',jev:{mode:'shadow'}}),true,{classify:classifier});
  assert.equal(Object.prototype.hasOwnProperty.call(questions,'model_profile'),false);
 });
-test('decideModelRoute applies a confident non-default profile in auto mode',()=>{
- assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,true);
+test('decideModelRoute applies a confident non-default profile with a run approval',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true,approveModel:'long-horizon'}).applied,true);
 });
 test('decideModelRoute records but does not apply a recommendation in shadow mode',()=>{
  assert.equal(decideModelRoute(routeConfig('shadow'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,false);
@@ -1285,6 +1285,102 @@ test('decideModelRoute keeps the default below the confidence threshold',()=>{
 });
 test('decideModelRoute ignores an unknown model profile',()=>{
  assert.match(decideModelRoute(routeConfig('auto'),{type:'choice',value:'missing',confidence:0.9},{eligible:true}).reason,/not in the roster/);
+});
+test('decideModelRoute marks a confident non-default profile as needing approval',()=>{
+ assert.equal(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).needsApproval,true);
+});
+test('decideModelRoute names the missing approval in the reason',()=>{
+ assert.match(decideModelRoute(routeConfig('auto'),{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).reason,/approval/);
+});
+test('decideModelRoute applies a confident non-default profile with a project approval',()=>{
+ assert.equal(decideModelRoute({...routeConfig('auto'),approved:['long-horizon']},{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).applied,true);
+});
+test('decideModelRoute records the project approval source',()=>{
+ assert.deepEqual(decideModelRoute({...routeConfig('auto'),approved:['long-horizon']},{type:'choice',value:'long-horizon',confidence:0.9},{eligible:true}).approval,{source:'project',key:'long-horizon'});
+});
+
+// --- human consent before a non-default model runs ---
+const approvalCwd=(models:any={})=>{const cwd=mkdtempSync(join(tmpdir(),'delivery-approval-'));writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({models:{routing:'auto',...models}}));return cwd;};
+const pricedAgent=(prices:Record<string,{input:number;output:number}>)=>{const dir=mkdtempSync(join(tmpdir(),'delivery-agent-'));writeFileSync(join(dir,'models-store.json'),JSON.stringify({openrouter:{models:Object.entries(prices).map(([id,cost])=>({id,cost}))}}));return dir;};
+const approvalFile=(r:any)=>JSON.parse(readFileSync(join(r.artifactDir,'model-approval.json'),'utf8'));
+
+test('A routed non-default profile without approval stops for model approval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.status,'needs_model_approval');
+});
+test('A routed non-default profile without approval leaves the worker exit code unset',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.workerExitCode,null);
+});
+test('A routed non-default profile without approval writes the approval request artifact',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(existsSync(join(r.artifactDir,'model-approval.json')),true);
+});
+test('The model-approval request mirrors into result.modelApproval',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(r.modelApproval,approvalFile(r));
+});
+test('The model-approval request carries both approve commands',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.deepEqual(approvalFile(r).approve,{run:'junior handoff <task> --approve-model long-horizon',project:'junior model approve long-horizon'});
+});
+test('The model-approval request carries the price delta from the local catalog',async()=>{
+ const agent=pricedAgent({[COMMODITY_MODEL]:{input:0.03,output:0.08},[ROUTED_MODEL]:{input:0.09,output:0.24}});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{PI_CODING_AGENT_DIR:agent}});
+ assert.equal(approvalFile(r).price.outputRatio,3);
+});
+test('The model-approval request falls back to cached online catalog prices',async()=>{
+ const home=mkdtempSync(join(tmpdir(),'delivery-cache-'));
+ writeFileSync(join(home,'model-catalog.json'),JSON.stringify({checkedAt:Date.now(),ids:[COMMODITY_MODEL,ROUTED_MODEL],prices:{[COMMODITY_MODEL]:{inputPerM:0.03,outputPerM:0.08,cacheReadPerM:null},[ROUTED_MODEL]:{inputPerM:0.09,outputPerM:0.24,cacheReadPerM:null}}}));
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9),env:{JUNIOR_HOME:home,PI_CODING_AGENT_DIR:join(home,'empty-agent')}});
+ assert.equal(approvalFile(r).price.outputRatio,3);
+});
+test('A routed profile approved for the run applies the routed model',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('A routed profile approved for the run records the run approval source',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'run');
+});
+test('A project-approved profile is applied with the project approval source',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({approved:['long-horizon']}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'project');
+});
+test('A plan-approved profile is applied with the plan approval source',async()=>{
+ const r=await run(task(0,{jev:{mode:'shadow'},approvedProfiles:['long-horizon']}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.approval.source,'plan');
+});
+test('An explicit task model without approval stops for model approval',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL}),true);
+ assert.equal(r.status,'needs_model_approval');
+});
+test('An explicit task model can be approved by its matching profile id',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL,approveModel:'long-horizon'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('An explicit task model that is run-approved runs on that model',async()=>{
+ const r=await run(task(0,{provider:'openrouter',model:ROUTED_MODEL,approveModel:'moonshotai/kimi-k2.7-code'}),true);
+ assert.equal(r.receipt.requested.model,ROUTED_MODEL);
+});
+test('models.unapproved default runs on the default model',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({unapproved:'default'}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.receipt.requested.model,COMMODITY_MODEL);
+});
+test('models.unapproved default records the declined recommendation',async()=>{
+ const r=await run(task(0,{cwd:approvalCwd({unapproved:'default'}),jev:{mode:'shadow'}}),true,{classify:modelGate('long-horizon',0.9)});
+ assert.equal(r.modelRouting.declined,true);
+});
+test('compactHandoff exposes the approval request for a blocked run',()=>{
+ const request={profile:'long-horizon',provider:'openrouter',model:ROUTED_MODEL,defaultModel:COMMODITY_MODEL,confidence:0.9,strengths:'s',reason:'r',price:{from:null,to:null,inputRatio:null,outputRatio:null,pricier:null},approve:{run:'r',project:'p'}};
+ assert.deepEqual(compactHandoff({status:'needs_model_approval',modelApproval:request}).model.approvalRequest,request);
+});
+test('compactHandoff exposes the applied model approval',()=>{
+ const approval={source:'run',key:'long-horizon'};
+ assert.deepEqual(compactHandoff({modelRouting:{approval}}).model.approval,approval);
+});
+test('compactHandoff passes the needs_model_approval outcome through',()=>{
+ assert.equal(compactHandoff({status:'needs_model_approval'}).outcome,'needs_model_approval');
 });
 test('compactHandoff exposes the model routing record',()=>{
  const route={mode:'auto',eligible:true,profile:'long-horizon',confidence:0.9,applied:true,provider:'openrouter',model:ROUTED_MODEL,reason:'auto-routed'};

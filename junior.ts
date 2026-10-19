@@ -68,12 +68,12 @@ interface CommandSpec {
 }
 
 const COMMANDS: Record<string, CommandSpec> = {
- handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers'], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--mock] [--full] [--quiet]' },
+ handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers', '--approve-model'], min: 1, max: 1,
+  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--approve-model <key>] [--mock] [--full] [--quiet]' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
- run: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior run <task.json> [--mock] [--full] [--quiet]' },
+ run: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--approve-model'], min: 1, max: 1,
+  help: 'Usage: junior run <task.json> [--approve-model <key>] [--mock] [--full] [--quiet]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
  status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
@@ -91,8 +91,8 @@ const COMMANDS: Record<string, CommandSpec> = {
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
- model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 1,
-  help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes]' },
+ model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
+  help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes] | approve|revoke <key>' },
  plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
   help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
  init: {
@@ -338,6 +338,7 @@ async function main(argv: string[]): Promise<void> {
   const path = parsed.files[0];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
+  if (parsed.values['--approve-model'] !== undefined) task = { ...task, approveModel: parsed.values['--approve-model'] };
   const mock = parsed.flags.has('--mock');
   const deps: GateDeps = {};
   if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };

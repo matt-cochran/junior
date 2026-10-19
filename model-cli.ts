@@ -126,6 +126,25 @@ export function applyUpgrades(cwd: string, changes: ModelChange[], fs: ConfigFs 
   return { path, written: true };
 }
 
+/** Write `models.approved` back to delivery.config.json, preserving every other
+ * top-level and `models` key. Returns false when the list did not change. */
+function writeApproved(cwd: string, approved: string[], fs: ConfigFs = DEFAULT_CONFIG_FS): boolean {
+  const path = join(cwd, 'delivery.config.json');
+  let obj: any;
+  try {
+    obj = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, 'utf8')) : null;
+  } catch {
+    obj = null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
+  if (!obj.models || typeof obj.models !== 'object' || Array.isArray(obj.models)) obj.models = {};
+  const before = JSON.stringify(Array.isArray(obj.models.approved) ? obj.models.approved : []);
+  obj.models.approved = approved;
+  if (before === JSON.stringify(approved)) return false;
+  fs.writeFileSync(path, JSON.stringify(obj, null, 2) + '\n');
+  return true;
+}
+
 export interface ModelCommandDeps {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -151,13 +170,16 @@ interface ParsedModel {
   sub: string;
   flags: Set<string>;
   values: Record<string, string>;
+  /** The single positional argument (the approve/revoke key), or null. */
+  positional: string | null;
 }
 
-/** Strict parser for `status|list|upgrade` options. */
+/** Strict parser for `status|list|upgrade|approve|revoke` options. */
 function parseModel(argv: string[]): ParsedModel {
   const sub = argv[0] ?? '';
   const flags = new Set<string>();
   const values: Record<string, string> = {};
+  let positional: string | null = null;
   const valueFlags = new Set(['--vendor', '--profile', '--to']);
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -174,9 +196,12 @@ function parseModel(argv: string[]): ParsedModel {
       flags.add(name);
       continue;
     }
-    throw Error(`Unknown option for model: ${arg}`);
+    if (arg.startsWith('-') && arg !== '-') throw Error(`Unknown option for model: ${arg}`);
+    if (positional !== null) throw Error(`Unexpected argument for model ${sub}: ${arg}`);
+    positional = arg;
   }
-  return { sub, flags, values };
+  if (positional !== null && sub !== 'approve' && sub !== 'revoke') throw Error(`Unexpected argument for model ${sub}: ${positional}`);
+  return { sub, flags, values, positional };
 }
 
 /**
@@ -201,6 +226,8 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
       policy: config.pinnedVerdict,
       routing: config.routing,
       autoUpgrade: config.autoUpgrade,
+      approved: config.approved,
+      unapproved: config.unapproved,
       roster: config.roster.map((p) => ({ profile: p.id, provider: p.provider, model: p.model, default: p.id === config.defaultProfile, price: catalog.prices[p.model] ?? null })),
       rejected: config.rejected,
       catalog: catalog.catalog,
@@ -224,6 +251,29 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
       (vendors[vendor] ??= []).push(id);
     }
     return { exitCode: 0, result: { catalog: catalog.catalog, models, vendors } };
+  }
+
+  if (parsed.sub === 'approve' || parsed.sub === 'revoke') {
+    const key = parsed.positional;
+    if (!key) {
+      return { exitCode: 1, result: { error: `Usage: junior model ${parsed.sub} <profile|model>` } };
+    }
+    const config = loadModelConfig(cwd);
+    const profile = config.roster.find((p) => p.id === key) ?? null;
+    if (parsed.sub === 'approve' && profile && profile.id === config.defaultProfile) {
+      return { exitCode: 0, result: { approved: config.approved, key, changed: false, reason: `profile '${key}' is the default and needs no approval` } };
+    }
+    if (!profile) {
+      const verdict = classifyModel(config.provider, key);
+      if (verdict.class !== 'commodity') {
+        return { exitCode: 1, result: { error: `Refusing to approve '${key}': ${verdict.reason}`, verdict } };
+      }
+    }
+    const approved = parsed.sub === 'approve'
+      ? [...config.approved.filter((k) => k !== key), key]
+      : config.approved.filter((k) => k !== key);
+    const changed = writeApproved(cwd, approved);
+    return { exitCode: 0, result: { approved, key, changed } };
   }
 
   if (parsed.sub === 'upgrade') {

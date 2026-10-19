@@ -44,6 +44,12 @@ export type ModelConfig = {
   /** `junior update` adopts newer same-lineage commodity models only when true. */
   autoUpgrade:boolean;
   defaultProfile:string;
+  /** Human-approved model keys: profile ids or model ids. Empty by default;
+   * the project pin itself never needs an entry. */
+  approved:string[];
+  /** What to do with an unapproved non-default model: ask for consent or fall
+   * back to the default model. */
+  unapproved:'ask'|'default';
   roster:RosterProfile[];
   rejected:RejectedProfile[];
 };
@@ -105,6 +111,23 @@ function isObject(value:unknown):value is Record<string,unknown> {
 
 function readRouting(value:unknown):RoutingMode {
   return value==='off'||value==='shadow'||value==='auto' ? value : DEFAULT_ROUTING;
+}
+
+/** Trimmed, de-duplicated approved keys; non-strings and blanks are dropped. */
+function readApproved(value:unknown):string[] {
+  if (!Array.isArray(value)) return [];
+  const out:string[]=[];
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const key=entry.trim();
+    if (!key || out.includes(key)) continue;
+    out.push(key);
+  }
+  return out;
+}
+
+function readUnapproved(value:unknown):'ask'|'default' {
+  return value==='default' ? 'default' : 'ask';
 }
 
 /** Overlay one `models.roster` entry, reporting a rejection when a brand-new
@@ -195,6 +218,8 @@ export function loadModelConfig(cwd:string, fs:RosterFs = DEFAULT_FS):ModelConfi
     routing:models ? readRouting(models.routing) : DEFAULT_ROUTING,
     autoUpgrade:models?.autoUpgrade===true,
     defaultProfile,
+    approved:readApproved(models?.approved),
+    unapproved:readUnapproved(models?.unapproved),
     roster,
     rejected,
   };

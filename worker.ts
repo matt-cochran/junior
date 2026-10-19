@@ -15,6 +15,8 @@ import { loadModelConfig, rosterChoiceCriteria, findProfile } from './roster.ts'
 import type { ModelConfig, RoutingMode } from './roster.ts';
 import { assertCommodity, ModelPolicyError } from './model-policy.ts';
 import type { ModelClass } from './model-policy.ts';
+import { readLocalCatalog, type ModelPrice } from './models.ts';
+import { priceDelta, readCachedCatalog, piAgentDir } from './model-updates.ts';
 import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
 import { clarificationApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
 
@@ -41,6 +43,7 @@ export const TASK_FIELDS = [
  'provider','model','thinking','pricing','jev',
  'workflow','isolation','billing',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
+ 'approveModel','approvedProfiles',
  'hopFrom','hopRevision','hopContext',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
@@ -243,6 +246,10 @@ export function validate(t: any) {
  if (t.maxRepairs !== undefined && (typeof t.maxRepairs !== 'number' || !Number.isInteger(t.maxRepairs) || t.maxRepairs < 0)) throw Error('Invalid maxRepairs (expected a nonnegative integer)');
  if (t.lineageDeadlineMs !== undefined && (typeof t.lineageDeadlineMs !== 'number' || !Number.isFinite(t.lineageDeadlineMs) || t.lineageDeadlineMs <= 0)) throw Error('Invalid lineageDeadlineMs (expected a finite positive number)');
  if (t.preparedFrom !== undefined && (typeof t.preparedFrom !== 'string' || !t.preparedFrom.trim())) throw Error('Invalid preparedFrom (expected the contract id of the prepare brief)');
+ if (t.approveModel !== undefined && (typeof t.approveModel !== 'string' || !t.approveModel.trim())) throw Error('Invalid approveModel (expected a profile id or model id)');
+ if (t.approvedProfiles !== undefined) {
+  if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
+ }
  if (t.context !== undefined) validateContext(t.context, t.cwd);
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
@@ -1187,6 +1194,9 @@ export function jevMode(t:any):JevMode {
  return m === 'shadow' || m === 'enforce' ? m : 'off';
 }
 
+/** The recorded human consent for one non-default target model. */
+export type ModelApproval = { source:'run'|'plan'|'project'; key:string };
+
 /** The model actually used for a run and, when routing is eligible, the Jev
  * recommendation that produced it. `applied:false` always means the requested
  * model stayed unchanged. */
@@ -1199,7 +1209,88 @@ export type ModelRoute = {
  provider:string;
  model:string;
  reason:string;
+ /** The run/plan/project consent that allowed a non-default target. */
+ approval?:ModelApproval;
+ /** True when a non-default target passed the other checks but lacks consent. */
+ needsApproval?:boolean;
+ /** True when `models.unapproved` was 'default' and the recommendation was
+  * recorded but not applied. */
+ declined?:boolean;
 };
+
+/** The consent request written before a non-default model would run. */
+export type ModelApprovalRequest = {
+ profile:string|null;
+ provider:string;
+ model:string;
+ defaultModel:string;
+ confidence:number|null;
+ strengths:string|null;
+ reason:string;
+ price:ReturnType<typeof priceDelta>;
+ approve:{run:string; project:string};
+};
+
+/** The run/plan/project approval for one of `keys`, most specific scope first.
+ * A key is either the profile id or the model id. */
+function findModelApproval(config:ModelConfig, opts:{approveModel?:unknown; approvedProfiles?:unknown}, keys:string[]):ModelApproval|null {
+ const run=typeof opts?.approveModel === 'string' && opts.approveModel.trim() ? opts.approveModel.trim() : null;
+ const plan=Array.isArray(opts?.approvedProfiles)
+  ? opts.approvedProfiles.filter((k:any):k is string => typeof k === 'string' && !!k.trim()).map((k)=>k.trim())
+  : [];
+ const project=Array.isArray(config.approved) ? config.approved : [];
+ for (const key of keys) if (run === key) return { source:'run', key };
+ for (const key of keys) if (plan.includes(key)) return { source:'plan', key };
+ for (const key of keys) if (project.includes(key)) return { source:'project', key };
+ return null;
+}
+
+/** The approval for an explicit task model: run/plan/project consent, else a
+ * resume/repair prior result that recorded an approval or ran the same model. */
+export function resolveExplicitApproval(config:ModelConfig, t:any, requested:{provider:string;model:string}, prior:any):ModelApproval|null {
+ const matchingProfiles=config.roster.filter((p)=>p.model === requested.model).map((p)=>p.id);
+ const direct=findModelApproval(config, { approveModel:t?.approveModel, approvedProfiles:t?.approvedProfiles }, [requested.model, ...matchingProfiles]);
+ if (direct) return direct;
+ const recorded=prior?.modelRouting?.approval;
+ if (recorded && typeof recorded === 'object' && (recorded.source === 'run' || recorded.source === 'plan' || recorded.source === 'project') && typeof recorded.key === 'string') {
+  return { source:recorded.source, key:recorded.key };
+ }
+ const priorReq=prior?.receipt?.requested;
+ if (priorReq && typeof priorReq.provider === 'string' && typeof priorReq.model === 'string'
+     && priorReq.provider === requested.provider && priorReq.model === requested.model) {
+  return { source:'run', key:requested.model };
+ }
+ return null;
+}
+
+/** Build the consent request for a non-default target, pricing it from the
+ * local Pi catalog and the cached online catalog (unknown -> null). */
+export function buildModelApprovalRequest(opts:{
+ target:{ profile:string|null; provider:string; model:string; confidence:number|null; strengths:string|null };
+ config:ModelConfig;
+ reason:string;
+ env?:NodeJS.ProcessEnv;
+}):ModelApprovalRequest {
+ const local=readLocalCatalog(piAgentDir(opts.env));
+ const cached=readCachedCatalog(opts.env);
+ const localPrices:Record<string,ModelPrice>=Object.fromEntries(local.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
+ const priceOf=(id:string):ModelPrice|null => localPrices[id] ?? cached?.prices?.[id] ?? null;
+ const key=opts.target.profile ?? opts.target.model;
+ return {
+  profile:opts.target.profile,
+  provider:opts.target.provider,
+  model:opts.target.model,
+  defaultModel:opts.config.model,
+  confidence:opts.target.confidence,
+  strengths:opts.target.strengths,
+  reason:opts.reason,
+  price:priceDelta(priceOf(opts.config.model), priceOf(opts.target.model)),
+  approve:{
+   run:`junior handoff <task> --approve-model ${key}`,
+   project:`junior model approve ${key}`,
+  },
+ };
+}
 
 /** The refusal record attached to a blocked result when the executor policy
  * rejects the requested (or routed) model. */
@@ -1219,7 +1310,7 @@ function modelProfileChoice(answer:GateAnswer):{ profile:string|null; confidence
  * Routing only changes the requested model in `auto` mode, for a known
  * non-default profile, above the confidence threshold, whose model passes the
  * commodity policy. `shadow` records the recommendation without applying it. */
-export function decideModelRoute(config:ModelConfig, answer:GateAnswer, opts:{eligible:boolean; skipped?:string}):ModelRoute {
+export function decideModelRoute(config:ModelConfig, answer:GateAnswer, opts:{eligible:boolean; skipped?:string; approveModel?:string; approvedProfiles?:string[]}):ModelRoute {
  const held={ provider:config.provider, model:config.model };
  const mode=config.routing;
  if (!opts.eligible || mode === 'off') {
@@ -1256,8 +1347,14 @@ export function decideModelRoute(config:ModelConfig, answer:GateAnswer, opts:{el
   return { mode, eligible:true, profile:profile.id, confidence, applied:false, ...held,
    reason:`shadow mode records model profile '${profile.id}' without applying it` };
  }
+ // A target that is the same model as the pin changes nothing and needs no consent.
+ const approval=profile.model === config.model ? null : findModelApproval(config, opts, [profile.id, profile.model]);
+ if (profile.model !== config.model && !approval) {
+  return { mode, eligible:true, profile:profile.id, confidence, applied:false, needsApproval:true, ...held,
+   reason:`model profile '${profile.id}' needs human approval: no run, plan or project approval for '${profile.id}' or '${profile.model}'` };
+ }
  return { mode, eligible:true, profile:profile.id, confidence, applied:true,
-  provider:profile.provider, model:profile.model, reason:`auto-routed to model profile '${profile.id}'` };
+  provider:profile.provider, model:profile.model, ...(approval?{approval}:{}), reason:`auto-routed to model profile '${profile.id}'` };
 }
 
 export type GateQuestion = { type:'bool'|'choice'|'score'; instructions:string; criteria?:any };
@@ -1684,6 +1781,9 @@ export type GateDeps = {
  clarify?:ClarifyDeps;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
+ /** Override the environment used to read the local/cached model catalog
+  * prices for a model-approval request (offline tests). */
+ env?:NodeJS.ProcessEnv;
  /** Optional short progress sink: one line per phase change plus a bounded
   * heartbeat while the worker runs. Best-effort; a throwing sink never aborts
   * a run. */
@@ -2099,10 +2199,50 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
 
   // Model routing is decided before the worker spawns, so every receipt and
   // argv builder below sees the final requested model.
-  const modelRoute=decideModelRoute(modelConfig, jev?.preflight?.answers?.model_profile, { eligible:routingEligible, skipped:routingSkipped });
+  let modelRoute=decideModelRoute(modelConfig, jev?.preflight?.answers?.model_profile, { eligible:routingEligible, skipped:routingSkipped, approveModel:t.approveModel, approvedProfiles:t.approvedProfiles });
   if (modelRoute.applied) {
    requested={ provider:modelRoute.provider, model:modelRoute.model };
    requestedSource='routed';
+  }
+
+  // Human consent: a target model that differs from the project pin needs a
+  // run, plan or project approval before any Pi worker starts.
+  let modelApproval:ModelApprovalRequest|undefined;
+  if (modelRoute.needsApproval && modelRoute.profile) {
+   const profile=findProfile(modelConfig, modelRoute.profile);
+   if (profile) {
+    modelApproval=buildModelApprovalRequest({
+     target:{ profile:profile.id, provider:profile.provider, model:profile.model, confidence:modelRoute.confidence, strengths:profile.strengths },
+     config:modelConfig, env:deps.env,
+     reason:`Jev picked model profile '${profile.id}' at confidence ${modelRoute.confidence ?? 'unknown'}; matched strengths: ${profile.strengths}. It differs from the project default '${modelConfig.model}', so a human must approve it.`,
+    });
+   }
+  } else if (requestedSource === 'task' && requested.model !== modelConfig.model) {
+   const approval=resolveExplicitApproval(modelConfig, t, requested, prior);
+   if (approval) modelRoute={...modelRoute, approval};
+   else modelApproval=buildModelApprovalRequest({
+    target:{ profile:null, provider:requested.provider, model:requested.model, confidence:null, strengths:null },
+    config:modelConfig, env:deps.env,
+    reason:`The contract requests model '${requested.model}' explicitly. It differs from the project default '${modelConfig.model}', so a human must approve it.`,
+   });
+  }
+  if (modelApproval) {
+   if (modelConfig.unapproved === 'default') {
+    modelRoute={...modelRoute, needsApproval:false, declined:true,
+     reason:`models.unapproved is 'default'; the recommendation was recorded but not applied: ${modelApproval.reason}`};
+    modelApproval=undefined;
+   } else {
+    heartbeat.setState('failed',{stopReason:'needs_model_approval'});
+    emit('finished needs_model_approval');
+    writeFileSync(join(dir,'model-approval.json'),JSON.stringify(modelApproval,null,2));
+    const out:any={ id:t.id, simulated:mock, status:'needs_model_approval', workerExitCode:null,
+     workerError:modelApproval.reason, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+     sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+     modelRouting:modelRoute, modelApproval };
+    if (mode !== 'off') out.jev=jev;
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   }
   }
 
   // Workflow selection is deterministic and kept separate from gate status.
