@@ -76,6 +76,8 @@ export interface UpdateCheckDeps {
   onCompanions?: (report: CompanionsReport) => void;
   /** Where `startupNotice` writes; defaults to `process.stderr`. */
   writeNotice?: (line: string) => void;
+  /** Local-only stale entries (e.g. outdated skills) appended to the notice. */
+  localOutdated?: () => string[];
   /** True for `doctor --check-updates`, which already prints the full report. */
   checkUpdates?: boolean;
   // Probe seams (defaults are the real self-update/installer/companion calls).
@@ -348,6 +350,15 @@ export function formatUpdateNotice(outdated: string[]): string {
   return `junior: ${n} update${n === 1 ? '' : 's'} available (${outdated.join(', ')}); run \`junior update\``;
 }
 
+/** Local stale entries for the notice; a throwing probe is ignored. */
+function localOutdatedEntries(deps: UpdateCheckDeps): string[] {
+  try {
+    return deps.localOutdated?.() ?? [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Print at most one update line to stderr for the commands where it is useful.
  * Never throws and never changes the exit code; ineligible commands return
@@ -359,8 +370,9 @@ export async function startupNotice(command: string, deps: UpdateCheckDeps = {})
     if (command === 'doctor' && deps.checkUpdates) return null;
     if (updateCheckDisabled(deps.env ?? process.env)) return null;
     const summary = await cachedUpdateSummary(deps);
-    if (!summary || summary.outdated.length === 0) return null;
-    const line = formatUpdateNotice(summary.outdated);
+    const outdated = [...(summary?.outdated ?? []), ...localOutdatedEntries(deps)];
+    if (outdated.length === 0) return null;
+    const line = formatUpdateNotice(outdated);
     (deps.writeNotice ?? ((text: string) => process.stderr.write(`${text}\n`)))(line);
     return line;
   } catch {

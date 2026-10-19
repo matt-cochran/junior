@@ -1607,16 +1607,27 @@ test('Repeat init reports the already-installed skill as identical',()=>{
  init(deps,{target:'codex'});
  assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'identical');
 });
-test('Changed packaged skill leaves an unchanged installed copy in place',()=>{
+test('Changed packaged skill leaves an unchanged installed copy in place when upgrade is disabled',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
+ init(deps,{target:'codex',upgrade:false});
+ assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v1\n');
+});
+test('Changed packaged skill is reported as outdated when upgrade is disabled',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
+ assert.equal(init(deps,{target:'codex',upgrade:false}).skill.actions[0].status,'outdated');
+});
+test('Default init refreshes an unmodified outdated skill copy',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
  init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
  init(deps,{target:'codex'});
- assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v1\n');
+ assert.equal(readFileSync(codexSkill(cwd),'utf8'),'v2\n');
 });
-test('Changed packaged skill is reported as outdated, not replaced',()=>{
+test('Default init reports an unmodified outdated skill as upgraded',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
  init(deps,{target:'codex'}); writeFileSync(src,'v2\n');
- assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'outdated');
+ assert.equal(init(deps,{target:'codex'}).skill.actions[0].status,'upgraded');
 });
 test('Explicit upgrade replaces an unchanged installed skill with the new packaged source',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
@@ -1660,6 +1671,39 @@ test('Doctor reports an installed project skill as ready',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-skill-')); const bin=withPiDir(cwd); const agent=writeAgent(cwd);
  init(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent}}));
  assert.equal(doctor(setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent}})).skill.ready,true);
+});
+test('Doctor warns that the Junior skill is missing with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.ok(doctor(setupDeps(cwd)).warnings.includes('Junior skill is not installed (claude, codex); run `junior init`'));
+});
+test('Doctor does not call a user-level Junior skill missing',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const home=mkdtempSync(join(tmpdir(),'delivery-home-'));
+ init(setupDeps(cwd),{scope:'user',skillRoot:join(home,'.claude','skills')});
+ assert.equal(doctor(setupDeps(cwd,{env:{HOME:home}})).warnings.some((w:string)=>w.startsWith('Junior skill is not installed')),false);
+});
+test('Doctor warns that the Junior skill is outdated with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps); writeFileSync(src,'v2\n');
+ assert.ok(doctor(deps).warnings.includes('Junior skill is outdated (claude, codex); run `junior update`'));
+});
+test('Doctor warns that a customized Junior skill is preserved with the affected managers',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const deps=setupDeps(cwd);
+ init(deps); writeFileSync(claudeSkill(cwd),'custom\n');
+ assert.ok(doctor(deps).warnings.includes('Junior skill is customized (claude); it is preserved; `junior init --force` replaces it'));
+});
+test('Doctor remediation repeats the missing Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-'));
+ assert.ok(doctor(setupDeps(cwd)).remediation.includes('Junior skill is not installed (claude, codex); run `junior init`'));
+});
+test('Doctor remediation repeats the outdated Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const src=skillSource('v1\n'); const deps=setupDeps(cwd,{skillSource:src});
+ init(deps); writeFileSync(src,'v2\n');
+ assert.ok(doctor(deps).remediation.includes('Junior skill is outdated (claude, codex); run `junior update`'));
+});
+test('Doctor remediation repeats the customized Junior skill guidance',()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-doc-')); const deps=setupDeps(cwd);
+ init(deps); writeFileSync(claudeSkill(cwd),'custom\n');
+ assert.ok(doctor(deps).remediation.includes('Junior skill is customized (claude); it is preserved; `junior init --force` replaces it'));
 });
 test('Parse init options selects user scope and the requested target',()=>{
  assert.equal(parseInitOptions(['init','--user','--target=claude']).scope,'user');
@@ -3230,7 +3274,7 @@ test('detectSlowMount ignores a native home checkout',()=>{
 test('doctor includes a slow-mount warning for a 9p checkout',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-slow-'));
  const d=doctor(setupDeps(cwd,{readMounts:()=>`client ${cwd} 9p rw 0 0\n`}));
- assert.equal(d.warnings.length,1);
+ assert.ok(d.warnings.some((w)=>w.startsWith('Slow Windows-mounted checkout')));
 });
 test('RuntimeHeartbeat emits a heartbeat line through the progress sink',()=>{
  const dir=mkdtempSync(join(tmpdir(),'delivery-hb-'));
