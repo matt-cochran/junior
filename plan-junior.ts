@@ -131,16 +131,30 @@ function finding(code: string, severity: FindingSeverity, ids: string[], message
 }
 
 /** Kahn layers of agent deliverables (ids sorted), each split greedily so no
- * cohort holds two deliverables that share an owned file. Prerequisites to
- * non-agent deliverables do not constrain the cohorts. */
-function agentCohorts(agent: Array<Record<string, any>>): string[][] {
+ * cohort holds two deliverables that share an owned file. A manager-owned or
+ * milestone deliverable is not itself in a cohort, but the agent deliverables
+ * behind it still constrain the ones that depend on it. */
+function agentCohorts(agent: Array<Record<string, any>>, all: Array<Record<string, any>>): string[][] {
   const byId = new Map(agent.map((deliverable) => [text(deliverable.id), deliverable]));
   const ids = [...byId.keys()].sort();
   const agentIds = new Set(ids);
   const dependencies = new Map<string, Set<string>>();
-  for (const id of ids) {
-    dependencies.set(id, new Set(prerequisiteIds(byId.get(id) as Record<string, any>).filter((dep) => agentIds.has(dep))));
-  }
+  const allById = new Map(all.map((deliverable) => [text(deliverable.id), deliverable]));
+  // The nearest agent ancestors of `id`, walking through non-agent deliverables.
+  const agentAncestors = (id: string): Set<string> => {
+    const found = new Set<string>();
+    const seen = new Set<string>();
+    const stack = [...prerequisiteIds(allById.get(id) ?? {})];
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      if (agentIds.has(current)) { found.add(current); continue; }
+      stack.push(...prerequisiteIds(allById.get(current) ?? {}));
+    }
+    return found;
+  };
+  for (const id of ids) dependencies.set(id, agentAncestors(id));
 
   const remaining = new Set(ids);
   const layers: string[][] = [];
@@ -177,8 +191,10 @@ function agentCohorts(agent: Array<Record<string, any>>): string[][] {
 export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): JuniorPlanCheck {
   const maxHours = typeof opts.maxHours === 'number' && Number.isFinite(opts.maxHours) ? opts.maxHours : 4;
   const hotFiles = opts.hotFiles ?? HOT_FILES;
-  const agent = deliverablesOf(plan).filter(isAgentDeliverable);
-  const byId = new Map(agent.map((deliverable) => [text(deliverable.id), deliverable]));
+  const deliverables = deliverablesOf(plan);
+  const agent = deliverables.filter(isAgentDeliverable);
+  // Ancestry spans every deliverable, so an order through a manager-owned step still counts.
+  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
   const findings: PlanFinding[] = [];
 
   for (const deliverable of agent) {
@@ -242,7 +258,7 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
   return {
     ok: !findings.some((entry) => entry.severity === 'error'),
     findings,
-    cohorts: agentCohorts(agent),
+    cohorts: agentCohorts(agent, deliverables),
   };
 }
 

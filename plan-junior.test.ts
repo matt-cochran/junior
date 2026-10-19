@@ -209,3 +209,21 @@ test('junior plan check exits 1 for an unsafe plan', () => {
   const cli = spawnSync(NODE, [JUNIOR, 'plan', 'check', file], { cwd: dir, encoding: 'utf8' });
   assert.equal(cli.status, 1);
 });
+
+test('cohorts keep a dependency that runs through a manager-owned deliverable', () => {
+  const plan = { deliverables: [
+    { id: 'a', owned_files: ['a.ts'], prerequisites: [], metadata: { artifact: 'a', owner: 'agent' } },
+    { id: 'm', owned_files: ['m.ts'], prerequisites: ['a'], metadata: { artifact: 'm', owner: 'manager' } },
+    { id: 'b', owned_files: ['b.ts'], prerequisites: ['m'], metadata: { artifact: 'b', owner: 'agent' } },
+  ] };
+  assert.deepEqual(checkPlanForJunior(plan).cohorts, [['a'], ['b']]);
+});
+
+test('a shared file ordered through a manager-owned deliverable is not a parallel conflict', () => {
+  const plan = { deliverables: [
+    { id: 'a', owned_files: ['x.ts'], prerequisites: [], metadata: { artifact: 'a', owner: 'agent' } },
+    { id: 'm', owned_files: [], prerequisites: ['a'], metadata: { artifact: 'm', owner: 'manager' } },
+    { id: 'b', owned_files: ['x.ts'], prerequisites: ['m'], metadata: { artifact: 'b', owner: 'agent' } },
+  ] };
+  assert.equal(checkPlanForJunior(plan).findings.some((f) => f.code === 'SHARED_FILE_PARALLEL'), false);
+});
