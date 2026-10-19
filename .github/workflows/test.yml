@@ -6,21 +6,21 @@ on:
     - dev
     - staging
     - main
+  # Every pull request is tested, whatever its base (stacked PRs, release/*).
   pull_request:
-    branches:
-    - dev
-    - staging
-    - main
   workflow_dispatch: null
-  workflow_call:
 
 permissions:
   contents: read
   actions: read
   pull-requests: read
+# A newer push to the same pull request supersedes the older run. Branch pushes
+# and dispatches get a group of their own: cancelling a staging push could drop
+# the only run that records evidence for that tree, and a later main promotion
+# would then fail closed.
 concurrency:
-  group: retained-test.yml-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: retained-test.yml-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   resolve:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft != true }}
@@ -40,14 +40,67 @@ jobs:
           runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
           workflow: test.yml
           token: ${{ github.token }}
-  checks:
+  # The full behavioral suite runs on Ubuntu 22.04 because several scenarios
+  # assert POSIX process-group cancellation (TERM then SIGKILL) and signals.
+  # Those guarantees are intentionally not claimed on Windows, where the
+  # installed CLI smoke below is the supported check instead. Both jobs keep
+  # their names inline (not in a reusable workflow) so required status checks
+  # keep matching; they are skipped when verified staging evidence is reused.
+  full:
+    name: Full suite (ubuntu-22.04, Node ${{ matrix.node }})
     needs: resolve
     if: needs.resolve.outputs.build-required == 'true'
-    uses: ./.github/workflows/test-checks.yml
-    secrets: inherit
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # Lightweight, native installed-CLI smoke on six OS/arch targets and both
+  # supported Node lines. It builds, packs and installs the tarball with
+  # lifecycle scripts ignored, then runs the installed `junior` shim. It does
+  # not exercise POSIX-only behavior, so it is safe on every platform. These
+  # stay on native GitHub runners for platform coverage.
+  smoke:
+    name: Installed CLI smoke (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: resolve
+    if: needs.resolve.outputs.build-required == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04       # linux x64
+          - ubuntu-22.04-arm   # linux arm64
+          - macos-15-intel     # darwin x64
+          - macos-15           # darwin arm64
+          - windows-latest     # windows x64
+          - windows-11-arm     # windows arm64
+        node: [24, 26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/smoke-installed.mjs
   build-gate:
     name: Build gate
-    needs: [resolve, checks]
+    needs: [resolve, full, smoke]
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true) }}
     runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
@@ -55,18 +108,21 @@ jobs:
         env:
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
+          FULL_RESULT: ${{ needs.full.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
           SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
         shell: bash
         run: |
           set -euo pipefail
           test "$RESOLVE_RESULT" = success
           if [ "$BUILD_REQUIRED" = true ]; then
-            test "$CHECKS_RESULT" = success
+            test "$FULL_RESULT" = success
+            test "$SMOKE_RESULT" = success
           else
             test "$BUILD_REQUIRED" = false
             test -n "$SOURCE_RUN"
-            test "$CHECKS_RESULT" = skipped
+            test "$FULL_RESULT" = skipped
+            test "$SMOKE_RESULT" = skipped
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: needs.resolve.outputs.build-required == 'true'
