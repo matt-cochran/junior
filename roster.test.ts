@@ -268,3 +268,21 @@ test('autoUpgrade is off unless delivery.config.json enables it', () => {
 test('models.autoUpgrade true enables automatic model adoption', () => {
   assert.equal(fromJson({ models: { autoUpgrade: true } }).autoUpgrade, true);
 });
+
+// --- price tolerance -------------------------------------------------------
+
+test('loadModelConfig defaults priceTolerance to 1.25', () => {
+  assert.equal(noConfig().priceTolerance, 1.25);
+});
+
+test('loadModelConfig reads a finite models.priceTolerance at least one', () => {
+  assert.equal(fromJson({ models: { priceTolerance: 1.4 } }).priceTolerance, 1.4);
+});
+
+test('loadModelConfig falls back to 1.25 for an invalid models.priceTolerance', () => {
+  assert.equal(fromJson({ models: { priceTolerance: 0.5 } }).priceTolerance, 1.25);
+});
+
+test('loadModelConfig rejects a non-numeric models.priceTolerance', () => {
+  assert.equal(fromJson({ models: { priceTolerance: 'wide' } }).priceTolerance, 1.25);
+});

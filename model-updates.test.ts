@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { catalogIds, modelUpdates, piAgentDir, priceDelta, readCachedCatalog } from './model-updates.ts';
+import { catalogIds, modelUpdates, piAgentDir, priceComparable, priceDelta, readCachedCatalog } from './model-updates.ts';
 
 const config=(roster:any[]):any=>({ provider:'openrouter', model:roster[0].model, source:'builtin', path:null, routing:'auto', autoUpgrade:false,
  defaultProfile:roster[0].id, roster, rejected:[], pinnedVerdict:{ class:'commodity' } });
@@ -51,7 +51,7 @@ test('catalogIds uses the online catalog when it is requested and reachable',asy
 test('catalogIds falls back to the local Pi catalog when the online catalog is unreachable',async()=>{
  const fetch=async()=>({ status:503, json:async()=>({}) });
  const r=await catalogIds({ online:true, fetch, env:{ PI_CODING_AGENT_DIR:agentDir(['deepseek/deepseek-v4.1-flash']) } });
- assert.deepEqual(r,{ ids:['deepseek/deepseek-v4.1-flash'], catalog:'local', prices:{} });
+ assert.deepEqual(r,{ ids:['deepseek/deepseek-v4.1-flash'], catalog:'local', prices:{}, sources:{} });
 });
 
 test('catalogIds reports no catalog when neither source is available',async()=>{
@@ -123,4 +123,110 @@ test('priceDelta reports the input ratio rounded to two decimals',()=>{
 test('priceDelta returns a null pricier verdict when a price is unknown',()=>{
  const d=priceDelta(null,{ inputPerM:0.15, outputPerM:0.6, cacheReadPerM:null });
  assert.equal(d.pricier,null);
+});
+
+// --- price parity ----------------------------------------------------------
+
+const pinPrice={ inputPerM:0.033, outputPerM:0.08, cacheReadPerM:null };
+
+test('priceComparable is true for ratios 1.2/1.1 at tolerance 1.25',()=>{
+ assert.equal(priceComparable({ inputRatio:1.2, outputRatio:1.1 },1.25),true);
+});
+
+test('priceComparable is false for ratios 4.57/7.5 at tolerance 1.25',()=>{
+ assert.equal(priceComparable({ inputRatio:4.57, outputRatio:7.5 },1.25),false);
+});
+
+test('priceComparable is false when only the output ratio exceeds the tolerance',()=>{
+ assert.equal(priceComparable({ inputRatio:1.1, outputRatio:1.6 },1.25),false);
+});
+
+test('priceComparable is null when the input ratio is unknown',()=>{
+ assert.equal(priceComparable({ inputRatio:null, outputRatio:1.1 },1.25),null);
+});
+
+test('priceComparable is null when the output ratio is unknown',()=>{
+ assert.equal(priceComparable({ inputRatio:1.1, outputRatio:null },1.25),null);
+});
+
+test('modelUpdates marks a newer release within tolerance as comparable',()=>{
+ const [u]=modelUpdates(config([general]),['deepseek/deepseek-v4.1-flash-1017'],{ prices:{ [general.model]:pinPrice, 'deepseek/deepseek-v4.1-flash-1017':{ inputPerM:0.04, outputPerM:0.09, cacheReadPerM:null } } });
+ assert.equal(u.comparable,true);
+});
+
+test('modelUpdates marks a pricier newer release as not comparable',()=>{
+ const [u]=modelUpdates(config([general]),['deepseek/deepseek-v4.1-flash-1017'],{ prices:{ [general.model]:pinPrice, 'deepseek/deepseek-v4.1-flash-1017':{ inputPerM:0.15, outputPerM:0.6, cacheReadPerM:null } } });
+ assert.equal(u.comparable,false);
+});
+
+test('modelUpdates reports a null comparable verdict when the newer price is unknown',()=>{
+ const [u]=modelUpdates(config([general]),['deepseek/deepseek-v4.1-flash-1017'],{ prices:{ [general.model]:pinPrice } });
+ assert.equal(u.comparable,null);
+});
+
+test('modelUpdates carries the update price delta on the entry',()=>{
+ const [u]=modelUpdates(config([general]),['deepseek/deepseek-v4.1-flash-1017'],{ prices:{ [general.model]:pinPrice, 'deepseek/deepseek-v4.1-flash-1017':{ inputPerM:0.04, outputPerM:0.09, cacheReadPerM:null } } });
+ assert.equal(u.price.inputRatio,1.21);
+});
+
+test('modelUpdates honours a roster price tolerance wider than the default',()=>{
+ const relaxed={ ...config([general]), priceTolerance:2 };
+ const [u]=modelUpdates(relaxed,['deepseek/deepseek-v4.1-flash-1017'],{ prices:{ [general.model]:pinPrice, 'deepseek/deepseek-v4.1-flash-1017':{ inputPerM:0.06, outputPerM:0.12, cacheReadPerM:null } } });
+ assert.equal(u.comparable,true);
+});
+
+test('modelUpdates reports the endpoint provider on the price delta',()=>{
+ const [u]=modelUpdates(config([general]),['deepseek/deepseek-v4.1-flash-1017'],{
+  prices:{ [general.model]:pinPrice, 'deepseek/deepseek-v4.1-flash-1017':{ inputPerM:0.04, outputPerM:0.09, cacheReadPerM:null } },
+  sources:{ 'deepseek/deepseek-v4.1-flash-1017':{ priceSource:'endpoint', provider:'Relace' } },
+ });
+ assert.equal(u.price.provider,'Relace');
+});
+
+// --- catalog endpoint prices -----------------------------------------------
+
+const routedFetch=(catalogBody:any, endpointBody:any)=>async(url:string)=>{
+ if (url.endsWith('/endpoints')) return { status:200, json:async()=>endpointBody };
+ return { status:200, json:async()=>catalogBody };
+};
+
+const pricedCatalog={ data:[
+ { id:'deepseek/deepseek-v4.1-flash', pricing:{ prompt:'0.000000033', completion:'0.00000008' } },
+ { id:'deepseek/deepseek-v4.1-flash-1017', pricing:{ prompt:'0.00000015', completion:'0.0000006' } },
+] };
+
+const relaceEndpoints={ data:{ endpoints:[
+ { provider_name:'Expensive', pricing:{ prompt:'0.00000015', completion:'0.0000006' }, supported_parameters:['tools'] },
+ { provider_name:'Relace', pricing:{ prompt:'0.00000005', completion:'0.0000001' }, supported_parameters:['tools'] },
+] } };
+
+test('catalogIds prefers the cheapest tools-capable endpoint price over the headline price',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const r=await catalogIds({ online:true, fetch:routedFetch(pricedCatalog,relaceEndpoints), cachePath, config:config([general]) });
+ assert.deepEqual(r.prices['deepseek/deepseek-v4.1-flash-1017'],{ inputPerM:0.05, outputPerM:0.1, cacheReadPerM:null });
+});
+
+test('catalogIds records the endpoint price source for a newest candidate',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const r=await catalogIds({ online:true, fetch:routedFetch(pricedCatalog,relaceEndpoints), cachePath, config:config([general]) });
+ assert.equal(r.sources['deepseek/deepseek-v4.1-flash-1017']?.priceSource,'endpoint');
+});
+
+test('catalogIds records the endpoint provider for a newest candidate',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const r=await catalogIds({ online:true, fetch:routedFetch(pricedCatalog,relaceEndpoints), cachePath, config:config([general]) });
+ assert.equal(r.sources['deepseek/deepseek-v4.1-flash-1017']?.provider,'Relace');
+});
+
+test('catalogIds keeps the headline price source when an endpoint has no tools',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const noTools={ data:{ endpoints:[{ provider_name:'NoTools', pricing:{ prompt:'0.00000001', completion:'0.00000001' }, supported_parameters:[] }] } };
+ const r=await catalogIds({ online:true, fetch:routedFetch(pricedCatalog,noTools), cachePath, config:config([general]) });
+ assert.equal(r.sources['deepseek/deepseek-v4.1-flash-1017']?.priceSource,'headline');
+});
+
+test('catalogIds writes the endpoint-adjusted price into the cache',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ await catalogIds({ online:true, fetch:routedFetch(pricedCatalog,relaceEndpoints), cachePath, config:config([general]) });
+ assert.equal(JSON.parse(readFileSync(cachePath,'utf8')).prices['deepseek/deepseek-v4.1-flash-1017'].inputPerM,0.05);
 });

@@ -3,20 +3,27 @@
 //
 // `modelUpdates` pairs every roster profile with the strictly newer releases in
 // its lineage, keeping only commodity models, so doctor, the startup update
-// check and `junior model upgrade` all report the same thing. `catalogIds`
-// reads the OpenRouter catalog when asked (and reachable) and otherwise falls
-// back to Pi's local catalog; neither ever throws.
+// check and `junior model upgrade` all report the same thing. Each entry also
+// carries the current-to-latest price delta and a parity verdict, so a release
+// that got materially pricier waits instead of being adopted. `catalogIds`
+// reads the OpenRouter catalog when asked (and reachable), sharpens the prices
+// of the bounded latest/current candidates with their cheapest tool-capable
+// endpoint, and otherwise falls back to Pi's local catalog; neither ever throws.
 // ---------------------------------------------------------------------------
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { isCommodity } from './model-policy.ts';
-import { fetchOnlineCatalog, newerInLineage, readLocalCatalog, type CatalogFetch, type ModelPrice } from './models.ts';
+import { cheapestToolPrice, fetchModelEndpoints, fetchOnlineCatalog, newerInLineage, readLocalCatalog, type CatalogFetch, type ModelPrice } from './models.ts';
 import type { ModelConfig } from './roster.ts';
 
-export type ModelUpdate = { profile:string; provider:string; current:string; newer:string[]; latest:string|null; isDefault:boolean };
-export type CatalogIds = { ids:string[]; catalog:'online'|'local'|null; prices:Record<string,ModelPrice> };
+export type PriceSource = 'endpoint'|'headline';
+export type PriceProvenance = { priceSource:PriceSource; provider:string|null };
+export type PriceDelta = ReturnType<typeof priceDelta> & Partial<PriceProvenance>;
+export type ModelUpdate = { profile:string; provider:string; current:string; newer:string[]; latest:string|null; isDefault:boolean; price:PriceDelta; comparable:boolean|null };
+export type CatalogIds = { ids:string[]; catalog:'online'|'local'|null; prices:Record<string,ModelPrice>; sources:Record<string,PriceProvenance> };
+export type ModelUpdatesOptions = { prices?:Record<string,ModelPrice>; sources?:Record<string,PriceProvenance>; tolerance?:number };
 
 /** The price change from one model to another. `pricier` is true when either
  * input or output per-M price rises, false when neither does, and null when
@@ -32,6 +39,18 @@ export function priceDelta(from:ModelPrice|null, to:ModelPrice|null):{ from:Mode
   outputRatio:ratio(from.outputPerM, to.outputPerM),
   pricier:to.inputPerM > from.inputPerM || to.outputPerM > from.outputPerM,
  };
+}
+
+/** True when both input and output ratios stay within `tolerance`, false when
+ * either exceeds it, and null when either ratio is unknown. */
+export function priceComparable(delta:{ inputRatio:number|null; outputRatio:number|null }, tolerance:number):boolean|null {
+ if (delta.inputRatio === null || delta.outputRatio === null) return null;
+ return delta.inputRatio <= tolerance && delta.outputRatio <= tolerance;
+}
+
+/** One printed ratio, keeping the two-decimal rounding of `priceDelta`. */
+export function formatRatio(ratio:number|null):string {
+ return ratio === null ? '?' : `${ratio}x`;
 }
 
 /** How long a cached online catalog may back offline update detection. */
@@ -99,31 +118,71 @@ export function piAgentDir(env:NodeJS.ProcessEnv = process.env):string {
 
 /** One entry per roster profile with the newer commodity releases in its
  * lineage, newest first. Only OpenRouter catalog ids are compared, so a
- * profile on another provider reports no newer releases. */
-export function modelUpdates(config:ModelConfig, ids:Iterable<string>):ModelUpdate[] {
+ * profile on another provider reports no newer releases. The current-to-latest
+ * price delta and its parity verdict are included when prices are supplied. */
+export function modelUpdates(config:ModelConfig, ids:Iterable<string>, opts:ModelUpdatesOptions = {}):ModelUpdate[] {
  const all=[...ids];
+ const prices=opts.prices ?? {};
+ const sources=opts.sources ?? {};
+ const tolerance=opts.tolerance ?? config.priceTolerance ?? 1.25;
  return config.roster.map((p)=>{
   const newer=p.provider === 'openrouter' ? newerInLineage(p.model, all).filter((id)=>isCommodity(p.provider, id)) : [];
-  return { profile:p.id, provider:p.provider, current:p.model, newer, latest:newer[0] ?? null, isDefault:p.id === config.defaultProfile };
+  const latest=newer[0] ?? null;
+  const base=priceDelta(prices[p.model] ?? null, latest ? prices[latest] ?? null : null);
+  const provenance=latest ? (sources[latest] ?? sources[p.model]) : sources[p.model];
+  const price:PriceDelta=provenance ? { ...base, priceSource:provenance.priceSource, provider:provenance.provider } : base;
+  return { profile:p.id, provider:p.provider, current:p.model, newer, latest, isDefault:p.id === config.defaultProfile, price, comparable:priceComparable(base, tolerance) };
  });
 }
 
+/** At most the newest candidate plus the current pin per OpenRouter profile:
+ * the bounded set whose endpoint prices can sharpen adoption decisions. */
+function endpointCandidates(config:ModelConfig, ids:string[]):string[] {
+ const all=[...ids];
+ const out:string[]=[];
+ for (const update of modelUpdates(config, all)) {
+  if (update.provider !== 'openrouter') continue;
+  for (const id of [update.latest, update.current]) {
+   if (id && !out.includes(id)) out.push(id);
+  }
+ }
+ return out;
+}
+
 /** Catalog ids for update detection: online when requested and reachable,
- * else the local Pi catalog, else none. */
-export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; timeoutMs?:number; env?:NodeJS.ProcessEnv; cachePath?:string } = {}):Promise<CatalogIds> {
+ * else the local Pi catalog, else none. With a config, the online path also
+ * prices the bounded latest-candidate/current-pin set from every endpoint and
+ * prefers the cheapest tools-capable endpoint over the headline price. */
+export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; timeoutMs?:number; env?:NodeJS.ProcessEnv; cachePath?:string; config?:ModelConfig } = {}):Promise<CatalogIds> {
  if (opts.online) {
   const entries=await fetchOnlineCatalog({ fetch:opts.fetch, timeoutMs:opts.timeoutMs });
   if (entries) {
    const ids=entries.map((e)=>e.id);
    const prices=Object.fromEntries(entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
+   const sources:Record<string,PriceProvenance>={};
+   for (const id of Object.keys(prices)) sources[id]={ priceSource:'headline', provider:null };
+   if (opts.config) {
+    const candidates=endpointCandidates(opts.config, ids);
+    const fetched=await Promise.all(candidates.map(async (id)=>{
+     const endpoints=await fetchModelEndpoints(id,{ fetch:opts.fetch, timeoutMs:opts.timeoutMs });
+     return { id, cheapest:cheapestToolPrice(endpoints) };
+    }));
+    for (const { id, cheapest } of fetched) {
+     if (!cheapest) continue;
+     prices[id]=cheapest.price;
+     sources[id]={ priceSource:'endpoint', provider:cheapest.provider };
+    }
+   }
    writeCatalogCache(opts.cachePath ?? modelCatalogCachePath(opts.env), ids, prices);
-   return { ids, catalog:'online', prices };
+   return { ids, catalog:'online', prices, sources };
   }
  }
  const local=readLocalCatalog(piAgentDir(opts.env));
  if (local.source) {
   const prices=Object.fromEntries(local.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
-  return { ids:local.entries.map((e)=>e.id), catalog:'local', prices };
+  const sources:Record<string,PriceProvenance>={};
+  for (const id of Object.keys(prices)) sources[id]={ priceSource:'headline', provider:null };
+  return { ids:local.entries.map((e)=>e.id), catalog:'local', prices, sources };
  }
- return { ids:[], catalog:null, prices:{} };
+ return { ids:[], catalog:null, prices:{}, sources:{} };
 }

@@ -26,7 +26,7 @@ import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 import { inspectReadiness, type ReadinessResult } from './readiness.ts';
 import { classifyModel } from './model-policy.ts';
-import { readLocalCatalog } from './models.ts';
+import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { loadModelConfig, type ModelConfig } from './roster.ts';
 import { modelUpdates, readCachedCatalog } from './model-updates.ts';
 
@@ -311,8 +311,9 @@ export type ModelCheck = {
  /** Roster profiles with local-catalog availability and default marking. */
  roster?:{profile:string; provider:string; model:string; available:boolean; default:boolean}[];
  rejected?:{id:string; model:string; reason:string}[];
- /** Roster profiles with newer commodity releases in the local catalog. */
- newer?:{profile:string; current:string; newer:string[]}[];
+ /** Roster profiles with newer commodity releases, their price-parity verdict
+  * and the current-to-latest ratios when a price is known. */
+ newer?:{profile:string; current:string; newer:string[]; comparable:boolean|null; inputRatio:number|null; outputRatio:number|null}[];
 };
 
 /** Count model entries for one provider in a parsed catalog object. Other
@@ -364,7 +365,7 @@ export function checkModel(provider:string, id:string, deps:SetupDeps = {}):Mode
 /** Attach the offline pin, policy, roster and update context to a model check.
  * `catalogIds` are the local Pi catalog ids only; nothing here touches the
  * network and nothing writes. */
-function describeModel(config:ModelConfig, catalogIds:string[]):Required<Pick<ModelCheck,'pinned'|'policy'|'routing'|'autoUpgrade'|'roster'|'rejected'|'newer'>> {
+function describeModel(config:ModelConfig, catalogIds:string[], prices:Record<string,ModelPrice> = {}):Required<Pick<ModelCheck,'pinned'|'policy'|'routing'|'autoUpgrade'|'roster'|'rejected'|'newer'>> {
  const policy=classifyModel(config.provider,config.model);
  return {
   pinned:{ provider:config.provider, id:config.model, source:config.source, path:config.path },
@@ -373,7 +374,7 @@ function describeModel(config:ModelConfig, catalogIds:string[]):Required<Pick<Mo
   autoUpgrade:config.autoUpgrade,
   roster:config.roster.map((p)=>({ profile:p.id, provider:p.provider, model:p.model, available:catalogIds.includes(p.model), default:p.id===config.defaultProfile })),
   rejected:config.rejected.map((r)=>({ id:r.id, model:r.model, reason:r.reason })),
-  newer:modelUpdates(config,catalogIds).filter((u)=>u.newer.length>0).map((u)=>({ profile:u.profile, current:u.current, newer:u.newer })),
+  newer:modelUpdates(config,catalogIds,{ prices }).filter((u)=>u.newer.length>0).map((u)=>({ profile:u.profile, current:u.current, newer:u.newer, comparable:u.comparable, inputRatio:u.price.inputRatio, outputRatio:u.price.outputRatio })),
  };
 }
 
@@ -466,7 +467,9 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const catalog=readLocalCatalog(agentDir(deps));
  const cached=readCachedCatalog(env);
  const catalogIdList=[...new Set([...catalog.entries.map((e)=>e.id), ...(cached?.ids ?? [])])];
- const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalogIdList) };
+ const localPrices=Object.fromEntries(catalog.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
+ const priceTable={ ...localPrices, ...(cached?.prices ?? {}) };
+ const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalogIdList,priceTable) };
  const policyOk=model.policy ? model.policy.class === 'commodity' : true;
 
  const remediation:string[]=[];
@@ -485,7 +488,12 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const warnings:string[]=[];
  const slowMount=detectSlowMount(cwd,deps);
  if (slowMount) warnings.push(slowMount);
- for (const update of model.newer ?? []) warnings.push(`Newer commodity models available: ${update.profile} ${update.current} -> ${update.newer[0]}; run \`junior model upgrade\`.`);
+ for (const update of model.newer ?? []) {
+  const parity=update.comparable === false
+   ? `; waiting for price parity (${update.inputRatio ?? '?'}x/${update.outputRatio ?? '?'}x)`
+   : update.comparable === true ? '; price-comparable; run `junior model upgrade`.' : '; run `junior model upgrade`.';
+  warnings.push(`Newer commodity models available: ${update.profile} ${update.current} -> ${update.newer[0]}${parity}`);
+ }
  for (const rejected of model.rejected ?? []) warnings.push(`Roster profile '${rejected.id}' rejected: ${rejected.reason}`);
 
  const checks:DoctorCheck[]=[

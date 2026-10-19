@@ -24,7 +24,7 @@ import { spawnSpec } from './cli-entry.ts';
 import { checkSelfUpdate, type SelfUpdateCheck, type SelfUpdateDeps } from './self-update.ts';
 import { checkToolUpdates, type InstallerDeps, type ToolUpdateStatus, type ToolName } from './installer.ts';
 import { inspectCompanions, type CompanionDeps, type CompanionsReport } from './companions.ts';
-import { catalogIds, modelUpdates as detectModelUpdates, type ModelUpdate } from './model-updates.ts';
+import { catalogIds, formatRatio, modelUpdates as detectModelUpdates, type ModelUpdate } from './model-updates.ts';
 import type { CatalogFetch } from './models.ts';
 import { loadModelConfig } from './roster.ts';
 
@@ -153,7 +153,7 @@ function remediationFor(updates: CollectedUpdates): string | null {
       ? 'Run `junior update --with-triz` to adopt the newer releases.'
       : 'Run `junior update` to adopt the newer releases.');
   }
-  if (updates.models.updates.length) {
+  if (updates.models.updates.some((update) => update.comparable !== false)) {
     parts.push('Run `junior model upgrade` to adopt newer models.');
   }
   return parts.length ? parts.join(' ') : null;
@@ -166,13 +166,14 @@ async function collectModelUpdates(deps: UpdateCheckDeps): Promise<CollectedUpda
   try {
     if (deps.modelUpdates) return await deps.modelUpdates(deps);
     const config = loadModelConfig(deps.cwd ?? process.cwd());
-    const { ids, catalog } = await catalogIds({
+    const { ids, catalog, prices, sources } = await catalogIds({
       online: true,
       fetch: deps.modelFetch,
       timeoutMs: deps.budgetMs,
       env: deps.env,
+      config,
     });
-    const updates = detectModelUpdates(config, ids).filter((update) => update.newer.length > 0);
+    const updates = detectModelUpdates(config, ids, { prices, sources }).filter((update) => update.newer.length > 0);
     return { catalog, updates };
   } catch {
     return { catalog: null, updates: [] };
@@ -253,12 +254,22 @@ function collectionResolved(updates: CollectedUpdates): boolean {
   return updates.managed.tools.some((tool) => tool.latest !== null);
 }
 
+/** One outdated entry for a newer model: pricier releases say they wait for
+ * price parity with their ratios, comparable ones say so, and an unknown price
+ * keeps the bare id. */
+function modelOutdatedEntry(update: ModelUpdate): string {
+  const id = update.latest ?? update.current;
+  if (update.comparable === false) return `model:${id} (waiting for price parity ${formatRatio(update.price?.inputRatio ?? null)}/${formatRatio(update.price?.outputRatio ?? null)})`;
+  if (update.comparable === true) return `model:${id} (price-comparable)`;
+  return `model:${id}`;
+}
+
 function summarize(updates: CollectedUpdates, checkedAt: number): UpdateSummary {
   const outdated: string[] = [];
   if (updates.junior.outdated === true) outdated.push('junior');
   outdated.push(...updates.managed.outdated);
   outdated.push(...updates.companions);
-  outdated.push(...updates.models.updates.map((update) => `model:${update.latest}`));
+  outdated.push(...updates.models.updates.map(modelOutdatedEntry));
   const summary: UpdateSummary = { checkedAt, outdated };
   if (updates.remediation) summary.remediation = updates.remediation;
   return summary;

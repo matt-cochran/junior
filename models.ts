@@ -7,10 +7,12 @@
 // releases of the same lineage, skipping aliases, variants and unstable builds.
 //
 // `readLocalCatalog` reads Pi's local catalog overlay (`models-store.json`)
-// with `models.json` as fallback, and `fetchOnlineCatalog` reads the
-// OpenRouter catalog online. Both are fully injectable so tests never touch the
-// network or the real agent directory, and both fail closed to an empty or null
-// result instead of throwing.
+// with `models.json` as fallback, while `fetchOnlineCatalog` reads the
+// OpenRouter catalog online and `fetchModelEndpoints` reads one model's
+// per-provider endpoints. All are fully injectable so tests never touch the
+// network or the real agent directory, and all fail closed to an empty or null
+// result instead of throwing. `cheapestToolPrice` picks the cheapest endpoint
+// that can call tools, which is the price parity is measured against.
 // ---------------------------------------------------------------------------
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -204,6 +206,12 @@ export function readLocalCatalog(agentDir:string, provider='openrouter', fs?:Loc
 export const OPENROUTER_MODELS_URL='https://openrouter.ai/api/v1/models';
 export type CatalogFetch=(url:string, init:{ signal?:AbortSignal; headers?:Record<string,string> })=>Promise<{ status:number; json():Promise<any> }>;
 
+/** One OpenRouter endpoint (a provider's hosting of a model). */
+export type ModelEndpoint = { provider:string; price:ModelPrice; tools:boolean };
+
+/** The OpenRouter endpoints URL for one model id. */
+export const OPENROUTER_ENDPOINTS_URL=(id:string)=>`https://openrouter.ai/api/v1/models/${id}/endpoints`;
+
 /** GET the OpenRouter catalog without credentials. Any network error, timeout
  * (default 3000 ms), non-200 response or unexpected shape resolves to null, so
  * this never throws. */
@@ -238,4 +246,50 @@ export async function fetchOnlineCatalog(opts:{ fetch?:CatalogFetch; timeoutMs?:
  } finally {
   clearTimeout(timer);
  }
+}
+
+/** GET the OpenRouter endpoints for one model without credentials. Any network
+ * error, timeout (default 3000 ms), non-200 response or unexpected shape
+ * resolves to null, so this never throws. */
+export async function fetchModelEndpoints(id:string, opts:{ fetch?:CatalogFetch; timeoutMs?:number }={}):Promise<ModelEndpoint[]|null> {
+ const doFetch=opts.fetch ?? (globalThis.fetch as unknown as CatalogFetch);
+ const timeoutMs=opts.timeoutMs ?? 3000;
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),timeoutMs);
+ if (typeof (timer as any).unref === 'function') (timer as any).unref();
+ const expired=new Promise<null>(res=>controller.signal.addEventListener('abort',()=>res(null)));
+ try {
+  const res=await Promise.race([doFetch(OPENROUTER_ENDPOINTS_URL(id),{ signal:controller.signal }),expired]);
+  if (!res || res.status !== 200) return null;
+  const body=await res.json();
+  const data=body?.data?.endpoints;
+  if (!Array.isArray(data)) return null;
+  const out:ModelEndpoint[]=[];
+  for (const ep of data) {
+   if (!ep || typeof ep !== 'object') continue;
+   const price=onlinePrice(ep.pricing);
+   if (!price) continue;
+   const provider=typeof ep.provider_name === 'string' && ep.provider_name ? ep.provider_name : 'unknown';
+   const params=Array.isArray(ep.supported_parameters) ? ep.supported_parameters : [];
+   out.push({ provider, price, tools:params.includes('tools') });
+  }
+  return out;
+ } catch {
+  return null;
+ } finally {
+  clearTimeout(timer);
+ }
+}
+
+/** The cheapest tools-capable endpoint by per-M input-plus-output sum, or null
+ * when no endpoint supports tools. */
+export function cheapestToolPrice(endpoints:ModelEndpoint[]|null|undefined):{ provider:string; price:ModelPrice }|null {
+ if (!Array.isArray(endpoints)) return null;
+ let best:{ provider:string; price:ModelPrice; sum:number }|null=null;
+ for (const endpoint of endpoints) {
+  if (!endpoint.tools) continue;
+  const sum=endpoint.price.inputPerM + endpoint.price.outputPerM;
+  if (!best || sum < best.sum) best={ provider:endpoint.provider, price:endpoint.price, sum };
+ }
+ return best ? { provider:best.provider, price:best.price } : null;
 }

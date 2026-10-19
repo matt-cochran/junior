@@ -20,12 +20,13 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyModel } from './model-policy.ts';
 import { loadModelConfig, type ModelConfig } from './roster.ts';
-import { catalogIds, modelUpdates, priceDelta, type ModelUpdate } from './model-updates.ts';
+import { catalogIds, modelUpdates, priceComparable, priceDelta, type ModelUpdate, type PriceDelta, type PriceProvenance } from './model-updates.ts';
 import type { CatalogFetch, ModelPrice } from './models.ts';
 
-export type ModelChange = { profile: string; from: string; to: string; isDefault: boolean; price: ReturnType<typeof priceDelta> };
+export type ModelChange = { profile: string; from: string; to: string; isDefault: boolean; price: PriceDelta };
 export type ModelRefusal = { profile: string; to: string; reason: string };
-export type UpgradePlan = { changes: ModelChange[]; refused: ModelRefusal[] };
+export type ModelWaiting = { profile: string; to: string; inputRatio: number | null; outputRatio: number | null; reason: 'waiting for price parity' };
+export type UpgradePlan = { changes: ModelChange[]; refused: ModelRefusal[]; waiting: ModelWaiting[] };
 
 /** Minimal fs seam so `applyUpgrades` can be exercised without disk. */
 export interface ConfigFs {
@@ -48,27 +49,34 @@ const DEFAULT_CONFIG_FS: ConfigFs = {
  * policy, so a frontier or unknown target is refused with the verdict reason
  * and never appears in `changes`.
  */
-export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: { profile?: string; to?: string; prices?: Record<string, ModelPrice> } = {}): UpgradePlan {
+export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: { profile?: string; to?: string; prices?: Record<string, ModelPrice>; sources?: Record<string, PriceProvenance> } = {}): UpgradePlan {
   const changes: ModelChange[] = [];
   const refused: ModelRefusal[] = [];
+  const waiting: ModelWaiting[] = [];
   const byProfile = new Map(updates.map((u) => [u.profile, u]));
   const prices = opts.prices ?? {};
-  const delta = (from: string, to: string) => priceDelta(prices[from] ?? null, prices[to] ?? null);
+  const sources = opts.sources ?? {};
+  const tolerance = config.priceTolerance ?? 1.25;
+  const delta = (from: string, to: string): PriceDelta => {
+    const base = priceDelta(prices[from] ?? null, prices[to] ?? null);
+    const provenance = sources[to] ?? sources[from];
+    return provenance ? { ...base, priceSource: provenance.priceSource, provider: provenance.provider } : base;
+  };
 
   if (opts.to !== undefined) {
     const profile = opts.profile ?? config.defaultProfile;
     const update = byProfile.get(profile);
     if (!update) {
       refused.push({ profile, to: opts.to, reason: `unknown profile '${profile}'` });
-      return { changes, refused };
+      return { changes, refused, waiting };
     }
     const verdict = classifyModel(update.provider, opts.to);
     if (verdict.class !== 'commodity') {
       refused.push({ profile, to: opts.to, reason: verdict.reason });
-      return { changes, refused };
+      return { changes, refused, waiting };
     }
     changes.push({ profile, from: update.current, to: opts.to, isDefault: profile === config.defaultProfile || update.isDefault, price: delta(update.current, opts.to) });
-    return { changes, refused };
+    return { changes, refused, waiting };
   }
 
   let selected = updates;
@@ -76,15 +84,20 @@ export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: 
     const update = byProfile.get(opts.profile);
     if (!update) {
       refused.push({ profile: opts.profile, to: '', reason: `unknown profile '${opts.profile}'` });
-      return { changes, refused };
+      return { changes, refused, waiting };
     }
     selected = [update];
   }
   for (const update of selected) {
     if (!update.latest) continue;
-    changes.push({ profile: update.profile, from: update.current, to: update.latest, isDefault: update.isDefault, price: delta(update.current, update.latest) });
+    const price = delta(update.current, update.latest);
+    if (priceComparable(price, tolerance) === false) {
+      waiting.push({ profile: update.profile, to: update.latest, inputRatio: price.inputRatio, outputRatio: price.outputRatio, reason: 'waiting for price parity' });
+      continue;
+    }
+    changes.push({ profile: update.profile, from: update.current, to: update.latest, isDefault: update.isDefault, price });
   }
-  return { changes, refused };
+  return { changes, refused, waiting };
 }
 
 /**
@@ -219,8 +232,8 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
 
   if (parsed.sub === 'status') {
     const config = loadModelConfig(cwd);
-    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env });
-    const updates = modelUpdates(config, catalog.ids);
+    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env, config });
+    const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
     const result = {
       pinned: { provider: config.provider, model: config.model, source: config.source, path: config.path },
       policy: config.pinnedVerdict,
@@ -228,10 +241,11 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
       autoUpgrade: config.autoUpgrade,
       approved: config.approved,
       unapproved: config.unapproved,
+      priceTolerance: config.priceTolerance,
       roster: config.roster.map((p) => ({ profile: p.id, provider: p.provider, model: p.model, default: p.id === config.defaultProfile, price: catalog.prices[p.model] ?? null })),
       rejected: config.rejected,
       catalog: catalog.catalog,
-      updates: updates.map((u) => ({ ...u, price: priceDelta(catalog.prices[u.current] ?? null, u.latest ? catalog.prices[u.latest] ?? null : null) })),
+      updates,
     };
     return { exitCode: 0, result };
   }
@@ -278,12 +292,12 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
 
   if (parsed.sub === 'upgrade') {
     const config = loadModelConfig(cwd);
-    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env });
-    const updates = modelUpdates(config, catalog.ids);
-    const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices });
+    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env, config });
+    const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
+    const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices, sources: catalog.sources });
     const dryRun = parsed.flags.has('--dry-run');
     const pricier = plan.changes.filter((change) => change.price.pricier === true);
-    const result: any = { changes: plan.changes, refused: plan.refused, applied: false, pricier };
+    const result: any = { changes: plan.changes, refused: plan.refused, waiting: plan.waiting, applied: false, pricier };
 
     let refusedToWrite = false;
     if (plan.changes.length > 0 && !dryRun) {
@@ -325,18 +339,19 @@ export async function adoptModelUpdates(cwd: string, deps: { fetch?: CatalogFetc
   enabled: boolean;
   changes: ModelChange[];
   refused: ModelRefusal[];
+  waiting: ModelWaiting[];
   applied: boolean;
   catalog: 'online' | 'local' | null;
 }> {
   const config = loadModelConfig(cwd);
-  const catalog = await catalogIds({ online: true, fetch: deps.fetch, env: deps.env });
-  const updates = modelUpdates(config, catalog.ids);
-  const { changes, refused } = planUpgrades(config, updates, {});
+  const catalog = await catalogIds({ online: true, fetch: deps.fetch, env: deps.env, config });
+  const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
+  const { changes, refused, waiting } = planUpgrades(config, updates, { prices: catalog.prices, sources: catalog.sources });
   const enabled = config.autoUpgrade;
   let applied = false;
   if (enabled && changes.length > 0) {
     applyUpgrades(cwd, changes);
     applied = true;
   }
-  return { enabled, changes, refused, applied, catalog: catalog.catalog };
+  return { enabled, changes, refused, waiting, applied, catalog: catalog.catalog };
 }

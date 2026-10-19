@@ -134,6 +134,9 @@ test('doctor warns about a rejected roster entry naming its id and reason', () =
  * without any network access. */
 const writeOnlineCache=(cwd:string,ids:string[],checkedAt=Date.now())=>{mkdirSync(join(cwd,'.junior'),{recursive:true});writeFileSync(join(cwd,'.junior','model-catalog.json'),JSON.stringify({checkedAt,ids}));};
 
+const PRICE_PIN={ inputPerM:0.033, outputPerM:0.08, cacheReadPerM:null };
+const writePricedOnlineCache=(cwd:string,ids:string[],newerPrice:any)=>{mkdirSync(join(cwd,'.junior'),{recursive:true});writeFileSync(join(cwd,'.junior','model-catalog.json'),JSON.stringify({checkedAt:Date.now(),ids,prices:{[MODEL]:PRICE_PIN,[NEWER]:newerPrice}}));};
+
 test('doctor reports the pinned model available when only the cached online catalog lists it', () => {
  const {cwd,deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
  writeOnlineCache(cwd,[NEWER]);
@@ -161,6 +164,32 @@ test('doctor roster availability counts models listed only in the cached online 
 test('doctor still reports a pin unavailable when neither catalog lists it', () => {
  const {deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
  assert.equal(doctor(deps).model.available,false);
+});
+
+// --- price parity -----------------------------------------------------------
+
+test('doctor warns waiting for price parity when the newer release is pricier', () => {
+ const {cwd,deps}=fixture({catalog:{openrouter:{models:[{id:MODEL},{id:NEWER}]}}});
+ writePricedOnlineCache(cwd,[MODEL,NEWER],{inputPerM:0.15,outputPerM:0.6,cacheReadPerM:null});
+ assert.match(doctor(deps).warnings.join(' '),/waiting for price parity \(4\.55x\/7\.5x\)/);
+});
+
+test('doctor reports a comparable newer release as comparable', () => {
+ const {cwd,deps}=fixture({catalog:{openrouter:{models:[{id:MODEL},{id:NEWER}]}}});
+ writePricedOnlineCache(cwd,[MODEL,NEWER],{inputPerM:0.04,outputPerM:0.09,cacheReadPerM:null});
+ assert.equal(doctor(deps).model.newer?.find((u)=>u.profile==='general')?.comparable,true);
+});
+
+test('doctor reports the input ratio for a newer release', () => {
+ const {cwd,deps}=fixture({catalog:{openrouter:{models:[{id:MODEL},{id:NEWER}]}}});
+ writePricedOnlineCache(cwd,[MODEL,NEWER],{inputPerM:0.04,outputPerM:0.09,cacheReadPerM:null});
+ assert.equal(doctor(deps).model.newer?.find((u)=>u.profile==='general')?.inputRatio,1.21);
+});
+
+test('doctor warns that a comparable newer release is price-comparable', () => {
+ const {cwd,deps}=fixture({catalog:{openrouter:{models:[{id:MODEL},{id:NEWER}]}}});
+ writePricedOnlineCache(cwd,[MODEL,NEWER],{inputPerM:0.04,outputPerM:0.09,cacheReadPerM:null});
+ assert.match(doctor(deps).warnings.join(' '),/price-comparable/);
 });
 
 // --- offline guarantee ------------------------------------------------------

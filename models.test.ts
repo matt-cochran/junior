@@ -8,8 +8,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
+  OPENROUTER_ENDPOINTS_URL,
   OPENROUTER_MODELS_URL,
+  cheapestToolPrice,
   compareModelIds,
+  fetchModelEndpoints,
   fetchOnlineCatalog,
   newerInLineage,
   parseModelId,
@@ -306,4 +309,95 @@ test('readLocalCatalog reports a null cache-read price when the cost omits cache
   });
   const [entry] = readLocalCatalog('/agent', 'openrouter', fs).entries;
   assert.equal(entry.price?.cacheReadPerM, null);
+});
+
+// --- fetchModelEndpoints ---------------------------------------------------
+
+const endpointBody = (endpoints: any[]) => ({ data: { endpoints } });
+
+const toolEndpoint = (over: any = {}) => ({
+  provider_name: 'Relace',
+  pricing: { prompt: '0.00000005', completion: '0.0000001', input_cache_read: '0.00000002' },
+  supported_parameters: ['tools', 'temperature'],
+  ...over,
+});
+
+test('OPENROUTER_ENDPOINTS_URL points at the endpoints path for a model id', () => {
+  assert.equal(
+    OPENROUTER_ENDPOINTS_URL('deepseek/deepseek-v4.1-flash-1017'),
+    'https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints',
+  );
+});
+
+test('fetchModelEndpoints reports the provider name of an endpoint', async () => {
+  const [endpoint] = (await fetchModelEndpoints('a/b', { fetch: fetchReturning(200, endpointBody([toolEndpoint()])) }))!;
+  assert.equal(endpoint.provider, 'Relace');
+});
+
+test('fetchModelEndpoints scales endpoint per-token pricing to per-million prices', async () => {
+  const [endpoint] = (await fetchModelEndpoints('a/b', { fetch: fetchReturning(200, endpointBody([toolEndpoint()])) }))!;
+  assert.deepEqual(endpoint.price, { inputPerM: 0.05, outputPerM: 0.1, cacheReadPerM: 0.02 });
+});
+
+test('fetchModelEndpoints reports tools support from supported_parameters', async () => {
+  const [endpoint] = (await fetchModelEndpoints('a/b', { fetch: fetchReturning(200, endpointBody([toolEndpoint()])) }))!;
+  assert.equal(endpoint.tools, true);
+});
+
+test('fetchModelEndpoints reports an endpoint without tools support as not tools-capable', async () => {
+  const [endpoint] = (await fetchModelEndpoints('a/b', {
+    fetch: fetchReturning(200, endpointBody([toolEndpoint({ supported_parameters: ['temperature'] })])),
+  }))!;
+  assert.equal(endpoint.tools, false);
+});
+
+test('fetchModelEndpoints returns null on a non-200 response', async () => {
+  assert.equal(await fetchModelEndpoints('a/b', { fetch: fetchReturning(503, endpointBody([])) }), null);
+});
+
+test('fetchModelEndpoints returns null when the request throws', async () => {
+  const fetch: CatalogFetch = async () => { throw new Error('offline'); };
+  assert.equal(await fetchModelEndpoints('a/b', { fetch }), null);
+});
+
+test('fetchModelEndpoints returns null when the response has no endpoints array', async () => {
+  assert.equal(await fetchModelEndpoints('a/b', { fetch: fetchReturning(200, { data: [] }) }), null);
+});
+
+// --- cheapestToolPrice -----------------------------------------------------
+
+const pricedEndpoint = (provider: string, inputPerM: number, outputPerM: number, tools: boolean) => ({
+  provider,
+  price: { inputPerM, outputPerM, cacheReadPerM: null },
+  tools,
+});
+
+test('cheapestToolPrice ignores endpoints without tools support', () => {
+  const cheapest = cheapestToolPrice([
+    pricedEndpoint('NoTools', 0.001, 0.001, false),
+    pricedEndpoint('WithTools', 0.05, 0.1, true),
+  ]);
+  assert.equal(cheapest?.provider, 'WithTools');
+});
+
+test('cheapestToolPrice picks the tools-capable endpoint with the lowest input-plus-output sum', () => {
+  const cheapest = cheapestToolPrice([
+    pricedEndpoint('Expensive', 0.15, 0.6, true),
+    pricedEndpoint('Relace', 0.05, 0.1, true),
+    pricedEndpoint('Mid', 0.04, 0.2, true),
+  ]);
+  assert.equal(cheapest?.provider, 'Relace');
+});
+
+test('cheapestToolPrice returns the price of the cheapest tools-capable endpoint', () => {
+  const cheapest = cheapestToolPrice([pricedEndpoint('Relace', 0.05, 0.1, true)]);
+  assert.deepEqual(cheapest?.price, { inputPerM: 0.05, outputPerM: 0.1, cacheReadPerM: null });
+});
+
+test('cheapestToolPrice returns null when no endpoint supports tools', () => {
+  assert.equal(cheapestToolPrice([pricedEndpoint('NoTools', 0.05, 0.1, false)]), null);
+});
+
+test('cheapestToolPrice returns null for a missing endpoint list', () => {
+  assert.equal(cheapestToolPrice(null), null);
 });

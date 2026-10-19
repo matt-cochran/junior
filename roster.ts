@@ -50,11 +50,15 @@ export type ModelConfig = {
   /** What to do with an unapproved non-default model: ask for consent or fall
    * back to the default model. */
   unapproved:'ask'|'default';
+  /** How much pricier a newer release may be (input and output ratios) before
+   * adoption waits for price parity. */
+  priceTolerance:number;
   roster:RosterProfile[];
   rejected:RejectedProfile[];
 };
 
 export const DEFAULT_ROUTING:RoutingMode = 'auto';
+export const DEFAULT_PRICE_TOLERANCE = 1.25;
 
 export const BUILTIN_ROSTER:readonly RosterProfile[] = [
   {
@@ -128,6 +132,11 @@ function readApproved(value:unknown):string[] {
 
 function readUnapproved(value:unknown):'ask'|'default' {
   return value==='default' ? 'default' : 'ask';
+}
+
+/** A finite tolerance of at least 1; anything else falls back to 1.25. */
+function readPriceTolerance(value:unknown):number {
+  return typeof value==='number' && Number.isFinite(value) && value >= 1 ? value : DEFAULT_PRICE_TOLERANCE;
 }
 
 /** Overlay one `models.roster` entry, reporting a rejection when a brand-new
@@ -220,6 +229,7 @@ export function loadModelConfig(cwd:string, fs:RosterFs = DEFAULT_FS):ModelConfi
     defaultProfile,
     approved:readApproved(models?.approved),
     unapproved:readUnapproved(models?.unapproved),
+    priceTolerance:readPriceTolerance(models?.priceTolerance),
     roster,
     rejected,
   };

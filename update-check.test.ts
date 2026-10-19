@@ -22,6 +22,30 @@ const DEEPSEEK_UPDATE: ModelUpdate = {
   isDefault: true,
 };
 
+const PRICEY_UPDATE: ModelUpdate = {
+  ...DEEPSEEK_UPDATE,
+  price: {
+    from: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+    to: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
+    inputRatio: 4.55,
+    outputRatio: 7.5,
+    pricier: true,
+  },
+  comparable: false,
+};
+
+const COMPARABLE_UPDATE: ModelUpdate = {
+  ...DEEPSEEK_UPDATE,
+  price: {
+    from: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+    to: { inputPerM: 0.04, outputPerM: 0.09, cacheReadPerM: null },
+    inputRatio: 1.21,
+    outputRatio: 1.13,
+    pricier: true,
+  },
+  comparable: true,
+};
+
 /** A model-detection seam that reports nothing, keeping tests offline. */
 const NO_MODEL_UPDATES = async () => ({ catalog: null as const, updates: [] as ModelUpdate[] });
 
@@ -352,6 +376,24 @@ test('collectUpdates adds no model remediation when no model is newer', async ()
   assert.doesNotMatch(String(updates.remediation ?? ''), /junior model upgrade/);
 });
 
+test('collectUpdates omits the model upgrade remediation when the only update is pricier', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [PRICEY_UPDATE] }),
+  });
+  assert.doesNotMatch(String(updates.remediation ?? ''), /junior model upgrade/);
+});
+
+test('collectUpdates suggests the model upgrade remediation for a comparable update', async () => {
+  const { collectUpdates } = await import('./update-check.ts');
+  const updates = await collectUpdates({
+    ...OFFLINE_PROBES,
+    modelUpdates: async () => ({ catalog: 'online', updates: [COMPARABLE_UPDATE] }),
+  });
+  assert.match(String(updates.remediation ?? ''), /junior model upgrade/);
+});
+
 test('cachedUpdateSummary records a model update in the outdated list', async () => {
   const fs = memoryFs();
   await (await import('./update-check.ts')).cachedUpdateSummary({
@@ -389,6 +431,44 @@ test('cachedUpdateSummary writes a summary when only the online catalog resolved
     }),
   });
   assert.notEqual(summary, null);
+});
+
+test('the cached outdated entry for a pricier newer model says waiting for price parity with its ratios', async () => {
+  const fs = memoryFs();
+  await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({
+      junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' },
+      models: { catalog: 'online', updates: [PRICEY_UPDATE] },
+    }),
+  });
+  const stored = JSON.parse(fs.files.get(CACHE) ?? 'null');
+  assert.ok(stored.outdated.includes('model:deepseek/deepseek-v4.1-flash-1017 (waiting for price parity 4.55x/7.5x)'));
+});
+
+test('the startup notice line names the price-parity wait and its ratios', async () => {
+  let line: string | null = null;
+  await (await import('./update-check.ts')).startupNotice('validate', {
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs: memoryFs(), writeNotice: (text: string) => { line = text; },
+    collect: async () => emptyUpdates({
+      junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' },
+      models: { catalog: 'online', updates: [PRICEY_UPDATE] },
+    }),
+  });
+  assert.match(String(line), /waiting for price parity 4\.55x\/7\.5x/);
+});
+
+test('the cached outdated entry for a comparable newer model says price-comparable', async () => {
+  const fs = memoryFs();
+  await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, now: () => 100 * HOUR, fs,
+    collect: async () => emptyUpdates({
+      junior: { installed: '1.0.0', latest: '1.0.0', outdated: false, kind: 'npm-global' },
+      models: { catalog: 'online', updates: [COMPARABLE_UPDATE] },
+    }),
+  });
+  const stored = JSON.parse(fs.files.get(CACHE) ?? 'null');
+  assert.ok(stored.outdated.includes('model:deepseek/deepseek-v4.1-flash-1017 (price-comparable)'));
 });
 
 test('startupNotice names the model update in its one line', async () => {

@@ -84,7 +84,7 @@ test('planUpgrades marks a change pricier when the target costs more per token',
     [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
     [NEWER]: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
   };
-  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices });
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { to: NEWER, prices });
   assert.equal(changes[0].price.pricier, true);
 });
 
@@ -93,13 +93,58 @@ test('planUpgrades reports the input ratio for a change when prices are given', 
     [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
     [NEWER]: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
   };
-  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices });
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { to: NEWER, prices });
   assert.equal(changes[0].price.inputRatio, 4.55);
 });
 
 test('planUpgrades reports the update as a plan with no refusals', () => {
   const { refused } = planUpgrades(modelConfig(), [generalUpdate()], {});
   assert.deepEqual(refused, []);
+});
+
+// --- planUpgrades: price parity --------------------------------------------
+
+const PRICE = {
+  [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+  [NEWER]: { inputPerM: 0.04, outputPerM: 0.09, cacheReadPerM: null },
+};
+
+const PRICEY = {
+  [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+  [NEWER]: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
+};
+
+test('planUpgrades proposes a price-comparable update', () => {
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices: PRICE });
+  assert.equal(changes.length, 1);
+});
+
+test('planUpgrades omits a pricier update from the plan', () => {
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices: PRICEY });
+  assert.equal(changes.length, 0);
+});
+
+test('planUpgrades lists a pricier update as waiting with its ratios', () => {
+  const { waiting } = planUpgrades(modelConfig(), [generalUpdate()], { prices: PRICEY });
+  assert.deepEqual(waiting, [{ profile: 'general', to: NEWER, inputRatio: 4.55, outputRatio: 7.5, reason: 'waiting for price parity' }]);
+});
+
+test('planUpgrades treats an unknown newer price as adoptable', () => {
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], {});
+  assert.equal(changes.length, 1);
+});
+
+test('planUpgrades plans an explicit pricier target', () => {
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { to: NEWER, prices: PRICEY });
+  assert.equal(changes[0].price.pricier, true);
+});
+
+test('planUpgrades records the endpoint provider on the change price', () => {
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], {
+    prices: PRICE,
+    sources: { [NEWER]: { priceSource: 'endpoint', provider: 'Relace' } },
+  });
+  assert.equal(changes[0].price.provider, 'Relace');
 });
 
 // --- planUpgrades: policy refusals -----------------------------------------
@@ -224,6 +269,39 @@ const pricedCatalogFetch = (pricing: Record<string, { prompt: string; completion
     json: async () => ({ data: Object.entries(pricing).map(([id, p]) => ({ id, pricing: p })) }),
   }));
 
+test('model upgrade without --to leaves a pricier newer model unadopted', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000015', completion: '0.0000006' },
+  });
+  await runModelCommand(['upgrade', '--yes', '--online'], { cwd: dir, env: tempEnv(), fetch, isTTY: false });
+  assert.equal(readConfig(dir).model, general.model);
+});
+
+test('model upgrade reports a pricier newer model as waiting', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000015', completion: '0.0000006' },
+  });
+  const { result } = await runModelCommand(['upgrade', '--dry-run', '--online'], { cwd: dir, env: tempEnv(), fetch, isTTY: false });
+  assert.equal(result.waiting[0]?.reason, 'waiting for price parity');
+});
+
+test('model upgrade --to a pricier id plans it marked pricier', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000015', completion: '0.0000006' },
+  });
+  const { result } = await runModelCommand(['upgrade', '--dry-run', '--online', '--to', NEWER], { cwd: dir, env: tempEnv(), fetch, isTTY: false });
+  assert.equal(result.changes[0]?.price.pricier, true);
+});
+
 test('model upgrade confirmation mentions when a change is pricier', async () => {
   const dir = workdir();
   writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
@@ -233,7 +311,7 @@ test('model upgrade confirmation mentions when a change is pricier', async () =>
     [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
     [NEWER]: { prompt: '0.00000015', completion: '0.0000006' },
   });
-  await runModelCommand(['upgrade', '--online'], { cwd: dir, env: tempEnv(), fetch, isTTY: true, confirm });
+  await runModelCommand(['upgrade', '--online', '--to', NEWER], { cwd: dir, env: tempEnv(), fetch, isTTY: true, confirm });
   assert.match(question, /1 is pricier than the current model/);
 });
 
@@ -341,6 +419,34 @@ test('adoptModelUpdates lists the would-be changes when autoUpgrade is false', a
   writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
   const result = await adoptModelUpdates(dir, { fetch: catalogFetch([NEWER]), env: tempEnv() });
   assert.equal(result.changes.length, 1);
+});
+
+test('adoptModelUpdates applies a price-comparable update when autoUpgrade is true', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto', autoUpgrade: true } });
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000004', completion: '0.00000009' },
+  });
+  await adoptModelUpdates(dir, { fetch, env: tempEnv() });
+  assert.equal(readConfig(dir).model, NEWER);
+});
+
+test('adoptModelUpdates reports a pricier update as waiting', async () => {
+  const dir = workdir();
+  writeConfig(dir, {
+    provider: 'openrouter',
+    model: general.model,
+    models: { routing: 'auto', autoUpgrade: true, roster: [{ id: 'deep-reasoning', model: reasoning.model }] },
+  });
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000004', completion: '0.00000009' },
+    [reasoning.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER_REASONING]: { prompt: '0.00000015', completion: '0.0000006' },
+  });
+  const result = await adoptModelUpdates(dir, { fetch, env: tempEnv() });
+  assert.deepEqual(result.waiting, [{ profile: 'deep-reasoning', to: NEWER_REASONING, inputRatio: 4.55, outputRatio: 7.5, reason: 'waiting for price parity' }]);
 });
 
 // --- model list -------------------------------------------------------------
