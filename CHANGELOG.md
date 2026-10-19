@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Companion skill installs build their argv per companion: scientific-process
+  and elicitation now receive `--target claude|codex|both` (never `all`) and
+  `--dir <cwd>` for project scope, so `junior update` installs their skills
+  (#52, #53).
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
