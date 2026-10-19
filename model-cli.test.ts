@@ -76,7 +76,25 @@ const catalogFetch = (ids: string[]) => (async () => ({ status: 200, json: async
 
 test('planUpgrades turns a deepseek update into a default change to its latest id', () => {
   const { changes } = planUpgrades(modelConfig(), [generalUpdate()], {});
-  assert.deepEqual(changes, [{ profile: 'general', from: general.model, to: NEWER, isDefault: true }]);
+  assert.deepEqual(changes, [{ profile: 'general', from: general.model, to: NEWER, isDefault: true, price: { from: null, to: null, inputRatio: null, outputRatio: null, pricier: null } }]);
+});
+
+test('planUpgrades marks a change pricier when the target costs more per token', () => {
+  const prices = {
+    [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+    [NEWER]: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
+  };
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices });
+  assert.equal(changes[0].price.pricier, true);
+});
+
+test('planUpgrades reports the input ratio for a change when prices are given', () => {
+  const prices = {
+    [general.model]: { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null },
+    [NEWER]: { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: null },
+  };
+  const { changes } = planUpgrades(modelConfig(), [generalUpdate()], { prices });
+  assert.equal(changes[0].price.inputRatio, 4.55);
 });
 
 test('planUpgrades reports the update as a plan with no refusals', () => {
@@ -198,6 +216,35 @@ test('model upgrade --dry-run reports the planned changes', async () => {
   writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
   const { result } = await runModelCommand(['upgrade', '--dry-run', '--online'], upgradeDeps(dir));
   assert.equal(result.applied, false);
+});
+
+const pricedCatalogFetch = (pricing: Record<string, { prompt: string; completion: string }>) =>
+  (async () => ({
+    status: 200,
+    json: async () => ({ data: Object.entries(pricing).map(([id, p]) => ({ id, pricing: p })) }),
+  }));
+
+test('model upgrade confirmation mentions when a change is pricier', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  let question = '';
+  const confirm = async (q: string) => { question = q; return false; };
+  const fetch = pricedCatalogFetch({
+    [general.model]: { prompt: '0.000000033', completion: '0.00000008' },
+    [NEWER]: { prompt: '0.00000015', completion: '0.0000006' },
+  });
+  await runModelCommand(['upgrade', '--online'], { cwd: dir, env: tempEnv(), fetch, isTTY: true, confirm });
+  assert.match(question, /1 is pricier than the current model/);
+});
+
+// --- model status -----------------------------------------------------------
+
+test('model status reports the price of each roster profile', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const fetch = pricedCatalogFetch({ [general.model]: { prompt: '0.000000033', completion: '0.00000008' } });
+  const { result } = await runModelCommand(['status', '--online'], { cwd: dir, env: tempEnv(), fetch, isTTY: false });
+  assert.deepEqual(result.roster[0].price, { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: null });
 });
 
 // --- adoptModelUpdates ------------------------------------------------------

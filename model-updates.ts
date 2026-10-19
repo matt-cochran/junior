@@ -12,11 +12,27 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { isCommodity } from './model-policy.ts';
-import { fetchOnlineCatalog, newerInLineage, readLocalCatalog, type CatalogFetch } from './models.ts';
+import { fetchOnlineCatalog, newerInLineage, readLocalCatalog, type CatalogFetch, type ModelPrice } from './models.ts';
 import type { ModelConfig } from './roster.ts';
 
 export type ModelUpdate = { profile:string; provider:string; current:string; newer:string[]; latest:string|null; isDefault:boolean };
-export type CatalogIds = { ids:string[]; catalog:'online'|'local'|null };
+export type CatalogIds = { ids:string[]; catalog:'online'|'local'|null; prices:Record<string,ModelPrice> };
+
+/** The price change from one model to another. `pricier` is true when either
+ * input or output per-M price rises, false when neither does, and null when
+ * either price is unknown. Ratios are `to`/`from` rounded to two decimals and
+ * null when unknown or when `from` is zero. */
+export function priceDelta(from:ModelPrice|null, to:ModelPrice|null):{ from:ModelPrice|null; to:ModelPrice|null; inputRatio:number|null; outputRatio:number|null; pricier:boolean|null } {
+ const ratio=(fromValue:number, toValue:number):number|null => fromValue === 0 ? null : Math.round((toValue / fromValue) * 100) / 100;
+ if (!from || !to) return { from, to, inputRatio:null, outputRatio:null, pricier:null };
+ return {
+  from,
+  to,
+  inputRatio:ratio(from.inputPerM, to.inputPerM),
+  outputRatio:ratio(from.outputPerM, to.outputPerM),
+  pricier:to.inputPerM > from.inputPerM || to.outputPerM > from.outputPerM,
+ };
+}
 
 /** How long a cached online catalog may back offline update detection. */
 export const MODEL_CATALOG_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -34,20 +50,33 @@ export function modelCatalogCachePath(env:NodeJS.ProcessEnv = process.env):strin
 
 /** Best-effort atomic write of the online catalog; a failure never breaks the
  * caller, which already has the ids in hand. */
-function writeCatalogCache(path:string, ids:string[]):void {
+function writeCatalogCache(path:string, ids:string[], prices:Record<string,ModelPrice>):void {
  if (!isAbsolute(path)) return; // no resolvable home: never cache into the cwd
  try {
   mkdirSync(dirname(path),{ recursive:true });
   const tmp=`${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ checkedAt:Date.now(), ids }));
+  writeFileSync(tmp, JSON.stringify({ checkedAt:Date.now(), ids, prices }));
   renameSync(tmp, path);
  } catch { /* the online catalog still serves this run */ }
+}
+
+/** True for a well-formed `ModelPrice`, used to sanitize a cached catalog. */
+function isModelPrice(v:any):v is ModelPrice {
+ return Boolean(v) && typeof v === 'object' && typeof v.inputPerM === 'number' && typeof v.outputPerM === 'number' && (v.cacheReadPerM === null || typeof v.cacheReadPerM === 'number');
+}
+
+/** Keep only well-formed priced ids from an untrusted price record. */
+function sanitizePrices(prices:any):Record<string,ModelPrice> {
+ if (!prices || typeof prices !== 'object' || Array.isArray(prices)) return {};
+ const out:Record<string,ModelPrice>={};
+ for (const [id, price] of Object.entries(prices)) if (isModelPrice(price)) out[id]=price;
+ return out;
 }
 
 /** Read the cached online catalog when it is present, well-formed and no older
  * than `maxAgeMs` (default seven days). Missing, malformed and stale caches
  * all read as null. */
-export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ now?:()=>number; maxAgeMs?:number; cachePath?:string } = {}):{ ids:string[]; checkedAt:number }|null {
+export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ now?:()=>number; maxAgeMs?:number; cachePath?:string } = {}):{ ids:string[]; checkedAt:number; prices:Record<string,ModelPrice> }|null {
  const path=opts.cachePath ?? modelCatalogCachePath(env);
  let text:string;
  try { text=readFileSync(path,'utf8'); } catch { return null; }
@@ -58,7 +87,7 @@ export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ no
  const now=(opts.now ?? Date.now)();
  const maxAgeMs=opts.maxAgeMs ?? MODEL_CATALOG_CACHE_TTL_MS;
  if (now - parsed.checkedAt > maxAgeMs) return null;
- return { ids:parsed.ids, checkedAt:parsed.checkedAt };
+ return { ids:parsed.ids, checkedAt:parsed.checkedAt, prices:sanitizePrices(parsed.prices) };
 }
 
 /** Pi's agent directory, honouring PI_CODING_AGENT_DIR like Pi itself. */
@@ -86,11 +115,15 @@ export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; ti
   const entries=await fetchOnlineCatalog({ fetch:opts.fetch, timeoutMs:opts.timeoutMs });
   if (entries) {
    const ids=entries.map((e)=>e.id);
-   writeCatalogCache(opts.cachePath ?? modelCatalogCachePath(opts.env), ids);
-   return { ids, catalog:'online' };
+   const prices=Object.fromEntries(entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
+   writeCatalogCache(opts.cachePath ?? modelCatalogCachePath(opts.env), ids, prices);
+   return { ids, catalog:'online', prices };
   }
  }
  const local=readLocalCatalog(piAgentDir(opts.env));
- if (local.source) return { ids:local.entries.map((e)=>e.id), catalog:'local' };
- return { ids:[], catalog:null };
+ if (local.source) {
+  const prices=Object.fromEntries(local.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
+  return { ids:local.entries.map((e)=>e.id), catalog:'local', prices };
+ }
+ return { ids:[], catalog:null, prices:{} };
 }

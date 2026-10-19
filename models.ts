@@ -112,8 +112,42 @@ export function newerInLineage(pinned:string, ids:Iterable<string>):string[] {
  return out.map(c=>c.raw);
 }
 
-export type CatalogEntry = { id:string; provider:string; name?:string; created?:number|null };
+export type CatalogEntry = { id:string; provider:string; name?:string; created?:number|null; price?:ModelPrice };
+export type ModelPrice = { inputPerM:number; outputPerM:number; cacheReadPerM:number|null };
 export type LocalCatalog = { entries:CatalogEntry[]; source:'models-store.json'|'models.json'|null; mtimeMs:number|null };
+
+/** Coerce a pricing field that OpenRouter may send as a string or a number. */
+function priceNumber(value:unknown):number|null {
+ if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+ if (typeof value === 'string' && value.trim() !== '') { const n=Number(value); return Number.isFinite(n) ? n : null; }
+ return null;
+}
+
+function roundPrice(n:number):number { return Math.round(n * 1e6) / 1e6; }
+
+/** Build a `ModelPrice` from USD-per-token `pricing` (OpenRouter), scaling to
+ * per-million tokens. A missing or invalid prompt/completion drops the price;
+ * a missing cache read becomes null. */
+function onlinePrice(pricing:any):ModelPrice|undefined {
+ if (!pricing || typeof pricing !== 'object') return undefined;
+ const input=priceNumber(pricing.prompt);
+ const output=priceNumber(pricing.completion);
+ if (input === null || output === null) return undefined;
+ const cacheRead=priceNumber(pricing.input_cache_read);
+ return { inputPerM:roundPrice(input * 1e6), outputPerM:roundPrice(output * 1e6), cacheReadPerM:cacheRead === null ? null : roundPrice(cacheRead * 1e6) };
+}
+
+/** Build a `ModelPrice` from Pi's `cost` fields, which are already USD per
+ * million tokens. A missing or invalid input/output drops the price; a missing
+ * cache read becomes null. */
+function localPrice(cost:any):ModelPrice|undefined {
+ if (!cost || typeof cost !== 'object') return undefined;
+ const input=priceNumber(cost.input);
+ const output=priceNumber(cost.output);
+ if (input === null || output === null) return undefined;
+ const cacheRead=priceNumber(cost.cacheRead);
+ return { inputPerM:roundPrice(input), outputPerM:roundPrice(output), cacheReadPerM:cacheRead === null ? null : roundPrice(cacheRead) };
+}
 
 type LocalCatalogFs = {
  existsSync(p:string):boolean;
@@ -138,6 +172,8 @@ function parseCatalogFile(text:string, shape:'store'|'custom', provider:string):
   const entry:CatalogEntry={ id:m.id, provider };
   if (typeof m.name === 'string') entry.name=m.name;
   if (typeof m.created === 'number' || m.created === null) entry.created=m.created ?? null;
+  const price=localPrice(m.cost);
+  if (price) entry.price=price;
   out.push(entry);
  }
  return out;
@@ -192,6 +228,8 @@ export async function fetchOnlineCatalog(opts:{ fetch?:CatalogFetch; timeoutMs?:
    const entry:CatalogEntry={ id:m.id, provider:'openrouter' };
    if (typeof m.name === 'string') entry.name=m.name;
    if (typeof m.created === 'number' || m.created === null) entry.created=m.created ?? null;
+   const price=onlinePrice(m.pricing);
+   if (price) entry.price=price;
    out.push(entry);
   }
   return out;

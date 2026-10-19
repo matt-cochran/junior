@@ -20,10 +20,10 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyModel } from './model-policy.ts';
 import { loadModelConfig, type ModelConfig } from './roster.ts';
-import { catalogIds, modelUpdates, type ModelUpdate } from './model-updates.ts';
-import type { CatalogFetch } from './models.ts';
+import { catalogIds, modelUpdates, priceDelta, type ModelUpdate } from './model-updates.ts';
+import type { CatalogFetch, ModelPrice } from './models.ts';
 
-export type ModelChange = { profile: string; from: string; to: string; isDefault: boolean };
+export type ModelChange = { profile: string; from: string; to: string; isDefault: boolean; price: ReturnType<typeof priceDelta> };
 export type ModelRefusal = { profile: string; to: string; reason: string };
 export type UpgradePlan = { changes: ModelChange[]; refused: ModelRefusal[] };
 
@@ -48,10 +48,12 @@ const DEFAULT_CONFIG_FS: ConfigFs = {
  * policy, so a frontier or unknown target is refused with the verdict reason
  * and never appears in `changes`.
  */
-export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: { profile?: string; to?: string } = {}): UpgradePlan {
+export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: { profile?: string; to?: string; prices?: Record<string, ModelPrice> } = {}): UpgradePlan {
   const changes: ModelChange[] = [];
   const refused: ModelRefusal[] = [];
   const byProfile = new Map(updates.map((u) => [u.profile, u]));
+  const prices = opts.prices ?? {};
+  const delta = (from: string, to: string) => priceDelta(prices[from] ?? null, prices[to] ?? null);
 
   if (opts.to !== undefined) {
     const profile = opts.profile ?? config.defaultProfile;
@@ -65,7 +67,7 @@ export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: 
       refused.push({ profile, to: opts.to, reason: verdict.reason });
       return { changes, refused };
     }
-    changes.push({ profile, from: update.current, to: opts.to, isDefault: profile === config.defaultProfile || update.isDefault });
+    changes.push({ profile, from: update.current, to: opts.to, isDefault: profile === config.defaultProfile || update.isDefault, price: delta(update.current, opts.to) });
     return { changes, refused };
   }
 
@@ -80,7 +82,7 @@ export function planUpgrades(config: ModelConfig, updates: ModelUpdate[], opts: 
   }
   for (const update of selected) {
     if (!update.latest) continue;
-    changes.push({ profile: update.profile, from: update.current, to: update.latest, isDefault: update.isDefault });
+    changes.push({ profile: update.profile, from: update.current, to: update.latest, isDefault: update.isDefault, price: delta(update.current, update.latest) });
   }
   return { changes, refused };
 }
@@ -199,10 +201,10 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
       policy: config.pinnedVerdict,
       routing: config.routing,
       autoUpgrade: config.autoUpgrade,
-      roster: config.roster.map((p) => ({ profile: p.id, provider: p.provider, model: p.model, default: p.id === config.defaultProfile })),
+      roster: config.roster.map((p) => ({ profile: p.id, provider: p.provider, model: p.model, default: p.id === config.defaultProfile, price: catalog.prices[p.model] ?? null })),
       rejected: config.rejected,
       catalog: catalog.catalog,
-      updates,
+      updates: updates.map((u) => ({ ...u, price: priceDelta(catalog.prices[u.current] ?? null, u.latest ? catalog.prices[u.latest] ?? null : null) })),
     };
     return { exitCode: 0, result };
   }
@@ -228,9 +230,10 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
     const config = loadModelConfig(cwd);
     const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env });
     const updates = modelUpdates(config, catalog.ids);
-    const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'] });
+    const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices });
     const dryRun = parsed.flags.has('--dry-run');
-    const result: any = { changes: plan.changes, refused: plan.refused, applied: false };
+    const pricier = plan.changes.filter((change) => change.price.pricier === true);
+    const result: any = { changes: plan.changes, refused: plan.refused, applied: false, pricier };
 
     let refusedToWrite = false;
     if (plan.changes.length > 0 && !dryRun) {
@@ -239,7 +242,8 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
         result.applied = true;
       } else if (isTTY) {
         const confirm = deps.confirm ?? defaultConfirm;
-        const ok = await confirm(`Apply ${plan.changes.length} model change(s) to delivery.config.json?`);
+        const suffix = pricier.length > 0 ? ` ${pricier.length} ${pricier.length === 1 ? 'is' : 'are'} pricier than the current model.` : '';
+        const ok = await confirm(`Apply ${plan.changes.length} model change(s) to delivery.config.json?${suffix}`);
         if (ok) {
           applyUpgrades(cwd, plan.changes);
           result.applied = true;

@@ -269,3 +269,41 @@ test('fetchOnlineCatalog returns null when a fetch ignores the abort signal past
   const fetch: CatalogFetch = () => new Promise(() => {});
   assert.equal(await fetchOnlineCatalog({ fetch, timeoutMs: 5 }), null);
 });
+
+// --- model pricing ---------------------------------------------------------
+
+test('fetchOnlineCatalog converts per-token pricing to per-million prices', async () => {
+  const fetch = fetchReturning(200, {
+    data: [{ id: 'a/b', pricing: { prompt: '0.000000033', completion: '0.00000008', input_cache_read: '0.00000001' } }],
+  });
+  const [entry] = (await fetchOnlineCatalog({ fetch }))!;
+  assert.deepEqual(entry.price, { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: 0.01 });
+});
+
+test('fetchOnlineCatalog reports a null cache-read price when OpenRouter omits it', async () => {
+  const fetch = fetchReturning(200, { data: [{ id: 'a/b', pricing: { prompt: '0.000000033', completion: '0.00000008' } }] });
+  const [entry] = (await fetchOnlineCatalog({ fetch }))!;
+  assert.equal(entry.price?.cacheReadPerM, null);
+});
+
+test('fetchOnlineCatalog omits the price when the prompt price is missing', async () => {
+  const fetch = fetchReturning(200, { data: [{ id: 'a/b', pricing: { completion: '0.00000008' } }] });
+  const [entry] = (await fetchOnlineCatalog({ fetch }))!;
+  assert.equal(entry.price, undefined);
+});
+
+test('readLocalCatalog converts Pi cost fields to per-million prices', () => {
+  const fs = fakeFs({
+    '/agent/models-store.json': JSON.stringify({ openrouter: { models: [{ id: 'a/b', cost: { input: 0.033, output: 0.08, cacheRead: 0.01 } }] } }),
+  });
+  const [entry] = readLocalCatalog('/agent', 'openrouter', fs).entries;
+  assert.deepEqual(entry.price, { inputPerM: 0.033, outputPerM: 0.08, cacheReadPerM: 0.01 });
+});
+
+test('readLocalCatalog reports a null cache-read price when the cost omits cacheRead', () => {
+  const fs = fakeFs({
+    '/agent/models-store.json': JSON.stringify({ openrouter: { models: [{ id: 'a/b', cost: { input: 1, output: 2 } }] } }),
+  });
+  const [entry] = readLocalCatalog('/agent', 'openrouter', fs).entries;
+  assert.equal(entry.price?.cacheReadPerM, null);
+});
