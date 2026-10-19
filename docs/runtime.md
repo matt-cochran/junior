@@ -23,6 +23,13 @@ Each result carries a `receipt` parsed from authoritative assistant
   0 only as placeholders. An empty cost object does not count as a report.
 - `malformed`/`malformedLines`: JSONL records that failed to parse.
 - `settled`: whether Pi emitted `agent_settled`.
+- `finalStopReason`/`stopReasons`: the stop reason of the last assistant message
+  and the ordered list for the segment. `outputLimited` is true when that final
+  stop is the per-message output limit (`length`), and `errored` is true only
+  when it is a genuine `error`.
+- `recoveredErrors`: the count of `error`/`length` stops that a later assistant
+  message followed. A recovered transient error does not fail the run; only a
+  final `error` does.
 - `responseIds`: unique provider response IDs Pi preserved on assistant
   `message_end` records (`message.responseId`). A live OpenRouter run populates
   these as `gen-...` generation IDs. They are the handle for obtaining
@@ -32,8 +39,9 @@ Each result carries a `receipt` parsed from authoritative assistant
 Receipt metadata is Pi-reported, not independent upstream attestation. Mock runs
 set `receipt.source` to `mock`, observe no model, and never claim an observed
 model. A live run is `ready_for_review` only when Pi exits zero, the stream
-parses, at least one assistant message ended, no assistant message ended
-`error`/`aborted`, Pi reported `agent_settled`, and all independent checks pass.
+parses, at least one assistant message ended, the final assistant message did
+not stop `error`/`aborted` (a transient error followed by a later message is
+recovered), Pi reported `agent_settled`, and all independent checks pass.
 Otherwise the run reports `receipt_failed` even when Pi exits zero; a settled
 stream with no assistant messages is rejected.
 
@@ -154,7 +162,11 @@ keeps artifacts in the source `.delivery/` directory. The result records
 `sourceCwd`, `executionCwd` and `isolation`. The worktree is **retained for
 review**; the worker never merges, removes, commits or pushes it. Review the
 isolated checkout and integrate it yourself (use `git worktree list` to find it,
-then inspect/diff or merge it manually).
+then inspect/diff or merge it manually). In `worktree` mode the worker prompt
+names only the execution checkout, and the Pi guard extension (`pi-guard.ts`)
+blocks `write`/`edit` tools whose resolved path leaves the configured write
+roots and blocks a `bash` command that reaches into the source checkout outside
+`.delivery`. This is a tool-boundary guard, not an OS sandbox.
 
 `isolation=worktree` refuses to start when the source checkout is dirty
 (staged, unstaged or nonignored untracked changes) and reports an actionable
@@ -332,6 +344,36 @@ States: `running`, `quiet`, `tool_timed_out`, `deadline_exceeded`, `failed`,
 
 Malformed or partial event lines, and child startup errors, still produce an
 inspectable failed result with the artifacts on disk.
+
+#### Output cap, breakdown and continuation
+The retained worker output is line-atomic: the cap is measured in bytes, but the
+last accepted line that fits is kept whole rather than sliced mid-record, so
+`events.jsonl` stays strict JSONL. Once the cap is reached the process group is
+stopped exactly like a wall-deadline breach, `outputTruncated` is set, and the
+run is reported as `output_truncated`; its checks never run because the receipt
+is incomplete. A non-blank final line cut by the cap is reported as
+`truncatedTail`, not as a malformed line.
+
+Each stream result also carries an `outputBreakdown` (`rawBytes`, `retainedBytes`,
+`byType` per event type, and the largest tool results). The compact handoff
+projects it as `output` (`rawBytes`, `retainedBytes`, `largestToolResults`), or
+`null` when the result has no stream breakdown (mock or legacy runs).
+
+A segment that hits the accumulation cap or a final per-message output limit
+(`stopReason: length`, surfaced as `receipt.outputLimited`) starts an automatic
+continuation when `execution.continuations` (0-3, default 1) allows and at least
+the remaining budget threshold is available. Junior writes a bounded
+`checkpoint-<n>.md` (git status and diff-stat, the acceptance list and the
+segment's last assistant text), starts a fresh Pi session in the same checkout
+with the checkpoint appended to the prompt, and writes `events-<n>.jsonl` and
+`worker-<n>.log` for the new segment. The output-limit continuation adds an
+instruction to work incrementally. The receipt reflects the final segment, while
+token usage, cost and provider response ids sum every segment. If the
+continuation budget is exhausted and the final segment still stopped at the
+per-message limit, the run records `unresolved` as
+`Model hit its per-message output limit (stopReason length); split the deliverable
+or reduce per-message work.` A segment stopped at the accumulation cap that
+cannot continue still ends the run as `output_truncated`.
 
 #### Repair lineage
 There are **no automatic retries or restarts**. A repair is an explicit task

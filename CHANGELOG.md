@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- Commodity-only executor policy (`model-policy.ts`): Junior executes only on a
+  recognized commodity/open-weight vendor (DeepSeek, Moonshot, Z.ai, Qwen,
+  MiniMax, Meta Llama), treats `openai/gpt-oss*` as commodity, and refuses a
+  frontier vendor (Anthropic, OpenAI, Google, xAI and their floating aliases) or
+  an unrecognized vendor or direct host before any spend. A refusal carries
+  `workerError` `frontier_model_refused` or `unknown_model_refused` with a
+  `modelPolicy` record; Jev (typesafe) is a classifier only.
+- Commodity model roster and routing (`roster.ts`, `worker.ts`): built-in
+  profiles `general` (default, DeepSeek V4.1 Flash), `deep-reasoning`,
+  `long-horizon`, `agentic-tools` and `fast-mechanical`; `delivery.config.json`
+  `models.routing` (`off|shadow|auto`, default `auto`), `models.roster`
+  overrides/additions/disabled and `models.autoUpgrade`.
+- Model visibility: a `junior doctor` model section (pin, policy, roster
+  availability, newer releases, warnings); the cached startup update check lists
+  `model:<id>` entries and suggests `junior model upgrade`.
+- `junior model status|list|upgrade` (`model-cli.ts`) with `--online`,
+  `--vendor`, `--profile`, `--to`, `--dry-run`, `--yes` and TTY confirmation.
+- Junior-ready planning (`plan-junior.ts`): `junior plan check <plan.json>
+  [--max-hours N]` and `junior plan contracts <plan.json> --out <dir>`;
+  `plan-from-spec` emits `metadata.junior`.
+
+### Changed
+
+- Jev asks one `model_profile` choice in the readiness call when the contract
+  names no model and is not a resume; `auto` applies a non-default profile at
+  confidence >= 0.6. Receipts record `requested.source` and
+  `result.modelRouting`, and the compact handoff exposes `model.routing` and
+  `model.policy`.
+- Model precedence is task model > routed profile > project pin > built-in.
+- `junior update` adopts newer same-lineage commodity models when
+  `models.autoUpgrade` is true and otherwise reports them as `result.models`.
+
+### Fixed
+
+- Output cap retains whole lines and reports an `outputBreakdown` in the compact
+  `output` (#44).
+- A final per-message output-limit stop (`stopReason: length`) continues in a
+  fresh segment and is named in the receipt, and a recovered transient error no
+  longer fails a run (#46).
+- Analysis workflows judge acceptance with a report outline and excerpt and
+  settle no-other-file-changed criteria deterministically (#49).
+
 ## [0.5.1] - 2026-10-16
 
 ### Fixed

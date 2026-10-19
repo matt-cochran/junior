@@ -32,7 +32,7 @@ const fixture=(over:any={})=>{
  const bin=withPiDir(cwd);
  const agent=writeAgent(cwd,{catalog:over.catalog});
  if (over.config) writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify(over.config));
- return {cwd,agent,bin,deps:setupDeps(cwd,{env:{PATH:bin,PI_CODING_AGENT_DIR:agent},execPath:join(bin,'node'),...(over.deps||{})})};
+ return {cwd,agent,bin,deps:setupDeps(cwd,{env:{PATH:bin,HOME:cwd,PI_CODING_AGENT_DIR:agent},execPath:join(bin,'node'),...(over.deps||{})})};
 };
 
 // --- pinned identity --------------------------------------------------------
@@ -126,6 +126,41 @@ test('doctor marks a roster profile absent from the local catalog as unavailable
 test('doctor warns about a rejected roster entry naming its id and reason', () => {
  const {deps}=fixture({config:{models:{roster:[{id:'broken',provider:'',model:'',strengths:''}]}}});
  assert.match(doctor(deps).warnings.join(' '),/broken.*needs provider, model and strengths/);
+});
+
+// --- online catalog cache ---------------------------------------------------
+
+/** Write the cached online catalog under the fixture's HOME so doctor reads it
+ * without any network access. */
+const writeOnlineCache=(cwd:string,ids:string[],checkedAt=Date.now())=>{mkdirSync(join(cwd,'.junior'),{recursive:true});writeFileSync(join(cwd,'.junior','model-catalog.json'),JSON.stringify({checkedAt,ids}));};
+
+test('doctor reports the pinned model available when only the cached online catalog lists it', () => {
+ const {cwd,deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
+ writeOnlineCache(cwd,[NEWER]);
+ assert.equal(doctor(deps).model.available,true);
+});
+
+test('doctor reports source online-cache for a pin listed only in the cached online catalog', () => {
+ const {cwd,deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
+ writeOnlineCache(cwd,[NEWER]);
+ assert.equal(doctor(deps).model.source,'online-cache');
+});
+
+test('doctor ok stays true for a pin listed only in a fresh cached online catalog', () => {
+ const {cwd,deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
+ writeOnlineCache(cwd,[NEWER]);
+ assert.equal(doctor(deps).ok,true);
+});
+
+test('doctor roster availability counts models listed only in the cached online catalog', () => {
+ const {cwd,deps}=fixture({catalog:{openrouter:{models:[{id:MODEL}]}}});
+ writeOnlineCache(cwd,['deepseek/deepseek-v4-pro-0813']);
+ assert.equal(doctor(deps).model.roster?.find((p)=>p.profile==='deep-reasoning')?.available,true);
+});
+
+test('doctor still reports a pin unavailable when neither catalog lists it', () => {
+ const {deps}=fixture({config:{provider:'openrouter',model:NEWER},catalog:{openrouter:{models:[]}}});
+ assert.equal(doctor(deps).model.available,false);
 });
 
 // --- offline guarantee ------------------------------------------------------

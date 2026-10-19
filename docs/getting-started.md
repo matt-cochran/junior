@@ -45,10 +45,26 @@ malformed results print a concise error and exit nonzero.
 
 Live execution: install/authenticate Pi with OpenRouter (`init`, then `pi` and
 `/login`/`/model`), then opt in to the paid smoke test by omitting `--mock`.
-Tasks declare id, deliverable, cwd, acceptance, checks (command + args), optional
-constraints, model and `jev`. Provider/model come from `delivery.config.json`
-when present, otherwise they default to openrouter and
-deepseek/deepseek-v4.1-flash; an explicit task value always wins.
+Tasks declare id, deliverable, cwd, acceptance, checks (command + args),
+optional constraints and `jev`. Provider/model come from `delivery.config.json`
+(or the built-in commodity roster) and Jev routing; a contract should normally
+omit `provider`/`model` so routing applies. An explicit task value always wins,
+and an explicit model must be a commodity/open-weight model (see
+[Models](models.md)). Plan a cpm plan into bounded handoffs with `junior plan
+check` and `junior plan contracts` (see [Planning for Junior](planning.md)).
+
+```json
+{
+  "id": "unique-deliverable-id",
+  "deliverable": "A precise artifact and resulting behavior",
+  "cwd": "/absolute/target/checkout",
+  "workflow": "test_first",
+  "acceptance": ["Observable behavior to verify"],
+  "checks": [{ "command": "node", "args": ["--test", "relevant.test.ts"] }],
+  "isolation": "worktree",
+  "jev": { "mode": "shadow" }
+}
+```
 
 
 ### Setup

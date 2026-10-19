@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { catalogIds, modelUpdates, piAgentDir } from './model-updates.ts';
+import { catalogIds, modelUpdates, piAgentDir, readCachedCatalog } from './model-updates.ts';
 
 const config=(roster:any[]):any=>({ provider:'openrouter', model:roster[0].model, source:'builtin', path:null, routing:'auto', autoUpgrade:false,
  defaultProfile:roster[0].id, roster, rejected:[], pinnedVerdict:{ class:'commodity' } });
@@ -43,7 +43,8 @@ test('piAgentDir honours PI_CODING_AGENT_DIR',()=>{
 
 test('catalogIds uses the online catalog when it is requested and reachable',async()=>{
  const fetch=async()=>({ status:200, json:async()=>({ data:[{ id:'deepseek/deepseek-v4.1-flash-1017' }] }) });
- const r=await catalogIds({ online:true, fetch, env:{ PI_CODING_AGENT_DIR:agentDir([]) } });
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const r=await catalogIds({ online:true, fetch, cachePath, env:{ PI_CODING_AGENT_DIR:agentDir([]) } });
  assert.equal(r.catalog,'online');
 });
 
@@ -56,4 +57,23 @@ test('catalogIds falls back to the local Pi catalog when the online catalog is u
 test('catalogIds reports no catalog when neither source is available',async()=>{
  const r=await catalogIds({ env:{ PI_CODING_AGENT_DIR:mkdtempSync(join(tmpdir(),'junior-mu-')) } });
  assert.equal(r.catalog,null);
+});
+
+test('catalogIds writes the online catalog ids to the cache path',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const fetch=async()=>({ status:200, json:async()=>({ data:[{ id:'deepseek/deepseek-v4.1-flash-1017' }] }) });
+ await catalogIds({ online:true, fetch, cachePath });
+ assert.deepEqual(JSON.parse(readFileSync(cachePath,'utf8')).ids,['deepseek/deepseek-v4.1-flash-1017']);
+});
+
+test('readCachedCatalog returns null for a cache older than maxAgeMs',()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ writeFileSync(cachePath,JSON.stringify({ checkedAt:1000, ids:['deepseek/deepseek-v4.1-flash-1017'] }));
+ assert.equal(readCachedCatalog({}, { cachePath, now:()=>1000+8*24*60*60*1000 }),null);
+});
+
+test('readCachedCatalog returns null for a malformed cache file',()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ writeFileSync(cachePath,'{ not json');
+ assert.equal(readCachedCatalog({}, { cachePath }),null);
 });

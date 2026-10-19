@@ -28,7 +28,7 @@ import { inspectReadiness, type ReadinessResult } from './readiness.ts';
 import { classifyModel } from './model-policy.ts';
 import { readLocalCatalog } from './models.ts';
 import { loadModelConfig, type ModelConfig } from './roster.ts';
-import { modelUpdates } from './model-updates.ts';
+import { modelUpdates, readCachedCatalog } from './model-updates.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -349,6 +349,12 @@ export function checkModel(provider:string, id:string, deps:SetupDeps = {}):Mode
   } catch { /* report missing below */ }
  }
  const storeStatus:ModelStoreStatus = catalogModels > 0 ? 'populated' : (storePresent || customPresent) ? 'empty' : 'missing';
+ // The online catalog cache is OpenRouter-only and read-only here, so doctor
+ // stays offline while recognising a pin that Pi's local catalog still lacks.
+ if (provider === 'openrouter') {
+  const cached=readCachedCatalog(deps.env ?? process.env);
+  if (cached?.ids.includes(id)) return { provider, id, available:true, source:'online-cache', storeStatus };
+ }
  const note=storeStatus === 'populated'
   ? `Model ${provider}/${id} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`
   : `The ${provider} model catalog is missing or empty; it fills after a credential is present. Start \`pi\` and run \`/login\` first, then refresh with \`pi update --models\`.`;
@@ -458,7 +464,9 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const credentials=checkCredentials(provider,deps);
  const config=loadModelConfig(cwd);
  const catalog=readLocalCatalog(agentDir(deps));
- const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalog.entries.map((e)=>e.id)) };
+ const cached=readCachedCatalog(env);
+ const catalogIdList=[...new Set([...catalog.entries.map((e)=>e.id), ...(cached?.ids ?? [])])];
+ const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalogIdList) };
  const policyOk=model.policy ? model.policy.class === 'commodity' : true;
 
  const remediation:string[]=[];
