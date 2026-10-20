@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES, callHop } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -833,6 +833,98 @@ test("a 0.3.0 store call reports the command's own result", () => {
   const req = writeJson(path.join(dir, "req.json"), commandRequest({ kind: "dimension.register", dimensionId: "code" }));
   const out = cliJson(runCli(["call", "--full", hop, "crossmatrix", req]));
   assert.equal(out.result.op, "dimension.register");
+});
+
+// --- scientific-process per-process session prelude ---------------------------
+//
+// Scientific Process keeps its open session in process memory, and `tools call`
+// spawns a fresh server per call, so the wrapper opens the session in the same
+// process before any method other than session.open. The session id comes from
+// the request arguments (default "default") and is stripped from the forwarded
+// method, which the 0.2.0 server scopes to the already-open session.
+
+function scientificHop(dir, log) {
+  return initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix"),
+      "scientific-process": toolEntry("scientific-process", {
+        env: { FAKE_MCP_MODE: "scientific-process", FAKE_SCIENTIFIC_LOG: log },
+      }),
+    },
+  });
+}
+
+function readScientificCalls(log) {
+  return fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test("a scientific-process state.get that needs an open session succeeds", async () => {
+  const dir = tmpdir();
+  const hop = scientificHop(dir, path.join(dir, "calls.log"));
+  const out = await callHop(hop, "scientific-process", {
+    tool: "state.get",
+    arguments: { session_id: "s1" },
+  });
+  assert.equal(out.ok, true);
+});
+
+test("a scientific-process prelude is not recorded as separate evidence", async () => {
+  const dir = tmpdir();
+  const hop = scientificHop(dir, path.join(dir, "calls.log"));
+  await callHop(hop, "scientific-process", { tool: "state.get", arguments: { session_id: "s1" } });
+  const manifest = JSON.parse(fs.readFileSync(hop, "utf8"));
+  assert.equal(manifest.evidence.length, 1);
+});
+
+test("a scientific-process prelude opens the caller's session before the method", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "calls.log");
+  const hop = scientificHop(dir, log);
+  await callHop(hop, "scientific-process", { tool: "state.get", arguments: { session_id: "s1" } });
+  assert.deepEqual(
+    readScientificCalls(log).map((call) => call.name),
+    ["session.open", "state.get"],
+  );
+});
+
+test("a scientific-process prelude defaults the session id when the request omits it", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "calls.log");
+  const hop = scientificHop(dir, log);
+  await callHop(hop, "scientific-process", { tool: "state.get", arguments: {} });
+  const open = readScientificCalls(log).find((call) => call.name === "session.open");
+  assert.equal(open.arguments.session_id, "default");
+});
+
+test("a scientific-process read is forwarded without the wrapper session id", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "calls.log");
+  const hop = scientificHop(dir, log);
+  await callHop(hop, "scientific-process", { tool: "state.get", arguments: { session_id: "s1", limit: 5 } });
+  const call = readScientificCalls(log).find((entry) => entry.name === "state.get");
+  assert.deepEqual(call.arguments, { limit: 5 });
+});
+
+test("a scientific-process command is forwarded without the wrapper session id", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "calls.log");
+  const hop = scientificHop(dir, log);
+  await callHop(hop, "scientific-process", {
+    tool: "append",
+    arguments: { session_id: "s1", observation: { id: "o1" } },
+  });
+  const call = readScientificCalls(log).find((entry) => entry.name === "append");
+  assert.deepEqual(call.arguments, { observation: { id: "o1" } });
+});
+
+test("an explicit scientific-process session.open is forwarded exactly once", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "calls.log");
+  const hop = scientificHop(dir, log);
+  await callHop(hop, "scientific-process", { tool: "session.open", arguments: { session_id: "s1" } });
+  assert.equal(readScientificCalls(log).length, 1);
 });
 
 // --- cpm review key derivation -----------------------------------------------
