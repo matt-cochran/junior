@@ -14,6 +14,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { acquireLock, createDetachedWorktree } from './isolation.ts';
+import { applyHandoff } from './apply.ts';
 import {
   directoryUsage,
   juniorWorktreeMeta,
@@ -53,6 +54,17 @@ const addWorktree = (repo: any, id: string, stamp: string) => {
 
 const registeredPaths = (repo: any) =>
   spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo.dir, encoding: 'utf8' }).stdout;
+
+/** Create a Junior-shaped worktree, make it ready, apply it to the source with
+ * the public apply API, and leave the applied record in the artifact dir. */
+const appliedWorktree = (repo: any, id: string, stamp: string) => {
+  const { art, worktree } = addWorktree(repo, id, stamp);
+  writeFileSync(join(worktree, 'change.txt'), 'applied\n');
+  writeFileSync(join(art, 'result.json'), JSON.stringify({ id, status: 'ready_for_review', isolation: { mode: 'worktree', worktree } }));
+  const result = applyHandoff(join(art, 'result.json'), { cwd: repo.dir });
+  if (!result.applied) throw Error(`apply failed: ${result.error}`);
+  return { art, worktree };
+};
 
 // --- duration parsing -------------------------------------------------------
 
@@ -118,6 +130,44 @@ test('prune skips a worktree with unreviewed changes', () => {
   writeFileSync(join(worktree, 'unreviewed.txt'), 'x');
   pruneWorktrees(repo.dir, {});
   assert.equal(existsSync(worktree), true);
+});
+
+// --- applied worktrees ------------------------------------------------------
+
+test('prune removes a worktree whose applied patch is unchanged', () => {
+  const repo = gitRepo();
+  const { worktree } = appliedWorktree(repo, 'd1', '1000');
+  pruneWorktrees(repo.dir, {});
+  assert.equal(existsSync(worktree), false);
+});
+
+test('prune --dry-run reports an applied worktree as a removal candidate', () => {
+  const repo = gitRepo();
+  const { worktree } = appliedWorktree(repo, 'd1', '1000');
+  assert.deepEqual(pruneWorktrees(repo.dir, { dryRun: true }).removed, [worktree]);
+});
+
+test('prune preserves the applied record after removing the worktree', () => {
+  const repo = gitRepo();
+  const { art } = appliedWorktree(repo, 'd1', '1000');
+  pruneWorktrees(repo.dir, {});
+  assert.equal(existsSync(join(art, 'applied.json')), true);
+});
+
+test('prune skips a worktree edited after apply', () => {
+  const repo = gitRepo();
+  const { worktree } = appliedWorktree(repo, 'd1', '1000');
+  writeFileSync(join(worktree, 'change.txt'), 'edited after apply\n');
+  const result = pruneWorktrees(repo.dir, {});
+  assert.ok(result.skipped.some((s) => s.path === worktree && /unreviewed/i.test(s.reason)));
+});
+
+test('prune skips a dirty worktree without an applied record', () => {
+  const repo = gitRepo();
+  const { worktree } = addWorktree(repo, 'd1', '1000');
+  writeFileSync(join(worktree, 'unreviewed.txt'), 'x');
+  const result = pruneWorktrees(repo.dir, {});
+  assert.ok(result.skipped.some((s) => s.path === worktree && /unreviewed/i.test(s.reason)));
 });
 
 test('prune reports a worktree with unreviewed changes as skipped', () => {

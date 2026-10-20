@@ -13,6 +13,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 export type ApplyHandoffResult = {
  applied: boolean;
@@ -67,6 +68,32 @@ function conflictsFrom(output: string): string[] {
 const fail = (dryRun: boolean, artifactDir: string, files: string[], error: string, conflicts?: string[]): ApplyHandoffResult =>
  ({ applied: false, dryRun, files, artifactDir, ...(conflicts && conflicts.length ? { conflicts } : {}), error });
 
+export type WorktreePatch = { patch?: string; files?: string[]; sha256?: string; error?: string };
+
+/** Build the full change set of a worktree (tracked edits plus untracked files
+ * made visible with `git add -A -N`) as a binary patch, and hash the exact
+ * bytes. This is the single definition of "the patch apply would apply";
+ * `pruneWorktrees` reuses it to recognize an applied-but-still-dirty worktree. */
+export function buildWorktreePatch(worktree: string): WorktreePatch {
+ const intent = runGit(worktree, ['add', '-A', '-N']);
+ if (intent.error || intent.status !== 0) {
+  return { error: `could not enumerate worktree changes: ${intent.error || intent.stderr.trim() || `git add exited ${intent.status}`}` };
+ }
+ const patch = runGit(worktree, ['diff', '--binary', 'HEAD']);
+ if (patch.error || patch.status !== 0) {
+  return { error: `could not build the handoff diff: ${patch.error || patch.stderr.trim() || `git diff exited ${patch.status}`}` };
+ }
+ const files = runGit(worktree, ['diff', '--name-only', 'HEAD']).stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+ const sha256 = hashPatch(patch.stdout);
+ return { patch: patch.stdout, files, sha256 };
+}
+
+/** SHA-256 of an already-built patch. Kept separate so callers can hash the
+ * exact bytes they applied. */
+export function hashPatch(patch: string): string {
+ return createHash('sha256').update(patch).digest('hex');
+}
+
 /** Apply a reviewed handoff to `opts.cwd`. Refuses on a non-ready status
  * (unless `force`), a non-worktree or missing worktree, or a worktree HEAD
  * that is not an ancestor of the source HEAD. `dryRun` only checks the patch.
@@ -100,18 +127,12 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
  if (ancestor.status !== 0) return fail(dryRun, artifactDir, [], `worktree HEAD ${wtHead.stdout.trim()} is not an ancestor of source HEAD ${srcHead.stdout.trim()}`);
 
  // Stage intent-to-add for untracked files so `git diff HEAD` carries them.
- const intent = runGit(worktree, ['add', '-A', '-N']);
- if (intent.error || intent.status !== 0) {
-  return fail(dryRun, artifactDir, [], `could not enumerate worktree changes: ${intent.error || intent.stderr.trim() || `git add exited ${intent.status}`}`);
- }
- const patch = runGit(worktree, ['diff', '--binary', 'HEAD']);
- if (patch.error || patch.status !== 0) {
-  return fail(dryRun, artifactDir, [], `could not build the handoff diff: ${patch.error || patch.stderr.trim() || `git diff exited ${patch.status}`}`);
- }
- const files = runGit(worktree, ['diff', '--name-only', 'HEAD']).stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+ const built = buildWorktreePatch(worktree);
+ if (built.error) return fail(dryRun, artifactDir, [], built.error);
+ const { patch, files, sha256 } = built as { patch: string; files: string[]; sha256: string };
 
  if (dryRun) {
-  const check = runGit(cwd, ['apply', '--check'], patch.stdout);
+  const check = runGit(cwd, ['apply', '--check'], patch);
   if (check.error || check.status !== 0) {
    const conflicts = conflictsFrom(`${check.stdout}\n${check.stderr}`);
    return fail(true, artifactDir, files, `handoff does not apply cleanly: ${conflicts.length ? conflicts.join(', ') : check.stderr.trim() || check.error || 'git apply --check failed'}`, conflicts);
@@ -125,7 +146,7 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
  for (const f of files) {
   try { backups.set(f, readFileSync(join(cwd, f))); } catch { /* absent before apply */ }
  }
- const applied = runGit(cwd, ['apply', '-3'], patch.stdout);
+ const applied = runGit(cwd, ['apply', '-3'], patch);
  if (applied.error || applied.status !== 0) {
   for (const f of files) {
    const p = join(cwd, f);
@@ -136,5 +157,11 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
   const conflicts = conflictsFrom(`${applied.stdout}\n${applied.stderr}`);
   return fail(false, artifactDir, files, `handoff apply failed: ${conflicts.length ? conflicts.join(', ') : applied.stderr.trim() || applied.error || `git apply exited ${applied.status}`}`, conflicts);
  }
+ // Record the applied patch so `junior prune` can recognize this worktree as
+ // reviewed once its diff still hashes to the same bytes. Best effort: a write
+ // failure never turns a successful apply into a reported failure.
+ try {
+  writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString(), patchSha256: sha256 }, null, 2) + '\n');
+ } catch { /* the applied record is best effort */ }
  return { applied: true, dryRun: false, files, artifactDir };
 }

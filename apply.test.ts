@@ -10,7 +10,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyHandoff } from './apply.ts';
@@ -138,4 +139,35 @@ test('applyHandoff leaves the source working tree unchanged when the diff confli
   git(source, ['commit', '-qm', 'source-change']);
   applyHandoff(resultPath, { cwd: source });
   assert.equal(readFileSync(join(source, 'base.txt'), 'utf8'), 'source\n');
+});
+
+// --- applied record ----------------------------------------------------------
+
+test('applyHandoff records the hash of the patch it applied', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  const { art, wt, resultPath } = makeRun(source, 'handoff-record', '1000', (work) => writeFileSync(join(work, 'base.txt'), 'worktree\n'));
+  applyHandoff(resultPath, { cwd: source });
+  git(wt, ['add', '-A', '-N']);
+  const patch = git(wt, ['diff', '--binary', 'HEAD']).stdout;
+  const expected = createHash('sha256').update(patch).digest('hex');
+  const record = JSON.parse(readFileSync(join(art, 'applied.json'), 'utf8'));
+  assert.equal(record.patchSha256, expected);
+});
+
+test('applyHandoff records when it applied', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  const { art, resultPath } = makeRun(source, 'handoff-stamp', '1000', (work) => writeFileSync(join(work, 'base.txt'), 'worktree\n'));
+  applyHandoff(resultPath, { cwd: source });
+  const record = JSON.parse(readFileSync(join(art, 'applied.json'), 'utf8'));
+  assert.ok(!Number.isNaN(Date.parse(record.appliedAt)));
+});
+
+test('applyHandoff dry run writes no applied record', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  const { art, resultPath } = makeRun(source, 'handoff-dry-record', '1000', (work) => writeFileSync(join(work, 'base.txt'), 'worktree\n'));
+  applyHandoff(resultPath, { cwd: source, dryRun: true });
+  assert.equal(existsSync(join(art, 'applied.json')), false);
 });
