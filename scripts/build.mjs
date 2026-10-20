@@ -96,7 +96,7 @@ export function transpile(file, source) {
 
 /** Build `dist/` from the production sources. Returns the emitted file list. */
 export function build() {
-  const files = ['junior.ts','mcp.ts','auth.ts','matrix.ts','matrix-init.ts','matrix-sync.ts','playbooks.ts','codemap.ts','report-issue.ts','worker.ts','pi-guard.ts','setup.ts','readiness.ts','harness.ts','runtime.ts','evidence.ts','isolation.ts','retention.ts','billing.ts','handoff.ts','hop-context.ts','installer.ts','cli-entry.ts','companions.ts','self-update.ts','update-check.ts','matrix-autopilot.ts','jtbd-bridge.ts','state-sync.ts','tool-routing.ts','context-graph.ts','matrix-analyze.ts','link-qc.ts','adr.ts','prepare.ts','spec-bridge.ts','clarify.ts','model-policy.ts','models.ts','roster.ts','model-updates.ts','model-cli.ts','plan-junior.ts','apply.ts','plan-handoff.ts','tools/tools.ts'].map((file) => join(root, file));
+  const files = ['junior.ts','mcp.ts','auth.ts','matrix.ts','matrix-init.ts','matrix-sync.ts','playbooks.ts','codemap.ts','report-issue.ts','worker.ts','pi-guard.ts','setup.ts','readiness.ts','harness.ts','runtime.ts','evidence.ts','isolation.ts','retention.ts','billing.ts','handoff.ts','hop-context.ts','installer.ts','cli-entry.ts','companions.ts','self-update.ts','update-check.ts','matrix-autopilot.ts','jtbd-bridge.ts','state-sync.ts','tool-routing.ts','context-graph.ts','matrix-analyze.ts','link-qc.ts','adr.ts','prepare.ts','spec-bridge.ts','clarify.ts','model-policy.ts','models.ts','roster.ts','model-updates.ts','model-cli.ts','plan-junior.ts','apply.ts','plan-handoff.ts','companion-shapes.ts','routes.ts','tools/tools.ts'].map((file) => join(root, file));
   rmSync(outDir, { recursive: true, force: true });
   const emitted = [];
   for (const file of files) {

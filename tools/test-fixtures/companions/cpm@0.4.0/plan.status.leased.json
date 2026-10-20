@@ -1,0 +1,131 @@
+{
+  "plan_id": "plan_FIXTURE",
+  "deliverables": [
+    [
+      "d-api",
+      {
+        "status": "in_progress"
+      },
+      1,
+      0,
+      0
+    ],
+    [
+      "d-docs",
+      {
+        "status": "pending"
+      },
+      0,
+      0,
+      0
+    ],
+    [
+      "ms",
+      {
+        "status": "pending"
+      },
+      0,
+      0,
+      0
+    ]
+  ],
+  "critical_path": [
+    "__start__",
+    "d-api",
+    "d-docs",
+    "ms",
+    "__finish__"
+  ],
+  "critical_path_hours": 3,
+  "locks_held": [
+    {
+      "plan_id": "plan_FIXTURE",
+      "deliverable_id": "d-api",
+      "caller_id": "fixture-worker",
+      "acquired_at": "2026-01-01T00:00:00Z",
+      "expires_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "critical_ids": [
+    "d-api",
+    "d-docs",
+    "ms"
+  ],
+  "schedule": [
+    {
+      "id": "__start__",
+      "es": 0,
+      "ef": 0,
+      "ls": 0,
+      "lf": 0,
+      "float": 0,
+      "critical": true,
+      "synthetic": true
+    },
+    {
+      "id": "d-api",
+      "es": 0,
+      "ef": 2,
+      "ls": 0,
+      "lf": 2,
+      "float": 0,
+      "critical": true,
+      "synthetic": false
+    },
+    {
+      "id": "d-docs",
+      "es": 2,
+      "ef": 3,
+      "ls": 2,
+      "lf": 3,
+      "float": 0,
+      "critical": true,
+      "synthetic": false
+    },
+    {
+      "id": "ms",
+      "es": 3,
+      "ef": 3,
+      "ls": 3,
+      "lf": 3,
+      "float": 0,
+      "critical": true,
+      "synthetic": false
+    },
+    {
+      "id": "__finish__",
+      "es": 3,
+      "ef": 3,
+      "ls": 3,
+      "lf": 3,
+      "float": 0,
+      "critical": true,
+      "synthetic": true
+    }
+  ],
+  "ready": [],
+  "plan_complete": false,
+  "milestones": [
+    {
+      "id": "ms",
+      "critical_path": [
+        "__start__",
+        "d-api",
+        "d-docs",
+        "ms"
+      ],
+      "hours": 3,
+      "complete": false
+    }
+  ],
+  "name": "fixture",
+  "variant": "main",
+  "selected": true,
+  "archived": false,
+  "active_plan": null,
+  "definition_drift": false,
+  "baseline": {
+    "baseline_number": 1,
+    "as_of": "2026-01-01T00:00:00Z"
+  }
+}

@@ -263,7 +263,7 @@ test('junior handoff --answers continues the clarification loop', () => {
   initHop(hop, {
     managedStatePath: join(dir, 'no-managed-tools.json'),
     tools: {
-      elicitation: { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: 'echo' }, sourceVersion: '1.0.0', sourceSha: '0'.repeat(64) },
+      elicitation: { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: 'elicitation' }, sourceVersion: '1.0.0', sourceSha: '0'.repeat(64) },
     },
   });
   const taskPath = join(dir, 'task.json');

@@ -18,6 +18,11 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDirectEntry } from './cli-entry.ts';
+import {
+  fmecaFailureModes as readFmecaFailureModes,
+  planDeliverables,
+  strictItems,
+} from './companion-shapes.ts';
 import { playbookDimensions } from './playbooks.ts';
 import { callHop } from './tools/tools.ts';
 
@@ -127,6 +132,14 @@ function stableHash(value: unknown): string {
 
 function normalizePath(input: string): string {
   return input.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/** Derive a plan id from a `.cpm-planner/plans/<name>/<variant>.json` path. */
+function planIdFromPath(filePath: string): string {
+  const normalized = normalizePath(filePath);
+  const match = normalized.match(/\.cpm-planner\/plans\/([^/]+)\/([^/]+)\.json$/);
+  if (match) return `${match[1]}/${match[2]}`;
+  return path.posix.basename(normalized).replace(/\.json$/, '');
 }
 
 function parentOf(p: string): string {
@@ -399,18 +412,9 @@ export function jevitateJourneys(files: MatrixFile[]): MatrixDimension {
 // CPM
 // ---------------------------------------------------------------------------
 
-function deliverablesFrom(planGraph: unknown): any[] {
-  if (Array.isArray(planGraph)) return planGraph;
-  if (isRecord(planGraph)) {
-    if (Array.isArray(planGraph.deliverables)) return planGraph.deliverables;
-    if (isRecord(planGraph.plan) && Array.isArray(planGraph.plan.deliverables)) return planGraph.plan.deliverables;
-  }
-  return [];
-}
-
 /** Implementation assets from a CPM plan graph. */
 export function cpmDeliverables(planGraph: unknown, planId: string): MatrixDimension {
-  const members: MatrixMember[] = deliverablesFrom(planGraph).map((deliverable) => {
+  const members: MatrixMember[] = strictItems(planDeliverables(planGraph), 'cpm', 'plan.get', planGraph).map((deliverable) => {
     const id = String(deliverable.id ?? deliverable.deliverableId ?? deliverable.slug ?? '');
     const sourceRef = `cpm:${planId}/${id}`;
     return {
@@ -438,16 +442,6 @@ export function cpmDeliverables(planGraph: unknown, planId: string): MatrixDimen
 // FMECA
 // ---------------------------------------------------------------------------
 
-function failureModesFrom(state: unknown): any[] {
-  if (Array.isArray(state)) return state;
-  if (isRecord(state)) {
-    for (const key of ['failure_modes', 'failureModes', 'modes', 'risks']) {
-      if (Array.isArray(state[key])) return state[key];
-    }
-  }
-  return [];
-}
-
 function numeric(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -464,7 +458,7 @@ function criticalityOf(mode: any): number | null {
 
 /** Failure modes from a FMECA session state; deterministic numeric criticality. */
 export function fmecaFailureModes(state: unknown, sessionId: string): MatrixDimension {
-  const members: MatrixMember[] = failureModesFrom(state).map((mode) => {
+  const members: MatrixMember[] = strictItems(readFmecaFailureModes(state), 'fmeca', 'state.get', state).map((mode) => {
     const id = String(mode.id ?? mode.failure_mode_id ?? mode.name ?? '');
     const member: MatrixMember = {
       id: `fm:${id}`,
@@ -610,6 +604,7 @@ interface MatrixOptions {
   set?: string;
   hop?: string;
   plan?: string;
+  planFile?: string;
   session?: string;
   fmecaSession?: string;
   elicitationSession?: string;
@@ -620,7 +615,7 @@ interface MatrixOptions {
 
 const SOURCES = ['code', 'tests', 'jevitate', 'cpm', 'fmeca', 'playbooks', 'state'];
 const VALUE_FLAGS = [
-  '--source', '--dir', '--out', '--set', '--hop', '--plan', '--session', '--model',
+  '--source', '--dir', '--out', '--set', '--hop', '--plan', '--plan-file', '--session', '--model',
   '--fmeca-session', '--elicitation-session', '--sp-session', '--jevitate-results',
 ];
 
@@ -628,10 +623,10 @@ export const MATRIX_USAGE = [
   'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
   '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
   '       [--set <dimensionSetId, default project-<source>>]',
-  '       [--hop <hop.json> --plan <plan_id>] [--hop <hop.json> --session <fmeca session_id>]',
+  '       [--hop <hop.json> --plan <plan_id> | --plan-file <path>] [--hop <hop.json> --session <fmeca session_id>]',
   'Usage: junior matrix init [--dir <project>]',
   'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
-  '       [--dir <project>] [--plan <plan_id>] [--session <fmeca session_id>]',
+  '       [--dir <project>] [--plan <plan_id> | --plan-file <path>] [--session <fmeca session_id>]',
   'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source state',
   '       [--plan <plan_id>] [--fmeca-session <id>] [--elicitation-session <id>]',
   '       [--sp-session <id>] [--jevitate-results <dir|file>] [--dir <project>]',
@@ -640,7 +635,7 @@ export const MATRIX_USAGE = [
   'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
   'Usage: junior matrix context --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId> [--max N]',
   'Usage: junior matrix stale --hop <hop.json> --model <modelId> [--dir <project>]',
-  'Usage: junior matrix bootstrap --hop <hop.json> --model <modelId> --dir <project> [--out proposals.json]',
+  'Usage: junior matrix bootstrap --hop <hop.json> --model <modelId> --dir <project> [--out proposals.json] [--plan-file <plan.json>]',
   'Usage: junior matrix confirm --hop <hop.json> --model <modelId> --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
   'Usage: junior matrix autolink --hop <hop.json> --model <modelId> --plan <plan_id>',
 ].join('\n');
@@ -661,6 +656,9 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
   }
   if (sources.length === 0) throw new Error(MATRIX_USAGE);
   for (const source of sources) if (!SOURCES.includes(source)) throw new Error(`Unknown source: ${source}`);
+  if (values['--plan'] !== undefined && values['--plan-file'] !== undefined) {
+    throw new Error('--plan and --plan-file are mutually exclusive');
+  }
   return {
     sources,
     dir: values['--dir'] ?? process.cwd(),
@@ -668,6 +666,7 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     set: values['--set'],
     hop: values['--hop'],
     plan: values['--plan'],
+    planFile: values['--plan-file'],
     session: values['--session'],
     fmecaSession: values['--fmeca-session'],
     elicitationSession: values['--elicitation-session'],
@@ -692,9 +691,10 @@ interface CodemapOptions {
   only?: string[];
   exclude?: string[];
   plan?: string;
+  planFile?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan', '--plan-file'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
 const CODEMAP_CONFIDENCES = ['high', 'medium', 'low'];
 const CODEMAP_LIST_FLAGS = ['--only', '--exclude']; // comma-separated id lists
@@ -736,6 +736,7 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     only: lists['--only'],
     exclude: lists['--exclude'],
     plan: values['--plan'],
+    planFile: values['--plan-file'],
   };
 }
 
@@ -792,10 +793,27 @@ async function dimensionsForSource(options: MatrixOptions, source: string): Prom
     return [jevitateJobs(jobsJson), jevitatePersonas(jobsJson), jevitateJourneys(files)];
   }
   if (source === 'cpm') {
-    if (!options.hop || !options.plan) throw new Error('cpm export requires --hop <hop.json> and --plan <plan_id>');
-    const outcome = await callHop(options.hop, 'cpm', { tool: 'plan.get', arguments: { plan_id: options.plan } });
+    if (options.planFile === undefined && (!options.hop || !options.plan)) {
+      throw new Error('cpm export requires --hop <hop.json> and --plan <plan_id>, or --plan-file <path>');
+    }
+    if (options.planFile !== undefined) {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(options.planFile, 'utf8');
+      } catch {
+        throw new Error(`cpm --plan-file could not read ${options.planFile}`);
+      }
+      let planJson: unknown;
+      try {
+        planJson = JSON.parse(raw);
+      } catch {
+        throw new Error(`cpm --plan-file is not valid JSON: ${options.planFile}`);
+      }
+      return [cpmDeliverables(planJson, planIdFromPath(options.planFile))];
+    }
+    const outcome = await callHop(options.hop!, 'cpm', { tool: 'plan.get', arguments: { plan_id: options.plan! } });
     if (!outcome.ok) throw new Error(`cpm plan.get failed: ${outcome.error?.message ?? outcome.note ?? 'unknown error'}`);
-    return [cpmDeliverables(outcome.result, options.plan)];
+    return [cpmDeliverables(outcome.result, options.plan!)];
   }
   if (!options.hop || !options.session) throw new Error('fmeca export requires --hop <hop.json> and --session <fmeca session_id>');
   const outcome = await callHop(options.hop, 'fmeca', { tool: 'state.get', arguments: { session_id: options.session } });
@@ -893,11 +911,14 @@ export async function main(argv: string[]): Promise<number> {
       const autopilot = await import('./matrix-autopilot.ts');
       if (subcommand === 'bootstrap') {
         const dir = options.dir ?? process.cwd();
+        // --plan-file reads the plan graph offline instead of the hop's plan.get snapshot.
+        const planGraph = options.planFile === undefined ? undefined : JSON.parse(fs.readFileSync(options.planFile, 'utf8'));
         const result = await autopilot.bootstrap({
           hopPath: options.hop,
           modelId: options.model,
           dir,
           out: options.out ?? path.join(dir, 'proposals.json'),
+          ...(planGraph === undefined ? {} : { deps: { planGraph } }),
         });
         process.stdout.write(
           `${JSON.stringify({ out: result.out, count: result.proposals.length, ...result.counts })}\n`,

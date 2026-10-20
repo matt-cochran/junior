@@ -31,7 +31,7 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  apply   <id|result.json> [--dry-run] [--force]   apply a reviewed handoff to this checkout',
   '  validate <task.json>; status <result.json> [--full]   validate a contract or print a receipt',
-  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>',
+  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
@@ -85,11 +85,11 @@ const COMMANDS: Record<string, CommandSpec> = {
  setup: { flags: ['--yes', '--dry-run'], valueFlags: ['--harness', '--hop'], min: 0, max: 0,
   help: 'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]' },
  update: {
-  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
+  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self', '--with-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
-  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions]',
+  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions] [--with-matrix]',
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
@@ -98,15 +98,17 @@ const COMMANDS: Record<string, CommandSpec> = {
  plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
   help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
  init: {
-  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
+  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill', '--no-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
   help: [
    'Usage: junior init [--no-install] [--no-companions] [--target codex|claude|both|none] [--user] [--project]',
-   '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz]',
+   '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz] [--no-matrix]',
   ].join('\n'),
  },
+ routes: { flags: ['--json'], valueFlags: [], min: 0, max: 1,
+  help: 'Usage: junior routes [--json] [<query>]' },
 };
 
 const INIT_TARGETS = ['codex', 'claude', 'both', 'none'];
@@ -210,6 +212,12 @@ async function main(argv: string[]): Promise<void> {
   return;
  }
 
+ if (command === 'routes') {
+  const routes = await import('./routes.ts');
+  process.exitCode = await routes.main(rest);
+  return;
+ }
+
  // Best-effort upgrade notice: must never throw and must never change the exit
  // code. It is skipped entirely for commands where an upgrade is not useful.
  const updateCheck = await import('./update-check.ts');
@@ -276,7 +284,7 @@ async function main(argv: string[]): Promise<void> {
   if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
   const opts:InitOptions = parseInitOptions(rest);
   // `update` adopts newer releases and replaces only skills Junior itself wrote.
-  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
+  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true, command: 'update' });
   // Adopt a newer Junior first, so the new release's own update logic runs.
   let self: any | undefined;
   if (command === 'update') {
@@ -376,13 +384,13 @@ async function main(argv: string[]): Promise<void> {
   let plan: any;
   if (task.plan !== undefined && command !== 'qa') {
    validate(task);
-   const { withPlanLease } = await import('./plan-handoff.ts');
+   const { withPlanLease, isHoldOutcome } = await import('./plan-handoff.ts');
    const { callHop } = await import('./tools/tools.ts');
    const hopPath = resolve(taskCwd, String(task.hopFrom));
    const lease = await withPlanLease(task, () => run(task, mock, deps), {
     callHop: (tool, request) => callHop(hopPath, tool, request),
     deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
-    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: r.status === 'needs_answers' || r.status === 'needs_choice', artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
    });
    if (!lease.plan.leased) {
     console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));
