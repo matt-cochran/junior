@@ -31,7 +31,7 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  apply   <id|result.json> [--dry-run] [--force]   apply a reviewed handoff to this checkout',
   '  validate <task.json>; status <result.json> [--full]   validate a contract or print a receipt',
-  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>',
+  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
   '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
@@ -107,6 +107,8 @@ const COMMANDS: Record<string, CommandSpec> = {
    '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz]',
   ].join('\n'),
  },
+ routes: { flags: ['--json'], valueFlags: [], min: 0, max: 1,
+  help: 'Usage: junior routes [--json] [<query>]' },
 };
 
 const INIT_TARGETS = ['codex', 'claude', 'both', 'none'];
@@ -207,6 +209,12 @@ async function main(argv: string[]): Promise<void> {
   const planCli = await import('./plan-junior.ts');
   const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
   process.exitCode = exitCode;
+  return;
+ }
+
+ if (command === 'routes') {
+  const routes = await import('./routes.ts');
+  process.exitCode = await routes.main(rest);
   return;
  }
 
