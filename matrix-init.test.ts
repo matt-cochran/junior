@@ -8,11 +8,11 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { matrixInit, type MatrixInitDeps } from './matrix-init.ts';
-import { init } from './setup.ts';
+import { init, parseInitOptions } from './setup.ts';
 
 type Call = { command: string; args: string[] };
 
@@ -80,6 +80,129 @@ test('matrix init reports the .crossmatrix store it newly created', () => {
 
 test('init suggests `junior matrix init` when the project has no .crossmatrix store', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'junior-matrix-init-cwd-'));
-  const result = init({ cwd, env: { PATH: '' }, readMounts: () => '' }, { target: 'none', install: false });
+  const deps = initDeps(cwd, { matrixInit: () => { throw new Error('crossmatrix-mcp was not found'); } });
+  const result = init(deps, { target: 'none', install: false });
   assert.ok(result.instructions.some((line) => line.includes('junior matrix init')));
+});
+
+// ---------------------------------------------------------------------------
+// `junior init` / `junior update` project-store lifecycle.
+//
+// Each scenario drives the public `init()` entry point with every filesystem
+// and companion seam injected, so no real `crossmatrix-mcp` is ever spawned and
+// no file outside a temp dir is touched. One observable outcome per test.
+// ---------------------------------------------------------------------------
+
+/** Injected init deps: offline doctor, no skill writes, one matrix seam. */
+function initDeps(cwd: string, over: Record<string, unknown> = {}) {
+  return {
+    cwd,
+    env: { PATH: '', HOME: cwd },
+    execPath: process.execPath,
+    readMounts: () => '',
+    matrixInit: () => ({ created: ['.crossmatrix'] }),
+    ...over,
+  } as any;
+}
+
+function freshDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+const INIT_OPTS = { target: 'none' as const, install: false };
+
+test('init creates the project store when matrixInit reports it created it', () => {
+  const result = init(initDeps(freshDir('junior-init-store-')), INIT_OPTS);
+  assert.equal(result.matrix.created, true);
+});
+
+test('init emits a commit instruction after creating the project store', () => {
+  const result = init(initDeps(freshDir('junior-init-commit-')), INIT_OPTS);
+  assert.ok(result.instructions.some((line) => /commit/i.test(line) && line.includes('.crossmatrix')));
+});
+
+test('init --no-matrix does not create the project store', () => {
+  const result = init(initDeps(freshDir('junior-init-nomatrix-')), { ...INIT_OPTS, matrix: false });
+  assert.equal(result.matrix.created, false);
+});
+
+test('init --no-matrix reports why the store was skipped', () => {
+  const result = init(initDeps(freshDir('junior-init-nomatrix-reason-')), { ...INIT_OPTS, matrix: false });
+  assert.match(String(result.matrix.skipped), /--no-matrix/);
+});
+
+test('init keeps working when matrixInit fails', () => {
+  const deps = initDeps(freshDir('junior-init-matrixfail-'), { matrixInit: () => { throw new Error('crossmatrix-mcp 0.2.1 is too old'); } });
+  assert.equal(init(deps, INIT_OPTS).matrix.created, false);
+});
+
+test('init reports the matrixInit failure reason', () => {
+  const deps = initDeps(freshDir('junior-init-matrixfail-reason-'), { matrixInit: () => { throw new Error('crossmatrix-mcp 0.2.1 is too old'); } });
+  assert.match(String(init(deps, INIT_OPTS).matrix.skipped), /too old/);
+});
+
+test('init keeps the matrix reminder when matrixInit fails', () => {
+  const deps = initDeps(freshDir('junior-init-matrixfail-reminder-'), { matrixInit: () => { throw new Error('no binary'); } });
+  assert.ok(init(deps, INIT_OPTS).instructions.some((line) => line.includes('junior matrix init')));
+});
+
+test('init reports an already-present project store', () => {
+  const cwd = freshDir('junior-init-existing-');
+  mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+  assert.equal(init(initDeps(cwd), INIT_OPTS).matrix.existing, true);
+});
+
+test('init emits no matrix reminder when the project store already exists', () => {
+  const cwd = freshDir('junior-init-existing-noreminder-');
+  mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+  const result = init(initDeps(cwd), INIT_OPTS);
+  assert.ok(!result.instructions.some((line) => line.includes('.crossmatrix')));
+});
+
+test('update without --with-matrix does not create the project store', () => {
+  const result = init(initDeps(freshDir('junior-update-skip-')), { ...INIT_OPTS, command: 'update' });
+  assert.equal(result.matrix.created, false);
+});
+
+test('update without --with-matrix reports the --with-matrix opt-in reason', () => {
+  const result = init(initDeps(freshDir('junior-update-skip-reason-')), { ...INIT_OPTS, command: 'update' });
+  assert.match(String(result.matrix.skipped), /--with-matrix/);
+});
+
+test('update without --with-matrix emits no matrix reminder', () => {
+  const result = init(initDeps(freshDir('junior-update-skip-reminder-')), { ...INIT_OPTS, command: 'update' });
+  assert.ok(!result.instructions.some((line) => line.includes('.crossmatrix')));
+});
+
+test('update --with-matrix creates the project store like init', () => {
+  const result = init(initDeps(freshDir('junior-update-matrix-')), { ...INIT_OPTS, command: 'update', matrix: true });
+  assert.equal(result.matrix.created, true);
+});
+
+test('update --with-matrix emits a commit instruction', () => {
+  const result = init(initDeps(freshDir('junior-update-commit-')), { ...INIT_OPTS, command: 'update', matrix: true });
+  assert.ok(result.instructions.some((line) => /commit/i.test(line) && line.includes('.crossmatrix')));
+});
+
+test('init labels its result command init', () => {
+  const result = init(initDeps(freshDir('junior-init-command-')), { ...INIT_OPTS, matrix: false });
+  assert.equal(result.command, 'init');
+});
+
+test('init --update still labels its result command init', () => {
+  const result = init(initDeps(freshDir('junior-init-update-command-')), { ...INIT_OPTS, matrix: false, update: true });
+  assert.equal(result.command, 'init');
+});
+
+test('init given command update labels its result command update', () => {
+  const result = init(initDeps(freshDir('junior-update-command-')), { ...INIT_OPTS, matrix: false, command: 'update' });
+  assert.equal(result.command, 'update');
+});
+
+test('parseInitOptions parses --no-matrix', () => {
+  assert.equal(parseInitOptions(['--no-matrix']).matrix, false);
+});
+
+test('parseInitOptions parses --with-matrix', () => {
+  assert.equal(parseInitOptions(['--with-matrix']).matrix, true);
 });

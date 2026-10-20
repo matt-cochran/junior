@@ -25,6 +25,12 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { callHop } from './tools/tools.ts';
+import {
+  elicitationClaims,
+  elicitationSignals,
+  elicitationTopSignal,
+  strictItems,
+} from './companion-shapes.ts';
 import { buildPlanFromSpec, type PlanDocument } from './spec-bridge.ts';
 import { briefMdPath, briefPath, renderBrief, validateBrief, type Brief } from './prepare.ts';
 import { seedElicitation } from './jtbd-bridge.ts';
@@ -327,40 +333,29 @@ function claimView(claim: Record<string, any>): ElicitationClaimView {
 
 /** The claims `state.get` returns, keyed by claim id (array or map shape). */
 function stateClaims(state: unknown): Map<string, ElicitationClaimView> {
-  const record = isRecord(state) ? state : {};
-  const raw = record.claims ?? (isRecord(record.state) ? record.state.claims : undefined);
   const map = new Map<string, ElicitationClaimView>();
-  if (Array.isArray(raw)) {
-    for (const claim of raw) {
-      if (!isRecord(claim)) continue;
-      const id = text(claim.id);
-      if (id) map.set(id, claimView(claim));
-    }
-  } else if (isRecord(raw)) {
-    for (const [key, claim] of Object.entries(raw)) {
-      if (!isRecord(claim)) continue;
-      const id = text(claim.id ?? key);
-      if (id) map.set(id, claimView(claim));
-    }
+  for (const claim of strictItems(elicitationClaims(state), 'elicitation', 'state.get', state)) {
+    if (!isRecord(claim)) continue;
+    const id = text(claim.id);
+    if (id) map.set(id, claimView(claim));
   }
   return map;
 }
 
 /** The clarify/remediate signals `state.get` returns, in server order. */
 function stateSignals(state: unknown): Array<Record<string, any>> {
-  const record = isRecord(state) ? state : {};
-  const raw = record.signals ?? (isRecord(record.state) ? record.state.signals : undefined);
-  return asArray(raw).filter(isRecord).filter((signal) => {
-    const kind = text(signal.kind);
-    return kind === 'clarify' || kind === 'remediate';
-  });
+  return strictItems(elicitationSignals(state), 'elicitation', 'state.get', state)
+    .filter(isRecord)
+    .filter((signal) => {
+      const kind = text(signal.kind);
+      return kind === 'clarify' || kind === 'remediate';
+    });
 }
 
 /** The single top signal `question.next` returns, or null. */
 function topSignal(result: unknown): Record<string, any> | null {
-  if (!isRecord(result) || result.done === true) return null;
-  const raw = isRecord(result.question) ? result.question : (isRecord(result.signal) ? result.signal : result);
-  if (!isRecord(raw)) return null;
+  const raw = elicitationTopSignal(result);
+  if (!raw) return null;
   const kind = text(raw.kind);
   if (kind !== 'clarify' && kind !== 'remediate') return null;
   return raw;

@@ -6,6 +6,65 @@
 
 `node junior.ts tools init hop.json config.json`, `tools call hop.json fmeca|cpm|crossmatrix request.json`, and `tools inspect hop.json` expose the same persistent Praxec adapter to managers and workers. See [tool configuration and native state](tools/README.md). Add `hopFrom` to a delivery contract to provide the latest integrity-checked snapshots to both Jev gates and the worker, without loading transcripts. Context is bounded to the latest snapshot per tool. State changes invalidate previous acceptance; workers never accept their own work. Manager acceptance is an explicit library operation, not authentication or a security boundary.
 
+## The three `junior tools call` forms
+
+`junior tools call [<hop.json>] <fmeca|cpm|crossmatrix|scientific-process|elicitation> <request.json|-> [key=value ...] [--full]`
+executes exactly one upstream MCP call, advances the HOP revision and records
+evidence. The hop defaults to `.delivery/setup/hop.json`. Output is the bare tool
+result; a failure prints `{ "ok": false, "error": ... }` and exits `1`; `--full`
+prints the whole envelope. The positional tail after the tool selects one of
+three request forms:
+
+```bash
+# inline <method> key=value ...: a value that parses as JSON is JSON, else a raw string
+junior tools call cpm plan.status plan_id=plan_123
+junior tools call cpm plan.schedule plan_id=plan_123 'capacities={"agent":3}'
+
+# stdin (`-`): the whole request object as JSON
+echo '{"tool":"plan.status","arguments":{"plan_id":"plan_123"}}' \
+  | junior tools call cpm -
+
+# request file: the same object read from a JSON file
+junior tools call cpm request.json
+```
+
+A request object sets `tool`, `arguments`, and the optional `expectedRevision`
+and `timeoutMs`; see [tool configuration and native state](tools/README.md).
+
+## `junior routes`
+
+`junior routes [--json] [<query>]` is the routing manifest for a manager that
+woke up without its conversation. Without a query it prints every route in
+declaration order; with a query it ranks routes by deterministic keyword overlap
+and prints the top three. `--json` prints the same `Route` objects (ranked when a query
+is given). Each route carries `id`, `job`, `triggers`, `first`, `then`, the
+companion `skill` and the `junior tools call` forms, for example
+`junior routes "the request is vague"`.
+
+## Companion skills and MCP names
+
+Companion skills name their upstream MCP servers and tools (`fmeca-mcp`,
+`cpm-planner`, `crossmatrix-mcp`). Do not register those servers just to follow
+a skill: map each named method to `junior tools call <tool> <method>`, which
+spawns the managed binary and returns the bare result. No MCP registration is
+required for the manager loop.
+
+`scientific-process` keeps its session in process memory and the wrapper spawns
+a fresh server per call, so a `scientific-process` call that is not itself
+`session.open` opens the session automatically in the same process before
+forwarding the method (`session_id` defaults to `default`). A companion-skill
+call therefore needs no explicit `session.open`.
+
+## Companion response fixtures
+
+Junior reads companion responses through one shape adapter
+(`companion-shapes.ts`), tested against recorded responses under
+`tools/test-fixtures/companions/<tool>@<version>/` and indexed by
+`tools/test-fixtures/companions/index.json`. Regenerate them with
+`node scripts/capture-companion-fixtures.mjs`. `junior doctor` warns when an
+installed companion version has no recorded fixtures, so a new response shape
+surfaces before it is parsed in production.
+
 #### Reporting tool bugs upstream (`junior report-issue`)
 When a companion or managed tool misbehaves, draft an issue for its own
 repository instead of working around it silently:

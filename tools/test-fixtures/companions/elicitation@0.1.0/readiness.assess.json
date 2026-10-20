@@ -1,0 +1,25 @@
+{
+  "blockers": [
+    "COVERAGE: required dimension 'acceptance' lacks a withstood hypothesis",
+    "CONTRADICTION: surviving high-severity contradiction 'ctr:intra:c1+c2' (Claim 'c1' asserts and 'c2' denies the same fact (fixture-elicit-20261020b format).)"
+  ],
+  "dimensions": [
+    {
+      "best_standing": "challenged",
+      "claims": [
+        "c1",
+        "c2"
+      ],
+      "dimension": "acceptance",
+      "required": true,
+      "satisfied": false
+    }
+  ],
+  "gaps": [
+    {
+      "dimension": "acceptance",
+      "suggested_question": "The acceptance hypothesis isn't settled yet — can you confirm or refute it?"
+    }
+  ],
+  "ready": false
+}

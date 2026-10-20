@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "note": "Recorded responses of the managed companion tools, as `junior tools call` prints them (bare result). Captured by hand 2026-10-20 (A2); regenerate with scripts/capture-companion-fixtures.mjs. Ids, lease tokens and timestamps are normalized. crossmatrix is not recorded: Junior passes its query results through rather than parsing response shapes.",
+  "tools": {
+    "cpm": {
+      "version": "0.4.0",
+      "files": [
+        "plan.acquire_cohort.json",
+        "plan.get.json",
+        "plan.mark_status.json",
+        "plan.status.json",
+        "plan.status.leased.json",
+        "plan.status.progress.json"
+      ]
+    },
+    "elicitation": {
+      "version": "0.1.0",
+      "files": [
+        "append.contradiction.json",
+        "append.json",
+        "question.next.json",
+        "readiness.assess.json",
+        "session.open.json",
+        "spec.export.json",
+        "state.get.json"
+      ]
+    },
+    "fmeca": {
+      "version": "0.2.0",
+      "files": [
+        "append.json",
+        "append.mitigation.json",
+        "readiness.assess.json",
+        "report.export.json",
+        "risk.next.json",
+        "session.open.json",
+        "state.get.json"
+      ]
+    },
+    "scientific-process": {
+      "version": "0.2.0",
+      "files": [
+        "append.json",
+        "experiment.next.json",
+        "report.export.json",
+        "session.open.json",
+        "state.get.concluded.json",
+        "state.get.json"
+      ]
+    }
+  }
+}

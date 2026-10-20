@@ -23,6 +23,14 @@ import {
 } from './matrix-sync.ts';
 import type { CodemapEvidence, CodemapSent } from './codemap.ts';
 import { callHop, loadHop } from './tools/tools.ts';
+import {
+  ShapeError,
+  elicitationClaims,
+  fmecaFailureModes,
+  planStatusRows,
+  spHypotheses,
+  strictItems,
+} from './companion-shapes.ts';
 
 const MIN_SOURCE_VERSION = [0, 3, 0] as const;
 
@@ -115,31 +123,11 @@ function normalizeCpmStatus(raw: unknown): string | null {
   return null;
 }
 
-/** `[[id, status], ...]` and `[{ id, status }, ...]` rows from `plan.status`. */
-function statusEntries(status: unknown): Array<{ id: string; raw: unknown }> {
-  const entries: Array<{ id: string; raw: unknown }> = [];
-  const root = isRecord(status) ? status : {};
-  for (const row of firstArray(root, ['deliverables', 'rows', 'statuses'])) {
-    if (Array.isArray(row) && row.length >= 2) {
-      entries.push({ id: text(row[0]), raw: row[1] });
-      continue;
-    }
-    if (isRecord(row)) {
-      entries.push({
-        id: text(row.id ?? row.deliverableId ?? row.deliverable_id ?? row.slug),
-        raw: row.status ?? row.mark_status ?? row.markStatus,
-      });
-    }
-  }
-  return entries;
-}
-
 /** One status observation per deliverable with a recognised cpm status. */
 export function cpmStatusObservations(status: unknown, planId: string): StateObservation[] {
   const observations: StateObservation[] = [];
-  for (const { id, raw } of statusEntries(status)) {
+  for (const { id, status: mark } of strictItems(planStatusRows(status), 'cpm', 'plan.status', status)) {
     if (!id) continue;
-    const mark = isRecord(raw) ? raw.status ?? raw.mark_status ?? raw.markStatus : raw;
     const normalized = normalizeCpmStatus(mark);
     if (!normalized) continue;
     const ref = `cpm:${planId}/${id}`;
@@ -185,16 +173,10 @@ function fmecaTargets(mode: Record<string, any>): string[] {
   return [...tokens];
 }
 
-function failureModesFrom(state: unknown): any[] {
-  if (Array.isArray(state)) return state;
-  if (isRecord(state)) return firstArray(state, ['failure_modes', 'failureModes', 'modes', 'risks']);
-  return [];
-}
-
 /** Link each failure mode to the features/files it names (or to itself). */
 export function fmecaStateObservations(state: unknown, sessionId: string): StateObservation[] {
   const observations: StateObservation[] = [];
-  for (const raw of failureModesFrom(state)) {
+  for (const raw of strictItems(fmecaFailureModes(state), 'fmeca', 'state.get', state)) {
     if (!isRecord(raw)) continue;
     const id = text(raw.id ?? raw.failure_mode_id ?? raw.name);
     if (!id) continue;
@@ -220,12 +202,6 @@ export function fmecaStateObservations(state: unknown, sessionId: string): State
 // elicitation: claim standing -> jevitate outcome/requirement members
 // ---------------------------------------------------------------------------
 
-function claimsFrom(state: unknown): any[] {
-  if (Array.isArray(state)) return state;
-  if (isRecord(state)) return firstArray(state, ['claims', 'claim_standings', 'claimStandings']);
-  return [];
-}
-
 /** Resolve the jevitate member a claim id belongs to. */
 function claimTarget(id: string): string | null {
   const outcome = /^job:([^/]+)\/outcome:.+$/.exec(id);
@@ -240,7 +216,7 @@ function claimTarget(id: string): string | null {
 /** Link each claim's standing to the jevitate member it came from. */
 export function elicitationStateObservations(state: unknown, sessionId: string): StateObservation[] {
   const observations: StateObservation[] = [];
-  for (const raw of claimsFrom(state)) {
+  for (const raw of strictItems(elicitationClaims(state), 'elicitation', 'state.get', state)) {
     if (!isRecord(raw)) continue;
     const id = text(raw.id ?? raw.claim_id ?? raw.claimId);
     const to = id ? claimTarget(id) : null;
@@ -269,12 +245,6 @@ function verdictOf(item: Record<string, any>): string {
   return text(item.verdict ?? item.status ?? item.outcome ?? item.result).trim();
 }
 
-function hypothesesFrom(state: unknown): any[] {
-  if (Array.isArray(state)) return state;
-  if (isRecord(state)) return firstArray(state, ['hypotheses', 'claims']);
-  return [];
-}
-
 function experimentsFrom(state: unknown): any[] {
   if (isRecord(state)) return firstArray(state, ['experiments', 'runs']);
   return [];
@@ -283,7 +253,7 @@ function experimentsFrom(state: unknown): any[] {
 /** Link each hypothesis verdict to the files named in its statement/evidence. */
 export function scientificProcessStateObservations(state: unknown, sessionId: string): StateObservation[] {
   const observations: StateObservation[] = [];
-  const hypotheses = hypothesesFrom(state).filter(isRecord);
+  const hypotheses = strictItems(spHypotheses(state), 'scientific-process', 'state.get', state).filter(isRecord);
   for (const hypothesis of hypotheses) {
     const id = text(hypothesis.id ?? hypothesis.hypothesis_id ?? hypothesis.hypothesisId);
     if (!id) continue;
@@ -518,16 +488,26 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
   const notes: string[] = [];
   const observations: StateObservation[] = [];
 
+  /** Record a ShapeError as a note; any other error still fails the sync. */
+  const mapOrNote = (map: () => StateObservation[]): void => {
+    try {
+      observations.push(...map());
+    } catch (error) {
+      if (!(error instanceof ShapeError)) throw error;
+      notes.push(error.message);
+    }
+  };
+
   if (options.planId) {
     const status = await readState(call, options.hopPath, 'cpm', 'plan.status', { plan_id: options.planId }, notes);
-    if (status !== undefined) observations.push(...cpmStatusObservations(status, options.planId));
+    if (status !== undefined) mapOrNote(() => cpmStatusObservations(status, options.planId!));
   } else {
     notes.push('cpm plan.status skipped: no --plan');
   }
 
   if (options.fmecaSession) {
     const state = await readState(call, options.hopPath, 'fmeca', 'state.get', { session_id: options.fmecaSession }, notes);
-    if (state !== undefined) observations.push(...fmecaStateObservations(state, options.fmecaSession));
+    if (state !== undefined) mapOrNote(() => fmecaStateObservations(state, options.fmecaSession!));
   } else {
     notes.push('fmeca state.get skipped: no --fmeca-session');
   }
@@ -541,7 +521,7 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
       { session_id: options.elicitationSession },
       notes,
     );
-    if (state !== undefined) observations.push(...elicitationStateObservations(state, options.elicitationSession));
+    if (state !== undefined) mapOrNote(() => elicitationStateObservations(state, options.elicitationSession!));
   } else {
     notes.push('elicitation state.get skipped: no --elicitation-session');
   }
@@ -555,7 +535,7 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
       { session_id: options.spSession },
       notes,
     );
-    if (state !== undefined) observations.push(...scientificProcessStateObservations(state, options.spSession));
+    if (state !== undefined) mapOrNote(() => scientificProcessStateObservations(state, options.spSession!));
   } else {
     notes.push('scientific-process state.get skipped: no --sp-session');
   }

@@ -1,0 +1,26 @@
+{
+  "experiments": [
+    {
+      "design": "call plan.get on a synced plan",
+      "hypothesis_id": "h1",
+      "id": "e1",
+      "prediction": "deliverables appear under graph.deliverables"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "h1",
+      "statement": "cpm 0.4.0 plan.get nests deliverables under graph",
+      "status": "Open"
+    }
+  ],
+  "observations": [
+    {
+      "evidence": "fixture cpm.plan.get.json",
+      "experiment_id": "e1",
+      "id": "o1",
+      "result": "graph.deliverables has 3 entries",
+      "supports": true
+    }
+  ]
+}
