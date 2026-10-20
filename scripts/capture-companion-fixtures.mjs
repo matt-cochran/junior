@@ -457,7 +457,9 @@ async function runCapture(outDir, index, installed) {
       const missing = entry.files.filter((file) => !emitted.has(file));
       if (missing.length > 0) {
         throw new Error(`${tool} capture did not produce: ${missing.join(', ')}`);
-      }
+      }      // Record the newly verified version; older versions' fixtures are kept.
+      entry.versions = [...new Set([...(entry.versions ?? [entry.version]), version])];
+      entry.version = version;
     }
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
@@ -499,7 +501,7 @@ export async function main(argv = process.argv.slice(2)) {
   // The committed index names what to record, whatever --out points at.
   const index = loadIndex(DEFAULT_OUT);
   await runCapture(outDir, index, readInstalled());
-  if (resolve(outDir) !== resolve(DEFAULT_OUT)) writeFileSync(join(outDir, 'index.json'), renderJson(index));
+  writeFileSync(join(outDir, 'index.json'), renderJson(index));
   process.stdout.write(`captured ${plannedRecordings(index).length} companion fixtures into ${outDir}\n`);
   return 0;
 }
