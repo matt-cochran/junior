@@ -317,3 +317,31 @@ test('autolink skips a completed deliverable whose evidence result.json is missi
   await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', deps: deps as any });
   assert.equal(sent.filter((r) => r.op.kind === 'observe').length, 0);
 });
+
+test('bootstrap expands an owned directory to the tracked files under it', async () => {
+  const doc = await bootstrap({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    dir: '/project',
+    deps: {
+      loadHop: manifest,
+      planGraph: { deliverables: [{ id: 'd1', owned_files: ['fixtures/'] }] },
+      files: [file('fixtures/a.json'), file('fixtures/b/c.json'), file('src/x.ts')],
+    },
+  });
+  assert.deepEqual(doc.proposals.filter((p) => p.feature === 'cpm:d1').map((p) => p.path).sort(), ['fixtures/a.json', 'fixtures/b/c.json']);
+});
+
+test('bootstrap proposes no link to an owned path that is not tracked', async () => {
+  const doc = await bootstrap({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    dir: '/project',
+    deps: {
+      loadHop: manifest,
+      planGraph: { deliverables: [{ id: 'd1', owned_files: ['src/new.ts'] }] },
+      files: [file('src/x.ts')],
+    },
+  });
+  assert.equal(doc.proposals.filter((p) => p.feature === 'cpm:d1').length, 0);
+});

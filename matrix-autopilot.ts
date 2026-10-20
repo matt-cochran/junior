@@ -173,6 +173,24 @@ function ownedFiles(deliverable: any): string[] {
     .map(normalizePath);
 }
 
+/**
+ * Owned paths as code-dimension members: a tracked file stays, an owned
+ * directory expands to the tracked files under it, and a path that is not
+ * tracked yet is dropped, since confirming a link to it would fail.
+ */
+function trackedOwnedFiles(owned: string[], byPath: Map<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const entry of owned) {
+    if (byPath.has(entry)) {
+      out.push(entry);
+      continue;
+    }
+    const prefix = entry.endsWith('/') ? entry : `${entry}/`;
+    for (const path of byPath.keys()) if (path.startsWith(prefix)) out.push(path);
+  }
+  return out;
+}
+
 function jobsFrom(json: unknown): any[] {
   if (Array.isArray(json)) return json;
   if (isRecord(json) && Array.isArray(json.jobs)) return json.jobs;
@@ -308,7 +326,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
     if (!id) continue;
     const feature = `cpm:${id}`;
     featureRefs.push({ feature, names: [id, deliverableLabel(deliverable)] });
-    for (const file of ownedFiles(deliverable)) {
+    for (const file of trackedOwnedFiles(ownedFiles(deliverable), byPath)) {
       addProposal(proposals, seen, {
         feature,
         path: file,
