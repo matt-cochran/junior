@@ -1,0 +1,13 @@
+{
+  "question": {
+    "claims": [
+      "c1",
+      "c2"
+    ],
+    "code": "resolve_intra_spec_contradiction",
+    "contradiction": "ctr:intra:c1+c2",
+    "kind": "remediate",
+    "message": "Resolve contradiction 'ctr:intra:c1+c2' with a remediation move.",
+    "suggested_question": "Claims 'c1' and 'c2' both describe fixture-elicit-20261020b format but disagree — which holds?"
+  }
+}
