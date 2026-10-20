@@ -27,6 +27,10 @@ import { run } from './worker.ts';
 import { initHop } from './tools/tools.ts';
 
 const FAKE = join(import.meta.dirname, 'tools', 'test-fixtures', 'fake-mcp.mjs');
+const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
+function elicitFixture(name: string): unknown {
+  return JSON.parse(readFileSync(join(fixturesRoot, 'elicitation@0.1.0', `${name}.json`), 'utf8'));
+}
 
 // --- fixtures --------------------------------------------------------------
 
@@ -80,6 +84,17 @@ function fakeHop(options: FakeOptions = {}) {
     return ok({ ok: true });
   };
   return { callHop, calls };
+}
+
+/** A hop serving recorded elicitation results verbatim for `question.next`/`state.get`. */
+function fixtureHop(question: unknown, state: unknown) {
+  const callHop = async (_hop: string, tool: string, request: any) => {
+    const ok = (result: unknown) => ({ ok: true, tool, toolName: request.tool, result });
+    if (request.tool === 'question.next') return ok(question);
+    if (request.tool === 'state.get') return ok(state);
+    return ok({ ok: true });
+  };
+  return { callHop };
 }
 
 /** The real `coverage_gap` signal captured from a live elicitation session. */
@@ -290,6 +305,35 @@ test("question.next's signal is ranked before the other signals", async () => {
   const { callHop } = fakeHop({ topSignal: top, signals: [other, top] });
   const batch = await startClarification(taskFixture(workdir()), { dir: workdir(), hopPath: 'hop.json', callHop: callHop as any });
   assert.equal(batch.questions[0].question, 'Question 9?');
+});
+
+// --- recorded elicitation fixtures ------------------------------------------
+
+test('questionBatch ranks the signal from the elicitation question.next fixture first', async () => {
+  const { callHop } = fixtureHop(elicitFixture('question.next'), elicitFixture('state.get'));
+  const batch = await questionBatch('fixture-elicit-20261020b', { callHop: callHop as any });
+  assert.match(batch.questions[0].why, /resolve_intra_spec_contradiction/);
+});
+
+test('questionBatch includes the clarify signal from the elicitation state.get fixture', async () => {
+  const { callHop } = fixtureHop(elicitFixture('question.next'), elicitFixture('state.get'));
+  const batch = await questionBatch('fixture-elicit-20261020b', { callHop: callHop as any });
+  assert.ok(batch.questions.some((question) => question.why.includes('coverage_gap')));
+});
+
+test('questionBatch resolves an open hypothesis to the claim value from the elicitation state.get fixture', async () => {
+  const top = { question: { claims: ['c1'], code: 'open_hypothesis', kind: 'clarify', message: 'open', suggested_question: 'Confirm?' } };
+  const { callHop } = fixtureHop(top, elicitFixture('state.get'));
+  const batch = await questionBatch('fixture-elicit-20261020b', { callHop: callHop as any });
+  assert.equal(batch.questions[0].question, 'Confirm or refute: csv (context: export)');
+});
+
+test('questionBatch rejects an unrecognized elicitation state.get response', async () => {
+  const { callHop } = fixtureHop({ question: null }, { unexpected: [] });
+  await assert.rejects(
+    () => questionBatch('fixture-elicit-20261020b', { callHop: callHop as any }),
+    /Unrecognized elicitation\.state\.get response; top-level keys: unexpected/,
+  );
 });
 
 // --- discover report evidence ---------------------------------------------

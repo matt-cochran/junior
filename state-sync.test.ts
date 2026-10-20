@@ -7,6 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   cpmStatusObservations,
   elicitationStateObservations,
@@ -16,6 +18,15 @@ import {
   syncState,
   type StateObservation,
 } from './state-sync.ts';
+
+const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
+function fixture(dir: string, name: string): unknown {
+  return JSON.parse(readFileSync(join(fixturesRoot, dir, `${name}.json`), 'utf8'));
+}
+const cpmFixture = (name: string) => fixture('cpm@0.4.0', name);
+const fmecaFixture = (name: string) => fixture('fmeca@0.2.0', name);
+const elicitFixture = (name: string) => fixture('elicitation@0.1.0', name);
+const spFixture = (name: string) => fixture('scientific-process@0.2.0', name);
 
 function observe(op: any) {
   return op.op ?? op;
@@ -174,6 +185,42 @@ test('syncState skips a tool whose read throws instead of failing', async () => 
   h.thrown.add('cpm');
   const result = await syncState(options({ planId: 'plan1', deps: { callHop: h.callHop, loadHop: h.loadHop } }));
   assert.ok(result.notes.some((note) => note.includes('cpm')));
+});
+
+// --- recorded companion fixtures -------------------------------------------
+
+test('syncState mirrors the cpm plan.status.progress fixture as a completed deliverable observation', async () => {
+  const h = harness({ cpm: cpmFixture('plan.status.progress') });
+  const result = await syncState(
+    options({ planId: 'plan_FIXTURE', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
+  );
+  assert.deepEqual(result.observations.map((o) => [o.from, o.observation]), [['cpm:d-api', 'complete']]);
+});
+
+test('fmecaStateObservations links the fmeca state.get fixture failure mode to its member', () => {
+  const observations = fmecaStateObservations(fmecaFixture('state.get'), 'fixture-fmeca-20261020');
+  assert.deepEqual(observations.map((o) => [o.from, o.to]), [['fm:fm1', 'fm:fm1']]);
+});
+
+test('syncState reads the elicitation state.get fixture without an unrecognized-shape note', async () => {
+  const h = harness({ elicitation: elicitFixture('state.get') });
+  const result = await syncState(
+    options({ elicitationSession: 'fixture-elicit-20261020b', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
+  );
+  assert.equal(result.notes.some((note) => note.includes('Unrecognized')), false);
+});
+
+test('scientificProcessStateObservations records the concluded fixture hypothesis verdict', () => {
+  const observations = scientificProcessStateObservations(spFixture('state.get.concluded'), 'fixture-sp');
+  assert.deepEqual(observations.map((o) => [o.from, o.observation]), [['hypothesis:h1', 'Supported']]);
+});
+
+test('syncState notes an unrecognized cpm plan.status response with its tool, method and keys', async () => {
+  const h = harness({ cpm: { unexpected: [] } });
+  const result = await syncState(
+    options({ planId: 'plan1', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
+  );
+  assert.ok(result.notes.includes('Unrecognized cpm.plan.status response; top-level keys: unexpected'));
 });
 
 test('syncState never copies an env value into an observation excerpt', async () => {
