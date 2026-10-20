@@ -2,6 +2,49 @@
 
 [Back to the README](../README.md)
 
+## Planning with Junior
+
+The quick path from an empty checkout to bounded handoffs. The cpm companion is
+reached through `junior tools call`, which spawns the managed binary, records
+evidence and returns the bare result; the hop defaults to
+`.delivery/setup/hop.json`.
+
+```bash
+# 1. Confirm the project can run a handoff.
+junior doctor
+
+# 2. Draft the plan. deliverable-cpm, or matrix plan-from-spec,
+#    writes .cpm-planner/plans/<name>/main.json.
+
+# 3. Lint and persist the draft in the cpm store.
+junior tools call cpm plan.lint path=.cpm-planner/plans/<name>/main.json
+junior tools call cpm plan.sync path=.cpm-planner/plans/<name>/main.json
+
+# 4. Shape it for Junior: cohorts, warnings, one contract per deliverable.
+junior plan check .cpm-planner/plans/<name>/main.json
+junior plan contracts .cpm-planner/plans/<name>/main.json --out .delivery/contracts
+
+# 5. Read the critical path and parallel capacity.
+junior tools call cpm plan.status plan_id=<id>
+junior tools call cpm plan.schedule plan_id=<id> 'capacities={"agent":3}'
+
+# 6. Improve a plan: fork variants, simulate, compare, select.
+junior tools call cpm plan.fork request.json
+junior tools call cpm plan.simulate request.json
+junior tools call cpm plan.compare request.json
+junior tools call cpm plan.select request.json
+
+# 7. Baseline earned value before long-running execution.
+junior tools call cpm plan.baseline plan_id=<id> reason=<text>
+```
+
+The deep planning procedure — authoring deliverables, leasing and acceptance,
+and earned value — lives in [skills/junior/SKILL.md](../skills/junior/SKILL.md) and the
+`cpm-*` companion skills. `junior routes "create a cpm plan"` recovers this
+route after a compaction.
+
+## `junior plan check` and `junior plan contracts`
+
 `junior plan check` and `junior plan contracts` take a cpm plan
 (`{ "deliverables": [...] }`, or a bare array of deliverables) and shape it for
 bounded Junior handoffs. `junior matrix plan-from-spec` writes a draft plan
