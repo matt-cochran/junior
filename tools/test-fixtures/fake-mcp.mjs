@@ -11,6 +11,11 @@
 //   elicitation serve real `question.next`/`state.get`/`readiness.assess`/
 //               `spec.export` elicitation shapes (defaults to the captured
 //               live shapes; override with FAKE_ELICITATION_STATE=<file>)
+//   scientific-process
+//               emulate the per-process scientific-process server: every
+//               method except session.open fails until session.open runs in
+//               the same process. Logs each tools/call as { name, arguments }
+//               to FAKE_SCIENTIFIC_LOG when set.
 //
 // The crossmatrix mode intentionally starts with NO model in memory: a fresh
 // process only answers `validate: true` if the caller replayed the import
@@ -48,6 +53,10 @@ if (queryResponsesFile && fs.existsSync(queryResponsesFile)) {
 // serves the real shapes captured from a live elicitation session so the
 // clarification loop can be exercised offline.
 const elicitationFile = process.env.FAKE_ELICITATION_STATE;
+// Opt-in Scientific Process call log: each tools/call is appended as one JSON
+// line `{ name, arguments }` so tests can observe the session.open prelude and
+// the forwarded method arguments.
+const scientificLog = process.env.FAKE_SCIENTIFIC_LOG;
 const DEFAULT_ELICITATION = (() => {
   const coverageGap = {
     claims: [],
@@ -94,6 +103,7 @@ function loadElicitationState() {
 }
 
 let model = null;
+let scientificSession = null;
 if (modelFile && fs.existsSync(modelFile)) {
   try {
     model = JSON.parse(fs.readFileSync(modelFile, "utf8"));
@@ -208,6 +218,47 @@ function handle(line) {
         return;
       }
       send({ jsonrpc: "2.0", id: msg.id, result: structured({ ok: true }) });
+      return;
+    }
+
+    if (mode === "scientific-process") {
+      if (scientificLog) {
+        try {
+          fs.appendFileSync(scientificLog, JSON.stringify({ name, arguments: args }) + "\n");
+        } catch {
+          /* ignore */
+        }
+      }
+      if (name === "session.open") {
+        scientificSession = typeof args?.session_id === "string" ? args.session_id : null;
+        send({ jsonrpc: "2.0", id: msg.id, result: structured({ message: "session opened", status: "ok" }) });
+        return;
+      }
+      if (scientificSession === null) {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: structured("no session open; call session.open first", true),
+        });
+        return;
+      }
+      if (name === "state.get") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: structured({ experiments: [], hypotheses: [], observations: [] }),
+        });
+        return;
+      }
+      if (name === "experiment.next") {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: structured({ id: "h1", statement: "next experiment", status: "Open" }),
+        });
+        return;
+      }
+      send({ jsonrpc: "2.0", id: msg.id, result: structured({ status: "ok" }) });
       return;
     }
 

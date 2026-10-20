@@ -957,11 +957,38 @@ function storeOpenCall(toolName: string, args: unknown): McpCallSpec | null {
 }
 
 /**
+ * The `session.open` prelude a scientific-process server needs in the same
+ * process before any method other than `session.open` itself. The server keeps
+ * the open session in process memory and the wrapper spawns a fresh server per
+ * call, so without the prelude every method fails with
+ * "no session open; call session.open first".
+ *
+ * The session id is the request's top-level `session_id`; when omitted it
+ * defaults to "default". The wrapper-level `session_id` is stripped from the
+ * forwarded method: the 0.2.0 server scopes methods to the already-open session
+ * and rejects unknown fields. Returns null when the request itself is
+ * `session.open`, which is forwarded untouched and unaccompanied.
+ */
+function scientificProcessPrelude(toolName: string, args: unknown): McpCallSpec[] | null {
+  if (toolName === "session.open") return null;
+  const request = isRecord(args) ? { ...args } : {};
+  const raw = request.session_id;
+  const sessionId = typeof raw === "string" && raw.length > 0 ? raw : "default";
+  delete request.session_id;
+  return [
+    { name: "session.open", arguments: { session_id: sessionId } },
+    { name: toolName, arguments: request },
+  ];
+}
+
+/**
  * Build the ordered tools/call sequence for a request.
  *
  * Crossmatrix is in-memory upstream, so when a validated model has been stored
  * and the incoming call is not itself an import, we replay the import on the
- * fresh server before issuing the real call.
+ * fresh server before issuing the real call. Crossmatrix 0.3+ opens the
+ * store-backed model per process, and scientific-process opens its session per
+ * process; both preludes run in the same server process as the real call.
  */
 function prepareCalls(
   hopPath: string,
@@ -971,6 +998,9 @@ function prepareCalls(
   args: unknown,
   prependModelOpen = true,
 ): McpCallSpec[] {
+  if (tool === "scientific-process") {
+    return scientificProcessPrelude(toolName, args) ?? [{ name: toolName, arguments: args ?? {} }];
+  }
   const actual: McpCallSpec = { name: toolName, arguments: args ?? {} };
   if (tool !== "crossmatrix") return [actual];
   if (crossmatrixUsesStore(hop)) {

@@ -1,6 +1,6 @@
 ---
 name: junior
-description: Delegate a bounded coding deliverable to DeepSeek through the local Junior delivery worker (junior.ts handoff), then review its compact receipt and independent checks. Use when the user requests Junior or wants commodity-model execution under premium-model supervision.
+description: Junior runs bounded coding deliverables on commodity models under your supervision and is the entry point to its planning and analysis toolbox: delegate a bounded coding deliverable, author and run CPM plans, assess FMECA risk, build crossmatrix traceability, run discover and investigate workflows, and resolve contradictions with TRIZ. Route any request with `junior routes "<request>"`; triggers include delegate/implement, CPM planning, FMECA risk, crossmatrix traceability, discovery, investigation and TRIZ. Companion tools run through `junior tools call`, with no MCP registration.
 license: MIT
 compatibility: Requires Node 22.19+, git and the junior CLI (npm @matthew-cochran/junior); delegated runs need Pi with a provider credential.
 ---
@@ -11,6 +11,59 @@ You manage the deliverable; DeepSeek executes through Pi. `junior handoff` runs
 one bounded task and prints a compact receipt; you review the artifacts and
 accept. Keep the manager context small: contract, compact receipt, relevant diff
 and check evidence.
+
+## Choose a route
+
+`junior routes "<request>"` ranks the routes best-first from your words, and
+`junior routes --json` prints the full manifest. Pick the row that matches the
+job, then follow its first command.
+
+| Route | When | First command | Skill |
+| --- | --- | --- | --- |
+| `delegate` | implement, fix or hand off one bounded coding deliverable | `junior validate <task.json>` | — |
+| `plan` | create, write or lint a CPM plan with owned files | `write .cpm-planner/plans/<name>/main.json` | cpm-plan |
+| `plan-for-junior` | shape a plan into handoff-sized contracts and cohorts | `junior plan check <plan.json>` | — |
+| `run-plan` | lease and run plan deliverables, then mark results | `junior tools call cpm plan.acquire_cohort caller_id=<id> plan_id=<id>` | cpm-run |
+| `improve-plan` | fork, simulate, compare and select plan variants | `junior tools call cpm plan.fork request.json` | cpm-improve |
+| `track-plan` | baseline, earned value and plan snapshots | `junior tools call cpm plan.baseline plan_id=<id> reason=<text>` | cpm-ev |
+| `risk` | what could go wrong; FMECA failure modes and readiness | `junior tools call fmeca session.open request.json` | fmeca |
+| `matrix` | trace requirements to tests; crossmatrix graph and QC | `junior matrix init` | crossmatrix |
+| `discover` | turn a vague idea into acceptance criteria | `junior handoff <task.json>  # contract workflow: discover` | — |
+| `investigate` | find root cause; frame a scientific-process experiment | `junior handoff <task.json>  # contract workflow: investigate` | — |
+| `triz` | resolve a technical contradiction or trade-off | `triz analyze <request.json> --out <result.json>` | — |
+| `browser-test` | verify a user journey in a real browser | `jevitate check --suite <file>` | jevitate-getting-started |
+| `report-issue` | report a broken companion or managed tool upstream | `junior report-issue <tool> --title <title>` | — |
+| `setup` | set up, check readiness or update the project | `junior doctor` | — |
+| `model` | inspect, list or approve commodity models | `junior model status` | — |
+
+### Companion calls
+
+Companion skills name MCP tools (`plan.status`, `session.open`, `append`,
+`state.get`, `risk.next`, `crossmatrix.query`, ...); each maps to
+`junior tools call <tool> <method>` through the local hop, with no MCP
+registration (scientific-process sessions are opened for you in the same
+process). Three forms:
+
+- Inline, values parse as JSON: `junior tools call cpm plan.status plan_id=<id>`
+- Stdin: `echo '{"tool":"plan.lint","arguments":{"path":"..."}}' | junior tools call cpm -`
+- Request file: `junior tools call cpm request.json`
+
+## Planning with Junior
+
+1. `junior doctor` to confirm readiness.
+2. Write `.cpm-planner/plans/<name>/main.json` with deliverables, `owned_files`
+   and prerequisites.
+3. `junior tools call cpm plan.lint path=.cpm-planner/plans/<name>/main.json`.
+4. `junior tools call cpm plan.sync path=.cpm-planner/plans/<name>/main.json`.
+5. `junior plan check <plan.json>` to split it into handoff-sized deliverables and safe parallel cohorts.
+6. `junior tools call cpm plan.status plan_id=<id>`; read the critical path and
+   ready set, then `junior tools call cpm plan.schedule plan_id=<id>
+   'capacities={"agent":3}'`.
+7. `plan.fork`/`plan.simulate`/`plan.compare`, then `plan.select` the best variant.
+8. `plan.baseline plan_id=<id> reason=<text>` before long-running execution.
+9. `junior plan contracts <plan.json> --out <dir>` for skeleton contracts.
+10. Lease deliverables per the Manager loop with the `cpm-plan`, `cpm-improve`,
+    `cpm-run` and `cpm-ev` skills.
 
 ## Session start
 
@@ -421,7 +474,7 @@ managed block:
 
 ```markdown
 <junior>
-Use the installed Junior skill to delegate one bounded deliverable. Review its receipt and independent checks before accepting the work.
+Use the installed Junior skill for delegation, CPM planning, FMECA risk, crossmatrix traceability and investigations; run `junior routes "<request>"` when unsure which command fits. Review receipts and independent checks before accepting work.
 </junior>
 ```
 

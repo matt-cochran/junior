@@ -49,6 +49,28 @@ function readyIntegrations(): any {
   };
 }
 
+/** Managed tools with the given name/version pairs, all otherwise ready. */
+function integrationsWith(...entries: Array<{ tool: string; version: string | null; usable?: boolean }>): any {
+  return {
+    ready: true,
+    statePath: '/tmp/junior/installed.json',
+    supported: [],
+    tools: entries.map((entry) => ({
+      tool: entry.tool,
+      repo: `praxec/${entry.tool}`,
+      installed: true,
+      usable: entry.usable ?? true,
+      verified: true,
+      executable: true,
+      version: entry.version,
+      tag: entry.version ? `v${entry.version}` : null,
+      path: `/tmp/junior/tools/${entry.tool}`,
+      provenance: 'test',
+      note: 'present',
+    })),
+  };
+}
+
 type World = {
   files?: Record<string, string>;
   binaries?: string[];
@@ -147,6 +169,69 @@ test('a missing managed tool makes readiness not ready', () => {
     { cwd: '/repo', harness: 'claude' },
   );
   assert.equal(result.ready, false);
+});
+
+// --- companion response-shape verification (advisory) -----------------------
+
+/** Deps with the update cache pinned to null, so shape scenarios stay offline. */
+function shapeDeps(world: World = {}): ReadinessDeps {
+  return { ...deps(world), updateSummary: null };
+}
+
+test('a usable tool at a verified version reports a verified shape item', () => {
+  const result = inspectReadiness(
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.4.0' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(result.items.find((item) => item.id === 'shape:cpm')?.status, 'verified');
+});
+
+test('a usable tool at an unverified version reports an unverified shape item', () => {
+  const result = inspectReadiness(
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(result.items.find((item) => item.id === 'shape:cpm')?.status, 'unverified');
+});
+
+test('an unverified shape item names the tool and version in its fix', () => {
+  const result = inspectReadiness(
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(
+    result.items.find((item) => item.id === 'shape:cpm')?.fix,
+    'Junior has not verified cpm 0.9.9 responses; run `junior update` for a newer Junior, or report it with `junior report-issue cpm`',
+  );
+});
+
+test('an unverified shape item leaves readiness ready', () => {
+  const result = inspectReadiness(
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(result.ready, true);
+});
+
+test('an unverified shape item does not change fixCommand', () => {
+  const world = { files: { [CLAUDE_SKILL]: SOURCE } };
+  const verified = inspectReadiness(
+    shapeDeps({ ...world, integrations: integrationsWith({ tool: 'cpm', version: '0.4.0' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  const unverified = inspectReadiness(
+    shapeDeps({ ...world, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(unverified.fixCommand, verified.fixCommand);
+});
+
+test('a tool absent from the verified-version table gets no shape item', () => {
+  const result = inspectReadiness(
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'crossmatrix', version: '0.3.2' }) }),
+    { cwd: '/repo', harness: 'claude' },
+  );
+  assert.equal(result.items.some((item) => item.kind === 'shape'), false);
 });
 
 // --- cached updates ---------------------------------------------------------
@@ -414,6 +499,18 @@ test('runSetup previews an MCP env value as a redacted variable name', async () 
     { cwd: dir, harness: 'codex', hopPath: hopOnDisk(dir, { secret: 'super-secret-token' }), dryRun: true },
   );
   assert.match(err, /FMECA_TOKEN=\*\*\*/);
+});
+
+test('planSetup emits no action for an unverified shape item', () => {
+  const readiness: ReadinessResult = {
+    harness: 'codex',
+    evidence: [],
+    ready: true,
+    items: [{ id: 'shape:cpm', kind: 'shape', name: 'cpm', status: 'unverified', required: false, fix: 'x' }],
+    summary: 'ready',
+  };
+  const actions = planSetup(readiness, { harness: 'codex', cwd: '/p' });
+  assert.deepEqual(actions, []);
 });
 
 test('planSetup runs the given Junior command for its own actions', () => {

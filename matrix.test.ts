@@ -25,10 +25,51 @@ import {
   validateDimensionSet,
   writeDimensionSet,
 } from './matrix.ts';
+import { ShapeError } from './companion-shapes.ts';
+import { initHop } from './tools/tools.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
+const FAKE = join(ROOT, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 const NODE = process.execPath;
+
+/** The recorded cpm@0.4.0 `plan.get` response. */
+function cpmPlanGetFixture(): unknown {
+  return JSON.parse(
+    readFileSync(join(ROOT, 'tools', 'test-fixtures', 'companions', 'cpm@0.4.0', 'plan.get.json'), 'utf8'),
+  );
+}
+
+/** Minimal cpm MCP server that answers every tools/call with the plan.get fixture. */
+const FAKE_CPM_SOURCE = `
+import fs from 'node:fs';
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (line) handle(line);
+  }
+});
+function send(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
+function handle(line) {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake-cpm', version: '0.0.1' } } });
+    return;
+  }
+  if (msg.method === 'notifications/initialized') return;
+  if (msg.method === 'tools/call') {
+    const value = JSON.parse(fs.readFileSync(process.env.FAKE_CPM_PLAN_GET, 'utf8'));
+    send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false } });
+    return;
+  }
+  if (msg.id !== undefined) send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
+}
+`;
 
 function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-matrix-'));
@@ -150,6 +191,23 @@ test('cpmDeliverables records owned files in attributes', () => {
 test('cpmDeliverables namespaces the source reference with the plan id', () => {
   const dim = cpmDeliverables([{ id: 'd1', title: 'Ship it' }], 'plan1');
   assert.equal(dim.members[0].sourceRef.sourceRef, 'cpm:plan1/d1');
+});
+
+test('cpmDeliverables yields one member per deliverable in the cpm@0.4.0 plan.get fixture', () => {
+  const dim = cpmDeliverables(cpmPlanGetFixture(), 'plan_FIXTURE');
+  assert.deepEqual(dim.members.map((m: any) => m.id), ['cpm:d-api', 'cpm:d-docs', 'cpm:ms']);
+});
+
+test('cpmDeliverables carries the cpm@0.4.0 owned_files into member attributes', () => {
+  const dim = cpmDeliverables(cpmPlanGetFixture(), 'plan_FIXTURE');
+  assert.deepEqual(
+    dim.members.map((m: any) => m.attributes.owned_files),
+    [['api.ts'], ['docs.md'], []],
+  );
+});
+
+test('cpmDeliverables throws a ShapeError for an unrecognized plan.get response', () => {
+  assert.throws(() => cpmDeliverables({ ok: true }, 'plan1'), ShapeError);
 });
 
 // --- fmeca ------------------------------------------------------------------
@@ -288,6 +346,131 @@ test('junior matrix export reports the same document as unchanged on a second ru
   assert.equal(JSON.parse(second.stdout).unchanged.length, 1);
 });
 
+test('junior matrix export --source cpm writes one member per deliverable from the cpm@0.4.0 fixture', () => {
+  const dir = workdir();
+  const script = join(dir, 'fake-cpm.mjs');
+  writeFileSync(script, FAKE_CPM_SOURCE);
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      cpm: {
+        command: NODE,
+        args: [script],
+        env: { FAKE_CPM_PLAN_GET: join(ROOT, 'tools', 'test-fixtures', 'companions', 'cpm@0.4.0', 'plan.get.json') },
+        sourceVersion: '0.4.0',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--hop', hop, '--plan', 'plan_FIXTURE', '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  const written = JSON.parse(result.stdout).written[0];
+  const doc = JSON.parse(readFileSync(written, 'utf8'));
+  const ids = doc.dimensions.find((d: any) => d.id === 'cpm').members.map((m: any) => m.id);
+  assert.deepEqual(ids, ['cpm:d-api', 'cpm:d-docs', 'cpm:ms']);
+});
+
+test('junior matrix export --source cpm exits non-zero when plan.get is unrecognized', () => {
+  const dir = workdir();
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      cpm: {
+        command: NODE,
+        args: [FAKE],
+        env: { FAKE_MCP_MODE: 'echo' },
+        sourceVersion: '0.4.0',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--hop', hop, '--plan', 'plan1', '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+});
+
+test('junior matrix export --source cpm reports the unrecognized plan.get shape', () => {
+  const dir = workdir();
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      cpm: {
+        command: NODE,
+        args: [FAKE],
+        env: { FAKE_MCP_MODE: 'echo' },
+        sourceVersion: '0.4.0',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--hop', hop, '--plan', 'plan1', '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.stderr.includes('Unrecognized cpm.plan.get response'), true);
+});
+
+test('junior matrix export --source cpm --plan-file yields the same member ids as the plan.get fixture', () => {
+  const dir = workdir();
+  const planFile = join(dir, '.cpm-planner', 'plans', 'my-plan', 'fixtures-first.json');
+  mkdirSync(dirname(planFile), { recursive: true });
+  const fixture = cpmPlanGetFixture() as { graph: { deliverables: unknown } };
+  writeFileSync(planFile, JSON.stringify({ deliverables: fixture.graph.deliverables }));
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', planFile, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  const written = JSON.parse(result.stdout).written[0];
+  const doc = JSON.parse(readFileSync(written, 'utf8'));
+  const ids = doc.dimensions.find((d: any) => d.id === 'cpm').members.map((m: any) => m.id);
+  const expected = cpmDeliverables(cpmPlanGetFixture(), 'plan_FIXTURE').members.map((m: any) => m.id);
+  assert.deepEqual(ids, expected);
+});
+
+test('junior matrix export --source cpm --plan-file exits non-zero for a missing file', () => {
+  const dir = workdir();
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', join(dir, 'missing.json'), '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+});
+
+test('junior matrix export --source cpm --plan-file names the missing file in its error', () => {
+  const dir = workdir();
+  const missing = join(dir, 'missing.json');
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', missing, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.stderr.includes(missing), true);
+});
+
+test('junior matrix export --source cpm --plan-file exits non-zero for unparseable JSON', () => {
+  const dir = workdir();
+  const planFile = join(dir, 'broken.json');
+  writeFileSync(planFile, '{ not json');
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', planFile, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+});
+
 test('junior matrix export from the jevitate source writes a file', () => {
   const repo = workdir();
   mkdirSync(join(repo, '.jevitate'), { recursive: true });
@@ -321,6 +504,13 @@ test('parseMatrixArgs accepts the state source with its companion session flags'
   assert.deepEqual(
     [parsed.sources, parsed.plan, parsed.fmecaSession, parsed.elicitationSession, parsed.spSession, parsed.jevitateResults],
     [['state'], 'p1', 'f1', 'e1', 's1', 'results/'],
+  );
+});
+
+test('parseMatrixArgs rejects --plan together with --plan-file', () => {
+  assert.throws(
+    () => parseMatrixArgs(['--source', 'cpm', '--plan', 'p1', '--plan-file', 'plan.json']),
+    /mutually exclusive/,
   );
 });
 

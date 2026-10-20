@@ -16,12 +16,14 @@
 import { spawnSpec } from './cli-entry.ts';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, delimiter } from 'node:path';
+import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
 import { inspectCompanions, inspectCompanionSkills, installCompanions, installCompanionSkills, installationDisabled,
  type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport, type CompanionSkillsReport } from './companions.ts';
+import { matrixInit } from './matrix-init.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 import { inspectReadiness, type ReadinessResult } from './readiness.ts';
@@ -38,6 +40,12 @@ export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
 export const TESTED_PI_VERSION = '1.0.3';
 export const DOCTOR_TIMEOUT_MS = 10000;
 export const INSTALL_TIMEOUT_MS = 300000;
+
+/** Project Crossmatrix store guidance. The reminder is shown only when the
+ * store is missing after an `init` (or a failed `--with-matrix` update). */
+const MATRIX_REMINDER = 'Create the project Crossmatrix store with `junior matrix init` and commit `.crossmatrix/`.';
+const MATRIX_COMMIT = 'Commit the project Crossmatrix store (`.crossmatrix/`) so the team shares it.';
+const MATRIX_UPDATE_SKIP = 'update does not create project state; pass --with-matrix';
 
 /** Packaged delegation skill installed by `init`. The source is resolved from
  * this module's location, never from the caller's working directory. */
@@ -81,6 +89,8 @@ export type SetupDeps = {
  /** Injectable `/proc/mounts` reader for slow-mount detection; tests never read
   * the host mount table. Defaults to the real file. */
  readMounts?:()=>string;
+ /** Injectable project-store creation seam; tests never spawn `crossmatrix-mcp`. */
+ matrixInit?:(dir:string)=>{created:string[]};
 };
 
 function readText(deps:SetupDeps, path:string):string {
@@ -550,8 +560,17 @@ export function summarizeInstall(install:InitResult['install'] | undefined, tool
  };
 }
 
+export type MatrixOutcome = {
+ /** True only when this run created `.crossmatrix/` through `crossmatrix-mcp init`. */
+ created:boolean;
+ /** True when a `.crossmatrix/` store was already present before this run. */
+ existing?:boolean;
+ /** Why creation was skipped: explicit opt-out, update rule, or a matrixInit failure. */
+ skipped?:string;
+};
+
 export type InitResult = {
- command:'init';
+ command:'init'|'update';
  cwd:string;
  created:string[];
  preserved:string[];
@@ -560,6 +579,8 @@ export type InitResult = {
  skill:SkillResult;
  /** Exact Junior-owned paths newly added to the repository-local exclude file. */
  excluded:string[];
+ /** Outcome of the project Crossmatrix store step, independent of `ready`. */
+ matrix:MatrixOutcome;
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
@@ -595,6 +616,16 @@ function generatedExcludePatterns(skill:SkillResult, created:string[]):string[] 
   }
  }
  return [...new Set(patterns)];
+}
+
+/** Create the project store through the matrix-init seam. The managed tools
+ * manifest is derived from `toolsRoot`/`HOME` so an injected environment never
+ * reaches the real user profile. */
+function defaultMatrixInit(deps:SetupDeps, dir:string):{created:string[]} {
+ const env=deps.env ?? process.env;
+ const home=env.HOME || env.USERPROFILE || homedir();
+ const statePath=join(deps.toolsRoot ?? join(home,'.junior','tools'),'installed.json');
+ return matrixInit({ cwd:dir, env, exists:deps.exists, readFile:deps.readFile, statePath }, { dir });
 }
 
 /** Idempotent project setup. Creates project defaults and an example task only
@@ -648,10 +679,33 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
- if (!exists(deps, join(cwd, '.crossmatrix'))) {
-  instructions.push('Create the project Crossmatrix store with `junior matrix init` and commit `.crossmatrix/`.');
+ const command=opts.command ?? 'init';
+ const storePath=join(cwd,'.crossmatrix');
+ const hadStore=exists(deps, storePath);
+ // `update` only creates committed project state when explicitly opted in;
+ // `init --no-matrix` opts out. `init --update` is still an init.
+ const shouldCreate=!hadStore && ((command === 'init' && opts.matrix !== false) || (command === 'update' && opts.matrix === true));
+ let matrix:MatrixOutcome;
+ if (shouldCreate) {
+  try {
+   const createdNow=(deps.matrixInit ?? ((dir:string)=>defaultMatrixInit(deps,dir)))(cwd).created ?? [];
+   matrix={ created: createdNow.includes('.crossmatrix') };
+  } catch (e) {
+   matrix={ created:false, skipped: e instanceof Error ? e.message : String(e) };
+  }
+ } else if (hadStore) {
+  matrix={ created:false, existing:true };
+ } else {
+  matrix={ created:false, skipped: command === 'update' ? MATRIX_UPDATE_SKIP : 'matrix store creation disabled with --no-matrix' };
  }
- return { command:'init', cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, install,
+ // Remind only when the store was just created or is still missing after init;
+ // a plain update that follows the no-project-state rule stays quiet.
+ if (matrix.created) {
+  instructions.push(MATRIX_COMMIT);
+ } else if (!exists(deps, storePath) && !(command === 'update' && opts.matrix !== true)) {
+  instructions.push(MATRIX_REMINDER);
+ }
+ return { command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, matrix, install,
   installSummary:summarizeInstall(install,null), instructions };
 }
 
@@ -698,7 +752,7 @@ export type SkillReadiness = {
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
 export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string; roots?:string[] };
-export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean };
+export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean; matrix?:boolean; command?:'init'|'update' };
 
 function sha256(text:string):string {
  return createHash('sha256').update(text).digest('hex');
@@ -865,6 +919,8 @@ export function parseInitOptions(argv:string[]):InitOptions {
   else if (a === '--upgrade') opts.upgrade=true;
   else if (a === '--update') opts.update=true;
   else if (a === '--with-triz') opts.withTriz=true;
+  else if (a === '--no-matrix') opts.matrix=false;
+  else if (a === '--with-matrix') opts.matrix=true;
   else if (a === '--force') opts.force=true;
   else if (a === '--no-skill') opts.target='none';
   else if (a === '--scope') opts.scope = argv[++i] === 'user' ? 'user' : 'project';

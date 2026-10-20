@@ -12,6 +12,17 @@
 // lease is deliberately not released here: acceptance is a manager action.
 // ---------------------------------------------------------------------------
 
+import { cohortDeliverableIds, planLocks, strictItems } from './companion-shapes.ts';
+
+/** Outcomes that stop a run to wait for the manager or the human: the lease is
+ * kept (a rerun by the same caller is re-entrant) and the deliverable is not
+ * marked failed. */
+export const HOLD_OUTCOMES: readonly string[] = ['needs_answers', 'needs_choice', 'needs_model_approval'];
+
+export function isHoldOutcome(status: unknown): boolean {
+  return typeof status === 'string' && HOLD_OUTCOMES.includes(status);
+}
+
 export type PlanHopResult = { ok: boolean; result?: any; error?: { message: string } };
 
 export type PlanHop = (
@@ -59,28 +70,21 @@ function messageOf(error: unknown): string {
   return text || 'unknown error';
 }
 
-/** Deliverable ids from a cpm cohort response; entries may be strings or objects. */
+/** Deliverable ids from a cpm cohort response; throws `ShapeError` when unrecognized. */
 function cohortIds(result: unknown): string[] {
-  const items = Array.isArray((result as any)?.deliverables) ? (result as any).deliverables : [];
-  return items
-    .map((item: any) => (typeof item === 'string' ? item : item?.id))
-    .map((id: any) => (id === null || id === undefined ? '' : String(id)))
-    .filter(Boolean);
+  return strictItems(cohortDeliverableIds(result), 'cpm', 'plan.acquire_cohort', result);
 }
 
 function effortHours(startedAt: number, endedAt: number): number {
   return Math.max(0.01, Math.round(((endedAt - startedAt) / 3_600_000) * 100) / 100);
 }
 
-/** Deliverable locks from a cpm `plan.status` response. */
+/** Deliverable locks from a cpm `plan.status` response; throws `ShapeError` when unrecognized. */
 function lockHolders(result: unknown): Array<{ deliverableId: string; callerId: string }> {
-  const locks = Array.isArray((result as any)?.locks_held) ? (result as any).locks_held : [];
-  return locks
-    .filter((lock: any) => lock && typeof lock === 'object')
-    .map((lock: any) => ({
-      deliverableId: lock.deliverable_id === null || lock.deliverable_id === undefined ? '' : String(lock.deliverable_id),
-      callerId: lock.caller_id === null || lock.caller_id === undefined ? '' : String(lock.caller_id),
-    }));
+  return strictItems(planLocks(result), 'cpm', 'plan.status', result).map((lock) => ({
+    deliverableId: lock.deliverableId,
+    callerId: lock.callerId,
+  }));
 }
 
 /** One line describing where the run landed, its outcome and its model. */
@@ -132,7 +136,14 @@ export async function withPlanLease<R>(
     plan.error = `plan.acquire_cohort failed: ${acquired.error?.message ?? 'unknown error'}`;
     return { plan };
   }
-  if (!cohortIds(acquired.result).includes(plan.deliverable)) {
+  let leasedIds: string[];
+  try {
+    leasedIds = cohortIds(acquired.result);
+  } catch (error) {
+    plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+    return { plan };
+  }
+  if (!leasedIds.includes(plan.deliverable)) {
     let status: PlanHopResult;
     try {
       status = await deps.callHop('cpm', {
@@ -142,7 +153,15 @@ export async function withPlanLease<R>(
     } catch {
       status = { ok: false };
     }
-    const held = status.ok ? lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable) : undefined;
+    let held: { deliverableId: string; callerId: string } | undefined;
+    try {
+      held = status.ok
+        ? lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable)
+        : undefined;
+    } catch (error) {
+      plan.error = `plan.status failed: ${messageOf(error)}`;
+      return { plan };
+    }
     if (!held || held.callerId !== callerId) {
       plan.error = held
         ? `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`

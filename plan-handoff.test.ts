@@ -7,7 +7,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { withPlanLease } from './plan-handoff.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { isHoldOutcome, withPlanLease } from './plan-handoff.ts';
+
+const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
+function cpmFixture(name: string): unknown {
+  return JSON.parse(readFileSync(join(fixturesRoot, 'cpm@0.4.0', `${name}.json`), 'utf8'));
+}
 
 const DELIVERABLE = 'P1b-plan-lease';
 const PLAN = { id: 'plan_1', deliverable: DELIVERABLE };
@@ -39,6 +46,46 @@ function deps(callHop: any, overrides: any = {}) {
 function markCall(calls: RecordedCall[]) {
   return calls.find((call) => call.request.tool === 'plan.mark_status');
 }
+
+// --- recorded cpm fixtures --------------------------------------------------
+
+test('withPlanLease leases the deliverable from the cpm acquire_cohort fixture', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: cpmFixture('plan.acquire_cohort') }) });
+  const out = await withPlanLease(
+    { id: 'task-1', plan: { id: 'plan_FIXTURE', deliverable: 'd-api' } },
+    async () => 'ok',
+    deps(callHop),
+  );
+  assert.equal(out.plan.leased, true);
+});
+
+test('withPlanLease re-enters the lease shown by the cpm plan.status.leased fixture', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: cpmFixture('plan.status.leased') }),
+  });
+  const out = await withPlanLease(
+    { id: 'task-1', plan: { id: 'plan_FIXTURE', deliverable: 'd-api', callerId: 'fixture-worker' } },
+    async () => 'ok',
+    deps(callHop),
+  );
+  assert.equal(out.plan.reentered, true);
+});
+
+test('withPlanLease refuses an unrecognized acquire_cohort response with the ShapeError reason', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { unexpected: [] } }) });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(out.plan.error ?? '', /Unrecognized cpm\.plan\.acquire_cohort response; top-level keys: unexpected/);
+});
+
+test('withPlanLease refuses an unrecognized plan.status response with the ShapeError reason', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { unexpected: [] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(out.plan.error ?? '', /Unrecognized cpm\.plan\.status response; top-level keys: unexpected/);
+});
 
 // --- acquire ----------------------------------------------------------------
 
@@ -248,4 +295,14 @@ test('withPlanLease records the mark failure in plan.error', async () => {
   const { callHop } = harness({ 'plan.mark_status': () => ({ ok: false, error: { message: 'locked' } }) });
   const out = await withPlanLease(TASK, async () => 'artifact', deps(callHop));
   assert.equal(out.plan.error, 'plan.mark_status failed: locked');
+});
+
+// --- hold outcomes ----------------------------------------------------------
+
+test('a model approval stop is a hold outcome', () => {
+  assert.equal(isHoldOutcome('needs_model_approval'), true);
+});
+
+test('a failed run is not a hold outcome', () => {
+  assert.equal(isHoldOutcome('failed'), false);
 });
