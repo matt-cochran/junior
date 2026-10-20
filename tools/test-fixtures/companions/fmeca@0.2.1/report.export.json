@@ -1,0 +1,42 @@
+{
+  "session_id": "fixture-fmeca-20261020",
+  "ready": true,
+  "rows": [
+    {
+      "failure_mode_id": "fm1",
+      "component": "export",
+      "domain": "runtime",
+      "description": "empty export",
+      "cause": "shape drift",
+      "effect": "silent data loss",
+      "local_effect": null,
+      "next_effect": null,
+      "single_point": false,
+      "disposition": "open",
+      "criticality": "high",
+      "residual_criticality": "low",
+      "standing": "acceptable",
+      "response_class": "restructure",
+      "mitigations": [
+        {
+          "id": "m1",
+          "kind": "detection",
+          "description": "fail on unrecognized shape",
+          "residual_criticality": "low",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "source_turn": "t1"
+    }
+  ],
+  "residual_buckets": {
+    "high": 0,
+    "medium": 0,
+    "low": 1,
+    "unscored": 0
+  },
+  "accepted_risks": [],
+  "critical_items": [],
+  "blockers": []
+}

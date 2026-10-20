@@ -416,10 +416,10 @@ test('strictItems returns the items of a recognized response', () => {
 
 test('VERIFIED_VERSIONS matches the tool/version pairs recorded in index.json', () => {
   const index = parse(readFileSync(join(fixturesRoot, 'index.json'), 'utf8')) as {
-    tools: Record<string, { version: string }>;
+    tools: Record<string, { version: string; versions?: string[] }>;
   };
   const expected = Object.fromEntries(
-    Object.entries(index.tools).map(([tool, meta]) => [tool, [meta.version]]),
+    Object.entries(index.tools).map(([tool, meta]) => [tool, meta.versions ?? [meta.version]]),
   );
   assert.deepEqual(VERIFIED_VERSIONS, expected);
 });

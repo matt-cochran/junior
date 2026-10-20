@@ -8,15 +8,17 @@
 // removes only inactive, clean, registered ones.
 //
 // Safety is the point: the source checkout and any foreign worktree are never
-// touched, dirty or unreviewed worktrees are preserved, an active advisory lock
-// blocks removal, symlinked or escaping paths are skipped, and removal never
-// passes `--force`. Removing a worktree leaves its logs/results artifacts in
-// place.
+// touched, dirty or unreviewed worktrees are preserved unless their exact
+// change set is recorded as already applied, an active advisory lock blocks
+// removal, symlinked or escaping paths are skipped, and removal never passes
+// `--force` for work Git has not been told was applied. Removing a worktree
+// leaves its logs/results artifacts in place.
 // ---------------------------------------------------------------------------
 
-import { lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { acquireLock, removeRegisteredWorktree, runGit, sourceDirty } from './isolation.ts';
+import { buildWorktreePatch } from './apply.ts';
 
 /** Parse a bounded `--older-than` duration such as `30m`, `24h` or `7d`. */
 export function parseDuration(text: string): number | null {
@@ -180,12 +182,37 @@ export function isCommitReachableFromSource(sourceCwd: string, commit: string, t
  return { reachable: false, error: (head.stderr || `git merge-base exited ${head.status}`).trim() };
 }
 
+/** True when a dirty worktree's current full change set (tracked edits plus
+ * intent-to-added untracked files, exactly as apply builds it) still hashes to
+ * the patch recorded in its artifact dir's applied.json. */
+function appliedPatchMatches(artifactDir: string, worktree: string): boolean {
+ let record: any;
+ try { record = JSON.parse(readFileSync(join(artifactDir, 'applied.json'), 'utf8')); } catch { return false; }
+ const expected = typeof record?.patchSha256 === 'string' ? record.patchSha256 : '';
+ if (!expected) return false;
+ const built = buildWorktreePatch(worktree);
+ return !built.error && built.sha256 === expected;
+}
+
+/** Remove a worktree whose applied patch was re-verified. Such a worktree is
+ * necessarily dirty, so Git needs `--force`; this is only reached after the
+ * diff hashed to the patch already applied to the source. */
+function removeAppliedWorktree(sourceCwd: string, worktree: string): { ok: boolean; error?: string } {
+ const r = runGit(sourceCwd, ['worktree', 'remove', '--force', worktree]);
+ if (r.error) return { ok: false, error: r.error.message };
+ if (r.status !== 0) return { ok: false, error: (r.stderr || r.stdout || `git worktree remove exited ${r.status}`).trim() };
+ runGit(sourceCwd, ['worktree', 'prune']);
+ return { ok: true };
+}
+
 /** Remove only inactive, clean, registered Junior worktrees whose commits are
- * reachable from a retained source ref. Everything else is reported as skipped
- * or retained; removal is never forced. Each candidate is inspected and
- * removed while holding the same checkout lock an execution would acquire, so
- * a live run and a prune can never race; the lock is released in `finally` and
- * an existing active lock is never removed. */
+ * reachable from a retained source ref. A dirty worktree is also removable
+ * when its exact change set still hashes to the patch recorded as applied in
+ * its artifact dir's applied.json. Everything else is reported as skipped or
+ * retained; removal is never forced for an unapplied worktree. Each candidate
+ * is inspected and removed while holding the same checkout lock an execution
+ * would acquire, so a live run and a prune can never race; the lock is released
+ * in `finally` and an existing active lock is never removed. */
 export function pruneWorktrees(sourceCwd: string, options: PruneOptions = {}): PruneResult {
  const now = options.now ?? Date.now();
  const deliveryRoot = resolve(sourceCwd, '.delivery');
@@ -219,7 +246,8 @@ export function pruneWorktrees(sourceCwd: string, options: PruneOptions = {}): P
 
    const dirty = sourceDirty(entry.path);
    if (dirty.error) { skipped.push({ path: entry.path, reason: `git status failed: ${dirty.error}` }); continue; }
-   if (dirty.dirty) { skipped.push({ path: entry.path, reason: 'unreviewed changes' }); continue; }
+   const applied = dirty.dirty && appliedPatchMatches(entry.artifactDir, entry.path);
+   if (dirty.dirty && !applied) { skipped.push({ path: entry.path, reason: 'unreviewed changes' }); continue; }
 
    const head = runGit(entry.path, ['rev-parse', 'HEAD']);
    if (head.error) { skipped.push({ path: entry.path, reason: `git rev-parse failed: ${head.error.message}` }); continue; }
@@ -233,7 +261,7 @@ export function pruneWorktrees(sourceCwd: string, options: PruneOptions = {}): P
 
    if (options.dryRun) { removed.push(entry.path); continue; }
 
-   const result = removeRegisteredWorktree(sourceCwd, entry.path);
+   const result = applied ? removeAppliedWorktree(sourceCwd, entry.path) : removeRegisteredWorktree(sourceCwd, entry.path);
    if (!result.ok) { skipped.push({ path: entry.path, reason: result.error || 'git worktree remove failed' }); continue; }
    removed.push(entry.path);
   } finally {

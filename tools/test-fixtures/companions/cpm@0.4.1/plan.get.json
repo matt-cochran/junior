@@ -1,0 +1,52 @@
+{
+  "plan_id": "plan_FIXTURE",
+  "graph": {
+    "deliverables": [
+      {
+        "id": "d-api",
+        "owned_files": [
+          "api.ts"
+        ],
+        "prerequisites": [],
+        "estimated_effort_hours": 2,
+        "metadata": {
+          "artifact": "api.ts",
+          "owner": "agent"
+        }
+      },
+      {
+        "id": "d-docs",
+        "owned_files": [
+          "docs.md"
+        ],
+        "prerequisites": [
+          {
+            "id": "d-api",
+            "consumes": "api surface"
+          }
+        ],
+        "estimated_effort_hours": 1,
+        "metadata": {
+          "artifact": "docs.md",
+          "owner": "agent"
+        }
+      },
+      {
+        "id": "ms",
+        "owned_files": [],
+        "prerequisites": [
+          {
+            "id": "d-docs",
+            "consumes": "docs"
+          }
+        ],
+        "metadata": {
+          "artifact": "release",
+          "owner": "owner",
+          "kind": "manual"
+        },
+        "milestone": true
+      }
+    ]
+  }
+}
