@@ -18,6 +18,13 @@ const NODE = process.execPath;
 const JUNIOR = join(import.meta.dirname, 'junior.ts');
 const FAKE = join(import.meta.dirname, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 
+/** The recorded cpm@0.4.0 `plan.get` response. */
+function planGetFixture(): unknown {
+  return JSON.parse(
+    readFileSync(join(import.meta.dirname, 'tools', 'test-fixtures', 'companions', 'cpm@0.4.0', 'plan.get.json'), 'utf8'),
+  );
+}
+
 function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-autopilot-'));
 }
@@ -144,6 +151,21 @@ test('bootstrap proposes a low-confidence job link to a file of a journey that r
   assert.equal(job?.confidence, 'low');
 });
 
+test('bootstrap proposes cpm:d-api and cpm:d-docs from the cpm@0.4.0 plan.get fixture', async () => {
+  const doc = await bootstrap({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    dir: '/project',
+    deps: {
+      loadHop: manifest,
+      planGraph: planGetFixture(),
+      files: [file('api.ts'), file('docs.md')],
+    },
+  });
+  const features = [...new Set(doc.proposals.map((p) => p.feature))].filter((f) => f.startsWith('cpm:'));
+  assert.deepEqual(features, ['cpm:d-api', 'cpm:d-docs']);
+});
+
 test('bootstrap proposes a medium tests link when a test name names a deliverable', async () => {
   const doc = await bootstrap({
     hopPath: 'hop.json',
@@ -235,6 +257,31 @@ test('autolink links a completed deliverable whose evidence names an existing re
             },
           },
         };
+      }
+      sent.push(request.arguments.request);
+      return { ok: true, result: {} };
+    },
+  };
+  await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', deps: deps as any });
+  const targets = sent.filter((r) => r.op.kind === 'observe').map((r) => r.op.to);
+  assert.deepEqual(targets, ['loc:src/a.ts']);
+});
+
+test('autolink reads a completed status from a cpm plan.status response', async () => {
+  const dir = workdir();
+  const result = resultFile(dir, 'J-1', ['src/a.ts']);
+  const sent: any[] = [];
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, _tool: string, request: any) => {
+      if (request.tool === 'plan.get') {
+        return {
+          ok: true,
+          result: { graph: { deliverables: [{ id: 'd1', owned_files: ['src/a.ts'], evidence: [result] }] } },
+        };
+      }
+      if (request.tool === 'plan.status') {
+        return { ok: true, result: { deliverables: [['d1', { status: 'complete' }, 1, 0, 0]] } };
       }
       sent.push(request.arguments.request);
       return { ok: true, result: {} };

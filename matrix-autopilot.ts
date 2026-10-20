@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { codemapLink, codemapObserve, type CodemapDeps, type CodemapSent } from './codemap.ts';
+import { planDeliverables, planStatusRows, strictItems } from './companion-shapes.ts';
 import { jevitateJobs, jevitateJourneys, tests as testArtifacts, type MatrixFile } from './matrix.ts';
 import { callHop, loadHop, type HopManifest } from './tools/tools.ts';
 
@@ -153,16 +154,6 @@ function planGraphFromHop(hopPath: string, load: typeof loadHop): unknown {
   const abs = path.resolve(path.dirname(hopPath), snapshot.path);
   if (!fs.existsSync(abs)) return null;
   return parseJson(fs.readFileSync(abs, 'utf8'));
-}
-
-function deliverablesOf(planGraph: unknown): any[] {
-  if (Array.isArray(planGraph)) return planGraph;
-  if (isRecord(planGraph)) {
-    if (Array.isArray(planGraph.deliverables)) return planGraph.deliverables;
-    if (isRecord(planGraph.graph) && Array.isArray(planGraph.graph.deliverables)) return planGraph.graph.deliverables;
-    if (isRecord(planGraph.plan) && Array.isArray(planGraph.plan.deliverables)) return planGraph.plan.deliverables;
-  }
-  return [];
 }
 
 function deliverableId(deliverable: any): string {
@@ -312,7 +303,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
   const featureRefs: FeatureRef[] = [];
 
   // 1. cpm deliverables -> their owned files (high).
-  for (const deliverable of deliverablesOf(planGraph)) {
+  for (const deliverable of strictItems(planDeliverables(planGraph), 'cpm', 'plan.get', planGraph)) {
     const id = deliverableId(deliverable);
     if (!id) continue;
     const feature = `cpm:${id}`;
@@ -469,19 +460,6 @@ export async function confirmProposals(options: ConfirmOptions): Promise<Confirm
   return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent };
 }
 
-/** Status rows from a `plan.status` result, keyed by deliverable id. */
-function statusRows(result: unknown): Map<string, string> {
-  const rows = new Map<string, string>();
-  const list = isRecord(result) && Array.isArray(result.deliverables) ? result.deliverables : [];
-  for (const row of list) {
-    if (!Array.isArray(row) || row.length < 2) continue;
-    const id = String(row[0]);
-    const status = row[1];
-    rows.set(id, typeof status === 'string' ? status.toLowerCase() : deliverableStatus(status));
-  }
-  return rows;
-}
-
 /** Link each complete cpm deliverable whose evidence names an existing result. */
 export async function autolink(options: AutolinkOptions): Promise<AutolinkResult> {
   const call = options.deps?.callHop ?? callHop;
@@ -491,14 +469,21 @@ export async function autolink(options: AutolinkOptions): Promise<AutolinkResult
     throw new Error(`cpm plan.get failed: ${outcome.error?.message ?? outcome.note ?? 'unknown error'}`);
   }
   const graph = outcome.result;
-  const deliverables = deliverablesOf(graph);
+  const deliverables = strictItems(planDeliverables(graph), 'cpm', 'plan.get', graph);
 
   // `plan.get` does not carry progress; consult `plan.status` for any
   // deliverable whose status is not already embedded in the graph.
   let statuses: Map<string, string> | null = null;
   if (deliverables.some((deliverable) => !deliverableStatus(deliverable))) {
     const statusOutcome = await call(options.hopPath, 'cpm', { tool: 'plan.status', arguments: { plan_id: options.planId } });
-    if (statusOutcome.ok) statuses = statusRows(statusOutcome.result);
+    if (statusOutcome.ok) {
+      statuses = new Map(
+        strictItems(planStatusRows(statusOutcome.result), 'cpm', 'plan.status', statusOutcome.result).map((row) => [
+          row.id,
+          row.status,
+        ]),
+      );
+    }
   }
 
   const sent: CodemapSent[] = [];

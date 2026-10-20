@@ -18,6 +18,11 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isDirectEntry } from './cli-entry.ts';
+import {
+  fmecaFailureModes as readFmecaFailureModes,
+  planDeliverables,
+  strictItems,
+} from './companion-shapes.ts';
 import { playbookDimensions } from './playbooks.ts';
 import { callHop } from './tools/tools.ts';
 
@@ -399,18 +404,9 @@ export function jevitateJourneys(files: MatrixFile[]): MatrixDimension {
 // CPM
 // ---------------------------------------------------------------------------
 
-function deliverablesFrom(planGraph: unknown): any[] {
-  if (Array.isArray(planGraph)) return planGraph;
-  if (isRecord(planGraph)) {
-    if (Array.isArray(planGraph.deliverables)) return planGraph.deliverables;
-    if (isRecord(planGraph.plan) && Array.isArray(planGraph.plan.deliverables)) return planGraph.plan.deliverables;
-  }
-  return [];
-}
-
 /** Implementation assets from a CPM plan graph. */
 export function cpmDeliverables(planGraph: unknown, planId: string): MatrixDimension {
-  const members: MatrixMember[] = deliverablesFrom(planGraph).map((deliverable) => {
+  const members: MatrixMember[] = strictItems(planDeliverables(planGraph), 'cpm', 'plan.get', planGraph).map((deliverable) => {
     const id = String(deliverable.id ?? deliverable.deliverableId ?? deliverable.slug ?? '');
     const sourceRef = `cpm:${planId}/${id}`;
     return {
@@ -438,16 +434,6 @@ export function cpmDeliverables(planGraph: unknown, planId: string): MatrixDimen
 // FMECA
 // ---------------------------------------------------------------------------
 
-function failureModesFrom(state: unknown): any[] {
-  if (Array.isArray(state)) return state;
-  if (isRecord(state)) {
-    for (const key of ['failure_modes', 'failureModes', 'modes', 'risks']) {
-      if (Array.isArray(state[key])) return state[key];
-    }
-  }
-  return [];
-}
-
 function numeric(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -464,7 +450,7 @@ function criticalityOf(mode: any): number | null {
 
 /** Failure modes from a FMECA session state; deterministic numeric criticality. */
 export function fmecaFailureModes(state: unknown, sessionId: string): MatrixDimension {
-  const members: MatrixMember[] = failureModesFrom(state).map((mode) => {
+  const members: MatrixMember[] = strictItems(readFmecaFailureModes(state), 'fmeca', 'state.get', state).map((mode) => {
     const id = String(mode.id ?? mode.failure_mode_id ?? mode.name ?? '');
     const member: MatrixMember = {
       id: `fm:${id}`,
