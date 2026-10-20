@@ -82,8 +82,9 @@ at `needs_model_approval` (`--approve-model`, plan `approvedProfiles`, or
 same-lineage commodity model only at price parity (`models.priceTolerance`).
 `junior model status|list|upgrade` reports and adopts the roster, and
 `junior plan check`/`junior plan contracts` shape a cpm plan into bounded
-handoffs. See [Models](docs/models.md) and
-[Planning for Junior](docs/planning.md).
+handoffs, and `junior routes "<request>"` names the command for any manager
+job (delegate, plan, risk, traceability, investigate). See
+[Models](docs/models.md) and [Planning for Junior](docs/planning.md).
 
 Execution settings live on the contract:
 
@@ -123,8 +124,9 @@ is visible as `cpmReview` (`available` or `unavailable`) and never its value.
   detection and the `junior model` commands.
 - **[Planning for Junior](docs/planning.md)** — shaping a cpm plan into safe,
   bounded handoffs with `junior plan check` and `junior plan contracts`.
-- **[Tools](docs/tools.md)** — common tool handoffs, `junior report-issue`, MCP
-  registration and frontier-attention classification.
+- **[Tools](docs/tools.md)** — the `junior tools call` forms, `junior routes`,
+  common tool handoffs, `junior report-issue`, MCP registration and
+  frontier-attention classification.
 - **[Crossmatrix state graph](skills/junior/SKILL.md)** — the `matrix` commands
   (`init`, `export`, `sync`, `bootstrap`, `confirm`, `autolink`, `codemap`,
   `link`, `graph`, `qc`, `analyze`, `adr`, `jtbd`, `plan-from-spec`), the
