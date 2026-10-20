@@ -85,11 +85,11 @@ const COMMANDS: Record<string, CommandSpec> = {
  setup: { flags: ['--yes', '--dry-run'], valueFlags: ['--harness', '--hop'], min: 0, max: 0,
   help: 'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]' },
  update: {
-  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self'],
+  flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self', '--with-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
-  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions]',
+  help: 'Usage: junior update [--target codex|claude|both|none] [--user] [--with-triz] [--no-companions] [--with-matrix]',
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
@@ -98,13 +98,13 @@ const COMMANDS: Record<string, CommandSpec> = {
  plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
   help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
  init: {
-  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill'],
+  flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill', '--no-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
   min: 0,
   max: 0,
   help: [
    'Usage: junior init [--no-install] [--no-companions] [--target codex|claude|both|none] [--user] [--project]',
-   '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz]',
+   '                   [--upgrade] [--force] [--skill-root DIR] [--update] [--with-triz] [--no-matrix]',
   ].join('\n'),
  },
  routes: { flags: ['--json'], valueFlags: [], min: 0, max: 1,
@@ -284,7 +284,7 @@ async function main(argv: string[]): Promise<void> {
   if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
   const opts:InitOptions = parseInitOptions(rest);
   // `update` adopts newer releases and replaces only skills Junior itself wrote.
-  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true });
+  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true, command: 'update' });
   // Adopt a newer Junior first, so the new release's own update logic runs.
   let self: any | undefined;
   if (command === 'update') {
@@ -384,13 +384,13 @@ async function main(argv: string[]): Promise<void> {
   let plan: any;
   if (task.plan !== undefined && command !== 'qa') {
    validate(task);
-   const { withPlanLease } = await import('./plan-handoff.ts');
+   const { withPlanLease, isHoldOutcome } = await import('./plan-handoff.ts');
    const { callHop } = await import('./tools/tools.ts');
    const hopPath = resolve(taskCwd, String(task.hopFrom));
    const lease = await withPlanLease(task, () => run(task, mock, deps), {
     callHop: (tool, request) => callHop(hopPath, tool, request),
     deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
-    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: r.status === 'needs_answers' || r.status === 'needs_choice', artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
    });
    if (!lease.plan.leased) {
     console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));

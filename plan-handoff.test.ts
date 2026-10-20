@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { withPlanLease } from './plan-handoff.ts';
+import { isHoldOutcome, withPlanLease } from './plan-handoff.ts';
 
 const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
 function cpmFixture(name: string): unknown {
@@ -295,4 +295,14 @@ test('withPlanLease records the mark failure in plan.error', async () => {
   const { callHop } = harness({ 'plan.mark_status': () => ({ ok: false, error: { message: 'locked' } }) });
   const out = await withPlanLease(TASK, async () => 'artifact', deps(callHop));
   assert.equal(out.plan.error, 'plan.mark_status failed: locked');
+});
+
+// --- hold outcomes ----------------------------------------------------------
+
+test('a model approval stop is a hold outcome', () => {
+  assert.equal(isHoldOutcome('needs_model_approval'), true);
+});
+
+test('a failed run is not a hold outcome', () => {
+  assert.equal(isHoldOutcome('failed'), false);
 });

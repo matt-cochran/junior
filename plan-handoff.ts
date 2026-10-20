@@ -14,6 +14,15 @@
 
 import { cohortDeliverableIds, planLocks, strictItems } from './companion-shapes.ts';
 
+/** Outcomes that stop a run to wait for the manager or the human: the lease is
+ * kept (a rerun by the same caller is re-entrant) and the deliverable is not
+ * marked failed. */
+export const HOLD_OUTCOMES: readonly string[] = ['needs_answers', 'needs_choice', 'needs_model_approval'];
+
+export function isHoldOutcome(status: unknown): boolean {
+  return typeof status === 'string' && HOLD_OUTCOMES.includes(status);
+}
+
 export type PlanHopResult = { ok: boolean; result?: any; error?: { message: string } };
 
 export type PlanHop = (
