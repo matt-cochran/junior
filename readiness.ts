@@ -19,6 +19,7 @@ import { inspectSkill } from './setup.ts';
 import { inspectCompanionSkills, COMPANIONS, type CompanionDeps } from './companions.ts';
 import { inspectMcpRegistration, buildMcpServers, registerMcpServers, type McpServerEntry } from './mcp.ts';
 import { inspectIntegrations, type IntegrationsResult, type InstallerDeps } from './installer.ts';
+import { VERIFIED_VERSIONS } from './companion-shapes.ts';
 import { updateCheckCachePath, type UpdateSummary } from './update-check.ts';
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -26,7 +27,7 @@ import { createInterface } from 'node:readline/promises';
 import { join, resolve, dirname, delimiter } from 'node:path';
 import { ensureLocalExcludes } from './isolation.ts';
 
-export type ReadinessItemKind = 'skill' | 'mcp' | 'tool' | 'update';
+export type ReadinessItemKind = 'skill' | 'mcp' | 'tool' | 'update' | 'shape';
 export type ReadinessItem = {
   id: string;
   kind: ReadinessItemKind;
@@ -198,6 +199,28 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
     });
   }
 
+  // Whether this Junior release has verified the responses of an installed
+  // companion version is advisory: an unverified version never gates readiness
+  // and never becomes a `junior setup` action.
+  for (const tool of integrations.tools) {
+    if (!tool.usable || tool.version === null) continue;
+    const verified = VERIFIED_VERSIONS[tool.tool];
+    if (!verified) continue;
+    const status = verified.includes(tool.version) ? 'verified' : 'unverified';
+    items.push({
+      id: `shape:${tool.tool}`,
+      kind: 'shape',
+      name: tool.tool,
+      status,
+      required: false,
+      ...(status === 'verified'
+        ? {}
+        : {
+            fix: `Junior has not verified ${tool.tool} ${tool.version} responses; run \`junior update\` for a newer Junior, or report it with \`junior report-issue ${tool.tool}\``,
+          }),
+    });
+  }
+
   const summary = readCachedSummary(deps, env, home);
   for (const name of summary?.outdated ?? []) {
     items.push({
@@ -212,7 +235,7 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
 
   const unreadyRequired = items.filter((item) => item.required && !isPresent(item));
   const ready = unreadyRequired.length === 0;
-  const fixable = items.some((item) => !isPresent(item));
+  const fixable = items.some((item) => item.kind !== 'shape' && !isPresent(item));
   const overall = ready
     ? 'ready: the harness can use Junior and every companion'
     : `not ready: ${unreadyRequired.map((item) => item.name).join(', ')}`;
