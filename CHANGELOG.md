@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-20
+
+### Added
+
+- `junior apply` records the applied patch hash in `applied.json`, and
+  `junior prune` removes a worktree whose changes were applied and are
+  unchanged since, instead of skipping it as "unreviewed changes".
+- Recorded responses for cpm 0.4.1, fmeca 0.2.1, elicitation 0.1.1 and
+  scientific-process 0.3.0: `junior doctor` reports them as verified. Their
+  response shapes are unchanged from the previous versions. The fixture index
+  lists every verified version per tool.
+
+### Changed
+
+- The companion releases this adopts document `junior tools call` in their
+  own skills (praxec/cpm-planner#82, scientific-process#11, elicitation#12,
+  fmeca#88, crossmatrix#31), and scientific-process 0.3.0 accepts a per-call
+  `session_id` (scientific-process#12); Junior's same-process session opening
+  stays for older servers.
+
 ## [0.8.0] - 2026-10-20
 
 ### Added
