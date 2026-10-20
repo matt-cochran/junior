@@ -6,10 +6,10 @@
 
 /** Tool versions with recorded fixtures under tools/test-fixtures/companions. */
 export const VERIFIED_VERSIONS: Readonly<Record<string, readonly string[]>> = {
-  cpm: ['0.4.0'],
-  fmeca: ['0.2.0'],
-  elicitation: ['0.1.0'],
-  'scientific-process': ['0.2.0'],
+  cpm: ['0.4.0', '0.4.1'],
+  fmeca: ['0.2.0', '0.2.1'],
+  elicitation: ['0.1.0', '0.1.1'],
+  'scientific-process': ['0.2.0', '0.3.0'],
 };
 
 export type ShapeResult<T> = { items: T[]; shape: string; recognized: boolean };

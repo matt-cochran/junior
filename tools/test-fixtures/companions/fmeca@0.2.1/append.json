@@ -1,0 +1,203 @@
+{
+  "session_id": "fixture-fmeca-20261020",
+  "meta": {
+    "title": "fixture"
+  },
+  "matrix_strategy": "qualitative3x3",
+  "matrix_scale": [
+    {
+      "ordinal": 1,
+      "label": "low"
+    },
+    {
+      "ordinal": 2,
+      "label": "medium"
+    },
+    {
+      "ordinal": 3,
+      "label": "high"
+    }
+  ],
+  "failure_modes": [
+    {
+      "id": "fm1",
+      "session_id": "fixture-fmeca-20261020",
+      "component": {
+        "id": "export"
+      },
+      "description": "empty export",
+      "cause": "shape drift",
+      "effect": "silent data loss",
+      "severity_observations": [
+        "data_loss"
+      ],
+      "probability_observations": [
+        "occasional"
+      ],
+      "domain": "runtime",
+      "scope": "localized",
+      "source": {
+        "turn_id": "t1"
+      },
+      "criticality": "high",
+      "residual_criticality": "high",
+      "standing": "unmitigated",
+      "response_class": "restructure",
+      "derived_severity": {
+        "ordinal": 3,
+        "label": "high"
+      },
+      "derived_probability": {
+        "ordinal": 2,
+        "label": "medium"
+      },
+      "mitigations": [],
+      "verified_residual_criticality": "high",
+      "disposition": "open",
+      "disposition_history": []
+    }
+  ],
+  "issues": [
+    {
+      "id": "issue:fm1:unmitigated_high",
+      "type": "unmitigated_high",
+      "failure_mode_id": "fm1",
+      "severity": "high",
+      "explanation": "Failure mode 'fm1' is High criticality with no mitigation.",
+      "suggested_action": "Add a mitigation following the prevent→detect→fail-fast discipline (prevention first)."
+    }
+  ],
+  "signals": [
+    {
+      "kind": "notify",
+      "code": "high_criticality",
+      "message": "Failure mode 'fm1' is High criticality.",
+      "failure_mode_id": "fm1"
+    },
+    {
+      "kind": "remediate",
+      "code": "unmitigated_risk",
+      "message": "Failure mode 'fm1' is High criticality with no mitigation.",
+      "failure_mode_id": "fm1",
+      "suggested_action": "Add a mitigation following the prevent→detect→fail-fast discipline (prevention first)."
+    }
+  ],
+  "registry": {
+    "component_ids": [
+      "export"
+    ]
+  },
+  "readiness": {
+    "ready": false,
+    "by_criticality": {
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "unscored": 0
+    },
+    "blockers": [
+      "RESIDUAL: failure mode 'fm1' still has High residual criticality"
+    ],
+    "resolution": {
+      "planned": 0,
+      "implemented": 0,
+      "verified": 0,
+      "abandoned": 0
+    },
+    "verified": {
+      "ready": false,
+      "blockers": [
+        "RESIDUAL: failure mode 'fm1' still has High residual criticality"
+      ]
+    },
+    "accepted_risks": [],
+    "excluded": [],
+    "critical_items": []
+  },
+  "scoring_catalog": [
+    {
+      "id": "data_loss",
+      "axis": "severity",
+      "level_ordinal": 3,
+      "level": "high",
+      "description": "Permanent loss or corruption of user/system data."
+    },
+    {
+      "id": "security_breach",
+      "axis": "severity",
+      "level_ordinal": 3,
+      "level": "high",
+      "description": "Confidentiality, integrity, or access-control compromise."
+    },
+    {
+      "id": "service_outage",
+      "axis": "severity",
+      "level_ordinal": 3,
+      "level": "high",
+      "description": "The component or a dependent becomes unavailable."
+    },
+    {
+      "id": "user_facing_degradation",
+      "axis": "severity",
+      "level_ordinal": 2,
+      "level": "medium",
+      "description": "Users see degraded behaviour but can still complete their task."
+    },
+    {
+      "id": "recoverable_error",
+      "axis": "severity",
+      "level_ordinal": 2,
+      "level": "medium",
+      "description": "An error that the system or user can recover from with effort."
+    },
+    {
+      "id": "cosmetic",
+      "axis": "severity",
+      "level_ordinal": 1,
+      "level": "low",
+      "description": "Cosmetic/non-functional issue with no impact on the task."
+    },
+    {
+      "id": "happens_in_normal_use",
+      "axis": "probability",
+      "level_ordinal": 3,
+      "level": "high",
+      "description": "Triggered by ordinary, expected usage."
+    },
+    {
+      "id": "known_recurring",
+      "axis": "probability",
+      "level_ordinal": 3,
+      "level": "high",
+      "description": "Already observed to recur in practice."
+    },
+    {
+      "id": "occasional",
+      "axis": "probability",
+      "level_ordinal": 2,
+      "level": "medium",
+      "description": "Happens intermittently under common-but-not-constant conditions."
+    },
+    {
+      "id": "load_or_concurrency_dependent",
+      "axis": "probability",
+      "level_ordinal": 2,
+      "level": "medium",
+      "description": "Surfaces under load, contention, or specific timing."
+    },
+    {
+      "id": "rare_edge_case",
+      "axis": "probability",
+      "level_ordinal": 1,
+      "level": "low",
+      "description": "Only under an uncommon, narrow edge case."
+    },
+    {
+      "id": "requires_misuse",
+      "axis": "probability",
+      "level_ordinal": 1,
+      "level": "low",
+      "description": "Only via deliberate misuse or an unsupported configuration."
+    }
+  ]
+}
