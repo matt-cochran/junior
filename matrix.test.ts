@@ -420,6 +420,57 @@ test('junior matrix export --source cpm reports the unrecognized plan.get shape'
   assert.equal(result.stderr.includes('Unrecognized cpm.plan.get response'), true);
 });
 
+test('junior matrix export --source cpm --plan-file yields the same member ids as the plan.get fixture', () => {
+  const dir = workdir();
+  const planFile = join(dir, '.cpm-planner', 'plans', 'my-plan', 'fixtures-first.json');
+  mkdirSync(dirname(planFile), { recursive: true });
+  const fixture = cpmPlanGetFixture() as { graph: { deliverables: unknown } };
+  writeFileSync(planFile, JSON.stringify({ deliverables: fixture.graph.deliverables }));
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', planFile, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  const written = JSON.parse(result.stdout).written[0];
+  const doc = JSON.parse(readFileSync(written, 'utf8'));
+  const ids = doc.dimensions.find((d: any) => d.id === 'cpm').members.map((m: any) => m.id);
+  const expected = cpmDeliverables(cpmPlanGetFixture(), 'plan_FIXTURE').members.map((m: any) => m.id);
+  assert.deepEqual(ids, expected);
+});
+
+test('junior matrix export --source cpm --plan-file exits non-zero for a missing file', () => {
+  const dir = workdir();
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', join(dir, 'missing.json'), '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+});
+
+test('junior matrix export --source cpm --plan-file names the missing file in its error', () => {
+  const dir = workdir();
+  const missing = join(dir, 'missing.json');
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', missing, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.stderr.includes(missing), true);
+});
+
+test('junior matrix export --source cpm --plan-file exits non-zero for unparseable JSON', () => {
+  const dir = workdir();
+  const planFile = join(dir, 'broken.json');
+  writeFileSync(planFile, '{ not json');
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--plan-file', planFile, '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+});
+
 test('junior matrix export from the jevitate source writes a file', () => {
   const repo = workdir();
   mkdirSync(join(repo, '.jevitate'), { recursive: true });
@@ -453,6 +504,13 @@ test('parseMatrixArgs accepts the state source with its companion session flags'
   assert.deepEqual(
     [parsed.sources, parsed.plan, parsed.fmecaSession, parsed.elicitationSession, parsed.spSession, parsed.jevitateResults],
     [['state'], 'p1', 'f1', 'e1', 's1', 'results/'],
+  );
+});
+
+test('parseMatrixArgs rejects --plan together with --plan-file', () => {
+  assert.throws(
+    () => parseMatrixArgs(['--source', 'cpm', '--plan', 'p1', '--plan-file', 'plan.json']),
+    /mutually exclusive/,
   );
 });
 
