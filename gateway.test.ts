@@ -35,7 +35,7 @@ test('Typesafe gateway carries the direct http transport', () => {
   assert.equal(GATEWAYS.typesafe.jevTransport, 'http');
 });
 test('Typesafe gateway maps to the direct Jev model id', () => {
-  assert.equal(GATEWAYS.typesafe.jevModel, 'jev-1.13');
+  assert.equal(GATEWAYS.typesafe.jevModel, 'jev-latest');
 });
 test('Typesafe gateway points at the TypeSafe base URL', () => {
   assert.equal(GATEWAYS.typesafe.baseUrl, 'https://api.typesafe.ai');
@@ -98,7 +98,7 @@ test('Resolved typesafe gateway carries its base URL', () => {
 });
 test('Resolved typesafe gateway carries its direct model id', () => {
   const resolved = resolveJevGateway('typesafe', deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' } }));
-  assert.equal(resolved?.model, 'jev-1.13');
+  assert.equal(resolved?.model, 'jev-latest');
 });
 test('Jev gateway is null when no gateway key resolves', () => {
   assert.equal(resolveJevGateway('auto', deps()), null);

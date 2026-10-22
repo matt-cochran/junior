@@ -227,7 +227,7 @@ through the one per-kind table in `gateway.ts`. Two gateway kinds ship today:
 | kind | base URL | key (in order) | Jev model id | transport |
 | --- | --- | --- | --- | --- |
 | `openrouter` | `https://openrouter.ai/api` | `OPENROUTER_API_KEY`, then Pi `auth.json` `openrouter` | `typesafe/jev-1.13` | Pi registry classifier |
-| `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-1.13` | direct HTTP |
+| `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-latest` | direct HTTP (System One wire format) |
 
 For either kind the key is read from its environment variable first (trimmed,
 non-blank), then from the matching entry in Pi's `auth.json` (`api_key`/`api`

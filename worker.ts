@@ -1925,16 +1925,44 @@ export function resolveClassifierModel(registry:any, modelDef:{provider:string;i
  * message (R5). */
 export function createTypesafeClassifier(gw: ResolvedJevGateway, fetchImpl: typeof fetch = fetch): GateClassifier {
  return async (context, options) => {
+  // System One's wire type for a yes/no question is `noul`; Pi's transport
+  // makes the same rewrite (and maps `noul` answers back to `bool`).
+  const questions = Object.fromEntries(Object.entries(context.questions)
+   .map(([id, q]) => [id, q.type === 'bool' ? { ...q, type: 'noul' } : q]));
   const res = await fetchImpl(`${gw.baseUrl}/v1/systemone`, {
    method: 'POST',
    headers: { 'content-type': 'application/json', authorization: `Bearer ${gw.key}` },
-   body: JSON.stringify({ state: context.state, model: gw.model, questions: context.questions }),
+   body: JSON.stringify({ state: context.state, model: gw.model, questions }),
    signal: options?.signal,
   });
-  if (!res.ok) return { provider: 'typesafe', model: gw.model, errorMessage: `TypeSafe Jev HTTP ${res.status}` };
+  if (!res.ok) {
+   let detail = '';
+   try { detail = (await res.text()).split(gw.key).join('[redacted]').replace(/\s+/g, ' ').trim().slice(0, 300); } catch { /* no body */ }
+   return { provider: 'typesafe', model: gw.model, errorMessage: `TypeSafe Jev HTTP ${res.status}${detail ? `: ${detail}` : ''}` };
+  }
   const json:any = await res.json();
-  return { provider: 'typesafe', model: gw.model, answers: json.answers, usage: json.usage, stopReason: 'stop' };
+  return { provider: 'typesafe', model: gw.model, answers: typesafeAnswers(json?.answers), usage: typesafeUsage(json?.usage), stopReason: 'stop' };
  };
+}
+
+/** Map System One answers to GateAnswer: `noul` becomes `bool` with its
+ * probability; `choice` and `score` keep their fields. */
+export function typesafeAnswers(raw:any):Record<string,GateAnswer>|undefined {
+ if (!raw || typeof raw !== 'object') return undefined;
+ const out:Record<string,GateAnswer> = {};
+ for (const [id, a] of Object.entries<any>(raw)) {
+  if (!a || typeof a !== 'object') continue;
+  out[id] = a.type === 'noul' ? { type:'bool', probability:a.noul } as GateAnswer : a as GateAnswer;
+ }
+ return out;
+}
+
+/** Map System One usage (`input_tokens`/`output_tokens`) to Pi's usage shape. */
+export function typesafeUsage(raw:any):any {
+ if (!raw || typeof raw !== 'object') return undefined;
+ const input = Number(raw.input_tokens ?? raw.input ?? 0) || 0;
+ const output = Number(raw.output_tokens ?? raw.output ?? 0) || 0;
+ return { input, output, totalTokens: input + output };
 }
 
 /** Resolve the run's Jev classifier from the gateway table (ADR-0006). A

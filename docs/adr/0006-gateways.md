@@ -37,7 +37,7 @@ their own way, and other proxies (LiteLLM, #70) are expected later. Issue #69.
    | kind | base URL | key (in order) | Jev model id |
    |---|---|---|---|
    | `openrouter` | `https://openrouter.ai/api` | `OPENROUTER_API_KEY`, then Pi `auth.json` `openrouter` | `typesafe/jev-1.13` (through Pi `registry.classify`, as today) |
-   | `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-1.13` (direct HTTP) |
+   | `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-latest` (direct HTTP; the direct API serves only `jev-latest`) |
 
    Adding a kind (for example `litellm` in #70) adds a table row plus its
    model-id mapping; call sites do not change. `baseUrl` may be overridden per

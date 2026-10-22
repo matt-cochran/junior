@@ -43,7 +43,7 @@ export const GATEWAYS: Record<GatewayKind, Gateway> = {
     baseUrl: 'https://api.typesafe.ai',
     keyEnv: 'TYPESAFE_JEV_API_KEY',
     authKey: 'typesafe',
-    jevModel: 'jev-1.13',
+    jevModel: 'jev-latest',
     jevTransport: 'http',
   },
 };
