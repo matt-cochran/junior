@@ -69,6 +69,11 @@ their own way, and other proxies (LiteLLM, #70) are expected later. Issue #69.
 
 ## Consequences
 
+With a TypeSafe key, Jev requests (the contract state and questions) go to
+`api.typesafe.ai` instead of OpenRouter; TypeSafe's Data Processing Agreement
+is public at https://typesafe.ai/legal/data-processing, and the setup docs
+link it.
+
 One OpenRouter key keeps working with no new setup. Users with a TypeSafe key
 get direct Jev calls by setting nothing more than the key. Later gateways are a
 table row, and an unknown kind fails loudly instead of quietly sending traffic
