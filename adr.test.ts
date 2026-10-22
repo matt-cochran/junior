@@ -255,8 +255,8 @@ test('adr check --record writes a proposed conformance observation', async () =>
 
 // --- seed ADRs --------------------------------------------------------------
 
-test('Junior ships four seed ADRs', () => {
-  assert.equal(loadAdrs(SEED_DIR).length, 4);
+test('Junior ships six seed ADRs', () => {
+  assert.equal(loadAdrs(SEED_DIR).length, 6);
 });
 
 test('Junior seed ADRs lint clean', () => {
