@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES, callHop } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES, callHop, cpmModelEnv } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -942,6 +942,7 @@ if (log) {
   fs.writeFileSync(log, JSON.stringify({
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null,
     CPM_OPENROUTER_KEY_FILE: process.env.CPM_OPENROUTER_KEY_FILE ?? null,
+    CPM_LLM_MODEL: process.env.CPM_LLM_MODEL ?? null,
   }));
 }
 let buf = "";
@@ -1114,4 +1115,90 @@ test("tools inspect output does not contain the OpenRouter key value", () => {
   const hop = initHop(dir);
   const result = runCli(["inspect", hop], 30000, { PI_CODING_AGENT_DIR: dir });
   assert.equal(result.stdout.includes("sk-inspect-secret-canary"), false);
+});
+
+// --- cpm executor model selection --------------------------------------------
+//
+// cpm spawns must be directed at the project's resolved model when the project
+// provider is openrouter, while an explicit CPM_LLM_MODEL still wins. Every
+// resolved id is policy-checked with the same commodity gate the rest of Junior
+// uses, so a frontier or unknown id fails the call before any child is spawned.
+
+const MODEL_HOP = path.join(os.tmpdir(), "project", ".delivery", "setup", "hop.json");
+
+function projectDefaults(provider, model) {
+  return { provider, model, source: "builtin", path: null };
+}
+
+test("cpmModelEnv injects the project openrouter model when nothing explicit is set", () => {
+  const out = cpmModelEnv(MODEL_HOP, undefined, {}, () => projectDefaults("openrouter", "deepseek/deepseek-v4.1-flash"));
+  assert.deepEqual(out, { CPM_LLM_MODEL: "deepseek/deepseek-v4.1-flash" });
+});
+
+test("cpmModelEnv injects nothing when the project provider is not openrouter", () => {
+  const out = cpmModelEnv(MODEL_HOP, undefined, {}, () => projectDefaults("local", "deepseek/deepseek-v4.1-flash"));
+  assert.deepEqual(out, {});
+});
+
+test("cpmModelEnv lets the hop model win over the project model", () => {
+  const out = cpmModelEnv(
+    MODEL_HOP,
+    { CPM_LLM_MODEL: "qwen/qwen3-coder" },
+    {},
+    () => projectDefaults("openrouter", "deepseek/deepseek-v4.1-flash"),
+  );
+  assert.deepEqual(out, { CPM_LLM_MODEL: "qwen/qwen3-coder" });
+});
+
+test("cpmModelEnv passes a commodity process model through unchanged", () => {
+  const out = cpmModelEnv(MODEL_HOP, undefined, { CPM_LLM_MODEL: "moonshotai/kimi-k2" });
+  assert.deepEqual(out, { CPM_LLM_MODEL: "moonshotai/kimi-k2" });
+});
+
+test("cpmModelEnv refuses a frontier hop model", () => {
+  assert.throws(
+    () => cpmModelEnv(MODEL_HOP, { CPM_LLM_MODEL: "openai/gpt-5-mini" }),
+    (err) => err.code === "frontier_model_refused",
+  );
+});
+
+test("cpmModelEnv refuses an unknown hop model", () => {
+  assert.throws(
+    () => cpmModelEnv(MODEL_HOP, { CPM_LLM_MODEL: "mystery/model-x" }),
+    (err) => err.code === "unknown_model_refused",
+  );
+});
+
+test("cpmModelEnv refuses a frontier project model", () => {
+  assert.throws(
+    () => cpmModelEnv(MODEL_HOP, undefined, {}, () => projectDefaults("openrouter", "anthropic/claude-opus-4")),
+    (err) => err.code === "frontier_model_refused",
+  );
+});
+
+test("a frontier hop CPM_LLM_MODEL fails the cpm call with frontier_model_refused", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  const hop = probeHop(dir, log, { probeEnv: { CPM_LLM_MODEL: "openai/gpt-5-mini" } });
+  await assert.rejects(
+    callHop(hop, "cpm", { tool: "plan.status", arguments: {} }),
+    (err) => err.code === "frontier_model_refused",
+  );
+});
+
+test("a frontier hop CPM_LLM_MODEL fails the cpm call before the child spawns", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  const hop = probeHop(dir, log, { probeEnv: { CPM_LLM_MODEL: "openai/gpt-5-mini" } });
+  await callHop(hop, "cpm", { tool: "plan.status", arguments: {} }).catch(() => {});
+  assert.equal(fs.existsSync(log), false);
+});
+
+test("a commodity process CPM_LLM_MODEL reaches the cpm child env", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  const hop = probeHop(dir, log);
+  const req = writeJson(path.join(dir, "req.json"), { tool: "plan.status", arguments: {} });
+  runCli(["call", hop, "cpm", req], 30000, { CPM_LLM_MODEL: "qwen/qwen3-coder" });
+  assert.equal(readProbeEnv(log).CPM_LLM_MODEL, "qwen/qwen3-coder");
 });

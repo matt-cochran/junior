@@ -39,6 +39,8 @@ import path from "node:path";
 import process from "node:process";
 import { isDirectEntry } from "../cli-entry.ts";
 import { openRouterAuthPath, readOpenRouterAuthFile } from "../billing.ts";
+import { loadDefaults } from "../setup.ts";
+import { assertCommodity } from "../model-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -829,6 +831,42 @@ export function cpmReviewStatus(hopEnv: Record<string, string> | undefined, env:
   return readOpenRouterAuthFile(openRouterAuthPath(env)) ? "available" : "unavailable";
 }
 
+/** The first non-empty CPM_LLM_MODEL: hop env first, then the process env. */
+function explicitCpmModel(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv): string | null {
+  for (const value of [hopEnv?.CPM_LLM_MODEL, env.CPM_LLM_MODEL]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * Extra env for a cpm spawn that selects the executor model. An explicit
+ * CPM_LLM_MODEL in the hop env wins over the process env, and both win over
+ * the project's resolved model. The project model only applies when the
+ * project provider is openrouter, the provider cpm routes through; otherwise
+ * cpm-planner's own commodity default is left in charge. Whichever id wins is
+ * policy-checked with the commodity gate, so a frontier or unknown model
+ * throws and the caller fails before spawning any child.
+ */
+export function cpmModelEnv(
+  hopPath: string,
+  hopEnv: Record<string, string> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  loadProjectDefaults = loadDefaults,
+): Record<string, string> {
+  const explicit = explicitCpmModel(hopEnv, env);
+  if (explicit) {
+    assertCommodity("openrouter", explicit);
+    return { CPM_LLM_MODEL: explicit };
+  }
+  // hop.json lives at <project>/.delivery/setup/hop.json.
+  const projectDir = path.dirname(path.dirname(path.dirname(hopPath)));
+  const defaults = loadProjectDefaults(projectDir);
+  if (defaults.provider !== "openrouter") return {};
+  assertCommodity("openrouter", defaults.model);
+  return { CPM_LLM_MODEL: defaults.model };
+}
+
 interface Semver {
   major: number;
   minor: number;
@@ -1071,7 +1109,7 @@ export async function callHop(
     }
     const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
     const env = { ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
-    if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env));
+    if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
 
     let outcome: CallOutcome;
     try {
