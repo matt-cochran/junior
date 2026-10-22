@@ -8,7 +8,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  jevMode,assessPreflight,assessPostflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,reportEvidence,deterministicCriterion,
- estimateCost,validatePricing,
+ createTypesafeClassifier,createJevClassifier,
+ estimateCost,validatePricing,CONTRACT_PARTS,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
@@ -19,6 +20,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
+import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
 const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
 const COMMODITY_MODEL='deepseek/deepseek-v4.1-flash';
@@ -186,6 +188,115 @@ test('Missing classifier catalog entry is supplied explicitly',()=>{
  const missing=resolveClassifierModel({getModelOfType:()=>undefined});
  assert.equal(missing.explicit,true);
  assert.deepEqual(missing.model,{provider:'openrouter',id:'typesafe/jev-1.13'});
+});
+
+// --- Jev gateway classifier (ADR-0006): injected fetch and Pi factory only ---
+const jsonFetch=(body:any,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});
+const captureFetch=(response:any)=>{const calls:any[]=[];const impl:any=async(url:string,init:any)=>{calls.push({url,init});return response;};return {calls,impl};};
+const typesafeGateway:any={kind:'typesafe',baseUrl:'https://api.typesafe.ai',model:'jev-latest',transport:'http',key:'ts-secret-key'};
+const stubClassifier=(modelDef:any):any=>async({questions}:any)=>{
+ const isPre=Object.prototype.hasOwnProperty.call(questions,'contract_clear');
+ return {stopReason:'stop',provider:'openrouter',model:modelDef.id,answers:isPre?JEVPASS:{AC1:bool(0.95)},usage:gateUsage};
+};
+
+test('Typesafe classifier posts to the systemone endpoint',async()=>{
+ const {calls,impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ await createTypesafeClassifier(typesafeGateway,impl)({state:{},questions:{}});
+ assert.equal(calls[0].url,'https://api.typesafe.ai/v1/systemone');
+});
+test('Typesafe classifier sends the bearer authorization header',async()=>{
+ const {calls,impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ await createTypesafeClassifier(typesafeGateway,impl)({state:{},questions:{}});
+ assert.equal(calls[0].init.headers.authorization,'Bearer ts-secret-key');
+});
+test('Typesafe classifier sends a bool question as the System One noul type',async()=>{
+ const {calls,impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ const state={deliverable:'x'};const questions={AC1:{type:'bool',instructions:'y'}};
+ await createTypesafeClassifier(typesafeGateway,impl)({state,questions});
+ assert.deepEqual(JSON.parse(calls[0].init.body),{state,model:'jev-latest',questions:{AC1:{type:'noul',instructions:'y'}}});
+});
+test('Typesafe classifier sends a choice question unchanged',async()=>{
+ const {calls,impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ const questions={W:{type:'choice',instructions:'y',criteria:{a:'A',b:'B'}}};
+ await createTypesafeClassifier(typesafeGateway,impl)({state:{},questions});
+ assert.deepEqual(JSON.parse(calls[0].init.body).questions,questions);
+});
+test('Typesafe classifier passes the abort signal through',async()=>{
+ const {calls,impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ const controller=new AbortController();
+ await createTypesafeClassifier(typesafeGateway,impl)({state:{},questions:{}},{signal:controller.signal});
+ assert.equal(calls[0].init.signal,controller.signal);
+});
+test('Typesafe classifier reports the typesafe provider on success',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({answers:{},usage:{}})).impl);
+ assert.equal((await classifier({state:{},questions:{}})).provider,'typesafe');
+});
+test('Typesafe classifier reports the gateway model id on success',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({answers:{},usage:{}})).impl);
+ assert.equal((await classifier({state:{},questions:{}})).model,'jev-latest');
+});
+test('Typesafe classifier maps a noul answer to a bool probability',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({answers:{AC1:{type:'noul',noul:0.9}},usage:{}})).impl);
+ assert.deepEqual((await classifier({state:{},questions:{}})).answers,{AC1:{type:'bool',probability:0.9}});
+});
+test('Typesafe classifier maps System One token usage',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({answers:{},usage:{input_tokens:10,output_tokens:4}})).impl);
+ assert.deepEqual((await classifier({state:{},questions:{}})).usage,{input:10,output:4,totalTokens:14});
+});
+test('Typesafe classifier names the HTTP status on a non-2xx response',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({},500)).impl);
+ assert.match((await classifier({state:{},questions:{}})).errorMessage,/HTTP 500/);
+});
+test('Typesafe classifier failure never exposes the gateway key',async()=>{
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(jsonFetch({},401)).impl);
+ assert.doesNotMatch((await classifier({state:{},questions:{}})).errorMessage,/ts-secret-key/);
+});
+test('createJevClassifier auto with only an openrouter key uses the Pi path',async()=>{
+ let def:any;
+ const pi:any=async(modelDef:any)=>{def=modelDef;return stubClassifier(modelDef);};
+ await createJevClassifier('auto',{gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'},pi});
+ assert.deepEqual(def,{provider:'openrouter',id:'typesafe/jev-1.13'});
+});
+test('createJevClassifier auto with only an openrouter key reports the openrouter gateway',async()=>{
+ const pi:any=async(modelDef:any)=>stubClassifier(modelDef);
+ const resolved=await createJevClassifier('auto',{gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'},pi});
+ assert.equal(resolved.gateway,'openrouter');
+});
+test('createJevClassifier auto with a typesafe key returns the direct HTTP classifier',async()=>{
+ const {impl}=captureFetch(jsonFetch({answers:{},usage:{}}));
+ const resolved=await createJevClassifier('auto',{gateway:{env:{TYPESAFE_JEV_API_KEY:'ts-key'},readAuthFile:()=>'{}'},fetch:impl});
+ assert.equal(resolved.gateway,'typesafe');
+});
+test('createJevClassifier with explicit typesafe and no key rejects with GatewayError',async()=>{
+ try {
+  await createJevClassifier('typesafe',{gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'}});
+  assert.fail('expected createJevClassifier to reject');
+ } catch (error) {
+  assert.ok(error instanceof GatewayError);
+ }
+});
+test('createJevClassifier missing key rejection carries jev_provider_key_missing',async()=>{
+ try {
+  await createJevClassifier('typesafe',{gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'}});
+  assert.fail('expected createJevClassifier to reject');
+ } catch (error) {
+  assert.equal((error as GatewayError).code,'jev_provider_key_missing');
+ }
+});
+test('validate rejects an unknown jev.provider naming the allowed values',()=>{
+ assert.throws(()=>validate({...task(),jev:{mode:'shadow',provider:'litellm'}}),/auto, openrouter or typesafe/);
+});
+test('Run records the openrouter gateway when Jev resolves through Pi',async()=>{
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''});
+ const jevPi:any=async(modelDef:any)=>stubClassifier(modelDef);
+ const r=await run(task(0,{jev:{mode:'shadow'}}),false,{spawnPi,jevPi,gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'}});
+ assert.equal(r.jev.gateway,'openrouter');
+});
+test('Run records the gateway Jev model id in the jev record',async()=>{
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''});
+ const jevPi:any=async(modelDef:any)=>stubClassifier(modelDef);
+ const r=await run(task(0,{jev:{mode:'shadow'}}),false,{spawnPi,jevPi,gateway:{env:{OPENROUTER_API_KEY:'or-key'},readAuthFile:()=>'{}'}});
+ assert.equal(r.jev.model.id,'typesafe/jev-1.13');
 });
 test('Git diff evidence is bounded and unavailable outside a repo',()=>{
  const b=boundEvidence('stat','0123456789',4);
@@ -2867,6 +2978,58 @@ test('Compact receipt exposes the attention trigger',async()=>{
  assert.equal(compactHandoff(r).attention.trigger,'contract_clear');
 });
 
+test('The readiness request asks which contract part is least clear',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.deepEqual(Object.keys(questions.contract_part.criteria),[...CONTRACT_PARTS]);
+});
+test('A blocking-assumption clarify names the classifier contract part',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83),contract_part:choice('constraints',0.9)}));
+ assert.equal(pre.attention.part?.name,'constraints');
+});
+test('A blocking-assumption clarify quotes the constraints as an excerpt',async()=>{
+ const t=task(0,{constraints:['Use Node only']});
+ const pre=await assessPreflight(t,gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83),contract_part:choice('constraints',0.9)}));
+ assert.equal(pre.attention.excerpt,'Use Node only');
+});
+test('A contract-clear clarify carries at least one question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)}));
+ assert.ok((pre.attention.questions?.length ?? 0)>=1);
+});
+test('An unanswered contract part falls back to acceptance',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.deepEqual(pre.attention.part,{name:'acceptance',probability:null});
+});
+test('An unanswered contract part still yields a clarify question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.ok((pre.attention.questions?.length ?? 0)>=1);
+});
+test('A delegate attention carries no clarify detail fields',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.deepEqual(Object.keys(pre.attention).filter((k)=>['part','excerpt','questions'].includes(k)),[]);
+});
+const emptyQuestionHop:any=async(_hop:string,tool:string,request:any)=>{
+ const ok=(result:any)=>({ok:true,tool,toolName:request.tool,result});
+ if(request.tool==='question.next')return ok({question:null});
+ if(request.tool==='state.get')return ok({signals:[],claims:[]});
+ return ok({});
+};
+test('A needs_answers result numbers fallback attention questions from Q1',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.deepEqual(r.clarification.questions.map((q:any)=>q.id),['Q1']);
+});
+test('A needs_answers result carries the attention question text',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.clarification.questions[0].question,r.jev.preflight.attention.questions[0]);
+});
+test('Compact receipt exposes the clarification batch',()=>{
+ const clarification={sessionId:'clarify:clar',round:1,questions:[{id:'Q1',question:'Which?',why:'Jev flagged the acceptance part of the contract',suggestedAnswer:null,claimIds:[]}]};
+ assert.deepEqual(compactHandoff({status:'needs_answers',clarification}).clarification,clarification);
+});
+
 // --- B01 run artifacts never appear as target-checkout changes (real Git fixtures) ---
 const artifactTask=(repo:any,extra:any={})=>({id:'b01',deliverable:'artifact isolation',cwd:repo.dir,acceptance:['checks pass'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],...extra});
 const deliveryPath=(p:string)=>p==='.delivery'||p.startsWith('.delivery/');
@@ -3576,4 +3739,26 @@ test('A contract modelProfile approved for the run applies the pinned model',asy
 
 test('The affinity key never contains the deliverable id',()=>{
  assert.equal(affinityKeyFor('/project','secret-feature-name').includes('secret-feature-name'),false);
+});
+test('Compact cost treats an unpriced zero from a non-OpenRouter provider as unknown',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'litellm',model:'deepseek/deepseek-v4.1-flash'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.equal(h.model.cost.available,false);
+});
+test('Compact cost names the missing Pi pricing for an unpriced zero',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'litellm',model:'deepseek/deepseek-v4.1-flash'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.match(String(h.model.cost.unknownReason),/provider litellm reported 0 for 1200 tokens/);
+});
+test('Compact cost keeps a reported zero from OpenRouter as a known free cost',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'openrouter',model:'deepseek/deepseek-v4.1-flash:free'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.equal(h.model.cost.amountUsd,0);
+});
+test('Typesafe classifier includes the API error text on a non-2xx response',async()=>{
+ const res={ok:false,status:400,json:async()=>({}),text:async()=>'{"error":"unknown model jev-1.13"}'};
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(res).impl);
+ assert.match((await classifier({state:{},questions:{}})).errorMessage,/HTTP 400: .*unknown model/);
+});
+test('Typesafe classifier redacts the key if the API echoes it',async()=>{
+ const res={ok:false,status:401,json:async()=>({}),text:async()=>'bad key ts-secret-key'};
+ const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(res).impl);
+ assert.doesNotMatch((await classifier({state:{},questions:{}})).errorMessage,/ts-secret-key/);
 });

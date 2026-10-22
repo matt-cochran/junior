@@ -106,6 +106,18 @@ configuration, and by default it makes no network call. Checks:
 - **Credentials**: inspects whether the requested provider has a credential in
   Pi's `auth.json` or its environment variable. Only provider names and source
   labels are reported; credential values are never returned or printed.
+- **Gateways**: reports the `gateways` section: each Jev gateway kind
+  (`openrouter`, `typesafe`) as configured or not configured with its source
+  (`env` or `auth`), plus the resolved `jev.provider` (`auto`, `openrouter` or
+  `typesafe`). An explicit provider whose key is missing reports
+  `jev_provider_key_missing` as remediation. It also reports `gateways.litellm`
+  for the Pi `models.json` provider from
+  [ADR-0007](adr/0007-litellm-is-a-pi-provider.md): `defined`, `keySource`
+  (`env`, `models.json` or `command`), `keyEnv`, `keyConfigured` and the `models`
+  count. A `!`-prefixed `apiKey` is reported as `command` with
+  `keyConfigured: null` and is never run. The section reads only `models.json`
+  and environment variables, makes no network call, is advisory and never
+  changes `ok`; key values are never reported.
 - **Model**: verifies the configured provider/model (default `openrouter/deepseek/deepseek-v4.1-flash`) against Pi's
   local catalog (`models-store.json`) and agent `models.json` with no network
   call, and gives an actionable diagnosis when it is missing. It also reports
@@ -372,6 +384,22 @@ it makes one read-only request to the key-status endpoint and reports `valid`,
 `usage`, `limit`, `remaining` and `ready`. For another provider it records
 `verified: null` with a clear reason instead of probing the wrong endpoint. The
 key itself is never returned or written to the result.
+
+##### Jev gateways
+An OpenRouter key alone is a complete Jev configuration. With only
+`OPENROUTER_API_KEY` (or the `openrouter` entry in Pi's `auth.json`),
+`jev.provider` at its default `auto` resolves to `openrouter`, and Jev requests
+go through the Pi registry classifier's `typesafe/jev-1.13` model.
+
+A TypeSafe key is optional and only changes where Jev calls go. Set
+`TYPESAFE_JEV_API_KEY` (or store a `typesafe` entry in Pi's `auth.json`) and
+either leave `jev.provider` at `auto` or pin `"jev": { "provider": "typesafe" }`
+in the contract. Then Jev requests (the contract state and questions) go to
+`api.typesafe.ai` instead of OpenRouter. TypeSafe's Data Processing Agreement is
+public at https://typesafe.ai/legal/data-processing. Pinning `openrouter`
+requires OpenRouter; pinning a provider whose key is missing fails with
+`jev_provider_key_missing` rather than silently switching. `junior doctor`
+reports each gateway's status and the resolved provider under `gateways`.
 
 The setup checks are free. A **paid smoke test is a separate, explicit opt-in**:
 run a live task without `--mock`, for example

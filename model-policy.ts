@@ -65,14 +65,16 @@ export function modelVendor(provider: string, id: string): string | null {
     const vendor = prefix.startsWith('~') ? prefix.slice(1) : prefix;
     return vendor.length > 0 ? vendor : null;
   }
-  if (slash === 0 || normalizedProvider === '' || normalizedProvider === 'openrouter') return null;
+  if (slash === 0 || normalizedProvider === '' || AGGREGATOR_PROVIDERS.includes(normalizedProvider)) return null;
   if (normalizedProvider === 'zai') return 'z-ai';
   return normalizedProvider;
 }
 
 /** Providers that route to many vendors; only for these does the id's
- * `vendor/` prefix decide the vendor. A direct provider is itself the host. */
-export const AGGREGATOR_PROVIDERS: readonly string[] = ['openrouter'];
+ * `vendor/` prefix decide the vendor. A direct provider is itself the host.
+ * `litellm` is a Pi custom provider pointing at a LiteLLM proxy (ADR-0007), so
+ * its ids must carry a `vendor/` prefix. */
+export const AGGREGATOR_PROVIDERS: readonly string[] = ['openrouter', 'litellm'];
 
 /** Classify a provider/model pair as commodity, frontier, or unknown. */
 export function classifyModel(provider: string, id: string): ModelVerdict {
