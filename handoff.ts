@@ -26,7 +26,9 @@ export type HandoffArtifacts = {
 };
 
 export type CompactHandoff = {
- attention: {target:string; decision:string; reason:string; probability:number|null; mode:string; workerBlocked:boolean} | null;
+ attention: {target:string; decision:string; reason:string; probability:number|null; mode:string; workerBlocked:boolean;
+  /** Clarify detail: the contract part, its bounded excerpt, and the questions. */
+  part?:{name:string; probability:number|null}; excerpt?:string; questions?:string[]} | null;
  id: string;
  outcome: string;
  source: string;
@@ -116,6 +118,8 @@ export type CompactHandoff = {
   priorResult: any;
   context: string | null;
  } | null;
+ /** The clarification batch for a needs_answers result, or absent otherwise. */
+ clarification?: {sessionId:string; round:number; questions:any[]};
  artifacts: HandoffArtifacts;
 };
 
@@ -310,6 +314,11 @@ export function compactHandoff(result: any): CompactHandoff {
   },
   analysis,
   review,
+  ...(r.clarification && typeof r.clarification === 'object' ? {clarification:{
+   sessionId:String(r.clarification.sessionId ?? ''),
+   round:Number(r.clarification.round ?? 0),
+   questions:Array.isArray(r.clarification.questions) ? r.clarification.questions : [],
+  }} : {}),
   artifacts: artifactPaths(dir, report),
  };
 }

@@ -824,6 +824,55 @@ export function choiceVerdict(answer:any):{choice:ExplicitWorkflow|null; confide
  return {choice, confidence};
 }
 
+/** The contract parts Jev can name as least clear on a clarify. */
+export const CONTRACT_PARTS = ['deliverable','acceptance','constraints','checks','context'] as const;
+export type ContractPart = typeof CONTRACT_PARTS[number];
+/** One fixed sentence per part, used as the `contract_part` choice criteria. */
+export const CONTRACT_PART_DESCRIPTIONS: Record<ContractPart,string> = {
+ deliverable: 'The deliverable itself is least clear or rests on an unstated assumption.',
+ acceptance: 'The acceptance criteria are least clear or rest on an unstated assumption.',
+ constraints: 'The constraints are least clear or rest on an unstated assumption.',
+ checks: 'The independent checks are least clear or rest on an unstated assumption.',
+ context: 'The provided context is least clear or rests on an unstated assumption.',
+};
+
+/** Read a Jev `choice` answer for the contract-part question. */
+export function contractPartVerdict(answer:any):{name:ContractPart|null; probability:number|null} {
+ if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') return {name:null, probability:null};
+ const name=(CONTRACT_PARTS as readonly string[]).includes(answer.choice) ? answer.choice as ContractPart : null;
+ const probability=typeof answer.confidence === 'number' && Number.isFinite(answer.confidence) ? answer.confidence : null;
+ return {name, probability};
+}
+
+/** Render one part of the readiness state as the text Junior sent to Jev. */
+function contractPartText(state:{deliverable:any; acceptance:string[]; constraints:string[]; checks:{command:string;args?:string[]}[]; context:any}, name:ContractPart):string {
+ if (name === 'deliverable') return typeof state.deliverable === 'string' ? state.deliverable : String(state.deliverable ?? '');
+ if (name === 'acceptance') return (Array.isArray(state.acceptance) ? state.acceptance : []).join('; ');
+ if (name === 'constraints') return (Array.isArray(state.constraints) ? state.constraints : []).join('; ');
+ if (name === 'checks') return (Array.isArray(state.checks) ? state.checks : [])
+  .map((c)=>[c?.command, ...(Array.isArray(c?.args) ? c.args : [])].filter((v)=>typeof v === 'string' && v.length > 0).join(' '))
+  .filter(Boolean).join('; ');
+ return (Array.isArray(state.context) ? state.context : [])
+  .map((c)=>typeof c === 'string' ? c : String(c?.path ?? ''))
+  .filter(Boolean).join('; ');
+}
+
+/** Build the deterministic clarify detail for a contract part: the named part,
+ * its bounded excerpt, and at least one template question that quotes it. */
+export function clarifyDetail(state:{deliverable:any; acceptance:string[]; constraints:string[]; checks:{command:string;args?:string[]}[]; context:any}, part:{name:ContractPart|null; probability:number|null}):{part:{name:ContractPart; probability:number|null}; excerpt:string; questions:string[]} {
+ const name=part.name ?? 'acceptance';
+ const excerpt=contractPartText(state,name).slice(0,600);
+ const subject=excerpt || `the ${name} part of the contract`;
+ const templates:Record<ContractPart,string>={
+  deliverable:`What exactly must the deliverable contain that this description leaves unstated: ${subject}?`,
+  acceptance:`Which of these acceptance criteria can't be checked as written: ${subject}?`,
+  constraints:`Which of these constraints is incomplete or conflicts with the deliverable: ${subject}?`,
+  checks:`Which of these checks would not catch the failure this contract cares about: ${subject}?`,
+  context:`Which of these context paths is missing or insufficient to implement the contract: ${subject}?`,
+ };
+ return {part:{name, probability:part.probability}, excerpt, questions:[templates[name]]};
+}
+
 /** Resolve the workflow from the explicit contract, otherwise from a Jev choice
  * answer, otherwise deterministically to the inspect-first `checks_first`. */
 export function decideWorkflow(t:any, workflowAnswer:any, classifier:boolean, classifierError?:string):WorkflowDecision {
@@ -1487,6 +1536,11 @@ export type JevAttention = {
  probabilities:{ requires_frontier:number|null; contract_clear:number|null; blocking_assumptions:number|null };
  reason:string;
  probability:number|null;
+ /** On a clarify: the contract part Jev judged least clear, a bounded excerpt,
+  * and at least one deterministic question. Absent on other attentions. */
+ part?:{name:ContractPart; probability:number|null};
+ excerpt?:string;
+ questions?:string[];
 };
 
 export type JevPreflight = {
@@ -1659,6 +1713,13 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
    criteria:opts.modelProfiles,
   };
  }
+ // Name the least-clear contract part in the same call, before the traits so
+ // it counts against MAX_GATE_QUESTIONS.
+ questions.contract_part = {
+  type:'choice',
+  instructions:'Which part of the contract is least clear or rests on an unstated assumption? Judge only from the contract text and code context.',
+  criteria:CONTRACT_PART_DESCRIPTIONS,
+ };
  // One binary trait question per playbook trait, in the same call. When the
  // catalog is unavailable, or adding every trait would exceed the per-call
  // question limit, no trait questions are asked (fail closed to no traits).
@@ -1693,6 +1754,7 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
   try { routing = routeTools(traitProbabilities); } catch { routing = null; }
  }
  const probabilities = { requires_frontier:frontier.probability, contract_clear:clear.probability, blocking_assumptions:assumptions.probability };
+ const detail = clarifyDetail(state, contractPartVerdict(answers.contract_part));
  const attention:JevAttention = error
   ? {target:'manager',decision:'uncertain',trigger:'error',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:error,probability:frontier.probability,toolPlan:routing}
   : frontier.verdict === 'uncertain'
@@ -1700,9 +1762,9 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
    : frontier.verdict === 'true'
     ? {target:'frontier',decision:'frontier_required',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Jev recommends frontier attention for the task scope and decision requirements.',probability:frontier.probability,toolPlan:routing}
     : clear.verdict !== 'true'
-     ? {target:'manager',decision:'clarify',trigger:'contract_clear',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:contractClarifyReason(clear.probability),probability:clear.probability,toolPlan:routing}
+     ? {target:'manager',decision:'clarify',trigger:'contract_clear',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:contractClarifyReason(clear.probability),probability:clear.probability,toolPlan:routing,...detail}
      : assumptions.verdict !== 'false'
-      ? {target:'manager',decision:'clarify',trigger:'blocking_assumptions',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:assumptionClarifyReason(assumptions),probability:assumptions.probability,toolPlan:routing}
+      ? {target:'manager',decision:'clarify',trigger:'blocking_assumptions',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:assumptionClarifyReason(assumptions),probability:assumptions.probability,toolPlan:routing,...detail}
       : {target:'commodity',decision:'delegate',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability,toolPlan:routing};
  const base = { attention, answers, confidence, usage, reportedProvider:result?.provider, reportedModel:result?.model };
  // A gate error is not a pass or a definite block: it is uncertain.
@@ -2440,11 +2502,21 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
      });
      heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs())});
      heartbeat.setState('ready_for_review',{stopReason:'needs_answers'});
+     const attentionQuestions=jev?.preflight?.attention?.questions ?? [];
+     const questions=batch.questions.length > 0
+      ? batch.questions
+      : attentionQuestions.map((question:string, i:number)=>({
+       id:`Q${i+1}`,
+       question,
+       why:`Jev flagged the ${jev?.preflight?.attention?.part?.name ?? 'acceptance'} part of the contract`,
+       suggestedAnswer:null,
+       claimIds:[],
+      }));
      const clarifyResult:any={ id:t.id, simulated:mock, status:'needs_answers', workerExitCode:null,
       checks:[], artifactDir:dir, jev, workflow:decision, runtime:heartbeat.snapshot(), lineage,
       sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
       toolPlan: preparePlan, modelRouting:modelRoute,
-      clarification:{ sessionId:batch.sessionId, round:batch.round, questions:batch.questions } };
+      clarification:{ sessionId:batch.sessionId, round:batch.round, questions } };
      writeFileSync(join(dir,'result.json'),JSON.stringify(clarifyResult,null,2));
      return clarifyResult;
    } catch (e) {

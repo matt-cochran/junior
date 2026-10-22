@@ -8,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  jevMode,assessPreflight,assessPostflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,reportEvidence,deterministicCriterion,
- estimateCost,validatePricing,
+ estimateCost,validatePricing,CONTRACT_PARTS,
  taskWorkflow,decideWorkflow,choiceVerdict,buildPrompt,promptParts,buildPiArgs,piGuardModulePath,piBashTimeoutSeconds,
  resolveResume,loadResume,sessionLockKey,COMMON_PROMPT_BLOCK,WORKFLOW_PROMPT_BLOCKS,WORKFLOW_TEMPLATE_IDS,
  EXPLICIT_WORKFLOWS,WORKFLOW_DESCRIPTIONS,ANALYSIS_WORKFLOWS,ANALYSIS_REPORT_FILENAME,analysisReportPath,analysisReportBlock,isAnalysisWorkflow,
@@ -2865,6 +2865,58 @@ test('Compact receipt exposes the attention trigger',async()=>{
  const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)});
  const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier});
  assert.equal(compactHandoff(r).attention.trigger,'contract_clear');
+});
+
+test('The readiness request asks which contract part is least clear',async()=>{
+ let questions:any;
+ const classifier:any=async({questions:q}:any)=>{questions=q;return {stopReason:'stop',answers:JEVPASS};};
+ await assessPreflight(task(),classifier);
+ assert.deepEqual(Object.keys(questions.contract_part.criteria),[...CONTRACT_PARTS]);
+});
+test('A blocking-assumption clarify names the classifier contract part',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83),contract_part:choice('constraints',0.9)}));
+ assert.equal(pre.attention.part?.name,'constraints');
+});
+test('A blocking-assumption clarify quotes the constraints as an excerpt',async()=>{
+ const t=task(0,{constraints:['Use Node only']});
+ const pre=await assessPreflight(t,gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.95),blocking_assumptions:bool(0.83),contract_part:choice('constraints',0.9)}));
+ assert.equal(pre.attention.excerpt,'Use Node only');
+});
+test('A contract-clear clarify carries at least one question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)}));
+ assert.ok((pre.attention.questions?.length ?? 0)>=1);
+});
+test('An unanswered contract part falls back to acceptance',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.deepEqual(pre.attention.part,{name:'acceptance',probability:null});
+});
+test('An unanswered contract part still yields a clarify question',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05)}));
+ assert.ok((pre.attention.questions?.length ?? 0)>=1);
+});
+test('A delegate attention carries no clarify detail fields',async()=>{
+ const pre=await assessPreflight(task(),gateClassifier(JEVPASS));
+ assert.deepEqual(Object.keys(pre.attention).filter((k)=>['part','excerpt','questions'].includes(k)),[]);
+});
+const emptyQuestionHop:any=async(_hop:string,tool:string,request:any)=>{
+ const ok=(result:any)=>({ok:true,tool,toolName:request.tool,result});
+ if(request.tool==='question.next')return ok({question:null});
+ if(request.tool==='state.get')return ok({signals:[],claims:[]});
+ return ok({});
+};
+test('A needs_answers result numbers fallback attention questions from Q1',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.deepEqual(r.clarification.questions.map((q:any)=>q.id),['Q1']);
+});
+test('A needs_answers result carries the attention question text',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.clarification.questions[0].question,r.jev.preflight.attention.questions[0]);
+});
+test('Compact receipt exposes the clarification batch',()=>{
+ const clarification={sessionId:'clarify:clar',round:1,questions:[{id:'Q1',question:'Which?',why:'Jev flagged the acceptance part of the contract',suggestedAnswer:null,claimIds:[]}]};
+ assert.deepEqual(compactHandoff({status:'needs_answers',clarification}).clarification,clarification);
 });
 
 // --- B01 run artifacts never appear as target-checkout changes (real Git fixtures) ---
