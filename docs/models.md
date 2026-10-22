@@ -252,6 +252,57 @@ Adding a gateway kind is a new table row plus its model-id mapping; call sites
 do not change. Worker execution is unchanged: this table governs only Jev, and
 the commodity model policy still governs the worker's own provider and model.
 
+## LiteLLM proxy
+
+A team with a LiteLLM proxy points Pi at it and pins the worker to `litellm`
+(ADR-0007). LiteLLM is a Pi custom provider: Junior opens no HTTP connection of
+its own for execution. Pi is spawned as `pi --provider litellm --model <id>`, and
+it reads the provider from the agent's `models.json`:
+
+```json
+{
+  "providers": {
+    "litellm": {
+      "baseUrl": "http://127.0.0.1:4000/v1",
+      "api": "openai-completions",
+      "apiKey": "$LITELLM_API_KEY",
+      "models": [
+        { "id": "deepseek/deepseek-v4.1-flash" }
+      ]
+    }
+  }
+}
+```
+
+`apiKey` may reference an environment variable (`$LITELLM_API_KEY` or
+`${LITELLM_API_KEY}`), be a literal string, or start with `!` to name a command
+Pi runs. `junior doctor` reports which of those it is without running the
+command or copying the value; see [Doctor](getting-started.md).
+
+Pin the proxy in `delivery.config.json` with a vendor-prefixed model id:
+
+```json
+{
+  "provider": "litellm",
+  "model": "deepseek/deepseek-v4.1-flash"
+}
+```
+
+`litellm` is an aggregator, so its model ids must carry a `vendor/` prefix. The
+commodity policy checks that prefix exactly as it does on OpenRouter: a
+recognized commodity vendor such as `deepseek` is allowed, a frontier vendor is
+refused, and an unprefixed id cannot resolve a vendor and is refused as unknown.
+A frontier or unknown pin reports `pinnedVerdict` and is refused before any
+spend.
+
+Billing capture is OpenRouter-only. For a `litellm` run the capture is skipped
+with the reason `provider litellm has no authoritative bill; the reported cost
+is an estimate`, so the receipt's cost is labelled estimated and is never
+reported as billed. Junior does not read a LiteLLM spend API.
+
+Jev does not use LiteLLM. Jev stays on the `openrouter` or `typesafe` gateway
+from the section above; `litellm` is not an accepted `jev.provider`.
+
 ## Receipt fields
 
 - `requested`: the provider/model passed to Pi, plus `source` (`task`, `routed`,

@@ -110,7 +110,13 @@ configuration, and by default it makes no network call. Checks:
   (`openrouter`, `typesafe`) as configured or not configured with its source
   (`env` or `auth`), plus the resolved `jev.provider` (`auto`, `openrouter` or
   `typesafe`). An explicit provider whose key is missing reports
-  `jev_provider_key_missing` as remediation. The section is advisory and never
+  `jev_provider_key_missing` as remediation. It also reports `gateways.litellm`
+  for the Pi `models.json` provider from
+  [ADR-0007](adr/0007-litellm-is-a-pi-provider.md): `defined`, `keySource`
+  (`env`, `models.json` or `command`), `keyEnv`, `keyConfigured` and the `models`
+  count. A `!`-prefixed `apiKey` is reported as `command` with
+  `keyConfigured: null` and is never run. The section reads only `models.json`
+  and environment variables, makes no network call, is advisory and never
   changes `ok`; key values are never reported.
 - **Model**: verifies the configured provider/model (default `openrouter/deepseek/deepseek-v4.1-flash`) against Pi's
   local catalog (`models-store.json`) and agent `models.json` with no network
