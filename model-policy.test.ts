@@ -170,3 +170,19 @@ test('classifyModel fails closed for an unrecognized direct provider serving a c
 test('classifyModel accepts a direct commodity provider whose id carries its own vendor prefix', () => {
   assert.equal(classifyModel('deepseek', 'deepseek/deepseek-chat').class, 'commodity');
 });
+
+test('classifyModel treats a LiteLLM vendor-prefixed DeepSeek model as commodity', () => {
+  assert.equal(classifyModel('litellm', 'deepseek/deepseek-v4.1-flash').class, 'commodity');
+});
+
+test('classifyModel refuses a LiteLLM vendor-prefixed Anthropic model as frontier', () => {
+  assert.equal(classifyModel('litellm', 'anthropic/claude-sonnet').class, 'frontier');
+});
+
+test('classifyModel refuses a LiteLLM model id without a vendor prefix as unknown', () => {
+  assert.equal(classifyModel('litellm', 'deepseek-v4.1-flash').class, 'unknown');
+});
+
+test('classifyModel refuses a LiteLLM route to the Jev classifier as unknown', () => {
+  assert.equal(classifyModel('litellm', 'typesafe/jev-1.13').class, 'unknown');
+});

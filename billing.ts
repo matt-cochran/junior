@@ -211,7 +211,11 @@ function selectGenerations(receipt: BillingReceipt): { ids: string[]; modelById:
  if (!generations.length) return fail(REASONS.noGenerations);
  if (generations.some((g) => g.provider !== 'openrouter')) {
   // A run that used any other provider is not an OpenRouter-only bill.
-  return generations.some((g) => g.provider === 'openrouter') ? fail(REASONS.mixedProviders) : fail(REASONS.noGenerations);
+  if (generations.some((g) => g.provider === 'openrouter')) return fail(REASONS.mixedProviders);
+  // A run on another provider (for example a litellm proxy, ADR-0007) has no
+  // authoritative bill here; its reported cost stays an estimate.
+  const provider = generations[0]?.provider ?? 'unknown';
+  return fail(`provider ${provider} has no authoritative bill; the reported cost is an estimate`);
  }
  if (generations.some((g) => !g.responseId)) return fail(REASONS.missingId);
  if (generations.some((g) => !g.model || g.model === 'unknown')) return fail(REASONS.missingModel);

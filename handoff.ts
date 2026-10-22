@@ -26,7 +26,9 @@ export type HandoffArtifacts = {
 };
 
 export type CompactHandoff = {
- attention: {target:string; decision:string; reason:string; probability:number|null; mode:string; workerBlocked:boolean} | null;
+ attention: {target:string; decision:string; reason:string; probability:number|null; mode:string; workerBlocked:boolean;
+  /** Clarify detail: the contract part, its bounded excerpt, and the questions. */
+  part?:{name:string; probability:number|null}; excerpt?:string; questions?:string[]} | null;
  id: string;
  outcome: string;
  source: string;
@@ -116,6 +118,8 @@ export type CompactHandoff = {
   priorResult: any;
   context: string | null;
  } | null;
+ /** The clarification batch for a needs_answers result, or absent otherwise. */
+ clarification?: {sessionId:string; round:number; questions:any[]};
  artifacts: HandoffArtifacts;
 };
 
@@ -200,7 +204,12 @@ export function compactCost(r: any): CompactHandoff['model']['cost'] {
  // result written before the cost projection still reports a finite Pi total.
  const piReported = r?.cost?.piReported ?? r?.receipt?.usage?.cost;
  const piTotal = r?.cost?.piReportedTotal ?? piReported?.total ?? null;
- const piUsd = piReported?.available === true ? finiteUsd(piTotal) : null;
+ // A Pi custom provider (a litellm proxy, ADR-0007) without `cost` in Pi's
+ // models.json reports 0 for real token use; that zero is unpriced, not free.
+ const provider = r?.receipt?.requested?.provider;
+ const tokens = Number(r?.receipt?.usage?.totalTokens ?? 0);
+ const unpricedZero = provider !== undefined && provider !== 'openrouter' && piTotal === 0 && tokens > 0;
+ const piUsd = piReported?.available === true && !unpricedZero ? finiteUsd(piTotal) : null;
  const estimateUsd = finiteUsd(r?.cost?.estimatedUsd);
 
  let amountUsd: number | null = null;
@@ -221,7 +230,7 @@ export function compactCost(r: any): CompactHandoff['model']['cost'] {
  if (amountUsd === null) {
   const missing: string[] = [];
   if (providerUsd === null) missing.push(r?.cost?.billingReason ? `missing upstream billing: ${r.cost.billingReason}` : 'missing upstream billing');
-  if (piUsd === null) missing.push('missing Pi pricing');
+  if (piUsd === null) missing.push(unpricedZero ? `missing Pi pricing: provider ${provider} reported 0 for ${tokens} tokens; add cost to its Pi models.json entry` : 'missing Pi pricing');
   if (estimateUsd === null) missing.push(r?.cost?.unknownReason ? String(r.cost.unknownReason) : 'no configured pricing estimate');
   out.unknownReason = missing.join('; ');
  }
@@ -310,6 +319,11 @@ export function compactHandoff(result: any): CompactHandoff {
   },
   analysis,
   review,
+  ...(r.clarification && typeof r.clarification === 'object' ? {clarification:{
+   sessionId:String(r.clarification.sessionId ?? ''),
+   round:Number(r.clarification.round ?? 0),
+   questions:Array.isArray(r.clarification.questions) ? r.clarification.questions : [],
+  }} : {}),
   artifacts: artifactPaths(dir, report),
  };
 }

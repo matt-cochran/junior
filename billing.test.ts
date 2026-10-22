@@ -298,3 +298,12 @@ test('A generation still missing after the retries leaves billedUsd null', async
  const cap = await captureBilling(receiptFor([gen()]), config, budget(), { resolveApiKey: apiKey, fetch, sleep: async () => {}, retryDelayMs: 1 });
  assert.equal(cap.billedUsd, null);
 });
+test('A LiteLLM run records that its cost is an estimate', async () => {
+ const cap = await captureBilling(receiptFor([gen({ provider: 'litellm' })]), config, budget(), { resolveApiKey: apiKey, fetch: async () => okBody('gen-1', 'm', 0.1) });
+ assert.match(String(cap.reason), /provider litellm has no authoritative bill; the reported cost is an estimate/);
+});
+test('A LiteLLM run makes no billing request', async () => {
+ let calls = 0;
+ await captureBilling(receiptFor([gen({ provider: 'litellm' })]), config, budget(), { resolveApiKey: apiKey, fetch: async () => { calls++; return okBody('gen-1', 'm', 0.1); } });
+ assert.equal(calls, 0);
+});
