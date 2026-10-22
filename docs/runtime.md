@@ -416,6 +416,15 @@ cache. A selected roster profile's `openrouter` provider routing (`order`,
 provider settings and recorded as `providerRouting.openrouter`; both are null or
 absent for a non-OpenRouter run.
 
+#### Companion spawn environment
+Companion tools spawn with the gateway resolver's environment: `OPENROUTER_API_KEY`
+when it resolves, and `TYPESAFE_JEV_API_KEY` when a TypeSafe key resolves, both
+from `companionGatewayEnv` through `companionKeyEnv`. An explicit value already
+present in the hop's `tools.<tool>.env` or the process environment wins over the
+derived one, and a set `CPM_OPENROUTER_KEY_FILE` suppresses the derived
+`OPENROUTER_API_KEY`. These values are for the child spawn only and are never
+persisted.
+
 #### Compact handoff
 `junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
 `outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact

@@ -219,6 +219,39 @@ A deliverable keeps one model and one upstream provider:
   `ignore`, `allow_fallbacks`, `sort`), merged into the request's provider
   settings for that profile and recorded under `providerRouting.openrouter`.
 
+## Jev gateways
+
+Jev is a classifier only; it never executes. Every Jev request is resolved
+through the one per-kind table in `gateway.ts`. Two gateway kinds ship today:
+
+| kind | base URL | key (in order) | Jev model id | transport |
+| --- | --- | --- | --- | --- |
+| `openrouter` | `https://openrouter.ai/api` | `OPENROUTER_API_KEY`, then Pi `auth.json` `openrouter` | `typesafe/jev-1.13` | Pi registry classifier |
+| `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-1.13` | direct HTTP |
+
+For either kind the key is read from its environment variable first (trimmed,
+non-blank), then from the matching entry in Pi's `auth.json` (`api_key`/`api`
+with `key`, or `oauth` with `access`). Key values never appear in errors,
+receipts, run records, doctor output or logs.
+
+`jev.provider` selects the gateway and accepts `auto` (default), `openrouter` or
+`typesafe`. It resolves in this order:
+
+1. the contract's `jev.provider`,
+2. `delivery.config.json`'s `jev.provider`,
+3. `auto`.
+
+`auto` resolves to `typesafe` when a TypeSafe key resolves, otherwise to
+`openrouter`; with no key at all Jev is unavailable exactly as before. An
+explicit `jev.provider` whose key is missing fails with `jev_provider_key_missing`
+and a message naming the provider and its key environment variable; it never
+silently switches to a different paid path. A kind not in the table is rejected
+with an error naming the allowed kinds.
+
+Adding a gateway kind is a new table row plus its model-id mapping; call sites
+do not change. Worker execution is unchanged: this table governs only Jev, and
+the commodity model policy still governs the worker's own provider and model.
+
 ## Receipt fields
 
 - `requested`: the provider/model passed to Pi, plus `source` (`task`, `routed`,
