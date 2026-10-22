@@ -1,0 +1,25 @@
+{
+  "ready": true,
+  "by_criticality": {
+    "high": 0,
+    "medium": 0,
+    "low": 1,
+    "unscored": 0
+  },
+  "blockers": [],
+  "resolution": {
+    "planned": 1,
+    "implemented": 0,
+    "verified": 0,
+    "abandoned": 0
+  },
+  "verified": {
+    "ready": false,
+    "blockers": [
+      "RESIDUAL: failure mode 'fm1' still has High residual criticality"
+    ]
+  },
+  "accepted_risks": [],
+  "excluded": [],
+  "critical_items": []
+}

@@ -219,6 +219,100 @@ A deliverable keeps one model and one upstream provider:
   `ignore`, `allow_fallbacks`, `sort`), merged into the request's provider
   settings for that profile and recorded under `providerRouting.openrouter`.
 
+## Jev gateways
+
+Jev is a classifier only; it never executes. Every Jev request is resolved
+through the one per-kind table in `gateway.ts`. Two gateway kinds ship today:
+
+| kind | base URL | key (in order) | Jev model id | transport |
+| --- | --- | --- | --- | --- |
+| `openrouter` | `https://openrouter.ai/api` | `OPENROUTER_API_KEY`, then Pi `auth.json` `openrouter` | `typesafe/jev-1.13` | Pi registry classifier |
+| `typesafe` | `https://api.typesafe.ai` | `TYPESAFE_JEV_API_KEY`, then Pi `auth.json` `typesafe` | `jev-latest` | direct HTTP (System One wire format) |
+
+For either kind the key is read from its environment variable first (trimmed,
+non-blank), then from the matching entry in Pi's `auth.json` (`api_key`/`api`
+with `key`, or `oauth` with `access`). Key values never appear in errors,
+receipts, run records, doctor output or logs.
+
+`jev.provider` selects the gateway and accepts `auto` (default), `openrouter` or
+`typesafe`. It resolves in this order:
+
+1. the contract's `jev.provider`,
+2. `delivery.config.json`'s `jev.provider`,
+3. `auto`.
+
+`auto` resolves to `typesafe` when a TypeSafe key resolves, otherwise to
+`openrouter`; with no key at all Jev is unavailable exactly as before. An
+explicit `jev.provider` whose key is missing fails with `jev_provider_key_missing`
+and a message naming the provider and its key environment variable; it never
+silently switches to a different paid path. A kind not in the table is rejected
+with an error naming the allowed kinds.
+
+Adding a gateway kind is a new table row plus its model-id mapping; call sites
+do not change. Worker execution is unchanged: this table governs only Jev, and
+the commodity model policy still governs the worker's own provider and model.
+
+## LiteLLM proxy
+
+A team with a LiteLLM proxy points Pi at it and pins the worker to `litellm`
+(ADR-0007). LiteLLM is a Pi custom provider: Junior opens no HTTP connection of
+its own for execution. Pi is spawned as `pi --provider litellm --model <id>`, and
+it reads the provider from the agent's `models.json`:
+
+```json
+{
+  "providers": {
+    "litellm": {
+      "baseUrl": "http://127.0.0.1:4000/v1",
+      "api": "openai-completions",
+      "apiKey": "$LITELLM_API_KEY",
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4.1-flash",
+          "cost": { "input": 0.02376, "output": 0.72, "cacheRead": 0.0054, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
+```
+
+`apiKey` may reference an environment variable (`$LITELLM_API_KEY` or
+`${LITELLM_API_KEY}`), be a literal string, or start with `!` to name a command
+Pi runs. `junior doctor` reports which of those it is without running the
+command or copying the value; see [Doctor](getting-started.md).
+
+Pin the proxy in `delivery.config.json` with a vendor-prefixed model id:
+
+```json
+{
+  "provider": "litellm",
+  "model": "deepseek/deepseek-v4.1-flash"
+}
+```
+
+`litellm` is an aggregator, so its model ids must carry a `vendor/` prefix. The
+commodity policy checks that prefix exactly as it does on OpenRouter: a
+recognized commodity vendor such as `deepseek` is allowed, a frontier vendor is
+refused, and an unprefixed id cannot resolve a vendor and is refused as unknown.
+A frontier or unknown pin reports `pinnedVerdict` and is refused before any
+spend.
+
+Pi prices a custom model from its `cost` entry (USD per million tokens for
+`input`, `output`, `cacheRead` and `cacheWrite`; the example copies the
+OpenRouter catalog price). Without `cost`, Pi reports `0` for real token use;
+Junior treats that zero as unpriced, so the receipt's cost is unavailable with
+`missing Pi pricing: provider litellm reported 0 for <n> tokens` rather than a
+free run.
+
+Billing capture is OpenRouter-only. For a `litellm` run the capture is skipped
+with the reason `provider litellm has no authoritative bill; the reported cost
+is an estimate`, so the receipt's cost is labelled estimated and is never
+reported as billed. Junior does not read a LiteLLM spend API.
+
+Jev does not use LiteLLM. Jev stays on the `openrouter` or `typesafe` gateway
+from the section above; `litellm` is not an accepted `jev.provider`.
+
 ## Receipt fields
 
 - `requested`: the provider/model passed to Pi, plus `source` (`task`, `routed`,
