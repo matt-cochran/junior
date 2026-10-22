@@ -108,8 +108,15 @@ contracts.
 
 The cpm tool's `plan.review` uses Junior's managed OpenRouter key when the
 process and hop env set neither `OPENROUTER_API_KEY` nor
-`CPM_OPENROUTER_KEY_FILE`; `junior tools inspect` reports whether a review key
-is visible as `cpmReview` (`available` or `unavailable`) and never its value.
+`CPM_OPENROUTER_KEY_FILE`, and runs on the project's commodity model
+(`CPM_LLM_MODEL`); `junior tools inspect` reports whether a review key is
+visible as `cpmReview` (`available` or `unavailable`) and never its value.
+
+One OpenRouter key covers everything. To send Jev calls straight to TypeSafe,
+set `TYPESAFE_JEV_API_KEY` ([DPA](https://typesafe.ai/legal/data-processing));
+`jev.provider` pins either one. To run the worker through a LiteLLM proxy,
+define a `litellm` provider in Pi's `models.json`. See
+[docs/models.md](docs/models.md) for both.
 
 ## What's in the box
 

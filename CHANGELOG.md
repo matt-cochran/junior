@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-22
+
+### Added
+
+- Jev gateways (ADR 0006, #69): `gateway.ts` holds one table of gateways
+  (`openrouter`, `typesafe`) with key order (environment variable, then Pi
+  `auth.json`) and model ids. `jev.provider` (`auto`, `openrouter` or
+  `typesafe`) in the contract or `delivery.config.json` chooses where Jev
+  calls go; `auto` uses TypeSafe when `TYPESAFE_JEV_API_KEY` resolves and
+  OpenRouter otherwise. An OpenRouter key alone is still a complete setup. A
+  provider pinned without its key fails with `jev_provider_key_missing`
+  instead of switching paid paths. Direct TypeSafe calls go to
+  `api.typesafe.ai` with the System One wire format and `jev-latest`;
+  TypeSafe's Data Processing Agreement is at
+  https://typesafe.ai/legal/data-processing. The run record names the Jev
+  gateway, and key values never appear in errors, receipts or doctor output.
+- Companion tools spawned through `junior tools call` get
+  `OPENROUTER_API_KEY` and, when configured, `TYPESAFE_JEV_API_KEY` from the
+  same resolver; values in the hop env or the process env still win.
+- `junior doctor` has a `gateways` section: each gateway's status and key
+  source, the resolved Jev provider, and the `litellm` provider in Pi's
+  `models.json` (defined, how its key is configured, model count). A
+  `!command` key is reported, never run.
+- LiteLLM (ADR 0007, #70): point Pi at a LiteLLM proxy with a `litellm`
+  provider in its `models.json` and pin `provider: "litellm"` with a
+  vendor-prefixed model. The commodity-only policy treats `litellm` like
+  OpenRouter: the vendor prefix decides, frontier vendors are refused, and an
+  unprefixed id is refused as unknown. Jev stays on OpenRouter or TypeSafe.
+
+### Changed
+
+- A clarify names what to fix (ADR 0005, #68): the readiness call also asks
+  which contract part is least clear, and a `contract_clear` or
+  `blocking_assumptions` clarify carries `part`, a quoted `excerpt` and at
+  least one question. The compact receipt now shows the clarification batch.
+- `junior tools call cpm` passes the project's model as `CPM_LLM_MODEL` and
+  refuses a frontier or unknown model before cpm-planner starts (#67).
+  cpm-planner 0.4.2 also defaults to a commodity model on its own.
+- A non-OpenRouter run's billing records why there is no authoritative bill,
+  and a Pi-reported `0` for real token use on such a provider is shown as
+  unpriced rather than free.
+- Recorded responses for cpm 0.4.2 and fmeca 0.2.2 (unchanged shapes); the
+  companion releases adopted are cpm-planner 0.4.2, crossmatrix 0.3.4,
+  fmeca 0.2.2 and triz 0.4.0.
+
 ## [0.8.1] - 2026-10-20
 
 ### Added
@@ -410,7 +455,10 @@ together in a committed `.crossmatrix/` store (requires Crossmatrix 0.3.0).
   checks, Git change evidence, optional Jev gates and the compact manager
   handoff.
 
-[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/matt-cochran/junior/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/matt-cochran/junior/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/matt-cochran/junior/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/matt-cochran/junior/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/matt-cochran/junior/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/matt-cochran/junior/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/matt-cochran/junior/compare/v0.5.0...v0.5.1
