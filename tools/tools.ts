@@ -38,7 +38,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { isDirectEntry } from "../cli-entry.ts";
-import { openRouterAuthPath, readOpenRouterAuthFile } from "../billing.ts";
+import { companionGatewayEnv, resolveGatewayKey } from "../gateway.ts";
+import type { GatewayDeps } from "../gateway.ts";
 import { loadDefaults } from "../setup.ts";
 import { assertCommodity } from "../model-policy.ts";
 
@@ -800,6 +801,38 @@ export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManif
   return fs.existsSync(store) ? { CROSSMATRIX_DIR: store } : {};
 }
 
+/** True when an env value is a non-blank string. */
+function isSet(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/**
+ * Gateway env for a companion spawn: the OpenRouter key and, when it resolves,
+ * the TypeSafe key. A name already set non-blank in the process env or the
+ * hop's `tools.<tool>.env` is left to that source, and cpm's explicit
+ * CPM_OPENROUTER_KEY_FILE suppresses the derived OPENROUTER_API_KEY (the same
+ * rule `cpmReviewEnv` applies). Values are for the child spawn only and are
+ * never persisted by the caller.
+ */
+export function companionKeyEnv(
+  hopEnv: Record<string, string> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  deps: GatewayDeps = {},
+): Record<string, string> {
+  const resolved = companionGatewayEnv({ env, ...deps });
+  const provided = (name: string): boolean =>
+    isSet(env[name]) || isSet(deps.env?.[name]) || isSet(hopEnv?.[name]);
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(resolved)) {
+    if (provided(name)) continue;
+    out[name] = value;
+  }
+  if (provided("CPM_OPENROUTER_KEY_FILE")) {
+    delete out.OPENROUTER_API_KEY;
+  }
+  return out;
+}
+
 /** Env var names that, when set, already direct the cpm tool at a review key. */
 const CPM_REVIEW_ENV_KEYS = ["OPENROUTER_API_KEY", "CPM_OPENROUTER_KEY_FILE"] as const;
 
@@ -814,21 +847,21 @@ function explicitCpmReviewEnv(hopEnv: Record<string, string> | undefined, env: N
 
 /**
  * Extra env for a cpm spawn. When neither the process env nor the hop's
- * `tools.cpm.env` names a review key, fall back to the OpenRouter credential
- * Pi manages in its auth file (via billing.ts's reader, so the path/parse rules
- * stay in one place) and inject it as OPENROUTER_API_KEY. The value is for the
- * child spawn only and is never persisted by the caller.
+ * `tools.cpm.env` names a review key, fall back to the OpenRouter gateway
+ * resolution (gateway.ts's single key source) and inject it as
+ * OPENROUTER_API_KEY. The value is for the child spawn only and is never
+ * persisted by the caller.
  */
 function cpmReviewEnv(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   if (explicitCpmReviewEnv(hopEnv, env)) return {};
-  const key = readOpenRouterAuthFile(openRouterAuthPath(env));
+  const key = resolveGatewayKey("openrouter", { env });
   return key ? { OPENROUTER_API_KEY: key } : {};
 }
 
 /** Whether a review key would be visible to the cpm tool, without exposing it. */
 export function cpmReviewStatus(hopEnv: Record<string, string> | undefined, env: NodeJS.ProcessEnv = process.env): "available" | "unavailable" {
   if (explicitCpmReviewEnv(hopEnv, env)) return "available";
-  return readOpenRouterAuthFile(openRouterAuthPath(env)) ? "available" : "unavailable";
+  return resolveGatewayKey("openrouter", { env }) ? "available" : "unavailable";
 }
 
 /** The first non-empty CPM_LLM_MODEL: hop env first, then the process env. */
@@ -1108,7 +1141,7 @@ export async function callHop(
       );
     }
     const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
-    const env = { ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
+    const env = { ...companionKeyEnv(cfg.env), ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
     if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
 
     let outcome: CallOutcome;

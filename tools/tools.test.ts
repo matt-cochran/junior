@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES, callHop, cpmModelEnv } from "./tools.ts";
+import { initHop as initHopManifest, isReadTool, buildToolEnv, crossmatrixUsesStore, probeToolVersion, TOOL_NAMES, callHop, cpmModelEnv, companionKeyEnv } from "./tools.ts";
 
 const ROOT = import.meta.dirname;
 const TOOLS = path.join(ROOT, "tools.ts");
@@ -62,6 +62,7 @@ function runCli(args, timeout = 30000, extraEnv = {}, opts = {}) {
     PI_CODING_AGENT_DIR: path.join(os.tmpdir(), "junior-tools-no-auth"),
   };
   delete env.OPENROUTER_API_KEY;
+  delete env.TYPESAFE_JEV_API_KEY;
   delete env.CPM_OPENROUTER_KEY_FILE;
   Object.assign(env, extraEnv);
   return spawnSync(NODE, [TOOLS, ...args], { encoding: "utf8", timeout, env, cwd: opts.cwd, input: opts.input });
@@ -941,6 +942,7 @@ const log = process.env.JUNIOR_TEST_ENV_LOG;
 if (log) {
   fs.writeFileSync(log, JSON.stringify({
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null,
+    TYPESAFE_JEV_API_KEY: process.env.TYPESAFE_JEV_API_KEY ?? null,
     CPM_OPENROUTER_KEY_FILE: process.env.CPM_OPENROUTER_KEY_FILE ?? null,
     CPM_LLM_MODEL: process.env.CPM_LLM_MODEL ?? null,
   }));
@@ -977,6 +979,10 @@ function writeAuthJson(dir, key) {
   fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key } }));
 }
 
+function writeAuthEntries(dir, entries) {
+  fs.writeFileSync(path.join(dir, "auth.json"), JSON.stringify(entries));
+}
+
 function probeEntry(dir, log, env = {}) {
   const probe = path.join(dir, "env-probe.mjs");
   fs.writeFileSync(probe, PROBE_SOURCE);
@@ -990,11 +996,8 @@ function probeEntry(dir, log, env = {}) {
 }
 
 function probeHop(dir, log, { tool = "cpm", probeEnv = {} } = {}) {
-  const tools = {
-    fmeca: toolEntry("echo"),
-    cpm: toolEntry("echo"),
-    crossmatrix: toolEntry("crossmatrix"),
-  };
+  const tools = Object.fromEntries(TOOL_NAMES.map((name) => [name, toolEntry("echo")]));
+  tools.crossmatrix = toolEntry("crossmatrix");
   tools[tool] = probeEntry(dir, log, probeEnv);
   const cfg = path.join(dir, "config.json");
   fs.writeFileSync(cfg, JSON.stringify({ projectId: "test-project", timeoutMs: 20000, lockTimeoutMs: 5000, tools }));
@@ -1057,27 +1060,88 @@ test("an explicit hop CPM_OPENROUTER_KEY_FILE suppresses the derived key", () =>
   assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
 });
 
-test("fmeca spawn does not receive the derived OpenRouter key", () => {
+test("an elicitation spawn receives the OpenRouter key from auth.json", () => {
   const dir = tmpdir();
   const log = path.join(dir, "probe-env.json");
-  writeAuthJson(dir, "sk-derived-from-auth");
-  const hop = probeHop(dir, log, { tool: "fmeca" });
+  writeAuthJson(dir, "sk-elicitation-auth");
+  const hop = probeHop(dir, log, { tool: "elicitation" });
   const req = writeJson(path.join(dir, "req.json"), { tool: "state.get", arguments: { session_id: "s1" } });
-  runCli(["call", hop, "fmeca", req], 30000, { PI_CODING_AGENT_DIR: dir });
-  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+  runCli(["call", hop, "elicitation", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, "sk-elicitation-auth");
 });
 
-test("crossmatrix spawn does not receive the derived OpenRouter key", () => {
+test("an elicitation spawn omits the TypeSafe key when only the OpenRouter key resolves", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthJson(dir, "sk-elicitation-auth");
+  const hop = probeHop(dir, log, { tool: "elicitation" });
+  const req = writeJson(path.join(dir, "req.json"), { tool: "state.get", arguments: { session_id: "s1" } });
+  runCli(["call", hop, "elicitation", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).TYPESAFE_JEV_API_KEY, null);
+});
+
+test("an explicit hop OPENROUTER_API_KEY reaches an elicitation spawn unchanged", () => {
   const dir = tmpdir();
   const log = path.join(dir, "probe-env.json");
   writeAuthJson(dir, "sk-derived-from-auth");
+  const hop = probeHop(dir, log, { tool: "elicitation", probeEnv: { OPENROUTER_API_KEY: "sk-explicit-hop" } });
+  const req = writeJson(path.join(dir, "req.json"), { tool: "state.get", arguments: { session_id: "s1" } });
+  runCli(["call", hop, "elicitation", req], 30000, { PI_CODING_AGENT_DIR: dir });
+  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, "sk-explicit-hop");
+});
+
+test("a crossmatrix spawn receives the TypeSafe key from auth.json", () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "probe-env.json");
+  writeAuthEntries(dir, { typesafe: { type: "api_key", key: "ts-crossmatrix-auth" } });
   const hop = probeHop(dir, log, { tool: "crossmatrix" });
   const req = writeJson(path.join(dir, "req.json"), {
     tool: "crossmatrix.query",
     arguments: { request: { requestId: "q1", query: { kind: "validate" } } },
   });
   runCli(["call", hop, "crossmatrix", req], 30000, { PI_CODING_AGENT_DIR: dir });
-  assert.equal(readProbeEnv(log).OPENROUTER_API_KEY, null);
+  assert.equal(readProbeEnv(log).TYPESAFE_JEV_API_KEY, "ts-crossmatrix-auth");
+});
+
+// --- companionKeyEnv ---------------------------------------------------------
+//
+// The shared companion env resolver layers the gateway keys over an explicit
+// process/hop env. Every scenario injects the auth reader so no real HOME or
+// credential is touched; one assertion observes the returned env map.
+
+const companionAuth = (entries) => ({
+  env: {},
+  readAuthFile: () => JSON.stringify(entries),
+});
+
+test("companionKeyEnv resolves the OpenRouter key from the auth file", () => {
+  const out = companionKeyEnv(undefined, {}, companionAuth({ openrouter: { type: "api_key", key: "sk-or-auth" } }));
+  assert.deepEqual(out, { OPENROUTER_API_KEY: "sk-or-auth" });
+});
+
+test("companionKeyEnv resolves the TypeSafe key from the auth file", () => {
+  const out = companionKeyEnv(undefined, {}, companionAuth({ typesafe: { type: "api_key", key: "sk-ts-auth" } }));
+  assert.deepEqual(out, { TYPESAFE_JEV_API_KEY: "sk-ts-auth" });
+});
+
+test("companionKeyEnv leaves an explicit process key in charge", () => {
+  const out = companionKeyEnv(undefined, { OPENROUTER_API_KEY: "sk-process" }, companionAuth({ openrouter: { type: "api_key", key: "sk-or-auth" } }));
+  assert.equal(out.OPENROUTER_API_KEY, undefined);
+});
+
+test("companionKeyEnv leaves an explicit hop key in charge", () => {
+  const out = companionKeyEnv({ OPENROUTER_API_KEY: "sk-hop" }, {}, companionAuth({ openrouter: { type: "api_key", key: "sk-or-auth" } }));
+  assert.equal(out.OPENROUTER_API_KEY, undefined);
+});
+
+test("companionKeyEnv ignores a blank explicit hop key", () => {
+  const out = companionKeyEnv({ OPENROUTER_API_KEY: "   " }, {}, companionAuth({ openrouter: { type: "api_key", key: "sk-or-auth" } }));
+  assert.equal(out.OPENROUTER_API_KEY, "sk-or-auth");
+});
+
+test("companionKeyEnv lets a CPM key file suppress the OpenRouter key", () => {
+  const out = companionKeyEnv(undefined, { CPM_OPENROUTER_KEY_FILE: "/tmp/review-key" }, companionAuth({ openrouter: { type: "api_key", key: "sk-or-auth" } }));
+  assert.equal(out.OPENROUTER_API_KEY, undefined);
 });
 
 test("the derived review key is never written to the hop or its snapshots", () => {
