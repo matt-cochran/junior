@@ -3732,3 +3732,15 @@ test('A contract modelProfile approved for the run applies the pinned model',asy
 test('The affinity key never contains the deliverable id',()=>{
  assert.equal(affinityKeyFor('/project','secret-feature-name').includes('secret-feature-name'),false);
 });
+test('Compact cost treats an unpriced zero from a non-OpenRouter provider as unknown',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'litellm',model:'deepseek/deepseek-v4.1-flash'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.equal(h.model.cost.available,false);
+});
+test('Compact cost names the missing Pi pricing for an unpriced zero',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'litellm',model:'deepseek/deepseek-v4.1-flash'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.match(String(h.model.cost.unknownReason),/provider litellm reported 0 for 1200 tokens/);
+});
+test('Compact cost keeps a reported zero from OpenRouter as a known free cost',()=>{
+ const h=compactHandoff(handoffResult({receipt:{requested:{provider:'openrouter',model:'deepseek/deepseek-v4.1-flash:free'},usage:{totalTokens:1200}},cost:{billedUsd:null,estimatedUsd:null,piReported:{total:0,available:true}}}));
+ assert.equal(h.model.cost.amountUsd,0);
+});

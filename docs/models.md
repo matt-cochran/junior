@@ -267,7 +267,10 @@ it reads the provider from the agent's `models.json`:
       "api": "openai-completions",
       "apiKey": "$LITELLM_API_KEY",
       "models": [
-        { "id": "deepseek/deepseek-v4.1-flash" }
+        {
+          "id": "deepseek/deepseek-v4.1-flash",
+          "cost": { "input": 0.02376, "output": 0.72, "cacheRead": 0.0054, "cacheWrite": 0 }
+        }
       ]
     }
   }
@@ -294,6 +297,13 @@ recognized commodity vendor such as `deepseek` is allowed, a frontier vendor is
 refused, and an unprefixed id cannot resolve a vendor and is refused as unknown.
 A frontier or unknown pin reports `pinnedVerdict` and is refused before any
 spend.
+
+Pi prices a custom model from its `cost` entry (USD per million tokens for
+`input`, `output`, `cacheRead` and `cacheWrite`; the example copies the
+OpenRouter catalog price). Without `cost`, Pi reports `0` for real token use;
+Junior treats that zero as unpriced, so the receipt's cost is unavailable with
+`missing Pi pricing: provider litellm reported 0 for <n> tokens` rather than a
+free run.
 
 Billing capture is OpenRouter-only. For a `litellm` run the capture is skipped
 with the reason `provider litellm has no authoritative bill; the reported cost
