@@ -419,7 +419,43 @@ export type JevGatewayStatus = {
   * value is invalid. The message never contains a key value (ADR-0006 R5). */
  error?:string;
 };
-export type GatewaysResult = { kinds:GatewayKindStatus[]; jev:JevGatewayStatus };
+export type LitellmStatus = {
+ defined:boolean;
+ keySource:'env'|'models.json'|'command'|null;
+ keyEnv?:string;
+ keyConfigured:boolean|null;
+ models:number;
+};
+export type GatewaysResult = { kinds:GatewayKindStatus[]; jev:JevGatewayStatus; litellm:LitellmStatus };
+
+/** Inspect the `litellm` provider entry in Pi's `models.json` without touching
+ * the network or executing any command. Reports only whether it is defined,
+ * how its apiKey is sourced, whether that source resolves, and its model
+ * count. The apiKey value is never copied into the result; a `!command` key
+ * is reported as `command` and is never run. Never throws. */
+export function inspectLitellm(deps:SetupDeps = {}):LitellmStatus {
+ const path=join(agentDir(deps),'models.json');
+ let provider:any=null;
+ if (exists(deps,path)) {
+  try {
+   const j=JSON.parse(readText(deps,path));
+   provider=j?.providers?.litellm;
+  } catch { /* an unreadable or malformed file is reported as undefined */ }
+ }
+ if (!provider || typeof provider!=='object') return {defined:false, keySource:null, keyConfigured:false, models:0};
+ const models=Array.isArray(provider.models) ? provider.models.filter(Boolean).length : 0;
+ const apiKey=typeof provider.apiKey==='string' ? provider.apiKey.trim() : '';
+ if (!apiKey) return {defined:true, keySource:null, keyConfigured:false, models};
+ if (apiKey.startsWith('!')) return {defined:true, keySource:'command', keyConfigured:null, models};
+ const ref=apiKey.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
+ if (ref) {
+  const env=deps.env ?? process.env;
+  const value=env[ref[1]];
+  const configured=typeof value==='string' && value.trim().length>0;
+  return {defined:true, keySource:'env', keyEnv:ref[1], keyConfigured:configured, models};
+ }
+ return {defined:true, keySource:'models.json', keyConfigured:true, models};
+}
 
 /** Read `jev.provider` from the project config in `cwd`; a missing file, a
  * malformed document or a missing key yields `auto`. Never throws. */
@@ -445,14 +481,15 @@ export function inspectGateways(cwd:string, deps:SetupDeps = {}):GatewaysResult 
   const key=resolveGatewayKey(kind, gatewayDeps);
   return { kind, keyEnv:gateway.keyEnv, configured:!!key, source:key ? 'auth' : null };
  });
+ const litellm=inspectLitellm(deps);
  const raw=readJevProvider(cwd, deps);
  let provider:JevProvider='auto';
  try {
   provider=validateJevProvider(raw);
   const resolved=resolveJevGateway(provider, gatewayDeps);
-  return { kinds, jev:{ provider, resolved:resolved?.kind ?? null } };
+  return { kinds, jev:{ provider, resolved:resolved?.kind ?? null }, litellm };
  } catch (err) {
-  return { kinds, jev:{ provider, resolved:null, error:err instanceof Error ? err.message : String(err) } };
+  return { kinds, jev:{ provider, resolved:null, error:err instanceof Error ? err.message : String(err) }, litellm };
  }
 }
 
@@ -573,6 +610,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  if (companionSkills.remediation.length) remediation.push(...companionSkills.remediation);
  const gateways=inspectGateways(deps.cwd ?? cwd, deps);
  if (gateways.jev.error) remediation.push(gateways.jev.error);
+ if (gateways.litellm.defined && gateways.litellm.keyEnv && gateways.litellm.keyConfigured === false) remediation.push(`Set ${gateways.litellm.keyEnv} for the litellm provider in Pi models.json`);
  const readiness=inspectReadiness({
   env,
   home: env.HOME || env.USERPROFILE,

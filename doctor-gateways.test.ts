@@ -26,6 +26,7 @@ const fixture=(over:any={})=>{
  writeFileSync(join(agent,'auth.json'),JSON.stringify(over.auth ?? {openrouter:{type:'api',key:'SUPER-SECRET-VALUE'}}));
  writeFileSync(join(agent,'models-store.json'),JSON.stringify(over.catalog ?? {openrouter:{models:[{id:MODEL,type:'chat'}]}}));
  if (over.config) writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify(over.config));
+ if (over.models) writeFileSync(join(agent,'models.json'),JSON.stringify(over.models));
  const deps={cwd,env:{PATH:bin,HOME:cwd,PI_CODING_AGENT_DIR:agent,...(over.env||{})},execPath:join(bin,'node'),nodeVersion:'26.5.0',exec:okExec,readMounts:()=>'',...(over.deps||{})};
  return {cwd,agent,deps};
 };
@@ -132,6 +133,58 @@ test('doctor remediation names TYPESAFE_JEV_API_KEY when jev.provider typesafe h
 test('doctor reports an invalid jev.provider in the gateway error instead of throwing', () => {
  const {deps}=fixture({config:{jev:{provider:'litellm'}}});
  assert.match(doctor(deps).gateways.jev.error as string,/Invalid jev\.provider litellm/);
+});
+
+// --- litellm models.json provider -------------------------------------------
+
+test('doctor reports litellm as undefined when models.json has no providers.litellm', () => {
+ const {deps}=fixture({models:{providers:{openrouter:{models:[]}}}});
+ assert.deepEqual(doctor(deps).gateways.litellm,{defined:false,keySource:null,keyConfigured:false,models:0});
+});
+
+test('doctor reports the litellm provider from an env key reference in models.json', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'$LITELLM_API_KEY',models:[{id:'deepseek/a'},{id:'deepseek/b'}]}}},env:{LITELLM_API_KEY:'ll-key'}});
+ assert.deepEqual(doctor(deps).gateways.litellm,{defined:true,keySource:'env',keyEnv:'LITELLM_API_KEY',keyConfigured:true,models:2});
+});
+
+test('doctor reports the litellm env key unconfigured when the braced env var is unset', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'${LITELLM_API_KEY}',models:[]}}}});
+ assert.equal(doctor(deps).gateways.litellm.keyConfigured,false);
+});
+
+test('doctor remediation names LITELLM_API_KEY when the litellm env key is unset', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'${LITELLM_API_KEY}',models:[]}}}});
+ assert.match(doctor(deps).remediation.join(' '),/Set LITELLM_API_KEY for the litellm provider/);
+});
+
+test('doctor reports keySource models.json for a literal litellm apiKey', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'sk-literal-key',models:[]}}}});
+ assert.equal(doctor(deps).gateways.litellm.keySource,'models.json');
+});
+
+test('doctor reports a literal litellm apiKey as configured', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'sk-literal-key',models:[]}}}});
+ assert.equal(doctor(deps).gateways.litellm.keyConfigured,true);
+});
+
+test('doctor reports keySource command for a bang-prefixed litellm apiKey', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'!op read op://vault/litellm',models:[]}}}});
+ assert.equal(doctor(deps).gateways.litellm.keySource,'command');
+});
+
+test('doctor reports an unknown keyConfigured for a bang-prefixed litellm apiKey', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'!op read op://vault/litellm',models:[]}}}});
+ assert.equal(doctor(deps).gateways.litellm.keyConfigured,null);
+});
+
+test('doctor never includes the litellm key value in its report', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'$LITELLM_API_KEY',models:[]}}},env:{LITELLM_API_KEY:'litellm-secret-value'}});
+ assert.doesNotMatch(JSON.stringify(doctor(deps)),/litellm-secret-value/);
+});
+
+test('doctor stays ready when the litellm key is unset', () => {
+ const {deps}=fixture({models:{providers:{litellm:{apiKey:'${LITELLM_API_KEY}',models:[]}}}});
+ assert.equal(doctor(deps).ok,true);
 });
 
 // --- key secrecy and readiness independence --------------------------------
