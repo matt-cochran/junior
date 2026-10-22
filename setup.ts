@@ -31,6 +31,7 @@ import { classifyModel } from './model-policy.ts';
 import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { loadModelConfig, type ModelConfig } from './roster.ts';
 import { modelUpdates, readCachedCatalog } from './model-updates.ts';
+import { GATEWAY_KINDS, GATEWAYS, validateJevProvider, resolveGatewayKey, resolveJevGateway, type GatewayKind, type JevProvider } from './gateway.ts';
 
 /** Pi itself requires Node 22.19 or newer; the worker is tested on Node 24+. */
 export const SUPPORTED_NODE_MIN = '22.19.0';
@@ -405,6 +406,56 @@ export function loadTestedPi(cwd:string, deps:SetupDeps = {}):TestedPi {
  return {name:PI_PACKAGE, version:TESTED_PI_VERSION, source:'builtin'};
 }
 
+export type GatewayKindStatus = {
+ kind:GatewayKind;
+ keyEnv:string;
+ configured:boolean;
+ source:'env'|'auth'|null;
+};
+export type JevGatewayStatus = {
+ provider:JevProvider;
+ resolved:GatewayKind|null;
+ /** Present only when an explicit provider lacks its key or the configured
+  * value is invalid. The message never contains a key value (ADR-0006 R5). */
+ error?:string;
+};
+export type GatewaysResult = { kinds:GatewayKindStatus[]; jev:JevGatewayStatus };
+
+/** Read `jev.provider` from the project config in `cwd`; a missing file, a
+ * malformed document or a missing key yields `auto`. Never throws. */
+function readJevProvider(cwd:string, deps:SetupDeps):unknown {
+ const path=join(cwd,'delivery.config.json');
+ try {
+  if (!exists(deps,path)) return 'auto';
+  const j=JSON.parse(readText(deps,path));
+  return j?.jev?.provider ?? 'auto';
+ } catch { return 'auto'; }
+}
+
+/** Report each gateway kind's configuration and source, plus the resolved Jev
+ * provider. Key values are never copied into the report (ADR-0006 R5). Every
+ * gateway is advisory: this never changes Pi execution readiness. */
+export function inspectGateways(cwd:string, deps:SetupDeps = {}):GatewaysResult {
+ const env=deps.env ?? process.env;
+ const gatewayDeps={ env, readAuthFile: deps.readFile ? (p:string)=>readText(deps,p) : undefined };
+ const kinds=GATEWAY_KINDS.map((kind):GatewayKindStatus => {
+  const gateway=GATEWAYS[kind];
+  const fromEnv=env[gateway.keyEnv];
+  if (typeof fromEnv==='string' && fromEnv.trim()) return { kind, keyEnv:gateway.keyEnv, configured:true, source:'env' };
+  const key=resolveGatewayKey(kind, gatewayDeps);
+  return { kind, keyEnv:gateway.keyEnv, configured:!!key, source:key ? 'auth' : null };
+ });
+ const raw=readJevProvider(cwd, deps);
+ let provider:JevProvider='auto';
+ try {
+  provider=validateJevProvider(raw);
+  const resolved=resolveJevGateway(provider, gatewayDeps);
+  return { kinds, jev:{ provider, resolved:resolved?.kind ?? null } };
+ } catch (err) {
+  return { kinds, jev:{ provider, resolved:null, error:err instanceof Error ? err.message : String(err) } };
+ }
+}
+
 export type DoctorCheck = { id:string; ok:boolean; detail:string };
 export type DoctorResult = {
  command:'doctor';
@@ -429,6 +480,8 @@ export type DoctorResult = {
  retention:RetentionSummary;
  /** Per-harness readiness for Junior and its companions; never changes the `ok` rule. */
  readiness:ReadinessResult;
+ /** Named Jev gateways and the resolved provider; advisory and never gating. */
+ gateways:GatewaysResult;
  checks:DoctorCheck[];
  remediation:string[];
 };
@@ -518,6 +571,8 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const companions=inspectCompanions({ env, exists:deps.exists, exec:deps.exec });
  const companionSkills=inspectCompanionSkills({ env, exists:deps.exists, readFile:deps.readFile }, { target:'both', scope:'project', cwd });
  if (companionSkills.remediation.length) remediation.push(...companionSkills.remediation);
+ const gateways=inspectGateways(deps.cwd ?? cwd, deps);
+ if (gateways.jev.error) remediation.push(gateways.jev.error);
  const readiness=inspectReadiness({
   env,
   home: env.HOME || env.USERPROFILE,
@@ -534,7 +589,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const skillLines=skillMessageLines(skill).filter((line)=>!(juniorSkillFound && line.startsWith('Junior skill is not installed')));
  warnings.push(...skillLines);
  remediation.push(...skillLines);
- return { command:'doctor', ok:checks.every((c)=>c.ok) && policyOk, warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, checks, remediation };
+ return { command:'doctor', ok:checks.every((c)=>c.ok) && policyOk, warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, gateways, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
