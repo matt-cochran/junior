@@ -20,6 +20,7 @@ import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { priceDelta, readCachedCatalog, piAgentDir } from './model-updates.ts';
 import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
 import { clarificationApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
+import { resolveJevGateway, validateJevProvider, GatewayError, type JevProvider, type GatewayDeps, type ResolvedJevGateway } from './gateway.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
 export { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_MODES, BILLING_ENDPOINT, BILLING_MAX_TIMEOUT_MS, BILLING_DEFAULT_TIMEOUT_MS, BILLING_MAX_GENERATIONS } from './billing.ts';
@@ -277,6 +278,7 @@ export function validate(t: any) {
  if (t.jev !== undefined) {
   if (!t.jev || typeof t.jev !== 'object' || Array.isArray(t.jev)) throw Error('Invalid jev config');
   if (t.jev.mode !== undefined && !['off','shadow','enforce'].includes(t.jev.mode)) throw Error('Invalid jev.mode (expected off, shadow or enforce)');
+  if (t.jev.provider !== undefined) validateJevProvider(t.jev.provider);
  }
  for (const k of Object.keys(t)) if (!(TASK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown contract field: ${k}`);
  return t;
@@ -1581,6 +1583,8 @@ export type JevPostflight = {
 export type JevGateRecord = {
  mode:JevMode;
  model:{ provider:string; id:string; explicit:boolean };
+ /** Resolved Jev gateway kind (ADR-0006). Absent when no classifier resolved. */
+ gateway?:'openrouter'|'typesafe';
  attempted:boolean;
  enforced:boolean;
  skipped?:string;
@@ -1914,6 +1918,57 @@ export function resolveClassifierModel(registry:any, modelDef:{provider:string;i
  return { model:{ provider:modelDef.provider, id:modelDef.id }, explicit:true };
 }
 
+/** Direct TypeSafe Jev client (ADR-0006). POSTs the same `{state, model,
+ * questions}` request crossmatrix's `assist/jev.rs` uses to
+ * `{base}/v1/systemone` and returns the same `GateClassifierResult` shape, so
+ * preflight/postflight callers are unchanged. Never includes the key in any
+ * message (R5). */
+export function createTypesafeClassifier(gw: ResolvedJevGateway, fetchImpl: typeof fetch = fetch): GateClassifier {
+ return async (context, options) => {
+  const res = await fetchImpl(`${gw.baseUrl}/v1/systemone`, {
+   method: 'POST',
+   headers: { 'content-type': 'application/json', authorization: `Bearer ${gw.key}` },
+   body: JSON.stringify({ state: context.state, model: gw.model, questions: context.questions }),
+   signal: options?.signal,
+  });
+  if (!res.ok) return { provider: 'typesafe', model: gw.model, errorMessage: `TypeSafe Jev HTTP ${res.status}` };
+  const json:any = await res.json();
+  return { provider: 'typesafe', model: gw.model, answers: json.answers, usage: json.usage, stopReason: 'stop' };
+ };
+}
+
+/** Resolve the run's Jev classifier from the gateway table (ADR-0006). A
+ * resolved `pi` gateway uses the Pi registry classifier; `http` uses the
+ * direct TypeSafe client. When no key resolves, the Pi path with `DEFAULT_JEV`
+ * is kept exactly as today. */
+export async function createJevClassifier(
+ provider: JevProvider = 'auto',
+ deps: { gateway?: GatewayDeps; fetch?: typeof fetch; pi?: typeof createPiClassifier } = {},
+): Promise<{ classify: GateClassifier; gateway: 'openrouter'|'typesafe'; model: string }> {
+ const gw = resolveJevGateway(provider, deps.gateway);
+ if (!gw) {
+  const classify = await (deps.pi ?? createPiClassifier)({ provider: DEFAULT_JEV.provider, id: DEFAULT_JEV.id });
+  return { classify, gateway: 'openrouter', model: DEFAULT_JEV.id };
+ }
+ if (gw.transport === 'pi') {
+  const classify = await (deps.pi ?? createPiClassifier)({ provider: 'openrouter', id: gw.model });
+  return { classify, gateway: 'openrouter', model: gw.model };
+ }
+ return { classify: createTypesafeClassifier(gw, deps.fetch), gateway: 'typesafe', model: gw.model };
+}
+
+/** Read the project `delivery.config.json` `jev.provider`. A missing or
+ * unreadable file is `auto`; a present but invalid value fails loudly (R2). */
+export function readProjectJevProvider(cwd:string):JevProvider {
+ let raw:any=null;
+ try {
+  const path=join(cwd,'delivery.config.json');
+  if (existsSync(path)) raw=JSON.parse(readFileSync(path,'utf8'));
+ } catch { raw=null; }
+ const value=raw?.jev?.provider;
+ return value === undefined ? 'auto' : validateJevProvider(value);
+}
+
 export type SpawnResult = { status:number|null; stdout?:string; stderr?:string; error?:Error };
 export type GateDeps = {
  classify?:GateClassifier;
@@ -1933,6 +1988,12 @@ export type GateDeps = {
  billingFetch?:BillingFetch;
  /** Injectable clarification-loop seams (elicitation hop call and discover report). */
  clarify?:ClarifyDeps;
+ /** Injectable Jev gateway resolution seams for offline tests (ADR-0006). */
+ gateway?:GatewayDeps;
+ jevFetch?:typeof fetch;
+ jevPi?:typeof createPiClassifier;
+ /** Injectable project `jev.provider` reader for offline tests. */
+ readJevProvider?:(cwd:string)=>JevProvider;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
  /** Override the environment used to read the local/cached model catalog
@@ -2095,6 +2156,8 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  let requested={ provider:explicitProvider ?? modelConfig.provider, model:explicitModel ?? modelConfig.model };
  let requestedSource:ReceiptModelSource=explicitProvider || explicitModel ? 'task' : modelConfig.source;
  const mode=jevMode(t);
+ const jevProviderSetting:JevProvider = (t.jev?.provider as JevProvider | undefined)
+  ?? (deps.readJevProvider ?? readProjectJevProvider)(sourceCwd);
  const jev:JevGateRecord|undefined = mode === 'off' ? undefined : {
   mode,
   model:{ provider:DEFAULT_JEV.provider, id:DEFAULT_JEV.id, explicit:false },
@@ -2358,7 +2421,10 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     jev!.skipped = 'mock run without an injected classifier';
    } else {
     try {
-     classify = await raceAbort(createPiClassifier(jev!.model), classifierBudget(), signal);
+     const resolved = await raceAbort(createJevClassifier(jevProviderSetting, { gateway: deps.gateway, fetch: deps.jevFetch, pi: deps.jevPi }), classifierBudget(), signal);
+     classify = resolved.classify;
+     jev!.gateway = resolved.gateway;
+     jev!.model = { provider: resolved.gateway, id: resolved.model, explicit: false };
      if ((classify as any).explicitModel) jev!.model.explicit = true;
     } catch (e) {
      jev!.error = `classifier unavailable: ${msg(e)}`;
