@@ -260,7 +260,7 @@ the isolation flags the installed Pi advertises: `--no-extensions`,
 `--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-approve`
 and `--no-mcp`. The default tool allowlist is
 `--tools read,bash,edit,write`. A flag Pi does not advertise is recorded as
-missing rather than passed. The tested Pi release is 1.0.4.
+missing rather than passed. The tested Pi release is 1.4.0.
 
 The contract's `piContext` can keep ambient setup (`ambient: true`), replace the
 tool list, or forward explicit skills, context files and extensions. The result

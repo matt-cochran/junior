@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes `.codex/hooks.json` or `.cursor/hooks.json` with `SessionStart` and
   `PreCompact` hooks, locally excluded when created (Codex needs the hooks
   trusted in `/hooks`), instead of printing instructions.
+- Junior is tested with Pi 1.4.0 (was 1.0.4): every Pi option Junior passes is
+  unchanged, a live DeepSeek handoff reports the same receipt fields, and Pi
+  1.4.0 fixes sessions that broke after an output-limit cut-off, which
+  continuation segments can hit. `junior init` installs 1.4.0 and `doctor`
+  compares against it.
 - Junior verifies cpm-planner 0.4.3, elicitation 0.1.2 and scientific-process
   0.3.1; their recorded responses are unchanged.
 
