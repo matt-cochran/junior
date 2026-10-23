@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CLARIFY_FILENAME,
+  clarityGateApplies,
   clarificationApplies,
   clarifyPath,
   discoverEvidenceFromReport,
@@ -179,6 +180,36 @@ test('clarificationApplies is false for a plain-change routing', () => {
 
 test('clarificationApplies is false without a clarifying signal', () => {
   assert.equal(clarificationApplies({ decision: 'delegate', trigger: 'requires_frontier' }, null), false);
+});
+
+// --- clarityGateApplies ----------------------------------------------------
+
+test('clarityGateApplies is true for an explicit workflow with an unclear contract', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'contract_clear' }, workflow: 'test_first' }), true);
+});
+
+test('clarityGateApplies is true for an explicit workflow with a blocking assumption', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'blocking_assumptions' }, workflow: 'test_first' }), true);
+});
+
+test('clarityGateApplies is false when check-back is off', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'contract_clear' }, workflow: 'auto', checkBack: 'off' }), false);
+});
+
+test('clarityGateApplies is false for a task prepared from a brief', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'contract_clear' }, workflow: 'auto', preparedFrom: 'brief.json' }), false);
+});
+
+test('clarityGateApplies is false for a task already clarified', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'contract_clear' }, workflow: 'test_first', clarifiedFrom: 'clarified-contract.json' }), false);
+});
+
+test('clarityGateApplies keeps the auto vague-feature routing', () => {
+  assert.equal(clarityGateApplies({ attention: null, workflow: 'auto', playbooks: [{ id: 'vague-feature' }] }), true);
+});
+
+test('clarityGateApplies ignores the vague-feature routing for an explicit workflow', () => {
+  assert.equal(clarityGateApplies({ attention: null, workflow: 'test_first', playbooks: [{ id: 'vague-feature' }] }), false);
 });
 
 // --- startClarification ----------------------------------------------------
@@ -395,6 +426,56 @@ test('a ready session with a non-plan routing produces a prepare brief', async (
   assert.equal(outcome.outcome, 'brief');
 });
 
+async function answerExplicitWorkflow(workflow: string) {
+  const dir = workdir();
+  const { callHop } = fakeHop({ ready: true, spec: READY_SPEC });
+  const batch = {
+    sessionId: 'clarify:clar',
+    round: 1,
+    playbooks: ['planned-change'],
+    artifactDir: join(dir, '.delivery', 'clar', '1'),
+    questions: [{ id: 'Q1', question: 'Q?', why: 'signal', suggestedAnswer: null, claimIds: ['clarify:clar/acceptance:0'] }],
+  };
+  const outcome = await applyAnswers({
+    cwd: dir,
+    task: taskFixture(dir, { workflow, constraints: ['Existing limit'] }),
+    answers: { Q1: { answer: 'go', stance: 'assent' } },
+    batch: batch as any,
+    deps: { hopPath: 'hop.json', callHop: callHop as any },
+  });
+  return { outcome, dir, batch };
+}
+
+test('a ready explicit-workflow session returns a clarified contract', async () => {
+  const { outcome } = await answerExplicitWorkflow('test_first');
+  assert.equal(outcome.outcome, 'contract');
+});
+
+test('the clarified contract preserves the explicit workflow', async () => {
+  const { outcome } = await answerExplicitWorkflow('test_first');
+  assert.equal((outcome as any).contract.workflow, 'test_first');
+});
+
+test('the clarified contract records each answer as a constraint', async () => {
+  const { outcome } = await answerExplicitWorkflow('test_first');
+  assert.deepEqual((outcome as any).contract.constraints, ['Existing limit', 'Clarified Q1: Q? -> assent: go']);
+});
+
+test('the clarified contract points at the batch clarify.json', async () => {
+  const { outcome, batch } = await answerExplicitWorkflow('test_first');
+  assert.equal((outcome as any).contract.clarifiedFrom, clarifyPath(batch.artifactDir));
+});
+
+test('the clarified contract is written to clarified-contract.json', async () => {
+  const { outcome } = await answerExplicitWorkflow('test_first');
+  assert.deepEqual(JSON.parse(readFileSync((outcome as any).contractPath, 'utf8')), (outcome as any).contract);
+});
+
+test('an auto-workflow plan-sized session still produces a draft plan', async () => {
+  const { outcome } = await answerOnce(workdir(), { Q1: { answer: 'go', stance: 'assent' } }, { ready: true, spec: READY_SPEC }, ['planned-change']);
+  assert.equal(outcome.outcome, 'plan_drafted');
+});
+
 test('a ready session exports the spec through the hop', async () => {
   const { calls } = await answerOnce(workdir(), { Q1: { answer: 'go', stance: 'assent' } }, { ready: true, spec: READY_SPEC });
   assert.ok(calls.some((c) => c.name === 'spec.export'));
@@ -454,4 +535,26 @@ test('an amendment to a coverage-gap question adds a claim in its dimension', as
   const batch = { sessionId: 'clarify:clar', round: 1, playbooks: [], artifactDir: join(dir, '.delivery', 'clar', '1'), questions: [{ id: 'Q1', question: 'Q?', why: 'coverage gap', suggestedAnswer: null, claimIds: [], dimension: 'acceptance' }] };
   await applyAnswers({ cwd: dir, task: taskFixture(dir), answers: { Q1: { answer: 'Exports are JSON', stance: 'amend' } }, batch: batch as any, deps: { hopPath: 'hop.json', callHop: callHop as any } });
   assert.deepEqual(calls.find((c) => c.name === 'append')?.args?.claim?.dimensions, ['acceptance']);
+});
+
+test('a multi-round clarified contract keeps answers from every round', async () => {
+  const dir = workdir();
+  const artifactDir = join(dir, '.delivery', 'clar', '1');
+  const task = taskFixture(dir, { workflow: 'test_first', constraints: ['Existing limit'] });
+  const question = (id: string, text: string) => ({ id, question: text, why: 'signal', suggestedAnswer: null, claimIds: ['clarify:clar/acceptance:0'] });
+  const unready = fakeHop({ ready: false });
+  await applyAnswers({
+    cwd: dir, task,
+    answers: { Q1: { answer: 'first', stance: 'amend' } },
+    batch: { sessionId: 'clarify:clar', round: 1, playbooks: [], artifactDir, questions: [question('Q1', 'Round one?')] } as any,
+    deps: { hopPath: 'hop.json', callHop: unready.callHop as any, maxRounds: 1 },
+  });
+  const ready = fakeHop({ ready: true, spec: READY_SPEC });
+  const outcome = await applyAnswers({
+    cwd: dir, task,
+    answers: { Q1: { answer: 'second', stance: 'assent' } },
+    batch: { sessionId: 'clarify:clar', round: 2, playbooks: [], artifactDir, questions: [question('Q1', 'Round two?')] } as any,
+    deps: { hopPath: 'hop.json', callHop: ready.callHop as any },
+  });
+  assert.deepEqual((outcome as any).contract.constraints, ['Existing limit', 'Clarified Q1: Round one? -> amend: first', 'Clarified Q1: Round two? -> assent: second']);
 });

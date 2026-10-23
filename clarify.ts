@@ -14,7 +14,9 @@
 //     it to `clarify.json`/`clarify.md`, returning `needs_answers`;
 //   * applies the manager's answers (`user_assent`/`user_refutation` evidence or
 //     an amendment claim), re-assesses readiness, and either drafts a cpm plan
-//     (a plan-sized routing) or a prepare brief (otherwise);
+//     (a plan-sized routing) or a prepare brief (otherwise); an explicit
+//     workflow instead receives a clarified contract with the answers recorded
+//     as constraints;
 //   * escalates to the manager with the open blockers after the bounded number
 //     of unready rounds.
 //
@@ -37,6 +39,8 @@ import { seedElicitation } from './jtbd-bridge.ts';
 
 export const CLARIFY_FILENAME = 'clarify.json';
 export const CLARIFY_MD_FILENAME = 'clarify.md';
+const CLARIFIED_CONTRACT_FILENAME = 'clarified-contract.json';
+const CLARIFIED_ANSWERS_FILENAME = 'clarified-answers.json';
 /** At most this many deduplicated questions are returned per batch. */
 export const MAX_CLARIFY_QUESTIONS = 7;
 /** At most this many unready rounds run before the loop escalates. */
@@ -103,6 +107,7 @@ export type ClarifyContinuation =
   | ClarifyBatch
   | { outcome: 'plan_drafted'; sessionId: string; round: number; spec: unknown; plan: PlanDocument; planPath: string }
   | { outcome: 'brief'; sessionId: string; round: number; spec: unknown; brief: Brief; briefPath: string; briefMdPath: string }
+  | { outcome: 'contract'; sessionId: string; round: number; spec: unknown; contract: any; contractPath: string }
   | { outcome: 'escalated'; sessionId: string; round: number; blockers: string[] };
 
 export interface ClarifyDeps {
@@ -141,6 +146,38 @@ export function clarificationApplies(
   }
   const ids = asArray(plan?.playbooks).map((playbook) => text(playbook?.id)).filter(Boolean);
   return ids.includes('vague-feature');
+}
+
+/** Inputs that decide whether the clarification gate runs for one task. */
+export interface ClarityGateInput {
+  attention: { decision?: string; trigger?: string } | null | undefined;
+  workflow?: string;
+  checkBack?: string;
+  preparedFrom?: unknown;
+  clarifiedFrom?: unknown;
+  playbooks?: Array<{ id?: string }>;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * True when the clarification gate should run. `checkBack: 'off'` and a task
+ * already prepared from a brief or previously clarified never re-enter. An
+ * auto (or unspecified) workflow keeps the readiness and vague-feature rules;
+ * an explicit workflow only clarifies for an unclear contract or a blocking
+ * assumption, never for the vague-feature routing alone.
+ */
+export function clarityGateApplies(input: ClarityGateInput): boolean {
+  if (input.checkBack === 'off') return false;
+  if (nonEmptyString(input.preparedFrom) || nonEmptyString(input.clarifiedFrom)) return false;
+  if (input.workflow === undefined || input.workflow === 'auto') {
+    return clarificationApplies(input.attention, { playbooks: input.playbooks });
+  }
+  const trigger = input.attention?.trigger;
+  return input.attention?.decision === 'clarify'
+    && (trigger === 'contract_clear' || trigger === 'blocking_assumptions');
 }
 
 /** True when a routing's work is large enough to warrant a cpm draft plan. */
@@ -590,6 +627,35 @@ function writeDraftPlan(cwd: string, contractId: string, plan: PlanDocument): st
   return out;
 }
 
+/** One `Clarified Qn: ... -> stance: answer` line per answered batch question. */
+function clarifiedLines(batch: ClarifyBatch, answers: Record<string, ClarifyAnswer>): string[] {
+  const lines: string[] = [];
+  for (const question of asArray(batch.questions)) {
+    const answer = answers[question.id];
+    if (!answer) continue;
+    lines.push(`Clarified ${question.id}: ${question.question} -> ${answer.stance}: ${answer.answer}`);
+  }
+  return lines;
+}
+
+/** Append this round's clarified lines to the session's running record, so a
+ * multi-round clarification keeps every earlier answer, and return them all. */
+function recordClarifiedLines(dir: string, lines: string[]): string[] {
+  const path = join(dir, CLARIFIED_ANSWERS_FILENAME);
+  let recorded: string[] = [];
+  if (existsSync(path)) {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (!Array.isArray(parsed) || parsed.some((line) => typeof line !== 'string')) {
+      throw new Error(`${path} is not a JSON array of strings`);
+    }
+    recorded = parsed;
+  }
+  const all = [...recorded, ...lines.filter((line) => !recorded.includes(line))];
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, `${JSON.stringify(all, null, 2)}\n`);
+  return all;
+}
+
 export interface ApplyAnswersOptions {
   cwd: string;
   task: any;
@@ -600,9 +666,10 @@ export interface ApplyAnswersOptions {
 }
 
 /**
- * Apply the manager's answers, re-assess readiness and either hand the exported
- * spec to the cpm plan bridge (plan-sized routing) or to the prepare brief, or
- * return the next question batch / escalate after the bounded rounds.
+ * Apply the manager's answers, re-assess readiness and either write the
+ * clarified contract (an explicit workflow), hand the exported spec to the cpm
+ * plan bridge (plan-sized routing) or to the prepare brief, or return the next
+ * question batch / escalate after the bounded rounds.
  */
 export async function applyAnswers(options: ApplyAnswersOptions): Promise<ClarifyContinuation> {
   const { cwd, task } = options;
@@ -628,6 +695,10 @@ export async function applyAnswers(options: ApplyAnswersOptions): Promise<Clarif
     if (!question) continue;
     await appendAnswer(deps, sessionId, question, answer);
   }
+  const explicitWorkflow = typeof task?.workflow === 'string' && task.workflow !== 'auto';
+  const clarified = explicitWorkflow
+    ? recordClarifiedLines(deps.dir as string, clarifiedLines(batch, options.answers ?? {}))
+    : [];
 
   const readiness = await elicit(deps, 'readiness.assess', { session_id: sessionId });
   const ready = readiness?.ready === true;
@@ -635,6 +706,13 @@ export async function applyAnswers(options: ApplyAnswersOptions): Promise<Clarif
   const round = batch.round ?? 1;
 
   if (ready) {
+    if (explicitWorkflow) {
+      const dir = deps.dir as string;
+      const contract = { ...task, constraints: [...asArray(task?.constraints), ...clarified], clarifiedFrom: clarifyPath(dir) };
+      const contractPath = join(dir, CLARIFIED_CONTRACT_FILENAME);
+      writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`);
+      return { outcome: 'contract', sessionId, round, spec: null, contract, contractPath };
+    }
     const exported = await elicit(deps, 'spec.export', { session_id: sessionId });
     const spec = isRecord(exported) && 'spec' in exported ? exported.spec : exported;
     if (isPlanSized(deps.playbooks ?? [])) {
