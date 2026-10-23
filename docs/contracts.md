@@ -7,8 +7,9 @@
 `deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `context`,
 `provider`, `model`, `thinking`, `pricing`, `billing`, `jev`, `workflow`,
 `isolation`, `isolationSetup`, `resumeFrom`, `repairFrom`,
-`reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `plan`, `hopFrom`, `hopRevision`,
-`hopContext`, `execution`, and the six execution settings directly:
+`reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `preparedFrom`, `checkBack`,
+`plan`, `hopFrom`, `hopRevision`, `hopContext`, `piContext`, `clarifiedFrom`,
+`scope`, `execution`, and the six execution settings directly:
 `deadlineMs`, `quietMs`, `toolTimeoutMs`, `heartbeatMs`, `checkTimeoutMs`,
 `checkReserveMs`).
 A misspelled or unsupported top-level key is rejected with `Unknown contract
@@ -89,6 +90,63 @@ never throws: an unreadable file becomes an `error` entry and an `end` past the
 file length is clamped. Resolved excerpts are rendered in the worker prompt
 under `Code context` and passed to the preflight gate; they are excerpts, not
 the full files.
+
+#### Pi context (`piContext`)
+Every non-mock run probes `pi --help` and passes the isolation flags the
+installed Pi supports: `--no-extensions`, `--no-skills`,
+`--no-context-files`, `--no-prompt-templates`, `--no-approve` and `--no-mcp`.
+Unless the contract says otherwise, it also passes
+`--tools read,bash,edit,write`. This keeps the worker from inheriting unrelated
+project skills, extensions, context files, prompt templates, trust and MCP
+servers. The tested Pi release is 1.0.4.
+
+`piContext` changes that baseline:
+
+```json
+"piContext": {
+  "ambient": false,
+  "tools": ["read", "bash", "edit", "write"],
+  "skills": ["skills/example"],
+  "contextFiles": ["docs/context.md"],
+  "extensions": ["extensions/example.ts"]
+}
+```
+
+- `ambient: true` keeps Pi's ambient setup and passes no isolation flags.
+- `tools` replaces the default built-in tool list.
+- `skills`, `contextFiles` and `extensions` forward explicit user choices; they
+  are not ambient discovery.
+
+A flag the installed Pi does not advertise is recorded as missing, not passed.
+The result and compact handoff carry `piIsolation` with `applied`, `missing`,
+`ambient` and `probed`, plus `honored` in the handoff: after the run Junior
+reads Pi's own system message and reports `isolation not honored: ...` in
+`unresolved` when ambient skills or tools outside the allowlist still appear.
+`junior doctor` reports any missing isolation flag in its remediation text.
+
+#### Scope check (`scope`)
+`scope` declares the files a run may change:
+
+```json
+"scope": {
+  "owned": ["src/worker.ts", { "path": "src/scope-check.ts", "mode": "write" }],
+  "incidental": ["package-lock.json", "**/*.snap"]
+}
+```
+
+`owned` is required when `scope` is present. Entries are path strings, objects
+with a `path` (a `mode` value is accepted but does not change scope matching),
+or repo-prefixed entries such as `api:src/a.ts`. `incidental` overrides the
+default lockfile and snapshot globs for this contract.
+
+When `scope` is omitted, `junior plan contracts` still fills `scope.owned` from
+the plan deliverable's `owned_files`. The project `delivery.config.json` can set
+`scope.incidental` to replace the default incidental globs for every run.
+
+After the run, the result carries `scope` with `checked`, `inScope`,
+`incidental` and `outOfScope`. The compact handoff keeps the same block, and
+each out-of-scope path adds an unresolved line `out of scope: <paths>`. Scope is
+reported for review; it does not change the run status.
 
 
 ### Micro-deliverable stages
@@ -226,6 +284,35 @@ Cache reuse across a continuation is **best effort and never guaranteed**. The
 receipt always preserves the observed `cacheRead` counters, the requested and
 observed provider/model, and does not claim actual billing. Each result carries
 a `cache` note to that effect.
+
+
+### Contract clarity before delegation
+An explicit-workflow contract can still be unclear. When the readiness decision
+is clarify on `contract_clear` (below 0.6), Junior stops at
+`needs_answers` before a worker starts and writes the question batch to
+`clarify.json`/`clarify.md`. The confidence threshold is `0.6`. A clarify on
+`blocking_assumptions` alone does not stop an explicit workflow: that answer is
+at or above 0.6 on 94% of runs that came back clean (ADR 0009 amendment).
+
+Answer the batch in a JSON file and re-run:
+
+```bash
+junior handoff task.json --answers answers.json
+```
+
+For an explicit workflow, a ready round returns outcome `contract` and writes
+`clarified-contract.json`. That contract keeps the requested `workflow`, adds
+one `Clarified Qn: ... -> stance: answer` constraint per answered question from
+every round, and sets `clarifiedFrom` to the clarify batch path. Pass the
+clarified contract to the next handoff.
+
+`checkBack: "off"` opts out of the gate. A contract with `preparedFrom` or
+`clarifiedFrom` does not re-enter it. A contract with `workflow: "auto"` keeps
+the existing prepare and vague-feature rules.
+
+`junior plan check <plan.json> --jev` runs the same readiness check on each
+planned contract and adds a paid, opt-in `quality` report; see
+[Planning for Junior](planning.md).
 
 
 ### Jev readiness and completion gates
