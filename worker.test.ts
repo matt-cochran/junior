@@ -18,7 +18,7 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
  ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor } from './worker.ts';
-import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH } from './setup.ts';
+import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH,TESTED_PI_VERSION } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
@@ -1184,7 +1184,7 @@ test('Resume from a prior recon run never auto-approves test_first',async()=>{
 });
 
 // --- D06 init/doctor (offline; no installs, no paid calls) ---
-const okExec=(_cmd:string,args:string[])=>({status:0,stdout:args.includes('--version')?'pi 1.0.3\n':'',stderr:''});
+const okExec=(_cmd:string,args:string[])=>({status:0,stdout:args.includes('--version')?`pi ${TESTED_PI_VERSION}\n`:'',stderr:''});
 const setupDeps=(cwd:string,over:any={})=>({cwd,env:{PATH:'',HOME:cwd,...(over.env||{})},execPath:join(cwd,'node'),nodeVersion:'26.5.0',exec:okExec,...over});
 const writeAgent=(cwd:string,over:any={})=>{
  const agent=join(cwd,'agent'); mkdirSync(agent,{recursive:true});
@@ -1202,7 +1202,7 @@ test('Doctor reports ready from injected pi, credentials and local catalog',()=>
  assert.equal(d.ok,true);
  assert.equal(d.node.supported,true);
  assert.equal(d.pi.found,true);
- assert.equal(d.pi.version,'1.0.3');
+ assert.equal(d.pi.version,TESTED_PI_VERSION);
  assert.equal(d.pi.pathMismatch,false);
  assert.equal(d.credentials.present,true);
  assert.equal(d.credentials.sources.includes('auth.json'),true);
@@ -1249,7 +1249,7 @@ test('Doctor reveals a PATH/nvm mismatch between pi and node',()=>{
 });
 test('Init creates defaults and example task only when absent; repeat preserves',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-init-'));
- const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:'1.0.3'}});
+ const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:TESTED_PI_VERSION}});
  const first:any=init(deps);
  assert.equal(first.command,'init');
  assert.ok(first.created.includes('delivery.config.json'));
@@ -1257,7 +1257,7 @@ test('Init creates defaults and example task only when absent; repeat preserves'
  const cfg=JSON.parse(readFileSync(join(cwd,'delivery.config.json'),'utf8'));
  assert.equal(cfg.provider,DEFAULT_PROVIDER);
  assert.equal(cfg.model,DEFAULT_MODEL);
- assert.equal(cfg.pi.testedVersion,'1.0.3');
+ assert.equal(cfg.pi.testedVersion,TESTED_PI_VERSION);
  // A local edit survives a repeat init.
  const custom='{"provider":"custom","model":"custom/model"}\n';
  writeFileSync(join(cwd,'delivery.config.json'),custom);
@@ -1270,7 +1270,7 @@ test('Init creates defaults and example task only when absent; repeat preserves'
 test('Ordinary init reports install instruction and never invokes npm',()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-init-'));
  const calls:any[]=[];
- const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:'1.0.3'},exec:(cmd:string,args:string[],opts:any)=>{calls.push({cmd,args,opts});return okExec(cmd,args);}});
+ const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:TESTED_PI_VERSION},exec:(cmd:string,args:string[],opts:any)=>{calls.push({cmd,args,opts});return okExec(cmd,args);}});
  const r:any=init(deps);
  assert.equal(calls.length,0);
  assert.equal(r.install,undefined);
@@ -1281,18 +1281,18 @@ test('Init --install uses the exact tested version via npm argv with a bounded t
  const cwd=mkdtempSync(join(tmpdir(),'delivery-init-'));
  const calls:any[]=[];
  const exec=(cmd:string,args:string[],opts:any)=>{calls.push({cmd,args,opts});return okExec(cmd,args);};
- const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:'1.0.3'},exec});
+ const deps=setupDeps(cwd,{installedPi:{name:PI_PACKAGE,version:TESTED_PI_VERSION},exec});
  const r:any=init(deps,{install:true});
  assert.equal(r.install.requested,true);
  assert.equal(r.install.attempted,true);
  assert.equal(r.install.ok,true);
  const npm=calls.find((c)=>c.cmd==='npm');
- assert.deepEqual(npm.args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@1.0.3`]);
+ assert.deepEqual(npm.args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@${TESTED_PI_VERSION}`]);
  assert.equal(npm.opts.timeout,INSTALL_TIMEOUT_MS);
  assert.equal(npm.opts.shell,undefined);
 });
 test('Discover installed Pi name/version from the local package.json',()=>{
- const info=discoverInstalledPi({execPath:'/mock/bin/node', readFile:()=>JSON.stringify({name:PI_PACKAGE,version:'1.0.3'})});
+ const info=discoverInstalledPi({execPath:'/mock/bin/node', readFile:()=>JSON.stringify({name:PI_PACKAGE,version:TESTED_PI_VERSION})});
  assert.ok(info);
  assert.equal(info!.name,PI_PACKAGE);
  assert.match(info!.version,/^\d+\.\d+\.\d+/);
@@ -1543,9 +1543,9 @@ test('Init --install reuses the pinned tested version when Pi is currently absen
  const calls:any[]=[];
  const exec=(cmd:string,args:string[],opts:any)=>{calls.push({cmd,args,opts});return okExec(cmd,args);};
  const r:any=init(setupDeps(cwd,{execPath:join(cwd,'missing-node'),exec}),{install:true});
- assert.equal(r.install.spec,`${PI_PACKAGE}@1.0.3`);
+ assert.equal(r.install.spec,`${PI_PACKAGE}@${TESTED_PI_VERSION}`);
  const npm=calls.find((c)=>c.cmd==='npm');
- assert.deepEqual(npm.args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@1.0.3`]);
+ assert.deepEqual(npm.args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@${TESTED_PI_VERSION}`]);
 });
 
 test('Doctor rejects empty saved credentials and a broken Pi executable',()=>{
@@ -1568,7 +1568,7 @@ test('Fresh init can install the pinned tested Pi without installed package meta
  const r=init(deps,{install:true});
  assert.equal(r.install!.ok,true);
  assert.equal(r.ready,true);
- assert.deepEqual(calls.find(c=>c.command==='npm').args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@1.0.3`]);
+ assert.deepEqual(calls.find(c=>c.command==='npm').args,['install','-g','--ignore-scripts',`${PI_PACKAGE}@${TESTED_PI_VERSION}`]);
  const again=init(deps,{install:true});
  assert.equal(again.install!.attempted,false);
  assert.equal(calls.filter(c=>c.command==='npm').length,1);
@@ -3761,4 +3761,62 @@ test('Typesafe classifier redacts the key if the API echoes it',async()=>{
  const res={ok:false,status:401,json:async()=>({}),text:async()=>'bad key ts-secret-key'};
  const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(res).impl);
  assert.doesNotMatch((await classifier({state:{},questions:{}})).errorMessage,/ts-secret-key/);
+});
+
+// --- WIRE10: Pi isolation, scope handoff and the explicit-workflow clarity gate ---
+const isolationCapabilities={flags:new Set(['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'])};
+
+test('Validation rejects a piContext skill entry that is not a non-empty string',()=>{
+ assert.throws(()=>validate(task(0,{piContext:{skills:['']}})),/Invalid piContext\.skills/);
+});
+test('Validation rejects a blank clarifiedFrom path',()=>{
+ assert.throws(()=>validate(task(0,{clarifiedFrom:' '})),/Invalid clarifiedFrom/);
+});
+test('Validation rejects a scope owned entry that is not a path',()=>{
+ assert.throws(()=>validate(task(0,{scope:{owned:[{path:''}]}})),/Invalid scope\.owned/);
+});
+test('Validation rejects a non-string scope incidental glob',()=>{
+ assert.throws(()=>validate(task(0,{scope:{owned:['a.ts'],incidental:[1]}})),/Invalid scope\.incidental/);
+});
+test('Pi argv appends the run isolation arguments after the guard extension',()=>{
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},null,undefined,undefined,['--no-extensions','--no-mcp']),['--provider','openrouter','--model','m','--mode','json','-e',piGuardModulePath(),'--no-extensions','--no-mcp']);
+});
+test('A live run passes its supported isolation flags to Pi',async()=>{
+ let seen:string[]=[];
+ const spawnPi=(_c:string,args:string[])=>{seen=args;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};};
+ await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.ok(seen.includes('--no-extensions'));
+});
+test('A live run records the probed Pi isolation plan on the result',async()=>{
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''});
+ const r=await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.deepEqual(r.piIsolation,{applied:['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'],missing:[],ambient:false,probed:true,verification:{checked:false,honored:true,problems:[]}});
+});
+test('A live run whose Pi system message still lists ambient skills reports isolation not honored',async()=>{
+ const system={type:'message_start',message:{role:'system',content:'',sections:{skills:'<skills><name>wrangler</name></skills>',tools:'<tools>\n- read: Read\n</tools>'}}};
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:'s'},system,assistant(),{type:'agent_settled'}),stderr:''});
+ const r=await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.ok(compactHandoff(r).unresolved.includes('isolation not honored: ambient skills present despite --no-skills'));
+});
+test('A run with a scope records the scope classification on the result',async()=>{
+ const r=await run(task(0,{scope:{owned:['src/*.ts']}}),true);
+ assert.equal(r.scope.checked,true);
+});
+test('An explicit-workflow contract with a clarify readiness decision stops at needs_answers',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{workflow:'test_first',jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.status,'needs_answers');
+});
+test('An explicit-workflow contract with a clarify readiness decision keeps its workflow',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{workflow:'test_first',jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.workflow.selected,'test_first');
+});
+test('The compact handoff carries the run scope classification',()=>{
+ const scope={checked:true,inScope:['src/a.ts'],incidental:[],outOfScope:['src/b.ts']};
+ assert.deepEqual(compactHandoff(handoffResult({scope})).scope,scope);
+});
+test('The compact handoff lists out-of-scope changes as unresolved',()=>{
+ const scope={checked:true,inScope:[],incidental:[],outOfScope:['src/a.ts','src/b.ts']};
+ assert.ok(compactHandoff(handoffResult({scope})).unresolved.includes('out of scope: src/a.ts, src/b.ts'));
 });

@@ -14,6 +14,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { scorePlanContracts, type PlanQualityReport } from './plan-quality.ts';
+import type { GateClassifier } from './worker.ts';
 
 /** Registration files whose edits serialize otherwise independent cohorts. */
 export const HOT_FILES: readonly string[] = [
@@ -23,6 +25,19 @@ export const HOT_FILES: readonly string[] = [
   'CHANGELOG.md',
   'README.md',
 ];
+
+/** Files that coordinate test and build registration across deliverables. */
+export const REGISTRATION_FILES: readonly string[] = [
+  'package.json',
+  'package-lock.json',
+  'scripts/build.mjs',
+  'junior.ts',
+  'cli.test.ts',
+  'CHANGELOG.md',
+  'README.md',
+];
+
+const TEST_FILE_PATTERN = /\.test\.(?:ts|mjs|js)$/;
 
 export type FindingSeverity = 'error' | 'warning' | 'info';
 
@@ -44,6 +59,8 @@ export interface PlanCheckOptions {
   maxHours?: number;
   /** Files that serialize cohorts. Default HOT_FILES. */
   hotFiles?: readonly string[];
+  /** Test files registered in package.json; enables the registration-scope rule. */
+  registeredTests?: readonly string[];
 }
 
 export interface ContractOptions {
@@ -103,7 +120,17 @@ function isAgentDeliverable(deliverable: Record<string, any>): boolean {
 }
 
 function ownedFiles(deliverable: Record<string, any>): string[] {
-  return asArray(deliverable.owned_files).map(text).filter(Boolean);
+  return asArray(deliverable.owned_files)
+    .map((entry) => (typeof entry === 'string' ? entry : isRecord(entry) && typeof entry.path === 'string' ? entry.path : ''))
+    .filter(Boolean);
+}
+
+/** Test file tokens (`.test.ts`, `.test.mjs`, `.test.js`) from `scripts.test`. */
+export function registeredTestFiles(packageJson: unknown): string[] {
+  const scripts = isRecord(packageJson) ? packageJson.scripts : undefined;
+  const test = isRecord(scripts) ? scripts.test : undefined;
+  if (typeof test !== 'string') return [];
+  return test.split(/\s+/).filter((token) => TEST_FILE_PATTERN.test(token));
 }
 
 /** Some plans use string prerequisites, some `{id, consumes}` edges. */
@@ -125,6 +152,17 @@ function likelyHours(deliverable: Record<string, any>): number {
   if (typeof likely === 'number' && Number.isFinite(likely)) return likely;
   const coarse = deliverable.estimated_effort_hours;
   return typeof coarse === 'number' && Number.isFinite(coarse) ? coarse : NaN;
+}
+
+/** True when a deliverable transitively lists `id` as a prerequisite and owns package.json. */
+function hasPackageJsonDescendant(byId: Map<string, Record<string, any>>, id: string): boolean {
+  for (const candidate of byId.values()) {
+    const candidateId = text(candidate.id);
+    if (candidateId === id) continue;
+    if (!ownedFiles(candidate).includes('package.json')) continue;
+    if (isAncestor(byId, id, candidateId)) return true;
+  }
+  return false;
 }
 
 /** True when `ancestorId` appears in the transitive prerequisites of `id`. */
@@ -207,6 +245,7 @@ function agentCohorts(agent: Array<Record<string, any>>, all: Array<Record<strin
 export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): JuniorPlanCheck {
   const maxHours = typeof opts.maxHours === 'number' && Number.isFinite(opts.maxHours) ? opts.maxHours : 4;
   const hotFiles = opts.hotFiles ?? HOT_FILES;
+  const registeredTests = opts.registeredTests;
   const deliverables = deliverablesOf(plan);
   const agent = deliverables.filter(isAgentDeliverable);
   // Ancestry spans every deliverable, so an order through a manager-owned step still counts.
@@ -248,6 +287,18 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
         [id, requestedProfile],
         `${id} pins model profile '${requestedProfile}'; split or tighten it to fit the default model, or record the approval in plan.metadata.junior.approvedProfiles`,
       ));
+    }
+
+    if (registeredTests !== undefined) {
+      const unregistered = files.filter((file) => TEST_FILE_PATTERN.test(file) && !registeredTests.includes(file));
+      if (unregistered.length > 0 && !files.includes('package.json') && !hasPackageJsonDescendant(byId, id)) {
+        findings.push(finding(
+          'REGISTRATION_OUTSIDE_SCOPE',
+          'warning',
+          [id, ...unregistered],
+          `${id} owns test file(s) ${unregistered.join(', ')} not registered in package.json; workers then edit package.json outside their owned files (observed in 22 of 79 plan-backed runs, H2)`,
+        ));
+      }
     }
 
     for (const edge of asArray(deliverable.prerequisites)) {
@@ -297,6 +348,10 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
     const id = text(deliverable.id);
     const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
     const files = ownedFiles(deliverable);
+    const checks = asArray(junior.checks);
+    const requestedProfile = text(junior.profile).trim();
+    const cargoCheck = checks.some((check) => isRecord(check) && text(check.command) === 'cargo');
+    const unownedRegistrations = REGISTRATION_FILES.filter((file) => !files.includes(file));
     const contract: Record<string, unknown> = {
       id,
       deliverable: text(deliverable.metadata?.artifact),
@@ -306,13 +361,21 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
       constraints: [
         `Only modify ${files.join(', ')}`,
         'Work only inside the current working directory; no commits or pushes; no nested workers',
+        ...(unownedRegistrations.length > 0
+          ? [`Do not edit registration files you do not own (${unownedRegistrations.join(', ')}); if your change needs registering there, say so in your final message instead`]
+          : []),
       ],
-      checks: asArray(junior.checks),
+      checks,
+      scope: { owned: files },
       isolation: 'worktree',
       jev: { mode: 'shadow' },
+      modelProfile: requestedProfile || 'general',
+      execution: {
+        deadlineMs: 1500000,
+        ...(cargoCheck ? { checkTimeoutMs: 900000 } : {}),
+        ...(isRecord(junior.execution) ? junior.execution : {}),
+      },
     };
-    const requestedProfile = text(junior.profile).trim();
-    if (requestedProfile) contract.modelProfile = requestedProfile;
     if (planApprovedProfiles.length > 0) contract.approvedProfiles = planApprovedProfiles;
     if (opts.provider !== undefined) contract.provider = opts.provider;
     if (opts.model !== undefined) contract.model = opts.model;
@@ -320,9 +383,33 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
   });
 }
 
+/** Score a plan file's contracts at plan-check time through the worker's own
+ * preflight gate. The caller supplies the classifier seam so tests and the CLI
+ * can keep Jev calls explicit. */
+export async function scorePlanFile(
+  planPath: string,
+  classify: GateClassifier,
+  opts: { cwd: string },
+): Promise<PlanQualityReport> {
+  const plan = JSON.parse(fs.readFileSync(path.resolve(opts.cwd, planPath), 'utf8'));
+  return scorePlanContracts(planContracts(plan, { cwd: opts.cwd }), classify);
+}
+
 export interface PlanCommandDeps {
   cwd?: string;
   out?: (s: string) => void;
+}
+
+/** Read `scripts.test` from a project package.json when present. A malformed
+ * package.json fails fast rather than silently skipping the registration rule. */
+function registeredTestsIn(cwd: string): string[] | undefined {
+  const packagePath = path.join(cwd, 'package.json');
+  if (!fs.existsSync(packagePath)) return undefined;
+  try {
+    return registeredTestFiles(JSON.parse(fs.readFileSync(packagePath, 'utf8')));
+  } catch (error) {
+    throw new Error(`${packagePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Thin CLI shell for `junior plan check|contracts`; prints its own JSON. */
@@ -348,6 +435,10 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
       outDir = String(inline ?? args[++i]);
       continue;
     }
+    if (name === '--jev') {
+      if (inline !== undefined) throw new Error('Option --jev does not take a value');
+      continue;
+    }
     positional.push(arg);
   }
 
@@ -355,7 +446,8 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     const file = positional[0];
     if (!file) throw new Error('Usage: junior plan check <plan.json> [--max-hours N]');
     const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
-    const result = checkPlanForJunior(plan, { maxHours });
+    const registeredTests = registeredTestsIn(cwd);
+    const result = checkPlanForJunior(plan, { maxHours, ...(registeredTests !== undefined ? { registeredTests } : {}) });
     out(JSON.stringify(result, null, 2));
     return { exitCode: result.ok ? 0 : 1, result };
   }

@@ -14,6 +14,7 @@
 
 import { join } from 'node:path';
 import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
+import type { ScopeResult } from './scope-check.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -36,6 +37,10 @@ export type CompactHandoff = {
   * happened in an isolated worktree. */
  sourceCwd: string | null;
  execution: { cwd: string | null; artifact: string | null; isolation: string };
+ /** Scope classification when the contract named an owned list, else null. */
+ scope: ScopeResult | null;
+ /** Pi isolation flags applied for the run, or null when it did not probe. */
+ piIsolation: { applied: string[]; missing: string[]; ambient: boolean; probed: boolean; honored: boolean | null } | null;
  artifact: string | null;
  /** Number of worker segments that ran (1 unless automatic continuation ran). */
  segments: number;
@@ -181,6 +186,9 @@ export function unresolvedIssues(result: any): string[] {
  if (result?.resume?.error) out.push(`resume: ${result.resume.error}`);
  if (result?.lineage?.rejected) out.push('repair rejected by lineage budget');
  if (result?.analysis && result.analysis.reportPresent === false) out.push(`analysis report missing: ${result.analysis.report ?? 'unknown path'}`);
+ const isolationProblems = result?.piIsolation?.verification?.problems;
+ if (Array.isArray(isolationProblems) && isolationProblems.length > 0) out.push(`isolation not honored: ${isolationProblems.join('; ')}`);
+ if (Array.isArray(result?.scope?.outOfScope) && result.scope.outOfScope.length > 0) out.push(`out of scope: ${result.scope.outOfScope.join(', ')}`);
  return out;
 }
 
@@ -273,6 +281,19 @@ export function compactHandoff(result: any): CompactHandoff {
    artifact: dir,
    isolation: r.isolation?.mode ?? 'none',
   },
+  scope: r.scope && typeof r.scope === 'object' ? {
+   checked: !!r.scope.checked,
+   inScope: Array.isArray(r.scope.inScope) ? r.scope.inScope : [],
+   incidental: Array.isArray(r.scope.incidental) ? r.scope.incidental : [],
+   outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
+  } : null,
+  piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {
+   applied: Array.isArray(r.piIsolation.applied) ? r.piIsolation.applied : [],
+   missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],
+   ambient: !!r.piIsolation.ambient,
+   probed: !!r.piIsolation.probed,
+   honored: r.piIsolation.verification?.checked ? !!r.piIsolation.verification.honored : null,
+  } : null,
   artifact: dir,
   segments: Array.isArray(r.segments) ? r.segments.length : 0,
   changedFiles,

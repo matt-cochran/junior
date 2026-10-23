@@ -254,6 +254,30 @@ automatically; the error names the lock file and its holder, and removal is a
 manual `rm`.
 
 
+#### Pi run isolation
+Every non-mock run probes `pi --help` once before the first spawn and passes
+the isolation flags the installed Pi advertises: `--no-extensions`,
+`--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-approve`
+and `--no-mcp`. The default tool allowlist is
+`--tools read,bash,edit,write`. A flag Pi does not advertise is recorded as
+missing rather than passed. The tested Pi release is 1.0.4.
+
+The contract's `piContext` can keep ambient setup (`ambient: true`), replace the
+tool list, or forward explicit skills, context files and extensions. The result
+and compact handoff carry `piIsolation` with `applied`, `missing`, `ambient`
+and `probed`; `probed` is false when an injected offline child bypasses the CLI
+probe. After the run, Junior checks Pi's first system message: ambient skills
+under `--no-skills` or a tool outside the `--tools` allowlist become an
+`isolation not honored: ...` line in the handoff's `unresolved` list
+(`piIsolation.honored` is false), so a Pi release that ignores a flag is
+reported rather than assumed. `junior doctor` reports unsupported isolation
+flags in `remediation`.
+
+Earlier worker runs inherited ambient resources: all 114 recorded runs had
+received 18 unrelated ambient skills. Isolation makes the contract, not the
+machine, the source of run inputs.
+
+
 ### Change evidence
 Each run captures a **before** and **after** snapshot of the execution checkout
 and saves the complete pair as `evidence.json` in its artifact directory, so
@@ -270,6 +294,18 @@ and the diff is capped with explicit `limits` metadata (`diffTruncated`,
 `statTruncated`, `filesTruncated`, `untrackedBytes`). A truncated diff means the
 gate and reviewer saw a prefix, not the whole change; an `unavailable` diff
 means no evidence was collected (for example outside a Git repository).
+
+#### Scope check
+A contract can declare `scope.owned` (and optional `scope.incidental`) to
+classify the run's changed files. `junior plan contracts` fills `scope.owned`
+from the deliverable's `owned_files`; project `delivery.config.json`
+`scope.incidental` overrides the default lockfile and snapshot globs.
+
+After the run, `result.scope` and the compact handoff `scope` contain `checked`,
+`inScope`, `incidental` and `outOfScope`. With no owned list, `checked` is false
+and non-incidental changes are not labelled out of scope. An out-of-scope path
+adds an unresolved line `out of scope: <paths>` to the handoff. Scope is
+advisory evidence for review: it never changes the run status.
 
 
 ### Runtime, deadlines and handoff
@@ -425,6 +461,20 @@ derived one, and a set `CPM_OPENROUTER_KEY_FILE` suppresses the derived
 `OPENROUTER_API_KEY`. These values are for the child spawn only and are never
 persisted.
 
+#### Contract clarity gate
+An explicit-workflow contract whose readiness decision is clarify on
+`contract_clear` (below 0.6) stops at `needs_answers` with a question batch
+before a worker starts; a `blocking_assumptions` clarify alone does not. The confidence threshold is `0.6`.
+`checkBack: "off"` opts out, and a contract with `preparedFrom` or
+`clarifiedFrom` never re-enters the gate.
+
+`junior handoff <task.json> --answers <file>` resolves the batch. For an
+explicit workflow it returns outcome `contract` and writes
+`clarified-contract.json` with the workflow unchanged, the answers from every
+round as constraints, and `clarifiedFrom` set. The manager passes that contract
+to the next handoff. `junior plan check <plan.json> --jev` runs the same check
+on each planned contract and adds an opt-in paid `quality` report.
+
 #### Compact handoff
 `junior.ts handoff` (or `status` without `--full`) prints one small object: `id`,
 `outcome`, `source` and preserved `sourceCwd`/`execution` cwd, artifact
@@ -444,6 +494,23 @@ compatibility. Repeated per-event stop reasons are deduplicated into
 The full receipt, events, evidence and runtime heartbeat stay in the artifact
 files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
 `result.json`) and are available through `status --full`.
+
+#### Session-start compact context
+`junior compact [--json] [--max-chars N]` prints a session-start block rebuilt
+from live local stores with no model or network call: the active plan, FMECA
+sessions, open scientific-process hypotheses and unresolved runs from the last
+48 hours. `--max-chars` defaults to 6000 and drops low-priority detail first;
+the active-plan section is never cut. `--json` prints the block plus
+`truncated` and per-section status.
+
+`junior setup --context-hooks [--scope local|project] [--remove]
+[--harness claude|codex|cursor]` installs a Claude Code `SessionStart` hook
+matching `compact|resume` that runs `junior compact`. Local scope writes
+`.claude/settings.local.json` (the default) and project scope writes
+`.claude/settings.json`; an existing file is backed up before it changes.
+Codex and Cursor receive printable instructions instead of a file write.
+After a compaction or resume, run `junior compact` and read the block before
+continuing.
 
 #### Handoff progress and live status
 `junior handoff`, `junior run` and `junior qa` stream progress lines to

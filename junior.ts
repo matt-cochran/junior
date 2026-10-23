@@ -31,10 +31,10 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  apply   <id|result.json> [--dry-run] [--force]   apply a reviewed handoff to this checkout',
   '  validate <task.json>; status <result.json> [--full]   validate a contract or print a receipt',
-  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
+  '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
-  '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check (--check-updates asks npm/GitHub; --online verifies provider credit)',
-  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run]',
+  '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check; compact [--json] [--max-chars N] prints the session-start context block',
+  '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run] [--context-hooks [--scope local|project] [--remove]]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
  ].join('\n');
@@ -82,8 +82,13 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
- setup: { flags: ['--yes', '--dry-run'], valueFlags: ['--harness', '--hop'], min: 0, max: 0,
-  help: 'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]' },
+ compact: { flags: ['--json'], valueFlags: ['--max-chars'], min: 0, max: 0,
+  help: 'Usage: junior compact [--json] [--max-chars N]' },
+ setup: { flags: ['--yes', '--dry-run', '--context-hooks', '--remove'], valueFlags: ['--harness', '--hop', '--scope'], min: 0, max: 0,
+  help: [
+   'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]',
+   '       junior setup --context-hooks [--scope local|project] [--remove] [--harness claude|codex|cursor]',
+  ].join('\n') },
  update: {
   flags: ['--user', '--project', '--with-triz', '--force', '--no-skill', '--no-companions', '--no-self', '--with-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -95,8 +100,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
  model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
   help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes] | approve|revoke <key>' },
- plan: { flags: [], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
-  help: 'Usage: junior plan check <plan.json> [--max-hours N] | contracts <plan.json> --out <dir>' },
+ plan: { flags: ['--jev'], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
+  help: 'Usage: junior plan check <plan.json> [--max-hours N] [--jev] | contracts <plan.json> --out <dir>' },
  init: {
   flags: ['--install', '--no-install', '--no-companions', '--user', '--project', '--upgrade', '--update', '--with-triz', '--force', '--no-skill', '--no-matrix'],
   valueFlags: ['--target', '--skill-root', '--scope'],
@@ -181,6 +186,17 @@ function applyChooseOption(task: any, cwd: string, parsed: ParsedCommand): any {
  return contract;
 }
 
+/** The single plan file positional from `check <file>` plus allowed options. */
+function planFileArg(args: string[]): string {
+ for (let i = 1; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === '--max-hours') { i++; continue; }
+  if (arg.startsWith('-')) continue;
+  return arg;
+ }
+ throw Error('Usage: junior plan check <plan.json> [--max-hours N] [--jev]');
+}
+
 async function main(argv: string[]): Promise<void> {
  const command = argv[0];
  const rest = argv.slice(1);
@@ -207,6 +223,18 @@ async function main(argv: string[]): Promise<void> {
 
  if (command === 'plan') {
   const planCli = await import('./plan-junior.ts');
+  const withJev = rest.includes('--jev');
+  if (withJev) {
+   const args = rest.filter((arg) => arg !== '--jev');
+   if (args[0] !== 'check') throw Error('--jev is only valid for junior plan check');
+   const captured = planCli.runPlanCommand(args, { cwd: process.cwd(), out: () => {} });
+   const planFile = planFileArg(args);
+   const { createPiClassifier } = await import('./worker.ts');
+   const quality = await planCli.scorePlanFile(planFile, await createPiClassifier(), { cwd: process.cwd() });
+   console.log(JSON.stringify({ ...captured.result, quality }, null, 2));
+   process.exitCode = captured.exitCode;
+   return;
+  }
   const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
   process.exitCode = exitCode;
   return;
@@ -230,7 +258,43 @@ async function main(argv: string[]): Promise<void> {
   },
  });
 
+ if (command === 'compact') {
+  const raw = parsed.values['--max-chars'];
+  let maxChars: number | undefined;
+  if (raw !== undefined) {
+   maxChars = Number(raw);
+   if (!Number.isInteger(maxChars) || maxChars <= 0) {
+    throw Error(`Invalid --max-chars value: ${raw} (expected a positive integer)`);
+   }
+  }
+  const { buildCompactBlock } = await import('./compact.ts');
+  const block = await buildCompactBlock({ cwd: process.cwd(), ...(maxChars !== undefined ? { maxChars } : {}) });
+  console.log(parsed.flags.has('--json') ? JSON.stringify(block, null, 2) : block.markdown);
+  return;
+ }
  if (command === 'setup') {
+  if (parsed.flags.has('--context-hooks')) {
+   const harness = parsed.values['--harness'];
+   if (harness !== undefined && !['claude', 'codex', 'cursor'].includes(harness)) {
+    throw Error(`Invalid --harness value: ${harness} (expected claude, codex or cursor)`);
+   }
+   const scope = parsed.values['--scope'];
+   if (scope !== undefined && scope !== 'local' && scope !== 'project') {
+    throw Error(`Invalid --scope value: ${scope} (expected local or project)`);
+   }
+   const contextHooks = await import('./context-hooks.ts');
+   if (harness === 'codex' || harness === 'cursor') {
+    console.log(contextHooks.harnessInstructions(harness));
+    return;
+   }
+   const result = contextHooks.installContextHooks({
+    projectDir: process.cwd(),
+    ...(scope !== undefined ? { scope: scope as 'local' | 'project' } : {}),
+    remove: parsed.flags.has('--remove'),
+   });
+   console.log(JSON.stringify(result, null, 2));
+   return;
+  }
   const setup = await import('./readiness.ts');
   const result = await setup.runSetup({}, {
    cwd: process.cwd(),

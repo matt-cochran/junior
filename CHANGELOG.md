@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-23
+
+### Added
+
+- Run isolation (#75): every non-mock run probes `pi --help` and passes the
+  isolation flags Pi supports (`--no-extensions`, `--no-skills`,
+  `--no-context-files`, `--no-prompt-templates`, `--no-approve`, `--no-mcp`)
+  and `--tools read,bash,edit,write`. The contract can set `piContext`
+  (`ambient`, `tools`, `skills`, `contextFiles`, `extensions`), and the result
+  and compact handoff record `piIsolation` (`applied`, `missing`, `ambient`,
+  `probed`, and `honored` from a post-run check of Pi's own system message).
+  `junior doctor` names any missing isolation flag. Tested Pi is 1.0.4. All 114 recorded worker runs had received 18 unrelated ambient skills.
+- Scope check (#76): the contract field `scope` takes `owned` and optional
+  `incidental` entries, and `junior plan contracts` fills `scope.owned` from
+  the plan. `delivery.config.json` `scope.incidental` overrides the default
+  lockfile and snapshot globs. The result and handoff report `scope`
+  (`checked`, `inScope`, `incidental`, `outOfScope`), and an out-of-scope path
+  appears in the handoff's `unresolved` list as `out of scope: ...`. The run
+  status does not change.
+- Contract clarity before delegation (ADR 0009, #85): an explicit-workflow
+  contract that Jev judges unclear (`contract_clear` below 0.6) stops at
+  `needs_answers` before a worker starts. A `blocking_assumptions` clarify
+  alone does not stop it: it fires on 94% of runs that came back clean.
+  `junior handoff <task.json> --answers <file>` returns outcome `contract`
+  with `clarified-contract.json`: the original workflow, every round's answers
+  as constraints, and `clarifiedFrom`. `checkBack: "off"` opts out, and a
+  contract already prepared or clarified never re-enters the gate. `junior
+  plan check <plan> --jev` adds an opt-in, paid `quality` report from the same
+  readiness check.
+- Plan-check lessons (#79): `junior plan check` reports
+  `REGISTRATION_OUTSIDE_SCOPE` when a deliverable owns a test file that
+  `package.json` does not register. Plan contracts accept `owned_files` as
+  paths or `{ path, mode }` entries and default to `modelProfile: general`, a
+  25-minute deadline, a cargo `checkTimeoutMs` when a check runs cargo, and a
+  constraint against editing unowned registration files.
+- `junior compact [--json] [--max-chars N]` (#78) prints a session-start block
+  rebuilt from live stores with no model call: the active plan, FMECA state,
+  open scientific-process hypotheses and unresolved runs from the last 48
+  hours. `junior setup --context-hooks [--scope local|project] [--remove]
+  [--harness claude|codex|cursor]` installs a Claude Code SessionStart hook
+  (`compact|resume`) or prints setup instructions for Codex and Cursor.
+- `restore-context` in `routes.ts`: `junior compact`, then `junior setup
+  --context-hooks`, for rebuilding a session after compaction or resume.
+
+### Changed
+
+- The build collects every production module, so a new module is included in
+  the published package without a separate list.
+- The Junior skill keeps the new route in its route table and explains the
+  clarity gate, `junior compact` and how to derive sharper hypotheses from a
+  refuted one.
+
+### Fixed
+
+- Worker runs no longer inherit ambient Pi skills, extensions, context files,
+  prompt templates, project trust or MCP servers (#75).
+- A plan-backed run now reports files changed outside its owned scope instead
+  of leaving them implicit (#76).
+- Explicit-workflow plan contracts no longer bypass the clarification gate
+  when Jev judges the contract unclear (#85).
+- Clarification questions quote at most 160 characters of their context
+  instead of repeating the whole deliverable in every question.
+
 ## [0.9.0] - 2026-10-22
 
 ### Added

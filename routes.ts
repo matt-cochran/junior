@@ -344,6 +344,19 @@ export const ROUTES: readonly Route[] = [
     then: ['junior report-issue <tool> --title <title> --file'],
   },
   {
+    id: 'restore-context',
+    job: "Rebuild the session's working context after compaction or resume from Junior's stores.",
+    triggers: [
+      'rebuild context after compaction',
+      'restore the session context',
+      'resume with the working context',
+      'lost context after compaction',
+      'what was i working on',
+    ],
+    first: 'junior compact',
+    then: ['junior setup --context-hooks'],
+  },
+  {
     id: 'setup',
     job: 'Set up or update the project: check readiness, run setup, init companions and adopt newer tools.',
     triggers: [
