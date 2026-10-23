@@ -39,7 +39,7 @@ export const SUPPORTED_NODE_MIN = '22.19.0';
 export const DEFAULT_PROVIDER = 'openrouter';
 export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
 export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
-export const TESTED_PI_VERSION = '1.0.4';
+export const TESTED_PI_VERSION = '1.4.0';
 export const DOCTOR_TIMEOUT_MS = 10000;
 export const INSTALL_TIMEOUT_MS = 300000;
 

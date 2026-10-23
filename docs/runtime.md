@@ -260,7 +260,7 @@ the isolation flags the installed Pi advertises: `--no-extensions`,
 `--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-approve`
 and `--no-mcp`. The default tool allowlist is
 `--tools read,bash,edit,write`. A flag Pi does not advertise is recorded as
-missing rather than passed. The tested Pi release is 1.0.4.
+missing rather than passed. The tested Pi release is 1.4.0.
 
 The contract's `piContext` can keep ambient setup (`ambient: true`), replace the
 tool list, or forward explicit skills, context files and extensions. The result
@@ -496,21 +496,56 @@ files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
 `result.json`) and are available through `status --full`.
 
 #### Session-start compact context
-`junior compact [--json] [--max-chars N]` prints a session-start block rebuilt
-from live local stores with no model or network call: the active plan, FMECA
-sessions, open scientific-process hypotheses and unresolved runs from the last
-48 hours. `--max-chars` defaults to 6000 and drops low-priority detail first;
-the active-plan section is never cut. `--json` prints the block plus
-`truncated` and per-section status.
+`junior compact [--json] [--max-chars N] [--cursor]` prints a session-start
+block rebuilt from live local stores with no model call: the active
+plan, pending decisions (`needs_answers`, `needs_choice` and
+`needs_model_approval` runs with the file to read), open notes, FMECA sessions,
+open scientific-process hypotheses, unresolved runs from the last 48 hours,
+open PRs and capture proposals. Open PRs, the only network read, come from `gh` for this repo plus
+`delivery.config.json` `compact.repos`, with a 3-second timeout; the section is
+unavailable when `gh` is missing. `--max-chars` defaults to 6000 and drops
+detail in this order: proposals, PRs, runs, hypotheses, risk, notes, decisions.
+The active-plan section is never cut. `--json` prints the block plus
+`truncated` and per-section status; `--cursor` prints only
+`{additional_context}` for Cursor.
 
 `junior setup --context-hooks [--scope local|project] [--remove]
 [--harness claude|codex|cursor]` installs a Claude Code `SessionStart` hook
-matching `compact|resume` that runs `junior compact`. Local scope writes
+matching `compact|resume` that runs `junior compact`, plus a `PreCompact` hook
+that runs `junior compact --capture`. Local scope writes
 `.claude/settings.local.json` (the default) and project scope writes
 `.claude/settings.json`; an existing file is backed up before it changes.
-Codex and Cursor receive printable instructions instead of a file write.
-After a compaction or resume, run `junior compact` and read the block before
-continuing.
+`--harness codex|cursor` writes `.codex/hooks.json` or `.cursor/hooks.json`
+with `SessionStart` and `PreCompact` hooks instead, locally excluded when
+created; Codex needs those hooks trusted in `/hooks`. After a compaction or
+resume, run `junior compact` and read the block before continuing.
+
+#### Session notes and pre-compact capture
+Notes live in `.delivery/notes.jsonl`, one append-only event per line. Events
+are `add`, `done`, `promote` and `dismiss`; standing is always computed by
+folding the log. The file is local and never committed. Five subcommands
+manage notes:
+
+```sh
+junior note add "re-check the retry budget" --kind todo
+junior note list [--json]
+junior note done <id>
+junior note promote <id>
+junior note dismiss <id>
+```
+
+`junior compact --capture` reads the PreCompact hook input as JSON on stdin.
+It takes the transcript tail (at most 48000 characters), asks the project's
+pinned default commodity model once through OpenRouter (`max_tokens` 1500,
+temperature 0, 30-second timeout, at most 12 proposals) for open decisions,
+questions, risks, hypotheses and todos, and writes them only as capture
+proposals. It never routes to another profile or asks for model approval, and
+it never writes FMECA, plan or scientific-process state; promoting a proposal
+into one of those stores is the manager's act. Capture is fail-open: it always
+exits 0 and writes one record per attempt, including skips and failures, to
+`.delivery/capture/<timestamp>.json`. The record holds `captureId`, `at`,
+`trigger`, `transcriptPath`, `tailChars`, `model`, `usage`, `proposals`,
+`duplicates` and an optional `error`.
 
 #### Handoff progress and live status
 `junior handoff`, `junior run` and `junior qa` stream progress lines to

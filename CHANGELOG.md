@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-23
+
+### Added
+
+- `junior note add|list|done|promote|dismiss` (#93): local session notes in
+  `.delivery/notes.jsonl`, one append-only event per line (`add`, `done`,
+  `promote`, `dismiss`). The file is locally excluded and never committed. A
+  manager note stays open until done; a capture proposal stays pending until
+  promoted or dismissed.
+- `junior compact --capture` (#93): reads the PreCompact hook input from stdin,
+  asks the pinned default commodity model (today DeepSeek V4.1 Flash, via
+  OpenRouter) once for open decisions, questions, risks, hypotheses and todos,
+  and writes them only as proposals. The budget is a 48000-character transcript
+  tail, 1500 output tokens with model reasoning off, one request with a
+  30-second timeout and at most 12 proposals. It always exits 0 and writes one
+  record per attempt to `.delivery/capture/<timestamp>.json`; it never writes FMECA, plan or
+  scientific-process state.
+- Four new `junior compact` block sections (#93): Pending decisions
+  (`needs_answers`, `needs_choice` and `needs_model_approval` runs with the file
+  to read), Open notes, Open PRs (`gh` for this repo plus `compact.repos` from
+  `delivery.config.json`, with a 3-second timeout and unavailable when `gh` is
+  missing) and Capture proposals.
+- `junior compact --cursor` (#93) prints `{additional_context}` for Cursor.
+
+### Changed
+
+- `junior setup --context-hooks` (#93) also installs a Claude Code `PreCompact`
+  hook running `junior compact --capture`. With `--harness codex|cursor` it
+  writes `.codex/hooks.json` or `.cursor/hooks.json` with `SessionStart` and
+  `PreCompact` hooks, locally excluded when created (Codex needs the hooks
+  trusted in `/hooks`), instead of printing instructions.
+- Junior is tested with Pi 1.4.0 (was 1.0.4): every Pi option Junior passes is
+  unchanged, a live DeepSeek handoff reports the same receipt fields, and Pi
+  1.4.0 fixes sessions that broke after an output-limit cut-off, which
+  continuation segments can hit. `junior init` installs 1.4.0 and `doctor`
+  compares against it.
+- Junior verifies cpm-planner 0.4.3, elicitation 0.1.2 and scientific-process
+  0.3.1; their recorded responses are unchanged.
+
 ## [0.10.1] - 2026-10-23
 
 ### Changed

@@ -78,11 +78,14 @@ outcome `contract` with `clarified-contract.json`, the workflow kept and
 `clarifiedFrom` set. Other contracts continue to a `plan-from-spec` draft or a
 prepare brief. The `discover` and `investigate` workflows are report-only.
 
-After a compaction or resume, `junior compact` prints a session-start block
-rebuilt from the live stores (active plan, FMECA, open hypotheses and recent
-unresolved runs) with no model call. `junior setup --context-hooks` installs a
-Claude Code `SessionStart` hook for `compact|resume`; `--harness codex|cursor`
-prints manual instructions instead.
+After a compaction or resume, `junior compact` prints a session-start block rebuilt
+from the live stores with no model call: the active plan, pending decisions with
+the file to read, open notes, FMECA, open hypotheses, recent unresolved runs, open
+PRs from `gh` and capture proposals. `junior note add|list|done|promote|dismiss`
+manages local notes in `.delivery/notes.jsonl`; `junior compact --capture` asks the
+pinned default model once and writes only proposals, and `junior compact --cursor`
+prints Cursor's `{additional_context}`. `junior setup --context-hooks` installs
+Claude Code `SessionStart` and `PreCompact` hooks; `--harness codex|cursor` writes `.codex/hooks.json` or `.cursor/hooks.json` instead.
 
 `junior doctor` adds a `companionSkills` report beside its `companions` report:
 each companion's agent skills read as `present`, `missing`,

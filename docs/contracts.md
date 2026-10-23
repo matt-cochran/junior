@@ -98,7 +98,7 @@ installed Pi supports: `--no-extensions`, `--no-skills`,
 Unless the contract says otherwise, it also passes
 `--tools read,bash,edit,write`. This keeps the worker from inheriting unrelated
 project skills, extensions, context files, prompt templates, trust and MCP
-servers. The tested Pi release is 1.0.4.
+servers. The tested Pi release is 1.4.0.
 
 `piContext` changes that baseline:
 

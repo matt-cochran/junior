@@ -17,6 +17,8 @@ import {
   type HopManifest,
 } from './tools/tools.ts';
 import { planStatusRows, spHypotheses } from './companion-shapes.ts';
+import { listOpen, type Note } from './notes.ts';
+import { openPullRequests, prLines, type PrSection } from './compact-prs.ts';
 
 /** Availability of one compact-context section. */
 export type CompactSectionStatus = 'ok' | 'none' | 'unavailable';
@@ -35,6 +37,10 @@ export type CompactDeps = {
   exists?: (p: string) => boolean;
   /** Deliverable ids that cpm reports complete; failures resolve to an empty set. */
   completedDeliverables?: () => Promise<Set<string>>;
+  /** Open manager notes and pending capture proposals; defaults to `listOpen(cwd)`. */
+  listNotes?: () => { notes: Note[]; proposals: Note[] };
+  /** Open pull requests; defaults to `openPullRequests({ cwd })`. */
+  openPrs?: () => Promise<PrSection>;
 };
 
 /** Rendered block plus per-section availability and truncation state. */
@@ -49,14 +55,24 @@ const DEFAULT_IN_FLIGHT_MAX_AGE_HOURS = 48;
 const SUCCESS_STATUSES = new Set(['ready_for_review', 'simulation_passed']);
 const FOLLOW_UP_SUFFIXES = ['-repair', '-resume'];
 const PLAN_HEADING = 'Active plan';
+const DECISIONS_HEADING = 'Pending decisions';
+const NOTES_HEADING = 'Open notes';
 const RISK_HEADING = 'Risk';
 const HYPOTHESES_HEADING = 'Open hypotheses';
 const RUNS_HEADING = 'In-flight runs';
+const PRS_HEADING = 'Open PRs';
+const PROPOSALS_HEADING = 'Capture proposals';
+const PENDING_DECISION_FILES: Record<string, string> = {
+  needs_answers: 'clarify.md',
+  needs_choice: 'brief.md',
+  needs_model_approval: 'model-approval.json',
+};
+const ANSWERED_DECISION_FILES = ['clarified-answers.json', 'clarified-contract.json'];
 
 type JsonObject = Record<string, any>;
 
 type Block = {
-  key: 'plan' | 'risk' | 'hypotheses' | 'runs';
+  key: 'plan' | 'decisions' | 'notes' | 'risk' | 'hypotheses' | 'runs' | 'prs' | 'proposals';
   heading: string;
   status: CompactSectionStatus;
   lines: string[];
@@ -284,13 +300,11 @@ async function defaultCompletedDeliverables(
   return completed;
 }
 
-function runItems(
+function latestRunAttempts(
   cwd: string,
   readDir: (p: string) => string[],
   readFile: (p: string) => string,
   exists: (p: string) => boolean,
-  cutoffMs: number,
-  completed: ReadonlySet<string>,
 ): Run[] {
   const root = join(cwd, '.delivery');
   if (!exists(root)) return [];
@@ -319,21 +333,60 @@ function runItems(
     if (stamp === undefined) continue;
     latest.push({ id, stamp, status: runStatus(join(root, id, stamp, 'result.json'), readFile, exists) });
   }
+  return latest;
+}
+
+function recentRun(run: Run, cutoffMs: number): boolean {
+  return !/^\d+$/.test(run.stamp) || Number(run.stamp) >= cutoffMs;
+}
+
+function runItems(
+  cwd: string,
+  readDir: (p: string) => string[],
+  readFile: (p: string) => string,
+  exists: (p: string) => boolean,
+  cutoffMs: number,
+  completed: ReadonlySet<string>,
+): Run[] {
+  const latest = latestRunAttempts(cwd, readDir, readFile, exists);
 
   // A later successful `<id>-repair` or `<id>-resume` run resolves the original.
   const statusById = new Map(latest.map((run) => [run.id, run.status]));
   const resolved = (id: string): boolean =>
     FOLLOW_UP_SUFFIXES.some((suffix) => SUCCESS_STATUSES.has(statusById.get(`${id}${suffix}`) ?? ''));
-  const recent = (stamp: string): boolean => !/^\d+$/.test(stamp) || Number(stamp) >= cutoffMs;
   return latest
     .filter(
       (run) =>
         !SUCCESS_STATUSES.has(run.status) &&
+        PENDING_DECISION_FILES[run.status] === undefined &&
         !resolved(run.id) &&
-        recent(run.stamp) &&
+        recentRun(run, cutoffMs) &&
         !completed.has(run.id) &&
         !run.id.startsWith('live-check-'),
     )
+    .sort((a, b) => b.stamp.localeCompare(a.stamp) || a.id.localeCompare(b.id));
+}
+
+function decisionItems(
+  cwd: string,
+  readDir: (p: string) => string[],
+  readFile: (p: string) => string,
+  exists: (p: string) => boolean,
+  cutoffMs: number,
+  completed: ReadonlySet<string>,
+): Run[] {
+  const root = join(cwd, '.delivery');
+  const latest = latestRunAttempts(cwd, readDir, readFile, exists);
+  return latest
+    .filter((run) => {
+      if (PENDING_DECISION_FILES[run.status] === undefined) return false;
+      if (!recentRun(run, cutoffMs) || completed.has(run.id) || run.id.startsWith('live-check-')) {
+        return false;
+      }
+      if (run.status !== 'needs_answers') return true;
+      const attempt = join(root, run.id, run.stamp);
+      return !ANSWERED_DECISION_FILES.some((file) => exists(join(attempt, file)));
+    })
     .sort((a, b) => b.stamp.localeCompare(a.stamp) || a.id.localeCompare(b.id));
 }
 
@@ -454,6 +507,79 @@ async function hypothesesBlock(
   return { ...block, status: 'ok', lines };
 }
 
+function decisionsBlock(
+  cwd: string,
+  readDir: (p: string) => string[],
+  readFile: (p: string) => string,
+  exists: (p: string) => boolean,
+  cutoffMs: number,
+  completed: ReadonlySet<string>,
+): Block {
+  const block: Block = { key: 'decisions', heading: DECISIONS_HEADING, status: 'none', lines: [], removable: true };
+  try {
+    const runs = decisionItems(cwd, readDir, readFile, exists, cutoffMs, completed);
+    if (runs.length === 0) return block;
+    return {
+      ...block,
+      status: 'ok',
+      lines: runs.map(
+        (run) =>
+          `- ${run.id}: ${run.status} -> ${join('.delivery', run.id, run.stamp, PENDING_DECISION_FILES[run.status])}`,
+      ),
+    };
+  } catch (error) {
+    return { ...block, status: 'unavailable', lines: [`unavailable: ${errorMessage(error)}`] };
+  }
+}
+
+function notesBlocks(listNotes: () => { notes: Note[]; proposals: Note[] }): Block[] {
+  const notes: Block = { key: 'notes', heading: NOTES_HEADING, status: 'none', lines: [], removable: true };
+  const proposals: Block = { key: 'proposals', heading: PROPOSALS_HEADING, status: 'none', lines: [], removable: true };
+  try {
+    const data = listNotes();
+    const openNotes = Array.isArray(data?.notes) ? [...data.notes] : [];
+    const openProposals = Array.isArray(data?.proposals) ? [...data.proposals] : [];
+    openNotes.sort((a, b) => text(a.createdAt).localeCompare(text(b.createdAt)));
+    openProposals.sort((a, b) => text(b.createdAt).localeCompare(text(a.createdAt)));
+    return [
+      {
+        ...notes,
+        status: openNotes.length === 0 ? 'none' : 'ok',
+        lines: openNotes.map((note) => `- [${note.kind}] ${note.text} (${note.id})`),
+      },
+      {
+        ...proposals,
+        status: openProposals.length === 0 ? 'none' : 'ok',
+        lines: openProposals.map(
+          (note) => `- [${note.kind}] ${note.text} (${note.id}, ${text(note.captureId)})`,
+        ),
+      },
+    ];
+  } catch (error) {
+    const line = `unavailable: ${errorMessage(error)}`;
+    return [
+      { ...notes, status: 'unavailable', lines: [line] },
+      { ...proposals, status: 'unavailable', lines: [line] },
+    ];
+  }
+}
+
+async function prsBlock(outcome: Promise<{ section?: PrSection; error?: unknown }>): Promise<Block> {
+  const block: Block = { key: 'prs', heading: PRS_HEADING, status: 'none', lines: [], removable: true };
+  try {
+    const result = await outcome;
+    if (result.error !== undefined || result.section === undefined) throw result.error;
+    const section = result.section;
+    return {
+      ...block,
+      status: section.status,
+      lines: section.status === 'none' ? [] : prLines(section),
+    };
+  } catch (error) {
+    return { ...block, status: 'unavailable', lines: [`unavailable: ${errorMessage(error)}`] };
+  }
+}
+
 function runsBlock(
   cwd: string,
   readDir: (p: string) => string[],
@@ -484,7 +610,7 @@ function render(header: string[], blocks: Block[], dropped: Record<string, numbe
 }
 
 function nextDroppable(blocks: Block[]): Block | null {
-  const order: Block['key'][] = ['runs', 'hypotheses', 'risk'];
+  const order: Block['key'][] = ['proposals', 'prs', 'runs', 'hypotheses', 'risk', 'notes', 'decisions'];
   for (const key of order) {
     const block = blocks.find((candidate) => candidate.key === key);
     if (block && block.removable && block.lines.length > 0) return block;
@@ -495,8 +621,9 @@ function nextDroppable(blocks: Block[]): Block | null {
 /**
  * Build the compact session-start context block from live local stores. All
  * companion access goes through the injected `callHop`; failures are reported
- * per section and never thrown. Over `maxChars`, in-flight runs (oldest first),
- * then hypotheses and risk detail are dropped while the plan is preserved.
+ * per section and never thrown. Over `maxChars`, proposals, PRs, in-flight runs,
+ * hypotheses, risk detail, notes and decisions are dropped in that order while
+ * the plan is preserved.
  */
 export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock> {
   if (!isObject(deps)) throw new TypeError('deps must be an object');
@@ -546,14 +673,41 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     completed = new Set();
   }
 
+  const listNotes = deps.listNotes ?? (() => listOpen(deps.cwd));
+  const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd }));
+  let prsOutcome: Promise<{ section?: PrSection; error?: unknown }>;
+  try {
+    prsOutcome = Promise.resolve(openPrs()).then(
+      (section) => ({ section }),
+      (error) => ({ error }),
+    );
+  } catch (error) {
+    prsOutcome = Promise.resolve({ error });
+  }
+
+  const cutoffMs = generated.getTime() - maxAgeHours * 3_600_000;
+  const notesAndProposals = notesBlocks(listNotes);
   const blocks = [
     await planBlock(hopPath, hopExists, callHop),
+    await decisionsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
+    notesAndProposals[0],
     await riskBlock(hopPath, hopExists, callHop),
     await hypothesesBlock(hopPath, hopExists, callHop, readDir, readFile, exists),
-    runsBlock(deps.cwd, readDir, readFile, exists, generated.getTime() - maxAgeHours * 3_600_000, completed),
+    runsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
+    await prsBlock(prsOutcome),
+    notesAndProposals[1],
   ];
 
-  const dropped: Record<string, number> = { plan: 0, risk: 0, hypotheses: 0, runs: 0 };
+  const dropped: Record<string, number> = {
+    plan: 0,
+    decisions: 0,
+    notes: 0,
+    risk: 0,
+    hypotheses: 0,
+    runs: 0,
+    prs: 0,
+    proposals: 0,
+  };
   let markdown = render(header, blocks, dropped);
   while (markdown.length > maxChars) {
     const block = nextDroppable(blocks);

@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop } from './tools/tools.ts';
@@ -22,8 +22,8 @@ const TOOLS = join(ROOT, 'tools', 'tools.ts');
 const FAKE = join(ROOT, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 const NODE = process.execPath;
 
-function runJunior(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', env: { ...process.env, JUNIOR_NO_INSTALL: '1', JUNIOR_NO_UPDATE_CHECK: '1', ...env } });
+function runJunior(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}, input?: string) {
+  return spawnSync(NODE, [JUNIOR, ...args], { cwd, encoding: 'utf8', input, env: { ...process.env, JUNIOR_NO_INSTALL: '1', JUNIOR_NO_UPDATE_CHECK: '1', ...env } });
 }
 
 function runTools(args: string[], cwd: string) {
@@ -34,7 +34,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact', 'note'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -466,6 +466,65 @@ test('junior handoff fails a plan without hopFrom before any lease attempt', () 
   assert.doesNotMatch(res.stdout, /plan_lease_refused/);
 });
 
+// --- CLI11 session-memory commands ------------------------------------------
+
+test('junior note add exits successfully', () => {
+  assert.equal(runJunior(['note', 'add', 'Publish the crate', '--kind', 'todo'], workdir()).status, 0);
+});
+
+test('junior note list prints a typed note added from the CLI', () => {
+  const dir = workdir();
+  runJunior(['note', 'add', 'Publish the crate', '--kind', 'todo'], dir);
+  assert.match(runJunior(['note', 'list'], dir).stdout, /- \[todo\] Publish the crate \(/);
+});
+
+test('junior note add --json prints the added note', () => {
+  const out = JSON.parse(runJunior(['note', 'add', 'Ship it', '--json'], workdir()).stdout);
+  assert.equal(out.text, 'Ship it');
+});
+
+test('junior note done removes the note from the open list', () => {
+  const dir = workdir();
+  const id = runJunior(['note', 'add', 'Publish the crate', '--kind', 'todo'], dir).stdout.trim().replace(/^added /, '');
+  runJunior(['note', 'done', id], dir);
+  assert.deepEqual(JSON.parse(runJunior(['note', 'list', '--json'], dir).stdout).notes, []);
+});
+
+test('junior note done with an unknown id exits 1', () => {
+  assert.equal(runJunior(['note', 'done', 'n-missing'], workdir()).status, 1);
+});
+
+test('junior note rejects an unknown subcommand', () => {
+  assert.notEqual(runJunior(['note', 'archive', 'x'], workdir()).status, 0);
+});
+
+test('junior note add rejects an invalid kind', () => {
+  assert.notEqual(runJunior(['note', 'add', 'x', '--kind', 'idea'], workdir()).status, 0);
+});
+
+test('junior compact --capture exits successfully with empty hook input', () => {
+  assert.equal(runJunior(['compact', '--capture'], workdir(), {}, '{}').status, 0);
+});
+
+test('junior compact --capture prints nothing to stdout', () => {
+  assert.equal(runJunior(['compact', '--capture'], workdir(), {}, '{}').stdout, '');
+});
+
+test('junior compact --capture writes one capture record', () => {
+  const dir = workdir();
+  runJunior(['compact', '--capture'], dir, {}, '{}');
+  assert.equal(readdirSync(join(dir, '.delivery', 'capture')).length, 1);
+});
+
+test('junior compact --capture exits successfully with invalid hook input', () => {
+  assert.equal(runJunior(['compact', '--capture'], workdir(), {}, 'not json').status, 0);
+});
+
+test('junior compact --cursor emits Cursor sessionStart JSON', () => {
+  const out = JSON.parse(runJunior(['compact', '--cursor'], workdir()).stdout);
+  assert.match(out.additional_context, /## Junior compact context/);
+});
+
 // --- CLI10 compact, context hooks and plan --jev ----------------------------
 
 test('junior compact exits successfully outside a Git checkout', () => {
@@ -493,14 +552,16 @@ test('junior setup --context-hooks prints the settings path', () => {
   assert.equal(typeof out.path, 'string');
 });
 
-test('junior setup --context-hooks --harness codex writes nothing', () => {
-  const dir = workdir();
+test('junior setup --context-hooks --harness codex writes .codex/hooks.json', () => {
+  const dir = gitRepo();
   runJunior(['setup', '--context-hooks', '--harness', 'codex'], dir);
-  assert.deepEqual(readdirSync(dir), []);
+  assert.equal(existsSync(join(dir, '.codex', 'hooks.json')), true);
 });
 
-test('junior setup --context-hooks --harness codex prints manual steps', () => {
-  assert.match(runJunior(['setup', '--context-hooks', '--harness', 'codex'], workdir()).stdout, /AGENTS\.md/);
+test('junior setup --context-hooks --harness cursor installs the capture hook', () => {
+  const dir = gitRepo();
+  runJunior(['setup', '--context-hooks', '--harness', 'cursor'], dir);
+  assert.match(readFileSync(join(dir, '.cursor', 'hooks.json'), 'utf8'), /junior compact --capture/);
 });
 
 test('junior setup --context-hooks --scope project accepts the project scope', () => {
