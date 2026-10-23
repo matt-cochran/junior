@@ -33,6 +33,7 @@ job, then follow its first command.
 | `triz` | resolve a technical contradiction or trade-off | `triz analyze <request.json> --out <result.json>` | — |
 | `browser-test` | verify a user journey in a real browser | `jevitate check --suite <file>` | jevitate-getting-started |
 | `report-issue` | report a broken companion or managed tool upstream | `junior report-issue <tool> --title <title>` | — |
+| `restore-context` | rebuild the session's working context after compaction or resume | `junior compact` | — |
 | `setup` | set up, check readiness or update the project | `junior doctor` | — |
 | `model` | inspect, list or approve commodity models | `junior model status` | — |
 
@@ -55,7 +56,7 @@ process). Three forms:
    and prerequisites.
 3. `junior tools call cpm plan.lint path=.cpm-planner/plans/<name>/main.json`.
 4. `junior tools call cpm plan.sync path=.cpm-planner/plans/<name>/main.json`.
-5. `junior plan check <plan.json>` to split it into handoff-sized deliverables and safe parallel cohorts.
+5. `junior plan check <plan.json>` to split it into handoff-sized deliverables and safe parallel cohorts; add `--jev` for a paid plan-time clarity report.
 6. `junior tools call cpm plan.status plan_id=<id>`; read the critical path and
    ready set, then `junior tools call cpm plan.schedule plan_id=<id>
    'capacities={"agent":3}'`.
@@ -83,6 +84,13 @@ A cached 24-hour update check may print one stderr line on `init`, `doctor`,
 `JUNIOR_NO_UPDATE_CHECK=1` disables it. Adopt newer releases with
 `junior update`, which updates Junior itself first, then every managed tool,
 companion and unmodified skill.
+
+After a compaction or resume, run `junior compact` and read the block before
+continuing. It rebuilds the active plan, FMECA state, open scientific-process
+hypotheses and unresolved runs from the last 48 hours from the live stores,
+with no model call. `junior setup --context-hooks [--scope local|project]
+[--harness claude|codex|cursor]` installs a Claude Code `SessionStart` hook for
+`compact|resume`, or prints instructions for Codex and Cursor.
 
 ## Junior as a junior engineer
 
@@ -120,8 +128,15 @@ A clarify returns a `needs_answers` batch of numbered questions instead of a
 result. Answer them in a JSON file and re-run
 `junior handoff <task.json> --answers <file>`; the readiness gate re-runs and
 either drafts a plan (`junior matrix plan-from-spec --spec <spec.json>`) or
-produces a prepare brief for `--choose`. Never invent user answers; unresolved
-questions stay unresolved.
+produces a prepare brief for `--choose`. An explicit-workflow contract whose
+readiness decision is clarify on `contract_clear` (below 0.6) stops the same
+way instead of starting a worker; a `blocking_assumptions` clarify alone does
+not stop it. Its ready round returns outcome
+`contract` and writes `clarified-contract.json` with the workflow unchanged,
+the answers from every round as constraints, and `clarifiedFrom` set; pass that
+contract to the next handoff. `checkBack: "off"` opts out, and a prepared or
+previously clarified contract does not re-enter the gate. Never invent user
+answers; unresolved questions stay unresolved.
 
 ### Analysis workflows
 
@@ -132,6 +147,24 @@ by leverage with suggested answers, record contradictions and the
 scientific-process experiment per handoff: state or resume a hypothesis, design
 the smallest refuting experiment, record the observation with raw evidence, and
 recommend the next experiment. Neither changes production code.
+
+## Investigate to ask better questions
+
+The scientific-process loop is for deriving the next, sharper hypothesis from
+each verdict, not just collecting answers. Before building, vet an investment
+with offline experiments over `.delivery` history. Record hypotheses,
+experiments and observations in a session. Treat a refuted hypothesis as a
+pointer to a better question, not a dead end.
+
+Worked example from session `junior-pi-hub-value`: "an evidence ledger would
+catch false-ready runs" (H3) and "the Jev postflight discriminates them" (H4)
+were refuted because the defects sat outside the written criteria. That led to
+H9 (Jev's preflight already flagged all three, but plan contracts bypassed the
+gate), H12 (clarify questions are generic) and H15 (a respondent with repo
+access found the gaps), then H17 (can a commodity worker answer them). Live
+verification then tested the gate itself (H16): keyed on the whole readiness
+decision it would have stopped 121 of 122 recorded runs, so it now keys on
+`contract_clear` alone. Measure the signal you will act on, not a nearby one.
 
 ## Locate the CLI
 

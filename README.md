@@ -15,8 +15,9 @@ npm uninstall -g @matthew-cochran/junior && npm install -g @matthew-cochran/juni
 ```
 
 Node 24 or newer. The package ships compiled JavaScript; there is no install-time
-build and no runtime npm dependency. Installation does not authorize paid model
-calls.
+build and no runtime npm dependency. The build collects every production module,
+so a new module is included without a separate list. Installation does not
+authorize paid model calls.
 
 ## Quickstart
 
@@ -56,15 +57,32 @@ reviews and marks it complete. `junior tools call cpm plan.status plan_id=...`
 calls a tool inline against `.delivery/setup/hop.json` and prints only the
 result.
 
+Every live run probes `pi --help` and passes the isolation flags it supports,
+including `--no-extensions`, `--no-skills`, `--no-context-files`,
+`--no-prompt-templates`, `--no-approve`, `--no-mcp` and
+`--tools read,bash,edit,write`. A contract can set `piContext`, and the handoff
+reports `piIsolation` and any missing flag; `junior doctor` reports missing
+isolation support. A contract can also set `scope` to declare its owned files;
+the handoff reports `scope` and an `out of scope:` unresolved line without
+changing the run status.
+
 Junior routes each contract from Jev task traits to deterministic playbooks and a
 `toolPlan` (worker directions plus manager setup) that is reflected before the
 worker starts. When the contract is unclear it runs the `prepare` workflow and
 stops at `needs_choice` with a numbered U/A brief; choose with
 `junior handoff <task> --choose <option> --correct <id>=<text>`, gated by the
 contract's `checkBack` (`auto|always|off`). A clarify returns a `needs_answers`
-batch that `junior handoff <task> --answers <file>` resolves before a
-`plan-from-spec` draft or a prepare brief. The `discover` and `investigate`
-workflows are report-only.
+batch that `junior handoff <task> --answers <file>` resolves. An explicit
+workflow that is still unclear also stops at `needs_answers`; its answers return
+outcome `contract` with `clarified-contract.json`, the workflow kept and
+`clarifiedFrom` set. Other contracts continue to a `plan-from-spec` draft or a
+prepare brief. The `discover` and `investigate` workflows are report-only.
+
+After a compaction or resume, `junior compact` prints a session-start block
+rebuilt from the live stores (active plan, FMECA, open hypotheses and recent
+unresolved runs) with no model call. `junior setup --context-hooks` installs a
+Claude Code `SessionStart` hook for `compact|resume`; `--harness codex|cursor`
+prints manual instructions instead.
 
 `junior doctor` adds a `companionSkills` report beside its `companions` report:
 each companion's agent skills read as `present`, `missing`,
@@ -82,8 +100,9 @@ at `needs_model_approval` (`--approve-model`, plan `approvedProfiles`, or
 same-lineage commodity model only at price parity (`models.priceTolerance`).
 `junior model status|list|upgrade` reports and adopts the roster, and
 `junior plan check`/`junior plan contracts` shape a cpm plan into bounded
-handoffs, and `junior routes "<request>"` names the command for any manager
-job (delegate, plan, risk, traceability, investigate). See
+handoffs (`plan check --jev` adds a paid plan-time clarity report), and
+`junior routes "<request>"` names the command for any manager job (delegate,
+plan, risk, traceability, investigate, restore context). See
 [Models](docs/models.md) and [Planning for Junior](docs/planning.md).
 
 Execution settings live on the contract:
@@ -126,7 +145,8 @@ define a `litellm` provider in Pi's `models.json`. See
 - **[Contracts](docs/contracts.md)** — the contract schema, micro-deliverable
   stages, workflow templates, session continuation and the Jev gates.
 - **[Runtime](docs/runtime.md)** — execution receipts, cost and billing, Git
-  worktree isolation, change evidence, deadlines and the compact handoff.
+  worktree isolation, Pi run isolation, scope checks, the clarity gate, change
+  evidence, deadlines and the compact handoff.
 - **[Models](docs/models.md)** — the commodity-only policy, roster, routing,
   detection and the `junior model` commands.
 - **[Planning for Junior](docs/planning.md)** — shaping a cpm plan into safe,

@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HOT_FILES, checkPlanForJunior, planContracts, runPlanCommand } from './plan-junior.ts';
+import { HOT_FILES, REGISTRATION_FILES, checkPlanForJunior, planContracts, registeredTestFiles, runPlanCommand, scorePlanFile } from './plan-junior.ts';
 
 const NODE = process.execPath;
 const JUNIOR = join(import.meta.dirname, 'junior.ts');
@@ -268,4 +268,113 @@ test('a shared file ordered through a manager-owned deliverable is not a paralle
     { id: 'b', owned_files: ['x.ts'], prerequisites: ['m'], metadata: { artifact: 'b', owner: 'agent' } },
   ] };
   assert.equal(checkPlanForJunior(plan).findings.some((f) => f.code === 'SHARED_FILE_PARALLEL'), false);
+});
+
+// --- registration scope lessons --------------------------------------------
+
+test('ownedFiles reads an append claim object as its path', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: [{ path: 'src/x.ts', mode: 'append' }] })), { cwd: '/repo' });
+  assert.equal(contract.constraints[0], 'Only modify src/x.ts');
+});
+
+test('REGISTRATION_FILES lists the files that must stay coordinated', () => {
+  assert.deepEqual(REGISTRATION_FILES, ['package.json', 'package-lock.json', 'scripts/build.mjs', 'junior.ts', 'cli.test.ts', 'CHANGELOG.md', 'README.md']);
+});
+
+test('planContracts defaults the model profile to general', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.equal(contract.modelProfile, 'general');
+});
+
+test('planContracts defaults the execution deadline to 1500000ms', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.equal((contract.execution as any).deadlineMs, 1500000);
+});
+
+test('planContracts allows a cargo check the longer check timeout', () => {
+  const junior = { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'cargo', args: ['test'] }] };
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'], junior })), { cwd: '/repo' });
+  assert.equal((contract.execution as any).checkTimeoutMs, 900000);
+});
+
+test('planContracts lets metadata.junior.execution override execution defaults', () => {
+  const junior = { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'true' }], execution: { deadlineMs: 1000 } };
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'], junior })), { cwd: '/repo' });
+  assert.equal((contract.execution as any).deadlineMs, 1000);
+});
+
+test('planContracts adds the registration files constraint', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.equal(contract.constraints[2], 'Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead');
+});
+
+test('planContracts omits an owned registration file from the constraint', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['package.json'] })), { cwd: '/repo' });
+  assert.equal(contract.constraints[2], 'Do not edit registration files you do not own (package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead');
+});
+
+test('registeredTestFiles returns only the test file tokens from scripts.test', () => {
+  const value = { scripts: { test: 'node --test a.test.ts b.test.mjs c.test.js README.md' } };
+  assert.deepEqual(registeredTestFiles(value), ['a.test.ts', 'b.test.mjs', 'c.test.js']);
+});
+
+test('checkPlanForJunior warns when a test owner has no package.json owner downstream', () => {
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/x.test.ts'] })), { registeredTests: [] });
+  assert.ok(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'));
+});
+
+test('REGISTRATION_OUTSIDE_SCOPE cites the H2 observation', () => {
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/x.test.ts'] })), { registeredTests: [] });
+  assert.match(result.findings.find((finding: any) => finding.code === 'REGISTRATION_OUTSIDE_SCOPE')?.message ?? '', /H2/);
+});
+
+test('checkPlanForJunior accepts a test owner with a package.json owner downstream', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['src/x.test.ts'] }),
+    agent('b', { owned_files: ['package.json'], prerequisites: [{ id: 'a', consumes: 'test file' }] }),
+  ), { registeredTests: [] });
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('checkPlanForJunior accepts a test owner that owns package.json itself', () => {
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/x.test.ts', 'package.json'] })), { registeredTests: [] });
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('checkPlanForJunior accepts a test file already registered in package.json', () => {
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/x.test.ts'] })), { registeredTests: ['src/x.test.ts'] });
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('checkPlanForJunior skips the registration scope rule without registeredTests', () => {
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/x.test.ts'] })));
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('planContracts omits the registration constraint when the deliverable owns every registration file', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: [...REGISTRATION_FILES] })), { cwd: '/repo' });
+  assert.equal(contract.constraints.some((c: string) => c.startsWith('Do not edit registration files')), false);
+});
+
+// --- CLI10 contract scope and plan-time quality ----------------------------
+
+test('planContracts records the owned files under scope.owned', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts', 'src/y.ts'] })), { cwd: '/repo' });
+  assert.deepEqual((contract.scope as any).owned, ['src/x.ts', 'src/y.ts']);
+});
+
+test('runPlanCommand reads the registered tests from package.json', () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(agent('a', { owned_files: ['x.test.ts'] })));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test x.test.ts' } }));
+  const { result } = runPlanCommand(['check', file], { cwd: dir, out: () => {} });
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('scorePlanFile returns one quality score per planned contract', async () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(agent('a', { owned_files: ['src/x.ts'] })));
+  const classify = async () => ({ answers: {}, usage: {} });
+  const report = await scorePlanFile(file, classify as any, { cwd: dir });
+  assert.deepEqual(report.scores.map((score) => score.id), ['a']);
 });
