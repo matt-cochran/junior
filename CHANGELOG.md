@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Acceptance entries in a contract may be objects `{id, text, when, checks,
+  mitigates}` as well as strings (#81, ADR 0011): `id` matches
+  `^[A-Za-z0-9:._/-]{1,128}$` and is unique within the contract; `checks` are
+  0-based indexes into the contract's `checks` array; `mitigates` are
+  `<session_id>/<mitigation_id>` links; an entry without an id is reported as
+  `AC<n>`. `validate` rejects an invalid or duplicate id and a check index
+  outside the array.
+- `junior matrix plan-from-spec` / `spec-bridge` assign each drafted criterion
+  the id `<requirement id>/ac<n>` (for example `req:c1/ac2`), assigned once when
+  the draft plan is written; ids are never recomputed from position afterwards
+  (#81, ADR 0011 R2).
+- `result.json` criterion records carry `tier`
+  (`check_passed|deterministic|judged|none`) and, when set, `mitigates`; a
+  criterion is `check_passed` only when every check it names ran in this run and
+  exited 0 (#81, ADR 0011 R4).
+- `junior plan contracts` copies acceptance objects as they are, ids, `when`,
+  `checks` and `mitigates` included, and `junior plan check` reports
+  `DUPLICATE_ACCEPTANCE_ID` (warning) when one acceptance id appears twice
+  (#81, ADR 0011).
+- `junior fmeca propose-verified <result.json|run id>` prints one ready
+  `set_mitigation_status` request per (criterion, mitigation) pair whose verdict
+  is `met` at tier `check_passed`; it never calls fmeca and changes nothing
+  (#81, ADR 0011 R5).
+- Personas are a graph node kind: `jevitate-personas:<id>` seeds normalise to
+  `persona:<id>` nodes, and the contract context built from a `matrix graph`
+  slice collects persona members in `evidence.personas` (#81).
+
+### Fixed
+
+- Dimension-qualified seeds that already carry the member prefix (for example
+  `jevitate-jobs:job:x`) now resolve to the prefixed member id instead of
+  staying an unclassified member (#81).
+
 ## [0.11.1] - 2026-10-23
 
 Junior's crossmatrix adapter now works against a real crossmatrix model

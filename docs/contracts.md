@@ -342,11 +342,35 @@ make no premium chat call. If the local catalog lacks the entry, an explicit
 - A classifier outage or an answer below the confidence threshold is
   `uncertain`; in `enforce` mode uncertainty marks the run `needs_review`.
 
-Acceptance entries are strings or `{ text, when }` objects. A conditional
-criterion is assessed in two steps: whether its `when` condition was actually
-exercised, then whether the criterion was met. If the condition was not
-exercised the criterion resolves to `not_applicable` and never counts as a gap
-or an uncertainty:
+#### Acceptance entries and tracing
+An acceptance entry is a plain string or an object. The object fields are:
+
+- `text` (required, non-empty): the observable outcome.
+- `id` (optional): the criterion id, matching `^[A-Za-z0-9:._/-]{1,128}$` and
+  unique within the contract. `validate` rejects an invalid or duplicate id.
+- `when` (optional, non-empty): the condition under which the criterion
+  applies.
+- `checks` (optional): 0-based indexes into the contract's `checks` array.
+  `validate` rejects an index outside that array. A criterion is
+  `check_passed` only when it names at least one check and every named check ran
+  in this run and exited 0.
+- `mitigates` (optional): `"<session_id>/<mitigation_id>"` strings naming the
+  fmeca mitigations this criterion verifies. The link lives only on the
+  criterion; fmeca stores no link back.
+
+When a criterion has no `id` the result reports it as `AC<n>` (1-based
+position). A supplied id is kept verbatim from the plan file to the contract,
+the prompt and `result.json`, so reordering criteria does not renumber them.
+`spec-bridge` assigns `<requirement id>/ac<n>` when it writes a draft plan (for
+example `req:c1/ac2`); the plan file is the definition after that. `junior
+fmeca propose-verified <result.json|run id>` prints one ready
+`set_mitigation_status` request per (criterion, mitigation) pair whose verdict
+is `met` at tier `check_passed`; it never calls fmeca.
+
+A conditional criterion is assessed in two steps: whether its `when` condition
+was actually exercised, then whether the criterion was met. If the condition
+was not exercised the criterion resolves to `not_applicable` and never counts
+as a gap or an uncertainty:
 
 ```json
 "acceptance": [
@@ -357,10 +381,14 @@ or an uncertainty:
 
 Each criterion in the result's `jev.postflight.criteria` records `id`, `index`,
 `text`, `verdict` (`met`, `gap`, `uncertain` or `not_applicable`), `probability`
-(P(satisfied)) and, for a conditional criterion, its `when` and
-`conditionProbability`. `gapIds` and `uncertainIds` list only actionable
-criteria, so a `not_applicable` criterion never appears there. `validate`
-rejects an acceptance object with an empty `text` or `when`.
+(P(satisfied)), `tier` and, when set, `mitigates`, and for a conditional
+criterion its `when` and `conditionProbability`. `tier` says how the verdict was
+reached: `check_passed` when the criterion names `checks` and every named check
+ran in this run and exited 0, `deterministic` when Junior settled it without a
+model, `judged` when only the Jev postflight decided it, and `none` otherwise.
+`gapIds` and `uncertainIds` list only actionable criteria, so a
+`not_applicable` criterion never appears there. `validate` rejects an acceptance
+object with an empty `text` or `when`.
 
 The result's `jev` record holds the mode, classifier model and whether it was
 explicit, whether the gate ran, the preflight/postflight statuses, the raw
