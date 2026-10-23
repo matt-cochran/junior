@@ -60,7 +60,8 @@ independently:
   chained handoffs.
 - **Disjoint `owned_files` for parallel cohorts.** Two agent deliverables that
   share an owned file must be ordered by a prerequisite relation, so they are not
-  leased into the same cohort.
+  leased into the same cohort. An entry is a path string or `{ path, mode }`;
+  Junior uses `path` for ownership and scope.
 - **Explicit `consumes` text for every interface.** A prerequisite edge is a
   string (`"D01"`) or `{ "id": "D01", "consumes": "the exported helper" }`; the
   `consumes` text names what flows across the boundary.
@@ -82,11 +83,17 @@ independently:
   `metadata.owner: "manager"` (or `"owner"`), `metadata.kind: "manual"`, or
   `milestone: true` is not executed by Junior. Use those for review, verification
   and acceptance.
+- **Register test files in scope.** When `package.json` declares its test files,
+  a deliverable that owns an unregistered test file and does not own
+  `package.json` gets `REGISTRATION_OUTSIDE_SCOPE`. Add the registration file to
+  that deliverable or let the final registration deliverable own it.
 
 ## `junior plan check`
 
 `junior plan check <plan.json> [--max-hours N]` lints the plan and prints
 `{ ok, findings, cohorts }`. `ok` is true when no finding is an error.
+`--jev` keeps that report and adds a `quality` report; see
+[Plan-time clarity](#plan-time-clarity---jev).
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -98,6 +105,7 @@ independently:
 | `INTERFACE_UNSPECIFIED` | warning | a prerequisite edge has no `consumes` text |
 | `HOT_FILE` | info | the deliverable owns one or more hot registration files |
 | `NEEDS_MODEL_APPROVAL` | warning | an agent deliverable pins a non-default profile that plan-level `metadata.junior.approvedProfiles` does not approve |
+| `REGISTRATION_OUTSIDE_SCOPE` | warning | a deliverable owns a test file that `package.json` does not register, and neither the deliverable nor a dependent one owns `package.json` |
 
 `cohorts` are Kahn-layered and then greedily split so no cohort holds two
 deliverables that share an owned file. A manager-owned or milestone deliverable
@@ -105,17 +113,54 @@ is not itself in a cohort, but the agent deliverables behind it still constrain
 the ones that depend on it, and a cycle is kept together in one layer rather
 than dropped from the report.
 
+## Plan-time clarity (`--jev`)
+
+`junior plan check <plan.json> --jev` runs the worker's own readiness check on
+each planned contract through the configured classifier. It is a paid call and
+only runs when `--jev` is passed. The output keeps `ok`, `findings` and
+`cohorts`, and adds:
+
+```json
+{
+  "quality": {
+    "threshold": 0.6,
+    "scores": [
+      { "id": "D01", "status": "clear", "trigger": null, "probability": null, "questions": [] }
+    ],
+    "flagged": 0,
+    "unscored": 0
+  }
+}
+```
+
+Each score is `clear`, `flagged` or `unscored`. `flagged` means the readiness
+decision is not delegate: clarify, frontier attention or uncertainty. The
+questions come from the same readiness check a handoff uses, so plan check does
+not add its own. Flag a contract before leasing it; a classifier outage leaves
+it `unscored` rather than blocking the plan lint.
+
 ## `junior plan contracts`
 
 `junior plan contracts <plan.json> --out <dir>` writes one JSON contract
 skeleton per agent deliverable to `<dir>/<id>.json`. The skeleton sets `id`,
 `deliverable` (from `metadata.artifact`), `cwd`, `workflow` (from
 `metadata.junior.workflow`, default `test_first`), `acceptance`, `constraints`
-(the owned files plus the standard scope constraint), `checks`,
-`isolation: "worktree"` and `jev: { "mode": "shadow" }`. When the deliverable
-sets `metadata.junior.profile`, the skeleton carries it as `modelProfile`; a
-plan-level `metadata.junior.approvedProfiles` list is copied to every skeleton
-as `approvedProfiles`.
+(the owned files plus the standard scope constraint), `checks`, `scope` with the
+owned files, `isolation: "worktree"` and `jev: { "mode": "shadow" }`.
+
+The defaults keep a skeleton inside one bounded handoff:
+
+- `modelProfile: "general"` unless `metadata.junior.profile` names another
+  profile.
+- `execution.deadlineMs: 1500000` (25 minutes).
+- `execution.checkTimeoutMs: 900000` when a check runs `cargo`.
+- A constraint against editing unowned registration files (`package.json`,
+  `package-lock.json`, `scripts/build.mjs`, `junior.ts`, `cli.test.ts`,
+  `CHANGELOG.md`, `README.md`), telling the worker to report the need instead.
+
+When the deliverable sets `metadata.junior.profile`, the skeleton carries it as
+`modelProfile`; a plan-level `metadata.junior.approvedProfiles` list is copied
+to every skeleton as `approvedProfiles`.
 
 The skeleton omits `provider` and `model`, so Jev routing applies by default.
 `modelProfile` pins a roster profile and `approvedProfiles` grants plan-scope

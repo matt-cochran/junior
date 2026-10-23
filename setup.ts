@@ -25,6 +25,7 @@ import { inspectCompanions, inspectCompanionSkills, installCompanions, installCo
  type CompanionsReport, type CompanionInstallReport, type CompanionSkillReport, type CompanionSkillsReport } from './companions.ts';
 import { matrixInit } from './matrix-init.ts';
 import { ensureLocalExcludes } from './isolation.ts';
+import { ISOLATION_FLAGS, parsePiCapabilities } from './pi-isolation.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
 import { inspectReadiness, type ReadinessResult } from './readiness.ts';
 import { classifyModel } from './model-policy.ts';
@@ -38,7 +39,7 @@ export const SUPPORTED_NODE_MIN = '22.19.0';
 export const DEFAULT_PROVIDER = 'openrouter';
 export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
 export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
-export const TESTED_PI_VERSION = '1.0.3';
+export const TESTED_PI_VERSION = '1.0.4';
 export const DOCTOR_TIMEOUT_MS = 10000;
 export const INSTALL_TIMEOUT_MS = 300000;
 
@@ -163,6 +164,10 @@ export type PiCheck = {
  versionWarning:boolean;
  versionNote?:string;
  note?:string;
+ /** Isolation flags the installed Pi help advertises, including `--tools`.
+  * `supported` is null when the help probe failed (see `note`): unknown, not
+  * missing, so doctor does not advise an update it cannot justify. */
+ isolation:{ supported:boolean|null; missing:string[] };
 };
 
 /** Classify an installed Pi version against the tested pin without blocking any
@@ -187,18 +192,32 @@ function classifyPiVersion(installed:string|null, tested:string):{status:PiVersi
 export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VERSION):PiCheck {
  const env=deps.env ?? process.env;
  const executable=whichOnPath('pi',env.PATH,deps);
+ const requiredIsolation=[...ISOLATION_FLAGS, '--tools'];
  if (!executable) return {found:false, executable:null, version:null, location:null, pathMismatch:false,
-  testedVersion, versionMatch:false, versionStatus:'unknown', versionWarning:false};
+  testedVersion, versionMatch:false, versionStatus:'unknown', versionWarning:false,
+  isolation:{supported:false, missing:requiredIsolation}};
+ const exec=deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o));
+ const execOptions={timeout:DOCTOR_TIMEOUT_MS, env:{...env, PI_OFFLINE:'1', PI_SKIP_VERSION_CHECK:'1'}};
  let version:string|null=null;
  let note:string|undefined;
  try {
-  const r=(deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o)))('pi',['--offline','--no-approve','--version'],{timeout:DOCTOR_TIMEOUT_MS, env:{...env, PI_OFFLINE:'1', PI_SKIP_VERSION_CHECK:'1'}});
+  const r=exec('pi',['--offline','--no-approve','--version'],execOptions);
   if (r.error) note=`pi --version failed: ${r.error}`;
   else if (r.status !== 0) note=`pi --version exited ${r.status}`;
   else version=firstSemver(r.stdout || '');
  } catch (e) {
   note=`pi --version failed: ${e instanceof Error ? e.message : String(e)}`;
  }
+ let capabilities:{ flags:ReadonlySet<string> }|null=null;
+ try {
+  const r=exec('pi',['--offline','--no-approve','--help'],execOptions);
+  if (r.error) note=note ?? `pi --help failed: ${r.error}`;
+  else if (r.status !== 0) note=note ?? `pi --help exited ${r.status}`;
+  else capabilities=parsePiCapabilities(r.stdout || '');
+ } catch (e) {
+  note=note ?? `pi --help failed: ${e instanceof Error ? e.message : String(e)}`;
+ }
+ const missingIsolation=capabilities ? requiredIsolation.filter((flag)=>!capabilities!.flags.has(flag)) : [];
  const location=dirname(executable);
  const nodeDir=dirname(deps.execPath ?? process.execPath);
  const pathMismatch=location !== nodeDir;
@@ -206,7 +225,8 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  const pairing=classifyPiVersion(version,testedVersion);
  return {found:true, executable, version, location, pathMismatch,
   testedVersion, versionMatch:pairing.match, versionStatus:pairing.status, versionWarning:pairing.warning,
-  ...(pairing.note?{versionNote:pairing.note}:{}), ...(note?{note}:{})};
+  ...(pairing.note?{versionNote:pairing.note}:{}), ...(note?{note}:{}),
+  isolation:{supported:capabilities ? missingIsolation.length === 0 : null, missing:missingIsolation}};
 }
 
 function asSpawn(command:string, args:string[], options:any):ExecResult {
@@ -577,6 +597,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  if (!pi.found) remediation.push(`Install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm.`);
  else if (!pi.version) remediation.push('Pi could not run successfully; check its executable and active Node installation.');
  else if (pi.pathMismatch) remediation.push('Install Pi with the active nvm Node so `pi` and `node` resolve from the same bin directory.');
+ if (pi.found && pi.isolation.missing.length > 0) remediation.push(`Pi is missing isolation flags (${pi.isolation.missing.join(', ')}); install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm to update it.`);
  if (pi.versionWarning && pi.versionNote) remediation.push(pi.versionNote);
  if (!credentials.present) remediation.push('Authenticate with Pi: start `pi` and run `/login`, then select the model with `/model`.');
  if (!model.available) {

@@ -43,6 +43,10 @@ test('rankRoutes ranks the matrix route first for a traceability request', () =>
   assert.equal(rankRoutes('traceability between requirements and tests')[0].id, 'matrix');
 });
 
+test('rankRoutes ranks the restore-context route first after a compaction', () => {
+  assert.equal(rankRoutes('rebuild context after compaction')[0].id, 'restore-context');
+});
+
 test('rankRoutes returns a score for every route so the ranking is total', () => {
   assert.equal(rankRoutes('create a CPM plan').length, ROUTES.length);
 });
