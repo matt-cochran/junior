@@ -80,6 +80,7 @@ test('relation.declare into an unregistered dimension is rejected as unknown_dim
   const outcome = await command(hop, modelId, {
     kind: 'relation.declare',
     relationId: 'cpm-code',
+    relationType: 'implements',
     from: 'cpm',
     to: 'missing-code',
     scale: 'junior-reference',
@@ -102,6 +103,7 @@ test('observe with a member absent from the from dimension is rejected as unknow
   await command(hop, modelId, {
     kind: 'relation.declare',
     relationId: 'cpm-code',
+    relationType: 'implements',
     from: 'cpm',
     to: 'code',
     scale: 'junior-reference',
@@ -134,6 +136,7 @@ test('a complete model sequence succeeds across separate server processes', asyn
   await command(hop, modelId, {
     kind: 'relation.declare',
     relationId: 'cpm-code',
+    relationType: 'implements',
     from: 'cpm',
     to: 'code',
     scale: 'junior-reference',
@@ -158,6 +161,7 @@ test('relation.declare with an undeclared scale is rejected as unknown_scale', a
   const outcome = await command(hop, modelId, {
     kind: 'relation.declare',
     relationId: 'cpm-code',
+    relationType: 'implements',
     from: 'cpm',
     to: 'code',
     scale: 'undeclared-scale',
@@ -179,4 +183,24 @@ test('without strict state any crossmatrix command still succeeds in write-log m
   });
 
   assert.equal(outcome.ok, true);
+});
+
+test('relation.declare with a relation type crossmatrix does not know is rejected as unknown_relation_type', async () => {
+  const dir = workdir();
+  const hop = writeHop(dir, { FAKE_CROSSMATRIX_STATE: stateFile(dir) });
+  const modelId = 'strict-model';
+
+  await registerDimension(hop, modelId, 'cpm', ['cpm:c1']);
+  await registerDimension(hop, modelId, 'code', ['loc:src/a.ts']);
+  await command(hop, modelId, { kind: 'scale.declare', scale: { id: 'junior-reference', mode: 'categorical', levels: [] } });
+  const outcome = await command(hop, modelId, {
+    kind: 'relation.declare',
+    relationId: 'cpm-code',
+    relationType: 'concerns',
+    from: 'cpm',
+    to: 'code',
+    scale: 'junior-reference',
+  });
+
+  assert.equal(outcome.result.error.code, 'unknown_relation_type');
 });

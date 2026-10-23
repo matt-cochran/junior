@@ -40,6 +40,11 @@ const errorOn = process.env.FAKE_CROSSMATRIX_ERROR;
 // fresh server process per call. A missing file starts as an empty state. Without
 // this variable the crossmatrix mode keeps its previous behaviour.
 const strictStateFile = process.env.FAKE_CROSSMATRIX_STATE;
+// Relation types crossmatrix-mcp 0.3.4 accepts (probed against the binary).
+const STRICT_RELATION_TYPES = new Set([
+  "satisfies", "implements", "covers", "mitigates", "derives_from", "constrains", "dependsOn",
+  "undermines", "opposes", "blocks", "exposes", "supports", "verifies", "contains",
+]);
 // Opt-in Crossmatrix query results: a JSON file mapping a query kind to the
 // result object to return. A value may be an array of pages selected by the
 // request's cursor so a client's nextCursor paging can be exercised. Unset
@@ -375,7 +380,18 @@ function handle(line) {
             return;
           }
           if (kind === "relation.declare") {
-            const { relationId, from, to, scale } = op;
+            const { relationId, from, to, scale, relationType } = op;
+            if (!STRICT_RELATION_TYPES.has(relationType)) {
+              reject("unknown_relation_type", `unknown relation type: ${String(relationType)}`);
+              return;
+            }
+            if (relationType === "contains" && from !== to) {
+              reject(
+                "invalid",
+                `contains relation '${String(relationId)}' must have from == to: from='${String(from)}' to='${String(to)}' must be equal`,
+              );
+              return;
+            }
             const missing = !model.dimensions[from] ? from : !model.dimensions[to] ? to : null;
             if (missing !== null) {
               reject("unknown_dimension", `unknown dimension '${String(missing)}'`);
