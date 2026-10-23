@@ -49,6 +49,7 @@ export type GraphNodeKind =
   | 'claim'
   | 'hypothesis'
   | 'adr'
+  | 'persona'
   | 'member';
 
 export interface GraphNode {
@@ -117,6 +118,7 @@ export interface ContractEvidenceSummary {
   risks: string[];
   claims: ContractClaim[];
   notes: string[];
+  personas: string[];
 }
 
 export interface ContractContext {
@@ -249,6 +251,7 @@ const MEMBER_PREFIX: Record<string, string> = {
   cpm: 'cpm',
   'jevitate-jobs': 'job',
   'jevitate-journeys': 'journey',
+  'jevitate-personas': 'persona',
   fmeca: 'fm',
 };
 
@@ -259,7 +262,9 @@ function normalizeMember(seed: string): string {
   const dimensionId = seed.slice(0, separator);
   const memberId = seed.slice(separator + 1);
   const prefix = MEMBER_PREFIX[dimensionId];
-  if (prefix && memberId && !memberId.startsWith(`${prefix}:`)) return `${prefix}:${memberId}`;
+  if (prefix && memberId) {
+    return memberId.startsWith(`${prefix}:`) ? memberId : `${prefix}:${memberId}`;
+  }
   return seed;
 }
 
@@ -285,6 +290,7 @@ function classify(member: string): { kind: GraphNodeKind; path?: string } {
   if (member.startsWith('claim:')) return { kind: 'claim' };
   if (member.startsWith('hypothesis:')) return { kind: 'hypothesis' };
   if (member.startsWith('adr:')) return { kind: 'adr' };
+  if (member.startsWith('persona:')) return { kind: 'persona' };
   return { kind: 'member' };
 }
 
@@ -472,6 +478,7 @@ export function contractContext(slice: GraphSlice): ContractContext {
   const risks: string[] = [];
   const claims: ContractClaim[] = [];
   const notes: string[] = [];
+  const personas: string[] = [];
 
   for (const node of slice.nodes) {
     if (node.kind === 'file' || node.kind === 'test') {
@@ -491,10 +498,12 @@ export function contractContext(slice: GraphSlice): ContractContext {
       }
     } else if (node.kind === 'adr' || node.kind === 'hypothesis') {
       if (!notes.includes(node.member)) notes.push(node.member);
+    } else if (node.kind === 'persona') {
+      if (!personas.includes(node.member)) personas.push(node.member);
     }
   }
 
-  return { context, evidence: { outcomes, risks, claims, notes } };
+  return { context, evidence: { outcomes, risks, claims, notes, personas } };
 }
 
 // --- impactChecks -----------------------------------------------------------

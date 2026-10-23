@@ -186,6 +186,35 @@ function finding(code: string, severity: FindingSeverity, ids: string[], message
   return { code, severity, ids, message };
 }
 
+/** metadata.junior.acceptance entries Junior can carry (ADR 0011): a non-empty
+ * string, or an object with a non-empty string text, copied as is so its id,
+ * when, checks and mitigates survive planning. Anything else is dropped. */
+function acceptanceEntries(value: unknown): Array<string | Record<string, any>> {
+  const out: Array<string | Record<string, any>> = [];
+  for (const entry of asArray(value)) {
+    if (typeof entry === 'string') {
+      if (entry) out.push(entry);
+      continue;
+    }
+    if (isRecord(entry) && typeof entry.text === 'string' && entry.text) out.push(entry);
+  }
+  return out;
+}
+
+/** Criterion ids that appear on more than one acceptance object. */
+function duplicateAcceptanceIds(entries: Array<string | Record<string, any>>): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry === 'string') continue;
+    const id = text(entry.id).trim();
+    if (!id) continue;
+    if (seen.has(id)) duplicates.add(id);
+    else seen.add(id);
+  }
+  return [...duplicates];
+}
+
 /** Kahn layers of agent deliverables (ids sorted), each split greedily so no
  * cohort holds two deliverables that share an owned file. A manager-owned or
  * milestone deliverable is not itself in a cohort, but the agent deliverables
@@ -269,8 +298,17 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
     }
 
     const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
-    if (asArray(junior.acceptance).map(text).filter(Boolean).length === 0) {
+    const acceptance = acceptanceEntries(junior.acceptance);
+    if (acceptance.length === 0) {
       findings.push(finding('NO_ACCEPTANCE', 'warning', [id], `${id} has no metadata.junior.acceptance`));
+    }
+    for (const duplicateId of duplicateAcceptanceIds(acceptance)) {
+      findings.push(finding(
+        'DUPLICATE_ACCEPTANCE_ID',
+        'warning',
+        [id],
+        `${id} has more than one acceptance criterion with id '${duplicateId}'`,
+      ));
     }
     if (asArray(junior.checks).length === 0) {
       findings.push(finding('NO_CHECKS', 'warning', [id], `${id} has no metadata.junior.checks; a deliverable needs an independent check`));
@@ -376,7 +414,7 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
       deliverable: text(deliverable.metadata?.artifact),
       cwd: repoCwd || opts.cwd,
       workflow: text(junior.workflow) || 'test_first',
-      acceptance: asArray(junior.acceptance).map(text).filter(Boolean),
+      acceptance: acceptanceEntries(junior.acceptance),
       constraints,
       checks,
       scope: { owned: files },

@@ -66,7 +66,8 @@ independently:
   string (`"D01"`) or `{ "id": "D01", "consumes": "the exported helper" }`; the
   `consumes` text names what flows across the boundary.
 - **`metadata.junior.acceptance` and `metadata.junior.checks`.** Acceptance is a
-  non-empty list of observable outcomes; checks are independent, runnable
+  non-empty list of observable outcomes, each a string or an
+  `{id, text, when, checks, mitigates}` object; checks are independent, runnable
   commands. `metadata.junior.workflow` optionally sets the workflow template
   (`test_first` is the contract default).
 - **Design for the default model.** `general` (DeepSeek V4.1 Flash) is the
@@ -87,6 +88,12 @@ independently:
   a deliverable that owns an unregistered test file and does not own
   `package.json` gets `REGISTRATION_OUTSIDE_SCOPE`. Add the registration file to
   that deliverable or let the final registration deliverable own it.
+
+When `junior matrix plan-from-spec` drafts a plan, `spec-bridge` assigns each
+criterion the id `<requirement id>/ac<n>` (for example `req:c1/ac2`) as it writes
+the draft. Ids are never recomputed from position after that: reordering or
+editing criteria in the plan keeps their ids, and `junior plan contracts` copies
+the acceptance objects unchanged.
 
 ## `junior plan check`
 

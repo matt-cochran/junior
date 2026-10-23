@@ -837,6 +837,46 @@ test('assessPostflight does not send a deterministic criterion to the classifier
  await assessPostflight({deliverable:'Review',acceptance:['changes no files']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
  assert.equal(calls,0);
 });
+test('validate rejects an acceptance.id with a space',()=>{
+ assert.throws(()=>validate(task(0,{acceptance:[{id:'a b',text:'x'}]})),/Invalid acceptance\.id/);
+});
+test('validate rejects duplicate acceptance ids',()=>{
+ assert.throws(()=>validate(task(0,{acceptance:[{id:'x',text:'a'},{id:'x',text:'b'}]})),/Duplicate acceptance\.id/);
+});
+test('validate rejects an acceptance.checks index beyond the checks array',()=>{
+ const checks=[{command:process.execPath,args:['-e','process.exit(0)']},{command:process.execPath,args:['-e','process.exit(0)']}];
+ assert.throws(()=>validate(task(0,{acceptance:[{text:'t',checks:[5]}],checks})),/Invalid acceptance\.checks/);
+});
+test('assessPostflight reports a supplied acceptance id',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.95)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{id:'req:c1/ac1',text:'t'}]},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(r.criteria[0].id,'req:c1/ac1');
+});
+test('assessPostflight infers no id for string acceptance entries by position',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.95),AC2:bool(0.95)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:['a','b']},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.deepEqual(r.criteria.map((c)=>c.id),['AC1','AC2']);
+});
+test('assessPostflight copies mitigates from the contract entry',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.95)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{id:'req:c1/ac1',text:'t',mitigates:['s1/m1']}]},classify,[],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.deepEqual(r.criteria[0].mitigates,['s1/m1']);
+});
+test('assessPostflight tiers a met criterion whose named check passed as check_passed',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.95)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{text:'t',checks:[0]}]},classify,[{exitCode:0}],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(r.criteria[0].tier,'check_passed');
+});
+test('assessPostflight tiers a met criterion whose named check failed as not check_passed',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.95)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{text:'t',checks:[0]}]},classify,[{exitCode:1}],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.notEqual(r.criteria[0].tier,'check_passed');
+});
+test('assessPostflight tiers an uncertain criterion whose named check passed as check_passed',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.5)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{text:'t',checks:[0]}]},classify,[{exitCode:0}],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(r.criteria[0].tier,'check_passed');
+});
 test('An fmeca run passes its written report to the postflight classifier',async()=>{
  let postState:any;
  const classifier:any=async({state,questions}:any)=>{

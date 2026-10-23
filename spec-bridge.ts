@@ -132,6 +132,15 @@ function acceptanceFor(requirement: Record<string, any>): string[] {
   return asArray(requirement.acceptance_criteria).map(text).filter(Boolean);
 }
 
+/** The acceptance criteria as `{id, text}` entries; the id embeds the 1-based position. */
+function acceptanceEntriesFor(requirement: Record<string, any>): Array<{ id: string; text: string }> {
+  const requirementId = text(requirement.id);
+  return acceptanceFor(requirement).map((criterion, index) => ({
+    id: `${requirementId}/ac${index + 1}`,
+    text: criterion,
+  }));
+}
+
 /** The inspectable artifact string for one requirement. */
 export function artifactFor(requirement: Record<string, any>): string {
   const statement = text(requirement.statement ?? requirement.capability ?? requirement.id);
@@ -150,7 +159,7 @@ function requirementDeliverable(
     artifact: artifactFor(requirement),
     owner: text(requirement.owner) || 'agent',
     source: `elicitation:${sessionId}/${text(requirement.id)}`,
-    junior: { workflow: 'test_first', acceptance: acceptanceFor(requirement), checks: [] },
+    junior: { workflow: 'test_first', acceptance: acceptanceEntriesFor(requirement), checks: [] },
   };
   const priority = text(requirement.priority).toLowerCase();
   if (priority) metadata.priority = priority;
