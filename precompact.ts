@@ -229,6 +229,29 @@ function defaultReadTranscript(path: string): string {
   return text;
 }
 
+/**
+ * The OpenRouter chat request for one capture. Reasoning is disabled: on a
+ * hybrid model it can spend the whole max_tokens budget and return no content.
+ */
+export function captureRequestBody(req: {
+  model: string;
+  system: string;
+  user: string;
+  maxTokens: number;
+}): Record<string, unknown> {
+  return {
+    model: req.model,
+    messages: [
+      { role: 'system', content: req.system },
+      { role: 'user', content: req.user },
+    ],
+    max_tokens: req.maxTokens,
+    temperature: 0,
+    reasoning: { enabled: false },
+    response_format: { type: 'json_object' },
+  };
+}
+
 async function defaultCallModel(req: {
   model: string;
   system: string;
@@ -243,16 +266,7 @@ async function defaultCallModel(req: {
       Authorization: `Bearer ${req.apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: req.model,
-      messages: [
-        { role: 'system', content: req.system },
-        { role: 'user', content: req.user },
-      ],
-      max_tokens: req.maxTokens,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-    }),
+    body: JSON.stringify(captureRequestBody(req)),
     signal: AbortSignal.timeout(req.timeoutMs),
   });
   if (!response.ok) throw new Error(`capture model request failed (${response.status})`);

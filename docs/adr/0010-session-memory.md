@@ -23,7 +23,7 @@ rules:
   - id: R5
     text: Capture runs as junior compact --capture with the harness hook input as JSON on stdin. It always exits 0. Every attempt, including a skip or failure, writes one record to <project root>/.delivery/capture/<timestamp>.json with the input size, model, usage, proposal count and error.
   - id: R6
-    text: Capture uses the project's pinned default model (loadModelConfig(cwd).provider/model, today deepseek/deepseek-v4.1-flash) through OpenRouter with the key from resolveGatewayKey('openrouter'). It never routes to another profile and never asks for model approval. Budget per capture - transcript tail at most 48000 characters, max_tokens 1500, temperature 0, one request, 30 second timeout, at most 12 proposals.
+    text: Capture uses the project's pinned default model (loadModelConfig(cwd).provider/model, today deepseek/deepseek-v4.1-flash) through OpenRouter with the key from resolveGatewayKey('openrouter'). It never routes to another profile and never asks for model approval. Budget per capture - transcript tail at most 48000 characters, max_tokens 1500, temperature 0, reasoning disabled, one request, 30 second timeout, at most 12 proposals.
   - id: R7
     text: The compact block reads notes and capture proposals, open PRs and pending-decision runs; it still makes no model call, and every new section is dropped before the plan section under maxChars.
 ---
