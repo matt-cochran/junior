@@ -166,8 +166,9 @@ function nonEmptyString(value: unknown): boolean {
  * True when the clarification gate should run. `checkBack: 'off'` and a task
  * already prepared from a brief or previously clarified never re-enter. An
  * auto (or unspecified) workflow keeps the readiness and vague-feature rules;
- * an explicit workflow only clarifies for an unclear contract or a blocking
- * assumption, never for the vague-feature routing alone.
+ * an explicit workflow only clarifies for an unclear contract (the
+ * contract_clear trigger), never for a blocking assumption or the
+ * vague-feature routing alone.
  */
 export function clarityGateApplies(input: ClarityGateInput): boolean {
   if (input.checkBack === 'off') return false;
@@ -175,9 +176,10 @@ export function clarityGateApplies(input: ClarityGateInput): boolean {
   if (input.workflow === undefined || input.workflow === 'auto') {
     return clarificationApplies(input.attention, { playbooks: input.playbooks });
   }
-  const trigger = input.attention?.trigger;
-  return input.attention?.decision === 'clarify'
-    && (trigger === 'contract_clear' || trigger === 'blocking_assumptions');
+  // Only an unclear contract gates an explicit workflow. blocking_assumptions
+  // is at or above 0.6 on 94% of runs that came back clean, so it does not
+  // separate problem contracts (ADR 0009, session junior-pi-hub-value H16).
+  return input.attention?.decision === 'clarify' && input.attention?.trigger === 'contract_clear';
 }
 
 /** True when a routing's work is large enough to warrant a cpm draft plan. */

@@ -80,9 +80,9 @@ test('a flagged contract carries the preflight reason', async () => {
   assert.match(String(report.scores[0].reason), /contract not judged clear/);
 });
 
-test('blocking assumptions are flagged under their own trigger', async () => {
+test('a blocking assumption alone is not flagged', async () => {
   const report = await scorePlanContracts([contract('c1', 'assumption')], classifierFor({ assumption: ASSUMPTION }));
-  assert.equal(report.scores[0].trigger, 'blocking_assumptions');
+  assert.equal(report.scores[0].status, 'clear');
 });
 
 test('a classifier outage yields unscored with the error as its reason', async () => {
@@ -138,8 +138,8 @@ test('the report threshold is the worker confidence threshold', async () => {
 });
 
 test('the report counts flagged and unscored contracts', async () => {
-  const classify = classifierFor({ unclear: UNCLEAR, assumption: ASSUMPTION });
-  const contracts = [contract('c1', 'unclear'), contract('c2', 'assumption')];
+  const classify = classifierFor({ unclear: UNCLEAR, frontier: FRONTIER, assumption: ASSUMPTION });
+  const contracts = [contract('c1', 'unclear'), contract('c2', 'frontier'), contract('c3', 'assumption')];
   const report = await scorePlanContracts(contracts, classify);
   assert.equal(report.flagged, 2);
 });

@@ -189,8 +189,12 @@ test('clarityGateApplies is true for an explicit workflow with an unclear contra
   assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'contract_clear' }, workflow: 'test_first' }), true);
 });
 
-test('clarityGateApplies is true for an explicit workflow with a blocking assumption', () => {
-  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'blocking_assumptions' }, workflow: 'test_first' }), true);
+test('clarityGateApplies is false for an explicit workflow with only a blocking assumption', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'blocking_assumptions' }, workflow: 'test_first' }), false);
+});
+
+test('clarityGateApplies keeps the auto rule for a blocking assumption', () => {
+  assert.equal(clarityGateApplies({ attention: { decision: 'clarify', trigger: 'blocking_assumptions' }, workflow: 'auto' }), true);
 });
 
 test('clarityGateApplies is false when check-back is off', () => {

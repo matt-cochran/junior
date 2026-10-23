@@ -10,7 +10,7 @@ applies_to:
   - plan-quality.ts
 rules:
   - id: R1
-    text: A contract with an explicit workflow stops for clarification when the readiness call decides clarify on contract_clear or blocking_assumptions, unless checkBack is off or the contract already came from a prepare brief or a clarification.
+    text: A contract with an explicit workflow stops for clarification when the readiness call decides clarify on the contract_clear trigger (contract_clear below 0.6), unless checkBack is off or the contract already came from a prepare brief or a clarification. A blocking_assumptions clarify alone does not stop it.
   - id: R2
     text: Answering a clarification for an explicit-workflow contract produces the same contract with the answers as constraints and the workflow unchanged; it never drafts a plan or brief in place of the requested workflow.
   - id: R3
@@ -48,7 +48,7 @@ J7) failed at the request, not at verification:
 
 1. **Gate explicit workflows.** `clarityGateApplies` extends
    `clarificationApplies`: for an explicit workflow, a `clarify` decision on
-   `contract_clear` or `blocking_assumptions` stops the run with a clarification
+   the `contract_clear` trigger stops the run with a clarification
    batch before any worker starts. `checkBack: "off"` disables it; a contract
    with `preparedFrom` or `clarifiedFrom` never re-enters it. The `auto`
    behaviour, including the vague-feature playbook rule, is unchanged.
@@ -75,3 +75,21 @@ J7) failed at the request, not at verification:
   recon worker can answer as well is open (H17).
 - Plan check can flag contracts before any lease, which is cheaper than a run
   that stops at the gate.
+
+## Amendment (2026-10-23, live verification)
+
+Live verification measured what the gate keys on. The readiness decision is
+`clarify` on 121 of 122 recorded runs, because `blocking_assumptions` is at or
+above 0.6 on 102 of 109 runs that came back clean. Keying the gate on the
+decision would stop almost every plan run. The analysis behind the original
+decision measured `contract_clear` alone, which flags 35% of clean runs and
+both measured false-ready runs. R1 therefore keys explicit workflows on the
+`contract_clear` trigger only, and plan-time scoring flags the same condition
+(plus frontier-required and uncertain decisions). Recorded as H16 evidence in
+`junior-pi-hub-value`. Auto-workflow behaviour is unchanged.
+
+Plan-time scoring of generated plan contracts (`junior plan contracts`, which
+carry the artifact text and acceptance but no code context) scored
+`contract_clear` 0.24-0.55 on all nine deliverables of the 0.10 plan, all of
+which succeeded once their contracts were enriched with context. Treat a
+plan-time flag as "add context before delegating", not as a defect.

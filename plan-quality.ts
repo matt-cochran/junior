@@ -43,9 +43,12 @@ function scoreOne(id: string, preflight: Awaited<ReturnType<typeof assessPreflig
       reason: preflight.error ?? attention.reason,
     };
   }
-  // Anything other than a delegate decision needs the manager before a lease:
-  // a clarify (ADR 0009), a frontier-required or an uncertain readiness.
-  if (attention.decision !== 'delegate') {
+  // Flag what the run-time gate or the manager would stop: an unclear contract
+  // (ADR 0009) or a frontier-required / uncertain readiness. A clarify on
+  // blocking_assumptions alone is not flagged: it fires on almost every
+  // contract and does not separate problem runs (H16).
+  const unclear = attention.decision === 'clarify' && attention.trigger === 'contract_clear';
+  if (unclear || attention.decision === 'frontier_required' || attention.decision === 'uncertain') {
     return {
       id,
       status: 'flagged',
