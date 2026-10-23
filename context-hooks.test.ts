@@ -8,6 +8,7 @@ import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   JUNIOR_HOOK_COMMAND,
   harnessInstructions,
@@ -183,4 +184,62 @@ test('codex instructions point at AGENTS.md and the junior compact command', () 
 
 test('cursor instructions name the Cursor harness', () => {
   assert.match(harnessInstructions('cursor'), /Cursor/);
+});
+
+// --- local backup exclusion -------------------------------------------------
+
+function gitRepo(t: any): string {
+  const dir = workspace(t);
+  const init = spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(init.status, 0, init.stderr);
+  return dir;
+}
+
+function existingSettings(dir: string): string {
+  const path = join(dir, '.claude', 'settings.local.json');
+  mkdirSync(join(dir, '.claude'), { recursive: true });
+  writeFileSync(path, JSON.stringify({ permissions: { allow: ['Read'] } }));
+  return path;
+}
+
+function gitStatus(dir: string): string {
+  const r = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+function excludeLines(dir: string): string[] {
+  return readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8').split(/\r?\n/);
+}
+
+test('install excludes the backup from Git status in a temporary repository', (t) => {
+  const dir = gitRepo(t);
+  existingSettings(dir);
+  installContextHooks({ projectDir: dir, now: () => new Date('2026-01-02T03:04:05Z') });
+  assert.doesNotMatch(gitStatus(dir), /\.bak/);
+});
+
+test('install records the exact backup path once in the local exclude file', (t) => {
+  const dir = gitRepo(t);
+  existingSettings(dir);
+  installContextHooks({ projectDir: dir, now: () => new Date('2026-01-02T03:04:05Z') });
+  assert.equal(excludeLines(dir).filter((line) => line === '/.claude/settings.local.json.2026-01-02T03-04-05-000Z.bak').length, 1);
+});
+
+test('install without an existing settings file adds no backup exclusion', (t) => {
+  const dir = gitRepo(t);
+  installContextHooks({ projectDir: dir });
+  assert.equal(excludeLines(dir).some((line) => line.endsWith('.bak')), false);
+});
+
+test('install survives an exclusion write failure and reports excludeError', (t) => {
+  const dir = gitRepo(t);
+  existingSettings(dir);
+  rmSync(join(dir, '.git', 'info', 'exclude'), { force: true });
+  mkdirSync(join(dir, '.git', 'info', 'exclude'));
+  const result = installContextHooks({ projectDir: dir, now: () => new Date('2026-01-02T03:04:05Z') });
+  assert.deepEqual(
+    { changed: result.changed, hasError: typeof result.excludeError === 'string' && result.excludeError.length > 0 },
+    { changed: true, hasError: true },
+  );
 });

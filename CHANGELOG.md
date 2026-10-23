@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server, not deleted (#90).
 - FMECA: the f12 Pi-drift detection mitigation now says the isolation check
   reports after the run rather than aborting before spend (#91).
+- `junior setup --context-hooks` records its settings backup
+  (`.claude/settings.local.json.<stamp>.bak`) in `.git/info/exclude`, so the
+  backup no longer makes the checkout dirty and blocks worktree handoffs (#95).
+- A plan-leased handoff refused before any worker starts (for example, worktree
+  isolation refused on a dirty checkout) keeps its lease and leaves the
+  deliverable's status alone instead of marking it failed, so re-running the
+  same contract picks it up again (#96).
 
 ## [0.10.0] - 2026-10-23
 
