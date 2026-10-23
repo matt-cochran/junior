@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isHoldOutcome, withPlanLease } from './plan-handoff.ts';
+import { isHoldOutcome, runNeverStarted, withPlanLease } from './plan-handoff.ts';
 
 const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
 function cpmFixture(name: string): unknown {
@@ -305,4 +305,21 @@ test('a model approval stop is a hold outcome', () => {
 
 test('a failed run is not a hold outcome', () => {
   assert.equal(isHoldOutcome('failed'), false);
+});
+
+// --- never-started runs -----------------------------------------------------
+
+test('a blocked run with no segments and no observed model never started', () => {
+  const result = { status: 'needs_review', segments: 0, runtime: { stopReason: 'blocked', elapsedMs: 0 }, model: { observed: [] } };
+  assert.equal(runNeverStarted(result), true);
+});
+
+test('a run with one segment and a checks failure did start', () => {
+  const result = { status: 'needs_review', segments: 1, runtime: { stopReason: 'checks_failed' }, model: { observed: [] } };
+  assert.equal(runNeverStarted(result), false);
+});
+
+test('a blocked run without segment or model fields never started', () => {
+  const result = { status: 'needs_review', runtime: { stopReason: 'blocked' } };
+  assert.equal(runNeverStarted(result), true);
 });

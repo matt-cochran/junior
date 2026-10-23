@@ -226,6 +226,49 @@ const upgradeDeps = (dir: string, overrides: any = {}) => ({
   ...overrides,
 });
 
+const recordingCatalogFetch = (ids: string[], urls: string[]) =>
+  (async (url: string) => {
+    urls.push(url);
+    return { status: 200, json: async () => ({ data: ids.map((id) => ({ id })) }) };
+  });
+
+test('model upgrade fetches the online catalog when no catalog flag is given', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const urls: string[] = [];
+  await runModelCommand(['upgrade', '--dry-run'], { cwd: dir, env: tempEnv(), fetch: recordingCatalogFetch([NEWER], urls) as any, isTTY: false });
+  assert.equal(urls.filter((url) => url === 'https://openrouter.ai/api/v1/models').length, 1);
+});
+
+test('model upgrade --offline makes no fetch call', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const urls: string[] = [];
+  await runModelCommand(['upgrade', '--dry-run', '--offline'], { cwd: dir, env: tempEnv(), fetch: recordingCatalogFetch([NEWER], urls) as any, isTTY: false });
+  assert.equal(urls.length, 0);
+});
+
+test('model upgrade --offline reports the local catalog', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const { result } = await runModelCommand(['upgrade', '--dry-run', '--offline'], { cwd: dir, env: tempEnv([NEWER]), fetch: (async () => { throw Error('fetch must not be called'); }) as any, isTTY: false });
+  assert.equal(result.catalog, 'local');
+});
+
+test('model upgrade --online fetches the online catalog like the default', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const urls: string[] = [];
+  await runModelCommand(['upgrade', '--dry-run', '--online'], { cwd: dir, env: tempEnv(), fetch: recordingCatalogFetch([NEWER], urls) as any, isTTY: false });
+  assert.equal(urls.filter((url) => url === 'https://openrouter.ai/api/v1/models').length, 1);
+});
+
+test('model upgrade rejects an unknown catalog flag', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  await assert.rejects(runModelCommand(['upgrade', '--dry-run', '--offlin'], { cwd: dir, env: tempEnv(), fetch: catalogFetch([NEWER]), isTTY: false }), /Unknown option/);
+});
+
 test('model upgrade --dry-run never writes delivery.config.json', async () => {
   const dir = workdir();
   const path = writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
@@ -450,6 +493,21 @@ test('adoptModelUpdates reports a pricier update as waiting', async () => {
 });
 
 // --- model list -------------------------------------------------------------
+
+test('model list fetches the online catalog when no catalog flag is given', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const urls: string[] = [];
+  await runModelCommand(['list'], { cwd: dir, env: tempEnv(), fetch: recordingCatalogFetch([NEWER], urls) as any, isTTY: false });
+  assert.equal(urls.filter((url) => url === 'https://openrouter.ai/api/v1/models').length, 1);
+});
+
+test('model list --offline reports the local catalog', async () => {
+  const dir = workdir();
+  writeConfig(dir, { provider: 'openrouter', model: general.model, models: { routing: 'auto' } });
+  const { result } = await runModelCommand(['list', '--offline'], { cwd: dir, env: tempEnv([NEWER]), fetch: (async () => { throw Error('fetch must not be called'); }) as any, isTTY: false });
+  assert.equal(result.catalog, 'local');
+});
 
 test('model list contains no frontier ids even when the catalog has frontier entries', async () => {
   const dir = workdir();

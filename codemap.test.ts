@@ -13,7 +13,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { initHop } from './tools/tools.ts';
-import { codemapContext, codemapFiles, codemapInit, codemapLink, codemapStale } from './codemap.ts';
+import {
+  codemapContext,
+  codemapFiles,
+  codemapInit,
+  codemapLink,
+  codemapStale,
+  DEFAULT_CODE_EXCLUDES,
+  isCodeRosterPath,
+  loadCodeExcludes,
+} from './codemap.ts';
 
 const NODE = process.execPath;
 const JUNIOR = join(import.meta.dirname, 'junior.ts');
@@ -70,6 +79,12 @@ function gitRepo(contents: Record<string, string>): string {
     writeFileSync(abs, content);
     spawnSync('git', ['add', p], { cwd: dir });
   }
+  return dir;
+}
+
+function gitRepoWithConfig(contents: Record<string, string>): string {
+  const dir = gitRepo(contents);
+  spawnSync('git', ['add', '.'], { cwd: dir });
   return dir;
 }
 
@@ -414,6 +429,61 @@ test('codemapContext has no duplicate paths', async () => {
   const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
   const context = await codemapContext({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
   assert.deepEqual(context.map((entry) => entry.path), ['src/a.ts']);
+});
+
+// --- code roster filtering --------------------------------------------------
+
+test('isCodeRosterPath rejects a .crossmatrix path even with no excludes', () => {
+  assert.equal(isCodeRosterPath('.crossmatrix/audit/jevitate.jsonl', []), false);
+});
+
+test('isCodeRosterPath rejects a default-excluded changeset path', () => {
+  assert.equal(isCodeRosterPath('.changeset/brave-owl.md', DEFAULT_CODE_EXCLUDES), false);
+});
+
+test('isCodeRosterPath accepts an ordinary source path under the default excludes', () => {
+  assert.equal(isCodeRosterPath('src/app.ts', DEFAULT_CODE_EXCLUDES), true);
+});
+
+test('isCodeRosterPath rejects a path matched by project excludes replacing the defaults', () => {
+  const excludes = loadCodeExcludes(gitRepoWithConfig({ 'delivery.config.json': JSON.stringify({ codemap: { exclude: ['docs/**'] } }) }));
+  assert.equal(isCodeRosterPath('docs/a.md', excludes), false);
+});
+
+test('isCodeRosterPath accepts a default-excluded path when project excludes replace the defaults', () => {
+  const excludes = loadCodeExcludes(gitRepoWithConfig({ 'delivery.config.json': JSON.stringify({ codemap: { exclude: ['docs/**'] } }) }));
+  assert.equal(isCodeRosterPath('.changeset/x.md', excludes), true);
+});
+
+test('codemapStale omits an excluded previously synced path from the code roster', async () => {
+  const dir = gitRepo({ '.changeset/x.md': 'release note', 'src/app.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const hopPath = writeHop(dir, '0.3.0', log);
+  const requests: any[] = [];
+  const deps = {
+    callHop: async (_hopPath: string, _tool: string, request: any) => {
+      requests.push(request);
+      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
+    },
+  };
+  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
+  assert.equal('.changeset/x.md' in requests[0].arguments.request.query.hashes, false);
+});
+
+test('codemapStale sends no delete or remove operation for an excluded path', async () => {
+  const dir = gitRepo({ '.changeset/x.md': 'release note', 'src/app.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const hopPath = writeHop(dir, '0.3.0', log);
+  const requests: any[] = [];
+  const deps = {
+    callHop: async (_hopPath: string, _tool: string, request: any) => {
+      requests.push(request);
+      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
+    },
+  };
+  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
+  const kinds = requests.map((request) => request.arguments?.request?.query?.kind ?? '');
+  assert.equal(kinds.some((kind) => kind === 'delete' || kind === 'remove'), false);
 });
 
 // --- codemapStale ----------------------------------------------------------

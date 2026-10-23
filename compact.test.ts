@@ -416,3 +416,111 @@ test('a non-positive in-flight window is rejected at the boundary', async (t) =>
   const dir = workspace(t);
   await assert.rejects(buildCompactBlock({ cwd: dir, inFlightMaxAgeHours: 0 }), /inFlightMaxAgeHours must be a positive number/);
 });
+
+test('a completed deliverable is not reported as in flight', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: join(dir, 'missing-hop.json'),
+    now: () => NOW,
+    completedDeliverables: async () => new Set(['CLI10']),
+  });
+  assert.doesNotMatch(block.markdown, /CLI10/);
+});
+
+test('an incomplete deliverable remains in flight', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: join(dir, 'missing-hop.json'),
+    now: () => NOW,
+    completedDeliverables: async () => new Set(),
+  });
+  assert.match(block.markdown, /- CLI10: status: checks_failed/);
+});
+
+test('a live-check run is never reported as in flight', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'live-check-vague', HOURS_AGO(2), 'needs_review');
+  const block = await buildCompactBlock({ cwd: dir, hopPath: join(dir, 'missing-hop.json'), now: () => NOW });
+  assert.doesNotMatch(block.markdown, /live-check-vague/);
+});
+
+test('a failing completed-deliverable lookup leaves the run in flight', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: join(dir, 'missing-hop.json'),
+    now: () => NOW,
+    completedDeliverables: async () => {
+      throw new Error('lookup failed');
+    },
+  });
+  assert.match(block.markdown, /- CLI10: status: checks_failed/);
+});
+
+test('the default lookup includes completed deliverables from archived plan lines', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    now: () => NOW,
+    callHop: async (_path, tool, request) => {
+      if (request.tool === 'plan.list') {
+        return outcome('plan.list', [{ variants: [{ plan_id: 'plan_archived', archived: true, plan_complete: false }] }]);
+      }
+      if (request.tool === 'plan.status') {
+        if ((request.arguments as any)?.plan_id === 'plan_archived') {
+          return outcome('plan.status', { deliverables: [['CLI10', { status: 'complete' }]] });
+        }
+        return failing('plan.status', 'NO_ACTIVE_PLAN');
+      }
+      return failing(request.tool, 'none');
+    },
+  });
+  assert.doesNotMatch(block.markdown, /CLI10/);
+});
+
+test('the default lookup includes completed deliverables from complete plan lines', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    now: () => NOW,
+    callHop: async (_path, tool, request) => {
+      if (request.tool === 'plan.list') {
+        return outcome('plan.list', [{ variants: [{ plan_id: 'plan_done', archived: false, plan_complete: true }] }]);
+      }
+      if (request.tool === 'plan.status') {
+        if ((request.arguments as any)?.plan_id === 'plan_done') {
+          return outcome('plan.status', { deliverables: [['CLI10', { status: 'complete' }]] });
+        }
+        return failing('plan.status', 'NO_ACTIVE_PLAN');
+      }
+      return failing(request.tool, 'none');
+    },
+  });
+  assert.doesNotMatch(block.markdown, /CLI10/);
+});
+
+test('a failing plan.status lookup in the default path leaves the run in flight', async (t) => {
+  const dir = workspace(t);
+  runAt(dir, 'CLI10', HOURS_AGO(2), 'checks_failed');
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    now: () => NOW,
+    callHop: async (_path, _tool, request) => {
+      if (request.tool === 'plan.list') {
+        return outcome('plan.list', [{ variants: [{ plan_id: 'plan_broken' }] }]);
+      }
+      return failing(request.tool, 'NO_ACTIVE_PLAN');
+    },
+  });
+  assert.match(block.markdown, /- CLI10: status: checks_failed/);
+});

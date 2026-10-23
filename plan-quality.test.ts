@@ -181,3 +181,23 @@ test('a frontier-required contract carries the requires_frontier trigger', async
   const report = await scorePlanContracts([contract('c1', 'frontier')], classifierFor({ frontier: FRONTIER }));
   assert.equal(report.scores[0].trigger, 'requires_frontier');
 });
+
+// --- P5 context resolution before scoring ----------------------------------
+
+test('scorePlanContracts sends the resolved context excerpt to the classifier', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'junior-quality-'));
+  writeFileSync(join(dir, 'a.ts'), 'excerpt-marker');
+  let sent = '';
+  const classify: GateClassifier = async ({ state }) => {
+    sent = JSON.stringify(state);
+    return { answers: CLEAR };
+  };
+  const entry = contract('c1', 'context');
+  entry.contract.cwd = dir;
+  entry.contract.context = [{ path: 'a.ts', start: 1, end: 1 }];
+  await scorePlanContracts([entry], classify);
+  assert.equal(sent.includes('excerpt-marker'), true);
+});
