@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HOT_FILES, REGISTRATION_FILES, checkPlanForJunior, planContracts, registeredTestFiles, runPlanCommand, scorePlanFile } from './plan-junior.ts';
@@ -377,4 +377,108 @@ test('scorePlanFile returns one quality score per planned contract', async () =>
   const classify = async () => ({ answers: {}, usage: {} });
   const report = await scorePlanFile(file, classify as any, { cwd: dir });
   assert.deepEqual(report.scores.map((score) => score.id), ['a']);
+});
+
+// --- P5 multi-repo contracts and context constraints -----------------------
+
+test('planContracts uses the repository checkout as the contract cwd', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['triz:README.md'], metadata: { repo: 'triz' } })),
+    { cwd: '/repo', repos: { triz: '/w/triz' } },
+  );
+  assert.equal(contract.cwd, '/w/triz');
+});
+
+test('planContracts strips the repository prefix from scope.owned', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['triz:README.md'], metadata: { repo: 'triz' } })),
+    { cwd: '/repo', repos: { triz: '/w/triz' } },
+  );
+  assert.deepEqual((contract.scope as any).owned, ['README.md']);
+});
+
+test('planContracts counts a prefixed registration file as owned', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['triz:README.md'], metadata: { repo: 'triz' } })),
+    { cwd: '/repo', repos: { triz: '/w/triz' } },
+  );
+  const registration = String(contract.constraints.find((c: string) => c.startsWith('Do not edit registration files')));
+  assert.equal(registration.includes('README.md'), false);
+});
+
+test('planContracts strips the repository prefix from the modify constraint', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['triz:README.md'], metadata: { repo: 'triz' } })),
+    { cwd: '/repo', repos: { triz: '/w/triz' } },
+  );
+  assert.equal(contract.constraints[0], 'Only modify README.md');
+});
+
+test('planContracts copies the junior context array onto the contract', () => {
+  const context = [{ path: 'a.ts', start: 1, end: 5 }];
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['a.ts'], junior: { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'true' }], context } })),
+    { cwd: '/repo' },
+  );
+  assert.deepEqual(contract.context, context);
+});
+
+test('planContracts appends a junior constraint after the generated ones', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['a.ts'], junior: { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'true' }], constraints: ['No new dependencies'] } })),
+    { cwd: '/repo' },
+  );
+  assert.equal(contract.constraints.at(-1), 'No new dependencies');
+});
+
+test('planContracts appends a repeated junior constraint only once', () => {
+  const [{ contract }] = planContracts(
+    plan(agent('a', { owned_files: ['a.ts'], junior: { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'true' }], constraints: ['No new dependencies', 'No new dependencies'] } })),
+    { cwd: '/repo' },
+  );
+  assert.deepEqual(contract.constraints.filter((c: string) => c === 'No new dependencies'), ['No new dependencies']);
+});
+
+test('planContracts keeps the base cwd when metadata.repo is absent', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.equal(contract.cwd, '/repo');
+});
+
+test('planContracts keeps the generated constraints when metadata.repo is absent', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts'] })), { cwd: '/repo' });
+  assert.deepEqual(contract.constraints, [
+    'Only modify src/x.ts',
+    'Work only inside the current working directory; no commits or pushes; no nested workers',
+    'Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead',
+  ]);
+});
+
+test('runPlanCommand reads repository checkouts from delivery.config.json', () => {
+  const dir = workdir();
+  const repo = join(dir, 'triz');
+  writeFileSync(join(dir, 'delivery.config.json'), JSON.stringify({ plan: { repos: { triz: repo } } }));
+  const file = writePlan(dir, plan(agent('a', { owned_files: ['triz:README.md'], metadata: { repo: 'triz' } })));
+  const { result } = runPlanCommand(['contracts', file, '--out', 'contracts'], { cwd: dir, out: () => {} });
+  const written = JSON.parse(readFileSync(result.written[0], 'utf8'));
+  assert.equal(written.cwd, repo);
+});
+
+test('scorePlanFile resolves context against the configured repository checkout', async () => {
+  const dir = workdir();
+  const repo = join(dir, 'triz');
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'a.ts'), 'repo-excerpt-marker');
+  writeFileSync(join(dir, 'delivery.config.json'), JSON.stringify({ plan: { repos: { triz: repo } } }));
+  const file = writePlan(dir, plan(agent('a', {
+    owned_files: ['triz:a.ts'],
+    metadata: { repo: 'triz' },
+    junior: { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'true' }], context: [{ path: 'a.ts' }] },
+  })));
+  let sent = '';
+  const classify = async ({ state }: any) => {
+    sent = JSON.stringify(state);
+    return { answers: {} };
+  };
+  await scorePlanFile(file, classify, { cwd: dir });
+  assert.equal(sent.includes('repo-excerpt-marker'), true);
 });

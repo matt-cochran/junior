@@ -560,3 +560,10 @@ test('checkPi reports isolation support as unknown when the help probe fails', (
 test('doctor gives no isolation remediation when the help probe fails', () => {
   assert.doesNotMatch(doctor(failingHelpDeps(workdir())).remediation.join(' '), /isolation flags/);
 });
+
+// --- model flags ------------------------------------------------------------
+
+test('junior model list accepts --offline', () => {
+  const dir = workdir();
+  assert.equal(runJunior(['model', 'list', '--offline'], dir, { PI_CODING_AGENT_DIR: dir }).status, 0);
+});

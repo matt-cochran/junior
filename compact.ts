@@ -16,7 +16,7 @@ import {
   loadHop,
   type HopManifest,
 } from './tools/tools.ts';
-import { spHypotheses } from './companion-shapes.ts';
+import { planStatusRows, spHypotheses } from './companion-shapes.ts';
 
 /** Availability of one compact-context section. */
 export type CompactSectionStatus = 'ok' | 'none' | 'unavailable';
@@ -33,6 +33,8 @@ export type CompactDeps = {
   readDir?: (p: string) => string[];
   readFile?: (p: string) => string;
   exists?: (p: string) => boolean;
+  /** Deliverable ids that cpm reports complete; failures resolve to an empty set. */
+  completedDeliverables?: () => Promise<Set<string>>;
 };
 
 /** Rendered block plus per-section availability and truncation state. */
@@ -239,12 +241,56 @@ function runStatus(resultPath: string, readFile: (p: string) => string, exists: 
     : 'unknown';
 }
 
+function planIds(result: unknown): string[] {
+  const ids = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!isObject(value)) return;
+    for (const key of ['plan_id', 'planId']) {
+      const id = value[key];
+      if (typeof id === 'string' && id.trim()) ids.add(id);
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== 'plan_id' && key !== 'planId') visit(child);
+    }
+  };
+  visit(result);
+  return [...ids];
+}
+
+async function defaultCompletedDeliverables(
+  hopPath: string,
+  hopExists: boolean,
+  callHop: typeof defaultCallHop,
+): Promise<Set<string>> {
+  const completed = new Set<string>();
+  if (!hopExists) return completed;
+  try {
+    const listing = await callHop(hopPath, 'cpm', { tool: 'plan.list', arguments: {} });
+    if (!listing.ok || listing.isError) return completed;
+    for (const planId of planIds(listing.result)) {
+      const status = await callHop(hopPath, 'cpm', { tool: 'plan.status', arguments: { plan_id: planId } });
+      if (!status.ok || status.isError) return new Set();
+      for (const row of planStatusRows(status.result).items) {
+        if (row.id && (row.status === 'complete' || row.status === 'completed')) completed.add(row.id);
+      }
+    }
+  } catch {
+    return new Set();
+  }
+  return completed;
+}
+
 function runItems(
   cwd: string,
   readDir: (p: string) => string[],
   readFile: (p: string) => string,
   exists: (p: string) => boolean,
   cutoffMs: number,
+  completed: ReadonlySet<string>,
 ): Run[] {
   const root = join(cwd, '.delivery');
   if (!exists(root)) return [];
@@ -280,7 +326,14 @@ function runItems(
     FOLLOW_UP_SUFFIXES.some((suffix) => SUCCESS_STATUSES.has(statusById.get(`${id}${suffix}`) ?? ''));
   const recent = (stamp: string): boolean => !/^\d+$/.test(stamp) || Number(stamp) >= cutoffMs;
   return latest
-    .filter((run) => !SUCCESS_STATUSES.has(run.status) && !resolved(run.id) && recent(run.stamp))
+    .filter(
+      (run) =>
+        !SUCCESS_STATUSES.has(run.status) &&
+        !resolved(run.id) &&
+        recent(run.stamp) &&
+        !completed.has(run.id) &&
+        !run.id.startsWith('live-check-'),
+    )
     .sort((a, b) => b.stamp.localeCompare(a.stamp) || a.id.localeCompare(b.id));
 }
 
@@ -407,10 +460,11 @@ function runsBlock(
   readFile: (p: string) => string,
   exists: (p: string) => boolean,
   cutoffMs: number,
+  completed: ReadonlySet<string>,
 ): Block {
   const block: Block = { key: 'runs', heading: RUNS_HEADING, status: 'none', lines: [], removable: true };
   try {
-    const runs = runItems(cwd, readDir, readFile, exists, cutoffMs);
+    const runs = runItems(cwd, readDir, readFile, exists, cutoffMs, completed);
     if (runs.length === 0) return block;
     return { ...block, status: 'ok', lines: runs.map((run) => `- ${run.id}: status: ${run.status}`) };
   } catch (error) {
@@ -483,11 +537,20 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     header.push('- hop: none');
   }
 
+  let completed = new Set<string>();
+  try {
+    completed = deps.completedDeliverables
+      ? await deps.completedDeliverables()
+      : await defaultCompletedDeliverables(hopPath, hopExists, callHop);
+  } catch {
+    completed = new Set();
+  }
+
   const blocks = [
     await planBlock(hopPath, hopExists, callHop),
     await riskBlock(hopPath, hopExists, callHop),
     await hypothesesBlock(hopPath, hopExists, callHop, readDir, readFile, exists),
-    runsBlock(deps.cwd, readDir, readFile, exists, generated.getTime() - maxAgeHours * 3_600_000),
+    runsBlock(deps.cwd, readDir, readFile, exists, generated.getTime() - maxAgeHours * 3_600_000, completed),
   ];
 
   const dropped: Record<string, number> = { plan: 0, risk: 0, hypotheses: 0, runs: 0 };
