@@ -3,7 +3,7 @@ import {isDirectEntry} from './cli-entry.ts';
 import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { resolve, join, dirname, relative, isAbsolute, sep, delimiter } from 'node:path';
+import { resolve, join, dirname, relative, isAbsolute, sep, delimiter, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { doctor, init, parseInitOptions } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
@@ -19,7 +19,9 @@ import type { ModelClass } from './model-policy.ts';
 import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { priceDelta, readCachedCatalog, piAgentDir } from './model-updates.ts';
 import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
-import { clarificationApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
+import { clarificationApplies, clarityGateApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
+import { validatePiContext, buildIsolationArgs, parsePiCapabilities, type PiCapabilities } from './pi-isolation.ts';
+import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { resolveJevGateway, validateJevProvider, GatewayError, type JevProvider, type GatewayDeps, type ResolvedJevGateway } from './gateway.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
@@ -47,7 +49,7 @@ export const TASK_FIELDS = [
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
  'approveModel','approvedProfiles','modelProfile',
  'plan',
- 'hopFrom','hopRevision','hopContext',
+ 'hopFrom','hopRevision','hopContext','piContext','clarifiedFrom','scope',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
 
@@ -274,6 +276,24 @@ export function validate(t: any) {
   if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');
  }
  if (t.context !== undefined) validateContext(t.context, t.cwd);
+ if (t.piContext !== undefined) {
+  const problem = validatePiContext(t.piContext);
+  if (problem) throw Error(problem);
+ }
+ if (t.clarifiedFrom !== undefined && (typeof t.clarifiedFrom !== 'string' || !t.clarifiedFrom.trim())) throw Error('Invalid clarifiedFrom (expected a path to a clarify.json)');
+ if (t.scope !== undefined) {
+  if (!t.scope || typeof t.scope !== 'object' || Array.isArray(t.scope)) throw Error('Invalid scope.owned (expected a non-empty array of paths)');
+  const owned = t.scope.owned;
+  const validOwned = Array.isArray(owned) && owned.length > 0 && owned.every((entry:any)=>
+   (typeof entry === 'string' && entry.trim()) ||
+   (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof entry.path === 'string' && entry.path.trim()));
+  if (!validOwned) throw Error('Invalid scope.owned (expected a non-empty array of non-empty strings or { path } objects)');
+  if (t.scope.incidental !== undefined) {
+   const incidental = t.scope.incidental;
+   if (!Array.isArray(incidental) || incidental.some((glob:any)=>typeof glob !== 'string' || !glob.trim())) throw Error('Invalid scope.incidental (expected an array of non-empty strings)');
+  }
+  for (const key of Object.keys(t.scope)) if (!['owned','incidental'].includes(key)) throw Error(`Unknown scope field: ${key}`);
+ }
  validateExecutionSettings(t);
  if (t.jev !== undefined) {
   if (!t.jev || typeof t.jev !== 'object' || Array.isArray(t.jev)) throw Error('Invalid jev config');
@@ -1235,12 +1255,30 @@ function timedOutToolLine(tool:{name:string; command?:string|null}):string {
  * never `--continue`, so continuation cannot silently pick the wrong session.
  * `-e <path>` loads the pi-guard extension that redirects bash stdin and bounds
  * its timeout. */
-export function buildPiArgs(requested:{provider:string;model:string}, sessionId?:string|null, thinking?:string, guardPath:string|null=piGuardModulePath()):string[] {
+export function buildPiArgs(requested:{provider:string;model:string}, sessionId?:string|null, thinking?:string, guardPath:string|null=piGuardModulePath(), isolationArgs:string[]=[]):string[] {
  const args=['--provider',requested.provider,'--model',requested.model,'--mode','json'];
  if (thinking) args.push('--thinking',thinking);
  if (sessionId) args.push('--session',sessionId);
  if (guardPath) args.push('-e',guardPath);
+ args.push(...isolationArgs);
  return args;
+}
+
+/** Probe the installed Pi CLI for the long options it supports. The probe is
+ * offline and bounded; any failure (missing binary, non-zero status, timeout)
+ * yields null so the caller can fall back to assuming every flag works. */
+export function probePiCapabilities(run?: (command:string, args:string[], options:any) => { status:number|null; stdout?:string; error?:Error }): PiCapabilities | null {
+ const invoke = run ?? ((command:string, args:string[], options:any) => spawnSync(command, args, options));
+ try {
+  const result = invoke('pi', ['--offline','--no-approve','--help'], {
+   encoding:'utf8', timeout:10000, maxBuffer:1048576,
+   env:{...process.env, PI_OFFLINE:'1', PI_SKIP_VERSION_CHECK:'1'},
+  });
+  if (result.status !== 0 || typeof result.stdout !== 'string') return null;
+  return parsePiCapabilities(result.stdout);
+ } catch {
+  return null;
+ }
 }
 
 // ---------------------------------------------------------------------------
@@ -2004,6 +2042,8 @@ export type GateDeps = {
  /** Injectable Pi spawn seam for offline argv/prompt tests. When omitted, live
   * runs use the streaming async child lifecycle instead of spawnSync. */
  spawnPi?:(command:string, args:string[], options:any)=>SpawnResult;
+ /** Injectable Pi capability probe for offline isolation tests. */
+ piCapabilities?:PiCapabilities|null;
  /** Injectable streaming child seam for offline lifecycle tests. */
  spawnChild?:SpawnChild;
  /** External interruption (SIGINT/SIGTERM in a live run). */
@@ -2577,12 +2617,20 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // it is recommended but not applied, the receipt says so.
   const checkBackMode = t.checkBack === 'always' || t.checkBack === 'off' ? t.checkBack : 'auto';
   // Clarification gate: an unclear contract (or a vague-feature routing) is
-  // interviewed before any commodity work. An explicit workflow is never
-  // replaced (ADR-0003), `checkBack: "off"` disables the loop, and a contract
-  // already derived from a prepare brief never re-enters it.
-  if (explicitWorkflow === 'auto' && checkBackMode !== 'off' && typeof t.preparedFrom !== 'string'
-      && (t.hopFrom || deps.clarify?.hopPath || deps.clarify?.callHop)
-      && clarificationApplies(jev?.preflight?.attention ?? null, preparePlan)) {
+  // interviewed before any commodity work. `checkBack: "off"` disables the loop,
+  // and a contract already derived from a prepare brief or a prior clarification
+  // never re-enters it. An explicit workflow still clarifies a contract that
+  // Jev judges unclear (ADR-0003); it is never replaced for vague-feature routing
+  // alone.
+  if ((t.hopFrom || deps.clarify?.hopPath || deps.clarify?.callHop)
+      && clarityGateApplies({
+       attention: jev?.preflight?.attention ?? null,
+       workflow: explicitWorkflow,
+       checkBack: checkBackMode,
+       preparedFrom: t.preparedFrom,
+       clarifiedFrom: t.clarifiedFrom,
+       playbooks: preparePlan?.playbooks,
+      })) {
    try {
     emit('clarify');
     const batch = await startClarification(t, {
@@ -2618,6 +2666,19 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     // through to the normal prepare/implement decision.
     emit(`clarify unavailable: ${msg(e)}`);
    }
+  }
+  // Probe the installed Pi CLI once for this non-mock run, before the first
+  // spawn, and derive the isolation arguments from the task's piContext.
+  let piIsolation:{applied:string[]; missing:string[]; ambient:boolean; probed:boolean}|null=null;
+  let isolationArgs:string[]=[];
+  if (!mock) {
+   // Offline spawn seams bypass the real CLI probe; production runs always probe.
+   const capabilities = deps.piCapabilities !== undefined
+    ? deps.piCapabilities
+    : (deps.spawnPi || deps.spawnChild) ? null : probePiCapabilities();
+   const isolationPlan = buildIsolationArgs(t.piContext, capabilities);
+   isolationArgs = isolationPlan.args;
+   piIsolation = { applied:isolationPlan.applied, missing:isolationPlan.missing, ambient:isolationPlan.ambient, probed:capabilities !== null };
   }
   const checkBackRecommended = typeof t.preparedFrom !== 'string' && decision.selected !== 'prepare'
       && shouldCheckBack(jev?.preflight?.attention ?? null, preparePlan, prepareHistory);
@@ -2715,7 +2776,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    segments.push({index:0,eventsPath,stopReason:streamResult.stopReason,outputTruncated:false,outputLimited:false,checkpointPath:null});
   } else if (deps.spawnPi) {
    const spawnTimeout=Math.max(1, Math.min(600000, 600000, Math.max(1, workerRemainingMs())));
-   const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low'),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432,env:piBashEnv});
+   const r=deps.spawnPi('pi',[...buildPiArgs(requested, resume?.parentSessionId ?? null, t.thinking ?? 'low', piGuardModulePath(), isolationArgs),prompt],{cwd:executionCwd,encoding:'utf8',timeout:spawnTimeout,maxBuffer:33554432,env:piBashEnv});
    stdout=r.stdout || ''; stderr=r.stderr || '';
    workerStatus=r.status ?? (r.error ? 1 : 0);
    legacyError=r.error?.message;
@@ -2735,7 +2796,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     const sessionId = continuationIndex === 0 ? (resume?.parentSessionId ?? null) : null;
     const segResult = await executeWorkerStreaming({
      spawnChild, command:'pi',
-     args:[...buildPiArgs(requested, sessionId, t.thinking ?? 'low'),segmentPrompt],
+     args:[...buildPiArgs(requested, sessionId, t.thinking ?? 'low', piGuardModulePath(), isolationArgs),segmentPrompt],
      cwd:executionCwd, env:piBashEnv, eventsPath:segEventsPath, logPath:segLogPath, runtimePath, settings, deadlineAt:workerDeadlineAt(),
      phase:'worker', signal, heartbeat, maxOutputBytes: maxSegmentOutputBytes,
     });
@@ -2841,6 +2902,18 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // deadline breach or interruption, and persist the complete evidence pair.
   const after=collectGitEvidence(executionCwd, { timeoutMs: Math.max(1, remainingMs()) });
   const evidence=evidenceDelta(before, after);
+  let scopeResult:ScopeResult|undefined;
+  if (t.scope) {
+   let projectConfig:any={};
+   try {
+    const configPath=join(sourceCwd,'delivery.config.json');
+    if (existsSync(configPath)) projectConfig=JSON.parse(readFileSync(configPath,'utf8'));
+   } catch { projectConfig={}; }
+   scopeResult=classifyScope(evidence.runChangedFiles, t.scope.owned, {
+    incidental: t.scope.incidental ?? incidentalGlobsFromConfig(projectConfig),
+    repo: basename(sourceCwd),
+   });
+  }
   writeFileSync(join(dir,'evidence.json'),JSON.stringify({
    sourceCwd, executionCwd, isolation,
    before: evidence.before, after: evidence.after,
@@ -2957,6 +3030,8 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const runtime=heartbeat.snapshot();
   const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null};
   result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
+  if (piIsolation) result.piIsolation=piIsolation;
+  if (scopeResult) result.scope=scopeResult;
   if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
   result.unresolved=[];
   if (streamResult?.timedOut && streamResult.timedOutTool) {

@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HOT_FILES, REGISTRATION_FILES, checkPlanForJunior, planContracts, registeredTestFiles, runPlanCommand } from './plan-junior.ts';
+import { HOT_FILES, REGISTRATION_FILES, checkPlanForJunior, planContracts, registeredTestFiles, runPlanCommand, scorePlanFile } from './plan-junior.ts';
 
 const NODE = process.execPath;
 const JUNIOR = join(import.meta.dirname, 'junior.ts');
@@ -354,4 +354,27 @@ test('checkPlanForJunior skips the registration scope rule without registeredTes
 test('planContracts omits the registration constraint when the deliverable owns every registration file', () => {
   const [{ contract }] = planContracts(plan(agent('a', { owned_files: [...REGISTRATION_FILES] })), { cwd: '/repo' });
   assert.equal(contract.constraints.some((c: string) => c.startsWith('Do not edit registration files')), false);
+});
+
+// --- CLI10 contract scope and plan-time quality ----------------------------
+
+test('planContracts records the owned files under scope.owned', () => {
+  const [{ contract }] = planContracts(plan(agent('a', { owned_files: ['src/x.ts', 'src/y.ts'] })), { cwd: '/repo' });
+  assert.deepEqual((contract.scope as any).owned, ['src/x.ts', 'src/y.ts']);
+});
+
+test('runPlanCommand reads the registered tests from package.json', () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(agent('a', { owned_files: ['x.test.ts'] })));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test x.test.ts' } }));
+  const { result } = runPlanCommand(['check', file], { cwd: dir, out: () => {} });
+  assert.equal(codes(result).includes('REGISTRATION_OUTSIDE_SCOPE'), false);
+});
+
+test('scorePlanFile returns one quality score per planned contract', async () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(agent('a', { owned_files: ['src/x.ts'] })));
+  const classify = async () => ({ answers: {}, usage: {} });
+  const report = await scorePlanFile(file, classify as any, { cwd: dir });
+  assert.deepEqual(report.scores.map((score) => score.id), ['a']);
 });

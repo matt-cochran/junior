@@ -3762,3 +3762,55 @@ test('Typesafe classifier redacts the key if the API echoes it',async()=>{
  const classifier=createTypesafeClassifier(typesafeGateway,captureFetch(res).impl);
  assert.doesNotMatch((await classifier({state:{},questions:{}})).errorMessage,/ts-secret-key/);
 });
+
+// --- WIRE10: Pi isolation, scope handoff and the explicit-workflow clarity gate ---
+const isolationCapabilities={flags:new Set(['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'])};
+
+test('Validation rejects a piContext skill entry that is not a non-empty string',()=>{
+ assert.throws(()=>validate(task(0,{piContext:{skills:['']}})),/Invalid piContext\.skills/);
+});
+test('Validation rejects a blank clarifiedFrom path',()=>{
+ assert.throws(()=>validate(task(0,{clarifiedFrom:' '})),/Invalid clarifiedFrom/);
+});
+test('Validation rejects a scope owned entry that is not a path',()=>{
+ assert.throws(()=>validate(task(0,{scope:{owned:[{path:''}]}})),/Invalid scope\.owned/);
+});
+test('Validation rejects a non-string scope incidental glob',()=>{
+ assert.throws(()=>validate(task(0,{scope:{owned:['a.ts'],incidental:[1]}})),/Invalid scope\.incidental/);
+});
+test('Pi argv appends the run isolation arguments after the guard extension',()=>{
+ assert.deepEqual(buildPiArgs({provider:'openrouter',model:'m'},null,undefined,undefined,['--no-extensions','--no-mcp']),['--provider','openrouter','--model','m','--mode','json','-e',piGuardModulePath(),'--no-extensions','--no-mcp']);
+});
+test('A live run passes its supported isolation flags to Pi',async()=>{
+ let seen:string[]=[];
+ const spawnPi=(_c:string,args:string[])=>{seen=args;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};};
+ await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.ok(seen.includes('--no-extensions'));
+});
+test('A live run records the probed Pi isolation plan on the result',async()=>{
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''});
+ const r=await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.deepEqual(r.piIsolation,{applied:['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'],missing:[],ambient:false,probed:true});
+});
+test('A run with a scope records the scope classification on the result',async()=>{
+ const r=await run(task(0,{scope:{owned:['src/*.ts']}}),true);
+ assert.equal(r.scope.checked,true);
+});
+test('An explicit-workflow contract with a clarify readiness decision stops at needs_answers',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{workflow:'test_first',jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.status,'needs_answers');
+});
+test('An explicit-workflow contract with a clarify readiness decision keeps its workflow',async()=>{
+ const classifier=gateClassifier({requires_frontier:bool(0.05),contract_clear:bool(0.2),blocking_assumptions:bool(0.05),contract_part:choice('acceptance',0.9)});
+ const r=await run(task(0,{workflow:'test_first',jev:{mode:'shadow'}}),true,{classify:classifier,clarify:{callHop:emptyQuestionHop}});
+ assert.equal(r.workflow.selected,'test_first');
+});
+test('The compact handoff carries the run scope classification',()=>{
+ const scope={checked:true,inScope:['src/a.ts'],incidental:[],outOfScope:['src/b.ts']};
+ assert.deepEqual(compactHandoff(handoffResult({scope})).scope,scope);
+});
+test('The compact handoff lists out-of-scope changes as unresolved',()=>{
+ const scope={checked:true,inScope:[],incidental:[],outOfScope:['src/a.ts','src/b.ts']};
+ assert.ok(compactHandoff(handoffResult({scope})).unresolved.includes('out of scope: src/a.ts, src/b.ts'));
+});

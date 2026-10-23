@@ -14,6 +14,7 @@ import { mkdtempSync, mkdirSync, readdirSync, existsSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop } from './tools/tools.ts';
+import { checkPi, doctor } from './setup.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -33,7 +34,7 @@ function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -463,4 +464,84 @@ test('junior handoff fails a plan without hopFrom before any lease attempt', () 
   }));
   const res = runJunior(['handoff', taskPath, '--mock', '--quiet'], dir);
   assert.doesNotMatch(res.stdout, /plan_lease_refused/);
+});
+
+// --- CLI10 compact, context hooks and plan --jev ----------------------------
+
+test('junior compact exits successfully outside a Git checkout', () => {
+  assert.equal(runJunior(['compact'], workdir()).status, 0);
+});
+
+test('junior compact prints the compact context markdown', () => {
+  assert.match(runJunior(['compact'], workdir()).stdout, /## Junior compact context/);
+});
+
+test('junior compact --json prints the whole compact block', () => {
+  assert.equal(typeof JSON.parse(runJunior(['compact', '--json'], workdir()).stdout).markdown, 'string');
+});
+
+test('junior compact rejects an invalid --max-chars value', () => {
+  assert.match(runJunior(['compact', '--max-chars=abc'], workdir()).stderr, /--max-chars/);
+});
+
+test('junior compact rejects a zero --max-chars value', () => {
+  assert.notEqual(runJunior(['compact', '--max-chars=0'], workdir()).status, 0);
+});
+
+test('junior setup --context-hooks prints the settings path', () => {
+  const out = JSON.parse(runJunior(['setup', '--context-hooks'], workdir()).stdout);
+  assert.equal(typeof out.path, 'string');
+});
+
+test('junior setup --context-hooks --harness codex writes nothing', () => {
+  const dir = workdir();
+  runJunior(['setup', '--context-hooks', '--harness', 'codex'], dir);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test('junior setup --context-hooks --harness codex prints manual steps', () => {
+  assert.match(runJunior(['setup', '--context-hooks', '--harness', 'codex'], workdir()).stdout, /AGENTS\.md/);
+});
+
+test('junior setup --context-hooks --scope project accepts the project scope', () => {
+  assert.equal(runJunior(['setup', '--context-hooks', '--scope', 'project'], workdir()).status, 0);
+});
+
+test('junior setup --context-hooks rejects an invalid --scope value', () => {
+  assert.notEqual(runJunior(['setup', '--context-hooks', '--scope=elsewhere'], workdir()).status, 0);
+});
+
+test('junior plan check --help documents --jev', () => {
+  assert.match(runJunior(['plan', '--help'], workdir()).stdout, /--jev/);
+});
+
+test('junior plan check without --jev omits the quality report', () => {
+  const dir = workdir();
+  const file = join(dir, 'plan.json');
+  writeFileSync(file, JSON.stringify({ deliverables: [{ id: 'a', owned_files: ['src/x.ts'], metadata: { artifact: 'a', owner: 'agent', junior: { acceptance: ['ok'], checks: [{ command: 'true' }] } } }] }));
+  assert.equal('quality' in JSON.parse(runJunior(['plan', 'check', file], dir).stdout), false);
+});
+
+// --- Pi isolation capability detection -------------------------------------
+
+function piDeps(cwd: string, help: string) {
+  const bin = join(cwd, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+  const exec = (_cmd: string, args: string[]) => ({
+    status: 0,
+    stdout: args.includes('--version') ? 'pi 1.0.4\n' : args.includes('--help') ? help : '',
+    stderr: '',
+  });
+  return { cwd, env: { PATH: bin, HOME: cwd }, execPath: join(bin, 'node'), exec, readMounts: () => '' };
+}
+
+test('checkPi reports a missing isolation flag when Pi help omits it', () => {
+  const help = '--no-extensions --no-skills --no-context-files --no-prompt-templates --tools';
+  assert.deepEqual(checkPi(piDeps(workdir(), help)).isolation.missing, ['--no-approve', '--no-mcp']);
+});
+
+test('doctor remediation names a missing isolation flag', () => {
+  const help = '--no-extensions --no-skills --no-context-files --no-prompt-templates --tools';
+  assert.match(doctor(piDeps(workdir(), help)).remediation.join(' '), /--no-approve, --no-mcp/);
 });

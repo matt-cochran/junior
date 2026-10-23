@@ -14,6 +14,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { scorePlanContracts, type PlanQualityReport } from './plan-quality.ts';
+import type { GateClassifier } from './worker.ts';
 
 /** Registration files whose edits serialize otherwise independent cohorts. */
 export const HOT_FILES: readonly string[] = [
@@ -364,6 +366,7 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
           : []),
       ],
       checks,
+      scope: { owned: files },
       isolation: 'worktree',
       jev: { mode: 'shadow' },
       modelProfile: requestedProfile || 'general',
@@ -380,9 +383,33 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
   });
 }
 
+/** Score a plan file's contracts at plan-check time through the worker's own
+ * preflight gate. The caller supplies the classifier seam so tests and the CLI
+ * can keep Jev calls explicit. */
+export async function scorePlanFile(
+  planPath: string,
+  classify: GateClassifier,
+  opts: { cwd: string },
+): Promise<PlanQualityReport> {
+  const plan = JSON.parse(fs.readFileSync(path.resolve(opts.cwd, planPath), 'utf8'));
+  return scorePlanContracts(planContracts(plan, { cwd: opts.cwd }), classify);
+}
+
 export interface PlanCommandDeps {
   cwd?: string;
   out?: (s: string) => void;
+}
+
+/** Read `scripts.test` from a project package.json when present. A malformed
+ * package.json fails fast rather than silently skipping the registration rule. */
+function registeredTestsIn(cwd: string): string[] | undefined {
+  const packagePath = path.join(cwd, 'package.json');
+  if (!fs.existsSync(packagePath)) return undefined;
+  try {
+    return registeredTestFiles(JSON.parse(fs.readFileSync(packagePath, 'utf8')));
+  } catch (error) {
+    throw new Error(`${packagePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Thin CLI shell for `junior plan check|contracts`; prints its own JSON. */
@@ -408,6 +435,10 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
       outDir = String(inline ?? args[++i]);
       continue;
     }
+    if (name === '--jev') {
+      if (inline !== undefined) throw new Error('Option --jev does not take a value');
+      continue;
+    }
     positional.push(arg);
   }
 
@@ -415,7 +446,8 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     const file = positional[0];
     if (!file) throw new Error('Usage: junior plan check <plan.json> [--max-hours N]');
     const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
-    const result = checkPlanForJunior(plan, { maxHours });
+    const registeredTests = registeredTestsIn(cwd);
+    const result = checkPlanForJunior(plan, { maxHours, ...(registeredTests !== undefined ? { registeredTests } : {}) });
     out(JSON.stringify(result, null, 2));
     return { exitCode: result.ok ? 0 : 1, result };
   }
