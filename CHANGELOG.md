@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-23
+
+Junior's crossmatrix adapter now works against a real crossmatrix model
+(ADR 0012). Crossmatrix itself is unchanged: every dimension, scale and
+relation Junior uses is declared by Junior, and crossmatrix stays a standalone
+tool.
+
+### Fixed
+
+- `junior matrix codemap init` no longer fails on a model without Jevitate
+  dimensions: a default feature dimension the model lacks is skipped with a
+  note; a missing dimension named with `--feature-dimension` is still an error
+  (#108).
+- `junior matrix sync --source state` writes only to relations it declares
+  between dimensions the model has, so its writes land on a real model. Before,
+  the first write failed with `unknown_member` and aborted the sync. Failure
+  modes now link to the deliverables and files their `refs` name
+  (`junior-fmeca-cpm`, `junior-fmeca-code`, relation type `undermines`), and a
+  plan criterion's `mitigates` links its deliverable to the failure mode with
+  the mitigation's status (`junior-cpm-fmeca`). A failed write is reported in
+  `failures` (exit code 1) and the sync continues; a stale reference is a note
+  (#109).
+- `junior matrix autolink` finds a complete deliverable's run by evidence path,
+  run id (`<id>/<stamp>`) or the latest `.delivery/<id>/<stamp>/result.json`,
+  and lists each one it could not link in `skipped` instead of skipping
+  silently (#110).
+
+### Changed
+
+- Deliverable status is a `status` attribute on the cpm roster (read from
+  `plan.status` when syncing through the hop) instead of self-edge
+  observations; fmeca members carry `criticality`, `residual_criticality`,
+  `standing` and `disposition` instead of the always-empty severity, occurrence
+  and detection numbers (#109).
+- `--source state` no longer mirrors elicitation claims, scientific-process
+  verdicts or jevitate results: no dimension holds those members, so each flag
+  reports one "not mirrored" note (ADR 0012 R5). None of these writes had ever
+  reached a real model.
+- The crossmatrix test double has a strict mode (`FAKE_CROSSMATRIX_STATE`) that
+  rejects unknown dimensions, scales, relations, members and relation types as
+  the server does, and `matrix-live.test.ts` runs the setup against an
+  installed `crossmatrix-mcp` (skipped when none is installed) (#111).
+
 ## [0.11.0] - 2026-10-23
 
 ### Added
