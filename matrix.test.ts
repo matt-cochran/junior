@@ -71,6 +71,39 @@ function handle(line) {
 }
 `;
 
+
+/** Minimal cpm MCP server that answers plan.get and plan.status from fixtures. */
+const FAKE_CPM_STATUS_SOURCE = `
+import fs from 'node:fs';
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (line) handle(line);
+  }
+});
+function send(obj) { process.stdout.write(JSON.stringify(obj) + '\\n'); }
+function handle(line) {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fake-cpm', version: '0.0.1' } } });
+    return;
+  }
+  if (msg.method === 'notifications/initialized') return;
+  if (msg.method === 'tools/call') {
+    const file = msg.params?.name === 'plan.status' ? process.env.FAKE_CPM_PLAN_STATUS : process.env.FAKE_CPM_PLAN_GET;
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false } });
+    return;
+  }
+  if (msg.id !== undefined) send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
+}
+`;
+
 function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-matrix-'));
 }
@@ -193,6 +226,16 @@ test('cpmDeliverables namespaces the source reference with the plan id', () => {
   assert.equal(dim.members[0].sourceRef.sourceRef, 'cpm:plan1/d1');
 });
 
+test('cpmDeliverables lowercases the status supplied for a deliverable', () => {
+  const dim = cpmDeliverables([{ id: 'd1', title: 'Ship it' }], 'plan1', new Map([['d1', 'Complete']]));
+  assert.equal(dim.members[0].attributes.status, 'complete');
+});
+
+test('cpmDeliverables omits the status attribute when no statuses are supplied', () => {
+  const dim = cpmDeliverables([{ id: 'd1', title: 'Ship it' }], 'plan1');
+  assert.equal(Object.hasOwn(dim.members[0].attributes, 'status'), false);
+});
+
 test('cpmDeliverables yields one member per deliverable in the cpm@0.4.0 plan.get fixture', () => {
   const dim = cpmDeliverables(cpmPlanGetFixture(), 'plan_FIXTURE');
   assert.deepEqual(dim.members.map((m: any) => m.id), ['cpm:d-api', 'cpm:d-docs', 'cpm:ms']);
@@ -218,6 +261,14 @@ test('fmecaFailureModes computes the criticality as a numeric weight', () => {
     's1',
   );
   assert.equal(dim.members[0].weight, 24);
+});
+
+test('fmecaFailureModes copies the fmeca@0.2.2 criticality into member attributes', () => {
+  const state = JSON.parse(
+    readFileSync(join(ROOT, 'tools', 'test-fixtures', 'companions', 'fmeca@0.2.2', 'state.get.json'), 'utf8'),
+  );
+  const dim = fmecaFailureModes(state, state.session_id);
+  assert.equal(dim.members[0].attributes.criticality, state.failure_modes[0].criticality);
 });
 
 test('fmecaFailureModes marks the numeric weight as a deterministic import', () => {
@@ -372,6 +423,37 @@ test('junior matrix export --source cpm writes one member per deliverable from t
   const doc = JSON.parse(readFileSync(written, 'utf8'));
   const ids = doc.dimensions.find((d: any) => d.id === 'cpm').members.map((m: any) => m.id);
   assert.deepEqual(ids, ['cpm:d-api', 'cpm:d-docs', 'cpm:ms']);
+});
+
+test('junior matrix export --source cpm through the hop carries plan.status statuses', () => {
+  const dir = workdir();
+  const script = join(dir, 'fake-cpm.mjs');
+  writeFileSync(script, FAKE_CPM_STATUS_SOURCE);
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      cpm: {
+        command: NODE,
+        args: [script],
+        env: {
+          FAKE_CPM_PLAN_GET: join(ROOT, 'tools', 'test-fixtures', 'companions', 'cpm@0.4.2', 'plan.get.json'),
+          FAKE_CPM_PLAN_STATUS: join(ROOT, 'tools', 'test-fixtures', 'companions', 'cpm@0.4.2', 'plan.status.progress.json'),
+        },
+        sourceVersion: '0.4.2',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'export', '--source', 'cpm', '--hop', hop, '--plan', 'plan_FIXTURE', '--dir', dir, '--out', join(dir, 'crossmatrix')],
+    { encoding: 'utf8' },
+  );
+  const written = JSON.parse(result.stdout).written[0];
+  const doc = JSON.parse(readFileSync(written, 'utf8'));
+  const statuses = doc.dimensions.find((d: any) => d.id === 'cpm').members.map((m: any) => m.attributes.status);
+  assert.deepEqual(statuses, ['complete', 'ready', 'pending']);
 });
 
 test('junior matrix export --source cpm exits non-zero when plan.get is unrecognized', () => {
