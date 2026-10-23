@@ -508,10 +508,24 @@ test('the needs_answers result carries the question batch summary', async () => 
   assert.equal(result.clarification?.questions?.[0]?.id, 'Q1');
 });
 
-test('an explicit workflow is not replaced by the clarification loop', async () => {
+test('an explicit-workflow contract judged unclear stops at needs_answers (ADR 0009)', async () => {
   const dir = workdir();
   const { callHop } = fakeHop({ signals: [COVERAGE_GAP] });
   const result = await run(taskFixture(dir, { jev: { mode: 'shadow' }, workflow: 'test_first' }), true, { classify: unclearClassifier, clarify: { hopPath: 'hop.json', callHop: callHop as any } });
+  assert.equal(result.status, 'needs_answers');
+});
+
+test('checkBack off disables the clarification gate for an explicit workflow', async () => {
+  const dir = workdir();
+  const { callHop } = fakeHop({ signals: [COVERAGE_GAP] });
+  const result = await run(taskFixture(dir, { jev: { mode: 'shadow' }, workflow: 'test_first', checkBack: 'off' }), true, { classify: unclearClassifier, clarify: { hopPath: 'hop.json', callHop: callHop as any } });
+  assert.notEqual(result.status, 'needs_answers');
+});
+
+test('a clarified explicit-workflow contract does not re-enter the gate', async () => {
+  const dir = workdir();
+  const { callHop } = fakeHop({ signals: [COVERAGE_GAP] });
+  const result = await run(taskFixture(dir, { jev: { mode: 'shadow' }, workflow: 'test_first', clarifiedFrom: join(dir, 'clarify.json') }), true, { classify: unclearClassifier, clarify: { hopPath: 'hop.json', callHop: callHop as any } });
   assert.notEqual(result.status, 'needs_answers');
 });
 
