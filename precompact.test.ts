@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { captureRequestBody, captureUserMessage, transcriptTail, parseCaptureResponse, runCapture, type CaptureDeps } from './precompact.ts';
+import { initHop } from './tools/tools.ts';
 
 const MODEL = { provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' };
 
@@ -28,6 +29,52 @@ function transcript(dir: string, text = 'We decide later.'): string {
   writeFileSync(path, JSON.stringify({ type: 'user', message: { role: 'user', content: text } }));
   return path;
 }
+
+/** Make every start of the hop command for a tool append one line to `log`. */
+function recordingCommand(dir: string, log: string): { command: string; args: string[] } {
+  const script = join(dir, 'hop-recorder.mjs');
+  writeFileSync(
+    script,
+    `#!/usr/bin/env node\nimport { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, 'started\\n');\n`,
+    { mode: 0o755 },
+  );
+  return { command: script, args: [] };
+}
+
+/** A HOP whose fmeca, cpm and scientific-process commands record every start. */
+function captureHop(dir: string, log: string): void {
+  const hopPath = join(dir, '.delivery', 'setup', 'hop.json');
+  const recorder = { ...recordingCommand(dir, log), sourceVersion: '0.0.0', sourceSha: '0'.repeat(64) };
+  initHop(hopPath, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: { fmeca: recorder, cpm: recorder, 'scientific-process': recorder },
+  });
+}
+
+const TWO_ITEMS =
+  '{"items":[{"kind":"decision","text":"Ship 0.11 first?"},{"kind":"todo","text":"Run the migration"}]}';
+
+test('runCapture writes two proposals when the model returns two valid items', async () => {
+  const dir = root();
+  const record = await runCapture({ transcript_path: transcript(dir) }, deps(dir, {
+    writeProposal: undefined,
+    callModel: async () => ({ content: TWO_ITEMS }),
+  }));
+
+  assert.equal(record.proposals, 2);
+});
+
+test('runCapture with a hop starts none of the fmeca, cpm or scientific-process commands', async () => {
+  const dir = root();
+  const log = join(dir, 'hop-starts.log');
+  captureHop(dir, log);
+  await runCapture({ transcript_path: transcript(dir) }, deps(dir, {
+    writeProposal: undefined,
+    callModel: async () => ({ content: TWO_ITEMS }),
+  }));
+
+  assert.equal(existsSync(log) ? readFileSync(log, 'utf8') : '', '');
+});
 
 test('transcriptTail keeps Claude conversation text and tool names but not tool results', () => {
   const jsonl = [
