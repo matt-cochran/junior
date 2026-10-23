@@ -135,6 +135,39 @@ test('graphSlice from a jevitate outcome seed reaches the file mapped by the lin
   assert.ok(slice.nodes.some((node) => node.member === 'loc:src/checkout.ts'));
 });
 
+test('graphSlice normalizes a jevitate-personas seed to a persona node', async () => {
+  const slice = await graphSlice({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    seeds: ['jevitate-personas:buyer'],
+    deps: injected({}),
+  });
+  const node = slice.nodes.find((entry) => entry.member === 'persona:buyer');
+  assert.deepEqual(node && { member: node.member, kind: node.kind }, { member: 'persona:buyer', kind: 'persona' });
+});
+
+test('graphSlice from a job seed reaches a linked persona node', async () => {
+  const slice = await graphSlice({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    seeds: ['job:checkout'],
+    deps: injected({ 'job:checkout': [hop({ member: 'persona:buyer', relation: 'personas' })] }),
+  });
+  const node = slice.nodes.find((entry) => entry.member === 'persona:buyer');
+  assert.equal(node?.kind, 'persona');
+});
+
+test('graphSlice keeps a jevitate-personas member already prefixed as a persona node', async () => {
+  const slice = await graphSlice({
+    hopPath: 'hop.json',
+    modelId: 'm1',
+    seeds: ['jevitate-personas:persona:buyer'],
+    deps: injected({}),
+  });
+  const node = slice.nodes.find((entry) => entry.member === 'persona:buyer');
+  assert.deepEqual(node && { member: node.member, kind: node.kind }, { member: 'persona:buyer', kind: 'persona' });
+});
+
 test('graphSlice stops at maxNodes and reports the cut', async () => {
   const slice = await graphSlice({
     hopPath: 'hop.json',
@@ -204,7 +237,19 @@ test('contractContext summarizes related outcomes, risks, claims and notes', () 
     risks: ['fm:f1'],
     claims: [{ member: 'claim:c1', standing: 'supported' }],
     notes: ['adr:1', 'hypothesis:h1'],
+    personas: [],
   });
+});
+
+test('contractContext collects persona members in slice order without duplicates', () => {
+  const result = contractContext(
+    sliceOf([
+      { member: 'persona:buyer', kind: 'persona', depth: 1, confidence: 'high', stale: false, observation: null, standing: null },
+      { member: 'persona:seller', kind: 'persona', depth: 1, confidence: 'high', stale: false, observation: null, standing: null },
+      { member: 'persona:buyer', kind: 'persona', depth: 2, confidence: 'low', stale: false, observation: null, standing: null },
+    ]),
+  );
+  assert.deepEqual(result.evidence.personas, ['persona:buyer', 'persona:seller']);
 });
 
 // --- impactChecks -----------------------------------------------------------
