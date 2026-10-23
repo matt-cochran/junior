@@ -1,0 +1,79 @@
+{
+  "accepted_tensions": [],
+  "blockers": [
+    "COVERAGE: required dimension 'acceptance' lacks a withstood hypothesis",
+    "CONTRADICTION: surviving high-severity contradiction 'ctr:intra:c1+c2' (Claim 'c1' asserts and 'c2' denies the same fact (fixture-elicit-20261020b format).)"
+  ],
+  "dimensions": [
+    {
+      "dimension": "acceptance",
+      "hypotheses": []
+    }
+  ],
+  "ready": false,
+  "requirements": [
+    {
+      "acceptance_criteria": [],
+      "capability": "format",
+      "id": "req:c1",
+      "quality_checks": [
+        {
+          "name": "has_acceptance",
+          "passed": false
+        },
+        {
+          "name": "has_owner",
+          "passed": false
+        },
+        {
+          "name": "testable",
+          "passed": false
+        },
+        {
+          "name": "unambiguous",
+          "passed": true
+        }
+      ],
+      "source_claims": [
+        "c1"
+      ],
+      "statement": "fixture-elicit-20261020b format csv",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    },
+    {
+      "acceptance_criteria": [],
+      "capability": "format",
+      "id": "req:c2",
+      "quality_checks": [
+        {
+          "name": "has_acceptance",
+          "passed": false
+        },
+        {
+          "name": "has_owner",
+          "passed": false
+        },
+        {
+          "name": "testable",
+          "passed": false
+        },
+        {
+          "name": "unambiguous",
+          "passed": true
+        }
+      ],
+      "source_claims": [
+        "c2"
+      ],
+      "statement": "fixture-elicit-20261020b format csv",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    }
+  ],
+  "session_id": "fixture-elicit-20261020b"
+}
