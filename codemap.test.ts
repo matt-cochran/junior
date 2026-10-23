@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { initHop } from './tools/tools.ts';
+import { callHop, initHop } from './tools/tools.ts';
 import {
   codemapContext,
   codemapFiles,
@@ -47,6 +47,47 @@ function writeHop(dir: string, sourceVersion: string, log: string, extraEnv: Rec
     },
   });
   return hop;
+}
+
+type StrictOp = Record<string, unknown>;
+
+async function strictCommand(hopPath: string, modelId: string, requestId: string, op: StrictOp): Promise<void> {
+  await callHop(hopPath, 'crossmatrix', {
+    tool: 'crossmatrix.command',
+    arguments: {
+      request: {
+        schemaVersion: '0.3.0',
+        requestId,
+        modelId,
+        actor: { actorType: 'system', persona: 'model_admin' },
+        op,
+      },
+    },
+  });
+}
+
+async function seedStrictModel(hopPath: string, modelId: string): Promise<void> {
+  await strictCommand(hopPath, modelId, 'seed-dimension-cpm', { kind: 'dimension.register', dimensionId: 'cpm' });
+  await strictCommand(hopPath, modelId, 'seed-members-cpm', {
+    kind: 'members.sync',
+    dimensionId: 'cpm',
+    members: [{ id: 'cpm:d1' }],
+  });
+  await strictCommand(hopPath, modelId, 'seed-dimension-code', { kind: 'dimension.register', dimensionId: 'code' });
+  await strictCommand(hopPath, modelId, 'seed-members-code', {
+    kind: 'members.sync',
+    dimensionId: 'code',
+    members: [{ id: 'loc:src/a.ts' }],
+  });
+}
+
+function strictStatePath(dir: string): string {
+  return join(dir, 'crossmatrix-state.json');
+}
+
+function strictRelations(dir: string, modelId: string): string[] {
+  const state = JSON.parse(readFileSync(strictStatePath(dir), 'utf8'));
+  return Object.keys(state.models[modelId]?.relations ?? {}).sort();
 }
 
 /** Opt-in fake crossmatrix query results, keyed by query kind. */
@@ -190,6 +231,38 @@ test('codemapInit sends no request when the hop is too old', async () => {
   const hop = writeHop(dir, '0.2.1', log);
   await codemapInit({ hopPath: hop, modelId: 'm1' }).catch(() => {});
   assert.equal(existsSync(log), false);
+});
+
+test('codemapInit with default dimensions notes each feature dimension the model lacks', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_STATE: strictStatePath(dir) });
+  await seedStrictModel(hop, 'm1');
+  const result = await codemapInit({ hopPath: hop, modelId: 'm1' });
+  assert.deepEqual(result.notes, [
+    'codemap-jevitate-jobs skipped: dimension jevitate-jobs is not in model m1',
+    'codemap-jevitate-journeys skipped: dimension jevitate-journeys is not in model m1',
+  ]);
+});
+
+test('codemapInit with default dimensions declares only relations whose dimensions exist', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_STATE: strictStatePath(dir) });
+  await seedStrictModel(hop, 'm1');
+  await codemapInit({ hopPath: hop, modelId: 'm1' });
+  assert.deepEqual(strictRelations(dir, 'm1'), ['codemap-contains', 'codemap-cpm']);
+});
+
+test('codemapInit rejects an explicitly named feature dimension the model lacks', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_STATE: strictStatePath(dir) });
+  await seedStrictModel(hop, 'm1');
+  await assert.rejects(
+    codemapInit({ hopPath: hop, modelId: 'm1', featureDimensions: ['jevitate-jobs'] }),
+    /jevitate-jobs/,
+  );
 });
 
 // --- codemapLink ------------------------------------------------------------

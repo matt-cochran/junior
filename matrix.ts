@@ -21,6 +21,7 @@ import { isDirectEntry } from './cli-entry.ts';
 import {
   fmecaFailureModes as readFmecaFailureModes,
   planDeliverables,
+  planStatusRows,
   strictItems,
 } from './companion-shapes.ts';
 import { playbookDimensions } from './playbooks.ts';
@@ -413,19 +414,26 @@ export function jevitateJourneys(files: MatrixFile[]): MatrixDimension {
 // ---------------------------------------------------------------------------
 
 /** Implementation assets from a CPM plan graph. */
-export function cpmDeliverables(planGraph: unknown, planId: string): MatrixDimension {
+export function cpmDeliverables(
+  planGraph: unknown,
+  planId: string,
+  statuses?: Map<string, string>,
+): MatrixDimension {
   const members: MatrixMember[] = strictItems(planDeliverables(planGraph), 'cpm', 'plan.get', planGraph).map((deliverable) => {
     const id = String(deliverable.id ?? deliverable.deliverableId ?? deliverable.slug ?? '');
     const sourceRef = `cpm:${planId}/${id}`;
+    const attributes: Record<string, unknown> = {
+      owned_files: deliverable.owned_files ?? deliverable.ownedFiles ?? [],
+      prerequisites: deliverable.prerequisites ?? deliverable.depends_on ?? deliverable.dependsOn ?? [],
+      estimated_effort_hours: deliverable.estimated_effort_hours ?? deliverable.estimatedEffortHours ?? null,
+    };
+    const status = statuses?.get(id);
+    if (status !== undefined) attributes.status = status.toLowerCase();
     return {
       id: `cpm:${id}`,
       label: String(deliverable.title ?? deliverable.name ?? deliverable.description ?? id),
       status: 'active',
-      attributes: {
-        owned_files: deliverable.owned_files ?? deliverable.ownedFiles ?? [],
-        prerequisites: deliverable.prerequisites ?? deliverable.depends_on ?? deliverable.dependsOn ?? [],
-        estimated_effort_hours: deliverable.estimated_effort_hours ?? deliverable.estimatedEffortHours ?? null,
-      },
+      attributes,
       sourceRef: {
         system: 'cpm',
         sourceType: 'deliverable',
@@ -465,9 +473,10 @@ export function fmecaFailureModes(state: unknown, sessionId: string): MatrixDime
       label: String(mode.name ?? mode.description ?? mode.failure_mode ?? id),
       status: 'active',
       attributes: {
-        severity: mode.severity ?? null,
-        occurrence: mode.occurrence ?? null,
-        detection: mode.detection ?? null,
+        criticality: mode.criticality ?? null,
+        residual_criticality: mode.residual_criticality ?? null,
+        standing: mode.standing ?? null,
+        disposition: mode.disposition ?? null,
         effect: mode.effect ?? null,
         cause: mode.cause ?? null,
       },
@@ -813,7 +822,11 @@ async function dimensionsForSource(options: MatrixOptions, source: string): Prom
     }
     const outcome = await callHop(options.hop!, 'cpm', { tool: 'plan.get', arguments: { plan_id: options.plan! } });
     if (!outcome.ok) throw new Error(`cpm plan.get failed: ${outcome.error?.message ?? outcome.note ?? 'unknown error'}`);
-    return [cpmDeliverables(outcome.result, options.plan!)];
+    const statusOutcome = await callHop(options.hop!, 'cpm', { tool: 'plan.status', arguments: { plan_id: options.plan! } });
+    const statuses = statusOutcome.ok
+      ? new Map(planStatusRows(statusOutcome.result).items.map((row) => [row.id, row.status]))
+      : undefined;
+    return [cpmDeliverables(outcome.result, options.plan!, statuses)];
   }
   if (!options.hop || !options.session) throw new Error('fmeca export requires --hop <hop.json> and --session <fmeca session_id>');
   const outcome = await callHop(options.hop, 'fmeca', { tool: 'state.get', arguments: { session_id: options.session } });
@@ -848,6 +861,7 @@ export async function main(argv: string[]): Promise<number> {
           dir: options.dir,
         });
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        if (result.failures.length > 0) process.exitCode = 1;
         return 0;
       }
       const dimensions: MatrixDimension[] = [];
