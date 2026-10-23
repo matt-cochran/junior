@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop } from './tools/tools.ts';
 import { MAX_GATE_QUESTIONS, type GateClassifier, type GateQuestion } from './worker.ts';
-import { buildPlanFromSpec, planFromSpec, runPlanFromSpec } from './spec-bridge.ts';
+import { artifactFor, buildPlanFromSpec, planFromSpec, runPlanFromSpec } from './spec-bridge.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -136,7 +136,36 @@ test('buildPlanFromSpec records the elicitation session and requirement id as th
 
 test('buildPlanFromSpec carries the requirement acceptance criteria as junior acceptance', () => {
   const plan = buildPlanFromSpec(READY_SPEC);
-  assert.deepEqual(deliverable(plan, 'r-auth')?.metadata.junior?.acceptance, ['token issued']);
+  assert.deepEqual(deliverable(plan, 'r-auth')?.metadata.junior?.acceptance, [
+    { id: 'r-auth/ac1', text: 'token issued' },
+  ]);
+});
+
+test('buildPlanFromSpec ids acceptance criteria by requirement id and 1-based position', () => {
+  const spec = {
+    ...READY_SPEC,
+    requirements: [
+      { id: 'req:c1', statement: 'export csv', acceptance_criteria: ['A', 'B'], priority: 'should' },
+    ],
+  };
+  const plan = buildPlanFromSpec(spec);
+  const id = requirementDeliverables(plan)[0]?.id;
+  assert.deepEqual(deliverable(plan, id)?.metadata.junior?.acceptance, [
+    { id: 'req:c1/ac1', text: 'A' },
+    { id: 'req:c1/ac2', text: 'B' },
+  ]);
+});
+
+test('artifactFor keeps the plain requirement acceptance texts', () => {
+  assert.equal(
+    artifactFor({ id: 'req:c1', statement: 'export csv', acceptance_criteria: ['A', 'B'] }),
+    'export csv, verified by: A; B',
+  );
+});
+
+test('buildPlanFromSpec maps a requirement without acceptance criteria to an empty acceptance list', () => {
+  const plan = buildPlanFromSpec(READY_SPEC);
+  assert.deepEqual(deliverable(plan, 'r-ui')?.metadata.junior?.acceptance, []);
 });
 
 test('buildPlanFromSpec adds a prerequisite when a condition names another capability', () => {
@@ -252,6 +281,16 @@ test('runPlanFromSpec returns 0 when the cpm lint is clean', async () => {
   const hop = fakeCpmHop(dir);
   const code = await runPlanFromSpec([
     '--spec', writeSpec(dir, READY_SPEC), '--name', 'p', '--dir', dir, '--hop', hop,
+  ]);
+  assert.equal(code, 0);
+});
+
+test('runPlanFromSpec converts the recorded elicitation@0.1.2 spec export', async () => {
+  const dir = workdir();
+  const hop = fakeCpmHop(dir);
+  const fixture = join(ROOT, 'tools', 'test-fixtures', 'companions', 'elicitation@0.1.2', 'spec.export.json');
+  const code = await runPlanFromSpec([
+    '--spec', fixture, '--name', 'p', '--dir', dir, '--hop', hop, '--allow-unready',
   ]);
   assert.equal(code, 0);
 });

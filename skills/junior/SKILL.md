@@ -391,6 +391,17 @@ value, snapshots). cpm-planner auto-baselines at the first execution unless
 Neither tool needs registering as an MCP server for this loop; Junior spawns the
 managed binaries itself.
 
+### Requirement tracing
+
+Put a stable `id` on each acceptance criterion, plus the `checks` it proves and
+the fmeca `mitigates` links it verifies. After a run,
+`node <cli> fmeca propose-verified <result.json|run id>` prints one ready
+`set_mitigation_status` request per (criterion, mitigation) pair whose verdict is
+`met` at tier `check_passed`. Review each proposal and apply it yourself with
+`node <cli> tools call fmeca`; Junior never calls fmeca and never applies a
+proposal automatically. Never apply a proposal
+for a criterion that was only judged (tier `judged`).
+
 ## Crossmatrix state graph
 
 Crossmatrix (0.3.0+) ties the other tools together in a committed

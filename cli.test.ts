@@ -628,3 +628,61 @@ test('junior model list accepts --offline', () => {
   const dir = workdir();
   assert.equal(runJunior(['model', 'list', '--offline'], dir, { PI_CODING_AGENT_DIR: dir }).status, 0);
 });
+
+// --- CLI12 fmeca propose-verified (ADR 0011 R5) -----------------------------
+
+function writeResult(path: string, id = 'req:c1/ac1', mitigates = ['s1/m1']): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, JSON.stringify({ jev: { postflight: { criteria: [{ id, text: 't', verdict: 'met', tier: 'check_passed', mitigates }] } } }));
+}
+
+test('junior --help lists fmeca propose-verified', () => {
+  assert.match(runJunior(['--help'], workdir()).stdout, /fmeca propose-verified/);
+});
+
+test('junior fmeca propose-verified with a result file exits successfully', () => {
+  const dir = workdir();
+  const file = join(dir, 'result.json');
+  writeResult(file);
+  assert.equal(runJunior(['fmeca', 'propose-verified', file], dir).status, 0);
+});
+
+test('junior fmeca propose-verified prints one proposal for a met check_passed criterion', () => {
+  const dir = workdir();
+  const file = join(dir, 'result.json');
+  writeResult(file);
+  assert.equal(JSON.parse(runJunior(['fmeca', 'propose-verified', file], dir).stdout).proposals.length, 1);
+});
+
+test('junior fmeca propose-verified uses the run id of the lexically greatest artifact directory', () => {
+  const dir = workdir();
+  writeResult(join(dir, '.delivery', 'R1', '100', 'result.json'));
+  writeResult(join(dir, '.delivery', 'R1', '200', 'result.json'));
+  assert.equal(JSON.parse(runJunior(['fmeca', 'propose-verified', 'R1'], dir).stdout).proposals[0].run, 'R1/200');
+});
+
+test('junior fmeca propose-verified names the artifact run when given its result file', () => {
+  const dir = workdir();
+  const file = join(dir, '.delivery', 'R1', '200', 'result.json');
+  writeResult(file);
+  assert.equal(JSON.parse(runJunior(['fmeca', 'propose-verified', file], dir).stdout).proposals[0].run, 'R1/200');
+});
+
+test('junior fmeca propose-verified exits 1 when the run has no result.json', () => {
+  assert.equal(runJunior(['fmeca', 'propose-verified', 'missing-run'], workdir()).status, 1);
+});
+
+test('junior fmeca propose-verified names the looked-for path in stderr when the run has no result.json', () => {
+  assert.match(runJunior(['fmeca', 'propose-verified', 'missing-run'], workdir()).stderr, /no result.json found: .*missing-run/);
+});
+
+test('junior fmeca propose-verified rejects an unknown subcommand', () => {
+  assert.notEqual(runJunior(['fmeca', 'archive', 'x'], workdir()).status, 0);
+});
+
+test('junior fmeca propose-verified reports invalid JSON on stderr', () => {
+  const dir = workdir();
+  const file = join(dir, 'result.json');
+  writeFileSync(file, 'not json');
+  assert.match(runJunior(['fmeca', 'propose-verified', file], dir).stderr, /invalid result\.json/);
+});
