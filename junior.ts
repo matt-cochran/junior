@@ -29,11 +29,11 @@ function usage(): string {
   '  handoff <task.json> [--mock] [--full]   run a task and print the compact handoff (default isolation=worktree; qa defaults to none)',
   '  qa      <task.json> [--mock] [--full]   run the report-only QA review workflow in place (fresh reviewer session)',
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
-  '  apply   <id|result.json> [--dry-run] [--force]   apply a reviewed handoff to this checkout',
-  '  validate <task.json>; status <result.json> [--full]   validate a contract or print a receipt',
+  '  apply   <id|result.json> [--dry-run] [--force] | validate <task.json> | status <result.json> [--full]   apply a reviewed handoff, validate a contract or print a receipt',
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
-  '  auth    set <provider> [--verify] | remove <provider>   store a provider key from stdin',
-  '  doctor  [--check-updates] [--online] [--harness <claude|cursor|codex>]   read-only readiness check; compact [--json] [--max-chars N] prints the session-start context block',
+  '  auth    set <provider> [--verify] | remove <provider>; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
+  '  compact [--json] [--max-chars N] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
+  '  note    add <text...> [--kind <kind>] | list [--json] | done|promote|dismiss <id>   manage local session notes',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run] [--context-hooks [--scope local|project] [--remove]]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
@@ -82,8 +82,14 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
- compact: { flags: ['--json'], valueFlags: ['--max-chars'], min: 0, max: 0,
-  help: 'Usage: junior compact [--json] [--max-chars N]' },
+ compact: { flags: ['--json', '--capture', '--cursor'], valueFlags: ['--max-chars'], min: 0, max: 0,
+  help: 'Usage: junior compact [--json] [--max-chars N] [--capture] [--cursor]' },
+ note: { flags: ['--json'], valueFlags: ['--kind'], min: 1, max: Number.MAX_SAFE_INTEGER,
+  help: [
+   'Usage: junior note add <text...> [--kind note|decision|question|risk|hypothesis|todo] [--json]',
+   '       junior note list [--json]',
+   '       junior note done|promote|dismiss <id>',
+  ].join('\n') },
  setup: { flags: ['--yes', '--dry-run', '--context-hooks', '--remove'], valueFlags: ['--harness', '--hop', '--scope'], min: 0, max: 0,
   help: [
    'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]',
@@ -258,7 +264,79 @@ async function main(argv: string[]): Promise<void> {
   },
  });
 
+ if (command === 'note') {
+  const [sub, ...words] = parsed.files;
+  const notes = await import('./notes.ts');
+  const kinds = ['note', 'decision', 'question', 'risk', 'hypothesis', 'todo'];
+  const kind = parsed.values['--kind'];
+  if (kind !== undefined && !kinds.includes(kind)) {
+   throw Error(`Invalid --kind value: ${kind} (expected ${kinds.join(', ')})`);
+  }
+  const root = process.cwd();
+  if (sub === 'add') {
+   const text = words.join(' ');
+   if (!text) throw Error(COMMANDS.note.help);
+   const note = notes.addNote(root, { text, ...(kind !== undefined ? { kind: kind as any } : {}) });
+   console.log(parsed.flags.has('--json') ? JSON.stringify(note, null, 2) : `added ${note.id}`);
+   return;
+  }
+  if (sub === 'list') {
+   if (words.length > 0) throw Error(COMMANDS.note.help);
+   const open = notes.listOpen(root);
+   if (parsed.flags.has('--json')) {
+    console.log(JSON.stringify(open, null, 2));
+    return;
+   }
+   const noteLines = [...open.notes]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .map((note) => `- [${note.kind}] ${note.text} (${note.id})`);
+   const proposalLines = [...open.proposals]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((note) => `- [${note.kind}] ${note.text} (${note.id}, ${note.captureId ?? ''})`);
+   console.log('### Open notes');
+   console.log(noteLines.length ? noteLines.join('\n') : 'none');
+   console.log('### Capture proposals');
+   console.log(proposalLines.length ? proposalLines.join('\n') : 'none');
+   return;
+  }
+  if (sub === 'done' || sub === 'promote' || sub === 'dismiss') {
+   if (words.length !== 1) throw Error(COMMANDS.note.help);
+   const id = words[0];
+   const changed = sub === 'done' ? notes.markDone(root, id) : notes[sub](root, id);
+   if (!changed) {
+    console.error(`no matching open note or proposal: ${id}`);
+    process.exitCode = 1;
+    return;
+   }
+   console.log(`${sub} ${id}`);
+   return;
+  }
+  throw Error(COMMANDS.note.help);
+ }
  if (command === 'compact') {
+  if (parsed.flags.has('--capture')) {
+   try {
+    let input: any = {};
+    try {
+     const rawInput = readFileSync(0, 'utf8');
+     if (rawInput.trim()) {
+      const parsedInput = JSON.parse(rawInput);
+      if (parsedInput && typeof parsedInput === 'object' && !Array.isArray(parsedInput)) input = parsedInput;
+     }
+    } catch { /* empty or invalid hook input becomes {} */ }
+    const { runCapture } = await import('./precompact.ts');
+    const record = await runCapture(input, {
+     root: typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd(),
+    });
+    const suffix = record.error ? ` (${record.error})` : '';
+    console.error(`junior capture: ${record.proposals} proposals, ${record.duplicates} duplicates${suffix}`);
+   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`junior capture: 0 proposals, 0 duplicates (${message})`);
+   }
+   process.exitCode = 0;
+   return;
+  }
   const raw = parsed.values['--max-chars'];
   let maxChars: number | undefined;
   if (raw !== undefined) {
@@ -269,6 +347,10 @@ async function main(argv: string[]): Promise<void> {
   }
   const { buildCompactBlock } = await import('./compact.ts');
   const block = await buildCompactBlock({ cwd: process.cwd(), ...(maxChars !== undefined ? { maxChars } : {}) });
+  if (parsed.flags.has('--cursor')) {
+   console.log(JSON.stringify({ additional_context: block.markdown }));
+   return;
+  }
   console.log(parsed.flags.has('--json') ? JSON.stringify(block, null, 2) : block.markdown);
   return;
  }
@@ -284,7 +366,13 @@ async function main(argv: string[]): Promise<void> {
    }
    const contextHooks = await import('./context-hooks.ts');
    if (harness === 'codex' || harness === 'cursor') {
-    console.log(contextHooks.harnessInstructions(harness));
+    const result = contextHooks.installHarnessHooks({
+     projectDir: process.cwd(),
+     harness,
+     remove: parsed.flags.has('--remove'),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    for (const note of result.notes) console.error(note);
     return;
    }
    const result = contextHooks.installContextHooks({

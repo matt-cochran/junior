@@ -1,0 +1,36 @@
+{
+  "plan_id": "plan_FIXTURE",
+  "deliverables": [
+    {
+      "id": "d-api",
+      "owned_files": [
+        "api.ts"
+      ],
+      "prerequisites": [],
+      "estimated_effort_hours": 2,
+      "metadata": {
+        "artifact": "api.ts",
+        "owner": "agent"
+      }
+    }
+  ],
+  "locks": [
+    {
+      "plan_id": "plan_FIXTURE",
+      "deliverable_id": "d-api",
+      "caller_id": "fixture-worker",
+      "acquired_at": "2026-01-01T00:00:00Z",
+      "expires_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "blocked": [],
+  "shared_paths": [],
+  "baseline_taken": {
+    "baseline_number": 1,
+    "as_of": "2026-01-01T00:00:00Z",
+    "reason": "first_execution"
+  },
+  "exhausted": false,
+  "blocked_count": 0,
+  "needs_operator": false
+}

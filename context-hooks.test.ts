@@ -10,11 +10,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
+  JUNIOR_CAPTURE_COMMAND,
   JUNIOR_HOOK_COMMAND,
+  harnessHooksPath,
   harnessInstructions,
   installContextHooks,
+  installHarnessHooks,
   mergeContextHooks,
+  mergeHarnessHooks,
   removeContextHooks,
+  removeHarnessHooks,
 } from './context-hooks.ts';
 
 function workspace(t: any): string {
@@ -55,14 +60,19 @@ test('merge preserves unrelated hook events', () => {
   assert.deepEqual(merged.settings.hooks.Stop, [{ hooks: [{ type: 'command', command: 'notify' }] }]);
 });
 
-test('merge is idempotent for an existing Junior hook', () => {
+test('merge adds PreCompact when only the old SessionStart hook exists', () => {
   const merged = mergeContextHooks({ hooks: { SessionStart: [entry('junior compact')] } });
-  assert.equal(merged.changed, false);
+  assert.deepEqual(merged.settings.hooks.PreCompact, [{ hooks: [{ type: 'command', command: 'junior compact --capture' }] }]);
 });
 
-test('merge recognizes a longer Junior command as installed', () => {
+test('merge reports a change when it adds PreCompact beside an existing SessionStart hook', () => {
+  const merged = mergeContextHooks({ hooks: { SessionStart: [entry('junior compact')] } });
+  assert.equal(merged.changed, true);
+});
+
+test('merge recognizes a longer Junior command as installed for SessionStart', () => {
   const merged = mergeContextHooks({ hooks: { SessionStart: [entry('junior compact --verbose')] } });
-  assert.equal(merged.changed, false);
+  assert.deepEqual(merged.settings.hooks.SessionStart, [entry('junior compact --verbose')]);
 });
 
 test('merge preserves another SessionStart entry beside the Junior hook', () => {
@@ -242,4 +252,192 @@ test('install survives an exclusion write failure and reports excludeError', (t)
     { changed: result.changed, hasError: typeof result.excludeError === 'string' && result.excludeError.length > 0 },
     { changed: true, hasError: true },
   );
+});
+
+
+// --- capture PreCompact hook -------------------------------------------------
+
+test('the exported capture command is junior compact --capture', () => {
+  assert.equal(JUNIOR_CAPTURE_COMMAND, 'junior compact --capture');
+});
+
+test('merge adds one PreCompact capture entry', () => {
+  const merged = mergeContextHooks({});
+  assert.deepEqual(merged.settings.hooks.PreCompact, [{ hooks: [{ type: 'command', command: 'junior compact --capture' }] }]);
+});
+
+test('merging twice reports no change the second time', () => {
+  const once = mergeContextHooks({});
+  const twice = mergeContextHooks(once.settings);
+  assert.equal(twice.changed, false);
+});
+
+test('merge ignores a capture command when looking for the SessionStart hook', () => {
+  const merged = mergeContextHooks({ hooks: { SessionStart: [entry('junior compact --capture')] } });
+  assert.deepEqual(merged.settings.hooks.SessionStart, [entry('junior compact --capture'), entry('junior compact')]);
+});
+
+test('remove keeps a user PreCompact hook and drops the Junior SessionStart array', () => {
+  const removed = removeContextHooks({
+    hooks: {
+      SessionStart: [entry('junior compact')],
+      PreCompact: [{ hooks: [{ type: 'command', command: 'echo hi' }] }],
+    },
+  });
+  assert.deepEqual(removed.settings.hooks, { PreCompact: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] });
+});
+
+test('remove rejects a non-array PreCompact value', () => {
+  assert.throws(() => removeContextHooks({ hooks: { PreCompact: {} } }), /PreCompact must be an array/);
+});
+
+// --- Codex and Cursor harness hooks ----------------------------------------
+
+test('harness hooks path for codex is .codex/hooks.json', (t) => {
+  const dir = workspace(t);
+  assert.equal(harnessHooksPath(dir, 'codex'), join(dir, '.codex', 'hooks.json'));
+});
+
+test('harness hooks path for cursor is .cursor/hooks.json', (t) => {
+  const dir = workspace(t);
+  assert.equal(harnessHooksPath(dir, 'cursor'), join(dir, '.cursor', 'hooks.json'));
+});
+
+test('codex merge yields the documented nested shape', () => {
+  const merged = mergeHarnessHooks('codex', {});
+  assert.deepEqual(merged.config, {
+    hooks: {
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'junior compact' }] }],
+      PreCompact: [{ hooks: [{ type: 'command', command: 'junior compact --capture' }] }],
+    },
+  });
+});
+
+test('cursor merge yields the documented flat shape with version 1', () => {
+  const merged = mergeHarnessHooks('cursor', {});
+  assert.deepEqual(merged.config, {
+    version: 1,
+    hooks: {
+      sessionStart: [{ command: 'junior compact --cursor' }],
+      preCompact: [{ command: 'junior compact --capture' }],
+    },
+  });
+});
+
+test('codex merge is idempotent', () => {
+  const once = mergeHarnessHooks('codex', {});
+  const twice = mergeHarnessHooks('codex', once.config);
+  assert.equal(twice.changed, false);
+});
+
+test('cursor merge keeps an existing version value', () => {
+  const merged = mergeHarnessHooks('cursor', { version: 7 });
+  assert.equal(merged.config.version, 7);
+});
+
+test('codex remove deletes only Junior entries and keeps a user Stop hook', () => {
+  const removed = removeHarnessHooks('codex', {
+    hooks: {
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'junior compact' }] }],
+      PreCompact: [{ hooks: [{ type: 'command', command: 'junior compact --capture' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }],
+    },
+  });
+  assert.deepEqual(removed.config, { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }] } });
+});
+
+test('cursor remove deletes only Junior flat entries', () => {
+  const removed = removeHarnessHooks('cursor', {
+    version: 1,
+    hooks: {
+      sessionStart: [{ command: 'junior compact --cursor' }, { command: 'other' }],
+      preCompact: [{ command: 'junior compact --capture' }],
+    },
+  });
+  assert.deepEqual(removed.config, { version: 1, hooks: { sessionStart: [{ command: 'other' }] } });
+});
+
+test('installHarnessHooks creates the cursor file with the documented shape', (t) => {
+  const dir = workspace(t);
+  installHarnessHooks({ projectDir: dir, harness: 'cursor' });
+  const stored = JSON.parse(readFileSync(join(dir, '.cursor', 'hooks.json'), 'utf8'));
+  assert.deepEqual(stored, {
+    version: 1,
+    hooks: {
+      sessionStart: [{ command: 'junior compact --cursor' }],
+      preCompact: [{ command: 'junior compact --capture' }],
+    },
+  });
+});
+
+test('a fresh cursor install leaves git status clean', (t) => {
+  const dir = gitRepo(t);
+  installHarnessHooks({ projectDir: dir, harness: 'cursor' });
+  assert.equal(gitStatus(dir), '');
+});
+
+test('a fresh codex install leaves git status clean', (t) => {
+  const dir = gitRepo(t);
+  installHarnessHooks({ projectDir: dir, harness: 'codex' });
+  assert.equal(gitStatus(dir), '');
+});
+
+test('installHarnessHooks reports created for a new file', (t) => {
+  const dir = workspace(t);
+  const result = installHarnessHooks({ projectDir: dir, harness: 'cursor' });
+  assert.equal(result.created, true);
+});
+
+test('installHarnessHooks keeps a user Stop hook when augmenting codex', (t) => {
+  const dir = workspace(t);
+  const path = join(dir, '.codex', 'hooks.json');
+  mkdirSync(join(dir, '.codex'), { recursive: true });
+  writeFileSync(path, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }] } }));
+  installHarnessHooks({ projectDir: dir, harness: 'codex', now: () => new Date('2026-01-02T03:04:05Z') });
+  const stored = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(stored.hooks.Stop, [{ hooks: [{ type: 'command', command: 'notify' }] }]);
+});
+
+test('installHarnessHooks writes a backup when an existing codex file changes', (t) => {
+  const dir = workspace(t);
+  const path = join(dir, '.codex', 'hooks.json');
+  mkdirSync(join(dir, '.codex'), { recursive: true });
+  writeFileSync(path, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }] } }));
+  const result = installHarnessHooks({ projectDir: dir, harness: 'codex', now: () => new Date('2026-01-02T03:04:05Z') });
+  assert.ok(result.backup !== null && existsSync(result.backup));
+});
+
+test('installHarnessHooks remove deletes only Junior codex entries', (t) => {
+  const dir = workspace(t);
+  const path = join(dir, '.codex', 'hooks.json');
+  mkdirSync(join(dir, '.codex'), { recursive: true });
+  writeFileSync(path, JSON.stringify({
+    hooks: {
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'junior compact' }] }],
+      PreCompact: [{ hooks: [{ type: 'command', command: 'junior compact --capture' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }],
+    },
+  }));
+  installHarnessHooks({ projectDir: dir, harness: 'codex', remove: true, now: () => new Date('2026-01-02T03:04:05Z') });
+  const stored = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(stored, { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'notify' }] }] } });
+});
+
+test('installHarnessHooks refuses a harness file that is not a JSON object', (t) => {
+  const dir = workspace(t);
+  mkdirSync(join(dir, '.cursor'), { recursive: true });
+  writeFileSync(join(dir, '.cursor', 'hooks.json'), '[]');
+  assert.throws(() => installHarnessHooks({ projectDir: dir, harness: 'cursor' }), /JSON object/);
+});
+
+test('codex notes tell the user to trust the Junior hooks', (t) => {
+  const dir = workspace(t);
+  const result = installHarnessHooks({ projectDir: dir, harness: 'codex' });
+  assert.ok(result.notes.includes('Codex runs project hooks only after you trust them: open /hooks in Codex and trust the Junior entries.'));
+});
+
+test('cursor notes are empty', (t) => {
+  const dir = workspace(t);
+  const result = installHarnessHooks({ projectDir: dir, harness: 'cursor' });
+  assert.deepEqual(result.notes, []);
 });
