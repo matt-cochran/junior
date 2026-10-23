@@ -1853,8 +1853,7 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
  });
  // A criterion names checks by index; check_passed needs every named check to
  // have run in this run and exited 0 (ADR-0011 R4).
- const checkPassed=(c:{checks?:number[]}, verdict:string):boolean=> verdict === 'met'
-  && Array.isArray(c.checks) && c.checks.length > 0
+ const checkPassed=(c:{checks?:number[]}):boolean=> Array.isArray(c.checks) && c.checks.length > 0
   && c.checks.every((i:number)=> i >= 0 && i < checks.length && checks[i] && checks[i].exitCode === 0);
  const report=opts?.report;
  const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
@@ -1907,7 +1906,7 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
   const settled=deterministic.get(c.qid);
   if (settled) return { ...base,
    verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true },
-   tier: checkPassed(c, settled) ? 'check_passed' : 'deterministic' };
+   tier: checkPassed(c) ? 'check_passed' : 'deterministic' };
   const v = boolVerdict(answers[c.qid]);
   const condition = c.when ? boolVerdict(conditionAnswer(answers, c.qid)) : null;
   const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
@@ -1917,7 +1916,7 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
    verdict, probability: v.probability,
    ...(condition ? { conditionProbability: condition.probability } : {}),
    answer: answers[c.qid],
-   tier: checkPassed(c, verdict) ? 'check_passed' : (v.verdict === 'true' || v.verdict === 'false') ? 'judged' : 'none' };
+   tier: checkPassed(c) ? 'check_passed' : (v.verdict === 'true' || v.verdict === 'false') ? 'judged' : 'none' };
  });
  const gapIds = out.filter((c)=>c.verdict === 'gap').map((c)=>c.id);
  const uncertainIds = out.filter((c)=>c.verdict === 'uncertain').map((c)=>c.id);

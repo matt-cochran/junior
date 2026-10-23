@@ -872,6 +872,11 @@ test('assessPostflight tiers a met criterion whose named check failed as not che
  const r=await assessPostflight({deliverable:'Review',acceptance:[{text:'t',checks:[0]}]},classify,[{exitCode:1}],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
  assert.notEqual(r.criteria[0].tier,'check_passed');
 });
+test('assessPostflight tiers an uncertain criterion whose named check passed as check_passed',async()=>{
+ const classify:any=async()=>({answers:{AC1:bool(0.5)}});
+ const r=await assessPostflight({deliverable:'Review',acceptance:[{text:'t',checks:[0]}]},classify,[{exitCode:0}],{stat:'',diff:'',truncated:false,changedFiles:[],limits:{}});
+ assert.equal(r.criteria[0].tier,'check_passed');
+});
 test('An fmeca run passes its written report to the postflight classifier',async()=>{
  let postState:any;
  const classifier:any=async({state,questions}:any)=>{
