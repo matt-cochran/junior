@@ -40,7 +40,7 @@ export type CompactHandoff = {
  /** Scope classification when the contract named an owned list, else null. */
  scope: ScopeResult | null;
  /** Pi isolation flags applied for the run, or null when it did not probe. */
- piIsolation: { applied: string[]; missing: string[]; ambient: boolean; probed: boolean } | null;
+ piIsolation: { applied: string[]; missing: string[]; ambient: boolean; probed: boolean; honored: boolean | null } | null;
  artifact: string | null;
  /** Number of worker segments that ran (1 unless automatic continuation ran). */
  segments: number;
@@ -186,6 +186,8 @@ export function unresolvedIssues(result: any): string[] {
  if (result?.resume?.error) out.push(`resume: ${result.resume.error}`);
  if (result?.lineage?.rejected) out.push('repair rejected by lineage budget');
  if (result?.analysis && result.analysis.reportPresent === false) out.push(`analysis report missing: ${result.analysis.report ?? 'unknown path'}`);
+ const isolationProblems = result?.piIsolation?.verification?.problems;
+ if (Array.isArray(isolationProblems) && isolationProblems.length > 0) out.push(`isolation not honored: ${isolationProblems.join('; ')}`);
  if (Array.isArray(result?.scope?.outOfScope) && result.scope.outOfScope.length > 0) out.push(`out of scope: ${result.scope.outOfScope.join(', ')}`);
  return out;
 }
@@ -290,6 +292,7 @@ export function compactHandoff(result: any): CompactHandoff {
    missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],
    ambient: !!r.piIsolation.ambient,
    probed: !!r.piIsolation.probed,
+   honored: r.piIsolation.verification?.checked ? !!r.piIsolation.verification.honored : null,
   } : null,
   artifact: dir,
   segments: Array.isArray(r.segments) ? r.segments.length : 0,

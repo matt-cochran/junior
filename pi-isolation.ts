@@ -95,3 +95,34 @@ export function buildIsolationArgs(
 
   return { args, applied, missing, ambient };
 }
+
+/** Whether a run's Pi system message reflects the isolation that was applied. */
+export type IsolationVerdict = { checked: boolean; honored: boolean; problems: string[] };
+
+/** Read the first system message in a Pi JSON event stream and check that the
+ * applied isolation took effect: no skills section under `--no-skills`, and
+ * no built-in tool outside the `--tools` allowlist. `checked` is false when
+ * the stream holds no system message with sections (nothing to verify). */
+export function verifyIsolation(eventsText: string, plan: { applied: readonly string[]; tools: readonly string[] }): IsolationVerdict {
+  let sections: Record<string, unknown> | null = null;
+  for (const line of eventsText.split('\n')) {
+    if (!line.trim()) continue;
+    let event: any;
+    try { event = JSON.parse(line); } catch { continue; }
+    const message = event?.type === 'message_start' ? event.message : null;
+    if (message?.role === 'system' && message.sections && typeof message.sections === 'object') {
+      sections = message.sections as Record<string, unknown>;
+      break;
+    }
+  }
+  if (!sections) return { checked: false, honored: true, problems: [] };
+  const problems: string[] = [];
+  const skills = typeof sections.skills === 'string' ? sections.skills.trim() : '';
+  if (plan.applied.includes('--no-skills') && skills) problems.push('ambient skills present despite --no-skills');
+  if (plan.applied.includes('--tools') && typeof sections.tools === 'string') {
+    const listed = [...sections.tools.matchAll(/^- ([A-Za-z_][\w-]*):/gm)].map((match) => match[1]);
+    const extra = listed.filter((tool) => !plan.tools.includes(tool));
+    if (extra.length > 0) problems.push(`tools outside the allowlist: ${extra.join(', ')}`);
+  }
+  return { checked: true, honored: problems.length === 0, problems };
+}

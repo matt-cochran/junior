@@ -14,6 +14,7 @@ import {
   buildIsolationArgs,
   parsePiCapabilities,
   validatePiContext,
+  verifyIsolation,
 } from './pi-isolation.ts';
 
 const REAL_PI_HELP = `pi - AI coding assistant with read, bash, edit, write tools
@@ -148,4 +149,26 @@ test('ambient context without an explicit tool list emits no tool allowlist', ()
 
 test('ambient context with an explicit tool list still emits it', () => {
   assert.deepEqual(buildIsolationArgs({ ambient: true, tools: ['read'] }, FULL_CAPABILITIES).args, ['--tools', 'read']);
+});
+
+const systemEvent = (sections: Record<string, string>): string =>
+  JSON.stringify({ type: 'message_start', message: { role: 'system', content: '', sections } });
+
+test('verifyIsolation passes an isolated system message with only allowlisted tools', () => {
+  const events = systemEvent({ skills: '', tools: '<tools>\n- read: Read\n- bash: Run\n</tools>' });
+  assert.equal(verifyIsolation(events, { applied: ['--no-skills', '--tools'], tools: ['read', 'bash'] }).honored, true);
+});
+
+test('verifyIsolation flags ambient skills when --no-skills was applied', () => {
+  const events = systemEvent({ skills: '<skills><name>wrangler</name></skills>', tools: '' });
+  assert.deepEqual(verifyIsolation(events, { applied: ['--no-skills'], tools: [] }).problems, ['ambient skills present despite --no-skills']);
+});
+
+test('verifyIsolation flags a tool outside the allowlist', () => {
+  const events = systemEvent({ skills: '', tools: '<tools>\n- read: Read\n- codemode: Run JS\n</tools>' });
+  assert.deepEqual(verifyIsolation(events, { applied: ['--tools'], tools: ['read'] }).problems, ['tools outside the allowlist: codemode']);
+});
+
+test('verifyIsolation reports unchecked when the stream has no system message', () => {
+  assert.equal(verifyIsolation('{"type":"agent_start"}\n', { applied: ['--no-skills'], tools: [] }).checked, false);
 });

@@ -20,7 +20,7 @@ import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { priceDelta, readCachedCatalog, piAgentDir } from './model-updates.ts';
 import { briefMdPath, briefPath, buildPlaceholderBrief, loadPrepareHistory, renderBrief, shouldCheckBack } from './prepare.ts';
 import { clarificationApplies, clarityGateApplies, resolveDiscoverReport, startClarification, type ClarifyDeps } from './clarify.ts';
-import { validatePiContext, buildIsolationArgs, parsePiCapabilities, type PiCapabilities } from './pi-isolation.ts';
+import { validatePiContext, buildIsolationArgs, parsePiCapabilities, verifyIsolation, DEFAULT_PI_TOOLS, type PiCapabilities, type IsolationVerdict } from './pi-isolation.ts';
 import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { resolveJevGateway, validateJevProvider, GatewayError, type JevProvider, type GatewayDeps, type ResolvedJevGateway } from './gateway.ts';
 
@@ -2669,7 +2669,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   }
   // Probe the installed Pi CLI once for this non-mock run, before the first
   // spawn, and derive the isolation arguments from the task's piContext.
-  let piIsolation:{applied:string[]; missing:string[]; ambient:boolean; probed:boolean}|null=null;
+  let piIsolation:{applied:string[]; missing:string[]; ambient:boolean; probed:boolean; verification?:IsolationVerdict}|null=null;
   let isolationArgs:string[]=[];
   if (!mock) {
    // Offline spawn seams bypass the real CLI probe; production runs always probe.
@@ -3030,6 +3030,16 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const runtime=heartbeat.snapshot();
   const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null};
   result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
+  // Verify against Pi's own system message that the applied isolation took
+  // effect, so a Pi upgrade that ignores a flag is reported, not assumed.
+  if (piIsolation && piIsolation.applied.length > 0 && segments[0] && existsSync(segments[0].eventsPath)) {
+   try {
+    piIsolation.verification=verifyIsolation(readFileSync(segments[0].eventsPath,'utf8'), {
+     applied: piIsolation.applied,
+     tools: Array.isArray(t.piContext?.tools) ? t.piContext.tools : [...DEFAULT_PI_TOOLS],
+    });
+   } catch { /* an unreadable event stream leaves the run unverified */ }
+  }
   if (piIsolation) result.piIsolation=piIsolation;
   if (scopeResult) result.scope=scopeResult;
   if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }

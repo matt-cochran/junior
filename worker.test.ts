@@ -3790,7 +3790,13 @@ test('A live run passes its supported isolation flags to Pi',async()=>{
 test('A live run records the probed Pi isolation plan on the result',async()=>{
  const spawnPi=()=>({status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''});
  const r=await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
- assert.deepEqual(r.piIsolation,{applied:['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'],missing:[],ambient:false,probed:true});
+ assert.deepEqual(r.piIsolation,{applied:['--no-extensions','--no-skills','--no-context-files','--no-prompt-templates','--no-approve','--no-mcp','--tools'],missing:[],ambient:false,probed:true,verification:{checked:false,honored:true,problems:[]}});
+});
+test('A live run whose Pi system message still lists ambient skills reports isolation not honored',async()=>{
+ const system={type:'message_start',message:{role:'system',content:'',sections:{skills:'<skills><name>wrangler</name></skills>',tools:'<tools>\n- read: Read\n</tools>'}}};
+ const spawnPi=()=>({status:0,stdout:stream({type:'session',id:'s'},system,assistant(),{type:'agent_settled'}),stderr:''});
+ const r=await run(task(0),false,{spawnPi,piCapabilities:isolationCapabilities});
+ assert.ok(compactHandoff(r).unresolved.includes('isolation not honored: ambient skills present despite --no-skills'));
 });
 test('A run with a scope records the scope classification on the result',async()=>{
  const r=await run(task(0,{scope:{owned:['src/*.ts']}}),true);
