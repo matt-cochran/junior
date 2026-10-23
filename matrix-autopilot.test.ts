@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop } from './tools/tools.ts';
@@ -87,6 +87,15 @@ function resultFile(dir: string, id: string, changedFiles: string[]): string {
     target,
     JSON.stringify({ id, status: 'ready_for_review', artifactDir: join(dir, id), evidence: { runChangedFiles: changedFiles } }),
   );
+  return target;
+}
+
+/** A Junior run result under the delivery directory autolink searches. */
+function deliveryResult(dir: string, id: string, stamp: string, changedFiles: string[]): string {
+  const artifactDir = join(dir, '.delivery', id, stamp);
+  mkdirSync(artifactDir, { recursive: true });
+  const target = join(artifactDir, 'result.json');
+  writeFileSync(target, JSON.stringify({ id, status: 'ready_for_review', artifactDir, evidence: { runChangedFiles: changedFiles } }));
   return target;
 }
 
@@ -316,6 +325,129 @@ test('autolink skips a completed deliverable whose evidence result.json is missi
   };
   await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', deps: deps as any });
   assert.equal(sent.filter((r) => r.op.kind === 'observe').length, 0);
+});
+
+test('autolink resolves a run id in the evidence to that delivery result', async () => {
+  const dir = workdir();
+  deliveryResult(dir, 'd1', '200', ['src/run-200.ts']);
+  deliveryResult(dir, 'd1', '300', ['src/run-300.ts']);
+  const sent: any[] = [];
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, tool: string, request: any) => {
+      if (tool === 'cpm') {
+        return {
+          ok: true,
+          result: {
+            graph: {
+              deliverables: [
+                { id: 'd1', status: { status: 'complete' }, evidence: ['handed off d1/200 with review notes'] },
+              ],
+            },
+          },
+        };
+      }
+      sent.push(request.arguments.request);
+      return { ok: true, result: {} };
+    },
+  };
+  await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', dir, deps: deps as any });
+  const targets = sent.filter((r) => r.op.kind === 'observe').map((r) => r.op.to);
+  assert.deepEqual(targets, ['loc:src/run-200.ts']);
+});
+
+test('autolink falls back to the lexically greatest delivery stamp holding a result', async () => {
+  const dir = workdir();
+  deliveryResult(dir, 'd1', '100', ['src/run-100.ts']);
+  deliveryResult(dir, 'd1', '200', ['src/run-200.ts']);
+  const sent: any[] = [];
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, tool: string, request: any) => {
+      if (tool === 'cpm') {
+        return {
+          ok: true,
+          result: {
+            graph: {
+              deliverables: [{ id: 'd1', status: { status: 'complete' }, evidence: ['completed without artifact references'] }],
+            },
+          },
+        };
+      }
+      sent.push(request.arguments.request);
+      return { ok: true, result: {} };
+    },
+  };
+  await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', dir, deps: deps as any });
+  const targets = sent.filter((r) => r.op.kind === 'observe').map((r) => r.op.to);
+  assert.deepEqual(targets, ['loc:src/run-200.ts']);
+});
+
+test('autolink reports a complete deliverable with no result.json as skipped', async () => {
+  const dir = workdir();
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, tool: string) => {
+      if (tool === 'cpm') {
+        return {
+          ok: true,
+          result: {
+            graph: {
+              deliverables: [{ id: 'd1', status: { status: 'complete' }, evidence: ['finished with no artifacts'] }],
+            },
+          },
+        };
+      }
+      return { ok: true, result: {} };
+    },
+  };
+  const result = await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', dir, deps: deps as any });
+  assert.deepEqual(result.skipped, [{ deliverable: 'd1', reason: 'no result.json' }]);
+});
+
+test('autolink does not link an incomplete deliverable even when its run result exists', async () => {
+  const dir = workdir();
+  deliveryResult(dir, 'd2', '100', ['src/pending.ts']);
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, tool: string) => {
+      if (tool === 'cpm') {
+        return {
+          ok: true,
+          result: {
+            graph: {
+              deliverables: [{ id: 'd2', status: { status: 'pending' }, evidence: ['d2/100'] }],
+            },
+          },
+        };
+      }
+      return { ok: true, result: {} };
+    },
+  };
+  const result = await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', dir, deps: deps as any });
+  assert.deepEqual(result.requestIds, []);
+});
+
+test('autolink does not list an incomplete deliverable in skipped', async () => {
+  const dir = workdir();
+  const deps = {
+    loadHop: manifest,
+    callHop: async (_hop: string, tool: string) => {
+      if (tool === 'cpm') {
+        return {
+          ok: true,
+          result: {
+            graph: {
+              deliverables: [{ id: 'd2', status: { status: 'pending' }, evidence: ['no artifacts yet'] }],
+            },
+          },
+        };
+      }
+      return { ok: true, result: {} };
+    },
+  };
+  const result = await autolink({ hopPath: 'hop.json', modelId: 'm1', planId: 'plan1', dir, deps: deps as any });
+  assert.deepEqual(result.skipped, []);
 });
 
 test('bootstrap expands an owned directory to the tracked files under it', async () => {
