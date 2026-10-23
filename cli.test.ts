@@ -545,3 +545,18 @@ test('doctor remediation names a missing isolation flag', () => {
   const help = '--no-extensions --no-skills --no-context-files --no-prompt-templates --tools';
   assert.match(doctor(piDeps(workdir(), help)).remediation.join(' '), /--no-approve, --no-mcp/);
 });
+
+function failingHelpDeps(cwd: string) {
+  const deps = piDeps(cwd, '');
+  return { ...deps, exec: (_cmd: string, args: string[]) => (args.includes('--help')
+    ? { status: null, stdout: '', stderr: '', error: 'spawnSync pi ETIMEDOUT' }
+    : { status: 0, stdout: 'pi 1.0.4\n', stderr: '' }) };
+}
+
+test('checkPi reports isolation support as unknown when the help probe fails', () => {
+  assert.equal(checkPi(failingHelpDeps(workdir())).isolation.supported, null);
+});
+
+test('doctor gives no isolation remediation when the help probe fails', () => {
+  assert.doesNotMatch(doctor(failingHelpDeps(workdir())).remediation.join(' '), /isolation flags/);
+});

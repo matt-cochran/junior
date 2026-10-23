@@ -164,8 +164,10 @@ export type PiCheck = {
  versionWarning:boolean;
  versionNote?:string;
  note?:string;
- /** Isolation flags the installed Pi help advertises, including `--tools`. */
- isolation:{ supported:boolean; missing:string[] };
+ /** Isolation flags the installed Pi help advertises, including `--tools`.
+  * `supported` is null when the help probe failed (see `note`): unknown, not
+  * missing, so doctor does not advise an update it cannot justify. */
+ isolation:{ supported:boolean|null; missing:string[] };
 };
 
 /** Classify an installed Pi version against the tested pin without blocking any
@@ -206,7 +208,7 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  } catch (e) {
   note=`pi --version failed: ${e instanceof Error ? e.message : String(e)}`;
  }
- let capabilities:{ flags:ReadonlySet<string> }={ flags:new Set<string>() };
+ let capabilities:{ flags:ReadonlySet<string> }|null=null;
  try {
   const r=exec('pi',['--offline','--no-approve','--help'],execOptions);
   if (r.error) note=note ?? `pi --help failed: ${r.error}`;
@@ -215,7 +217,7 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  } catch (e) {
   note=note ?? `pi --help failed: ${e instanceof Error ? e.message : String(e)}`;
  }
- const missingIsolation=requiredIsolation.filter((flag)=>!capabilities.flags.has(flag));
+ const missingIsolation=capabilities ? requiredIsolation.filter((flag)=>!capabilities!.flags.has(flag)) : [];
  const location=dirname(executable);
  const nodeDir=dirname(deps.execPath ?? process.execPath);
  const pathMismatch=location !== nodeDir;
@@ -224,7 +226,7 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  return {found:true, executable, version, location, pathMismatch,
   testedVersion, versionMatch:pairing.match, versionStatus:pairing.status, versionWarning:pairing.warning,
   ...(pairing.note?{versionNote:pairing.note}:{}), ...(note?{note}:{}),
-  isolation:{supported:missingIsolation.length === 0, missing:missingIsolation}};
+  isolation:{supported:capabilities ? missingIsolation.length === 0 : null, missing:missingIsolation}};
 }
 
 function asSpawn(command:string, args:string[], options:any):ExecResult {
