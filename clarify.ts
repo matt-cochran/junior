@@ -407,6 +407,17 @@ function signalKey(signal: Record<string, any>): string {
 }
 
 /** One `ClarifyQuestion` from a real elicitation signal. */
+/** Longest claim label quoted as question context. The label is usually the
+ * whole deliverable, so quoting it in full repeats the contract in every
+ * question of a batch. */
+export const MAX_QUESTION_CONTEXT_CHARS = 160;
+
+/** Collapse whitespace and cut `value` to `max` characters with an ellipsis. */
+function boundedExcerpt(value: string, max = MAX_QUESTION_CONTEXT_CHARS): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
+}
+
 function questionForSignal(
   signal: Record<string, any>,
   claims: Map<string, ElicitationClaimView>,
@@ -418,7 +429,7 @@ function questionForSignal(
     const claim = claims.get(claimIds[0]);
     if (claim && claim.value) {
       question = claim.label
-        ? `Confirm or refute: ${claim.value} (context: ${claim.label})`
+        ? `Confirm or refute: ${claim.value} (context: ${boundedExcerpt(claim.label)})`
         : `Confirm or refute: ${claim.value}`;
     }
   }

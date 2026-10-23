@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import {
   CLARIFY_FILENAME,
   clarityGateApplies,
+  MAX_QUESTION_CONTEXT_CHARS,
   clarificationApplies,
   clarifyPath,
   discoverEvidenceFromReport,
@@ -571,4 +572,21 @@ test('a multi-round clarified contract keeps answers from every round', async ()
     deps: { hopPath: 'hop.json', callHop: ready.callHop as any },
   });
   assert.deepEqual((outcome as any).contract.constraints, ['Existing limit', 'Clarified Q1: Round one? -> amend: first', 'Clarified Q1: Round two? -> assent: second']);
+});
+
+test('an open-hypothesis question quotes a long claim label as a bounded excerpt', async () => {
+  const top = { question: { claims: ['c1'], code: 'open_hypothesis', kind: 'clarify', message: 'open', suggested_question: 'Confirm?' } };
+  const state: any = structuredClone(elicitFixture('state.get'));
+  const long = `Document the release. ${'Every field and flag must be described precisely. '.repeat(20)}`;
+  const visit = (node: any): void => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (node && typeof node === 'object') {
+      if (node.id === 'c1' && node.subject && typeof node.subject === 'object') node.subject.label = long;
+      Object.values(node).forEach(visit);
+    }
+  };
+  visit(state);
+  const { callHop } = fixtureHop(top, state);
+  const batch = await questionBatch('fixture-elicit-20261020b', { callHop: callHop as any });
+  assert.ok(batch.questions[0].question.length <= 'Confirm or refute: csv (context: )'.length + MAX_QUESTION_CONTEXT_CHARS);
 });
