@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-23
+
 ### Added
 
 - `junior note add|list|done|promote|dismiss` (#93): local session notes in
@@ -18,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks the pinned default commodity model (today DeepSeek V4.1 Flash, via
   OpenRouter) once for open decisions, questions, risks, hypotheses and todos,
   and writes them only as proposals. The budget is a 48000-character transcript
-  tail, 1500 output tokens, one request with a 30-second timeout and at most 12
-  proposals. It always exits 0 and writes one record per attempt to
-  `.delivery/capture/<timestamp>.json`; it never writes FMECA, plan or
+  tail, 1500 output tokens with model reasoning off, one request with a
+  30-second timeout and at most 12 proposals. It always exits 0 and writes one
+  record per attempt to `.delivery/capture/<timestamp>.json`; it never writes FMECA, plan or
   scientific-process state.
 - Four new `junior compact` block sections (#93): Pending decisions
   (`needs_answers`, `needs_choice` and `needs_model_approval` runs with the file
