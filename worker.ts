@@ -231,10 +231,19 @@ export function validate(t: any) {
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
  if (t.thinking !== undefined && !['off','minimal','low','medium','high','xhigh','max'].includes(t.thinking)) throw Error('Invalid thinking level');
  if (!Array.isArray(t.acceptance) || !t.acceptance.length) throw Error('Missing acceptance');
+ const acceptanceIds = new Set<string>();
  for (const a of t.acceptance) {
   if (typeof a === 'string') { if (!a.trim()) throw Error('Missing acceptance'); continue; }
   if (!a || typeof a !== 'object' || Array.isArray(a)) throw Error('Invalid acceptance (expected a string or { text, when })');
   if (typeof a.text !== 'string' || !a.text.trim()) throw Error('Missing acceptance');
+  if (a.id !== undefined) {
+   if (typeof a.id !== 'string' || !/^[A-Za-z0-9:._\/-]{1,128}$/.test(a.id)) throw Error('Invalid acceptance.id');
+   if (acceptanceIds.has(a.id)) throw Error(`Duplicate acceptance.id: ${a.id}`);
+   acceptanceIds.add(a.id);
+  }
+  if (a.mitigates !== undefined) {
+   if (!Array.isArray(a.mitigates) || a.mitigates.some((m:any)=>typeof m !== 'string' || !m.trim())) throw Error('Invalid acceptance.mitigates');
+  }
   if (a.when !== undefined && (typeof a.when !== 'string' || !a.when.trim())) throw Error('Invalid acceptance.when (expected a non-empty string)');
  }
  if (t.assumptions !== undefined) {
@@ -252,6 +261,13 @@ export function validate(t: any) {
    if (typeof c.cwd !== 'string' || !c.cwd.trim()) throw Error('Invalid check.cwd (expected a non-empty string)');
    const abs=isAbsolute(c.cwd) ? resolve(c.cwd) : resolve(resolve(t.cwd), c.cwd);
    if (!withinWorkspace(resolve(t.cwd), abs)) throw Error(`Invalid check.cwd (outside the workspace): ${c.cwd}`);
+  }
+ }
+ // acceptance.checks names indexes into the checks array, so it is validated
+ // only once t.checks is known valid.
+ for (const a of t.acceptance) {
+  if (a && typeof a === 'object' && !Array.isArray(a) && a.checks !== undefined) {
+   if (!Array.isArray(a.checks) || a.checks.some((x:any)=>!Number.isInteger(x) || x < 0 || x >= t.checks.length)) throw Error('Invalid acceptance.checks');
   }
  }
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
@@ -1603,6 +1619,10 @@ export type JevCriterion = {
  /** Probability the `when` condition was exercised; null when not asked. */
  conditionProbability?:number|null;
  answer?:GateAnswer;
+ /** How the verdict was reached (ADR-0011 R4). */
+ tier:'check_passed'|'deterministic'|'judged'|'none';
+ /** fmeca mitigations this criterion verifies (ADR-0011 R3). */
+ mitigates?:string[];
 };
 
 export type JevPostflight = {
@@ -1822,33 +1842,43 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
 /** Completion gate: is each acceptance criterion satisfied by independent
  * check results and bounded git diff evidence? */
 export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]}):Promise<JevPostflight> {
- const criteria:{id:string; index:number; text:string; when?:string}[] = (t.acceptance || []).map((item:any, index:number)=>{
+ const criteria:{qid:string; id:string; index:number; text:string; when?:string; checks?:number[]; mitigates?:string[]}[] = (t.acceptance || []).map((item:any, index:number)=>{
+  const qid=`AC${index+1}`;
+  const supplied=item && typeof item === 'object' && !Array.isArray(item) && typeof item.id === 'string' && item.id.trim() ? item.id : undefined;
   const when=acceptanceWhen(item);
-  return when ? { id:`AC${index+1}`, index, text:acceptanceText(item), when } : { id:`AC${index+1}`, index, text:acceptanceText(item) };
+  const entryChecks=item && typeof item === 'object' && !Array.isArray(item) && Array.isArray(item.checks) ? item.checks : undefined;
+  const entryMitigates=item && typeof item === 'object' && !Array.isArray(item) && Array.isArray(item.mitigates) ? item.mitigates : undefined;
+  return { qid, id:supplied ?? qid, index, text:acceptanceText(item),
+   ...(when ? { when } : {}), ...(entryChecks ? { checks:entryChecks } : {}), ...(entryMitigates ? { mitigates:entryMitigates } : {}) };
  });
+ // A criterion names checks by index; check_passed needs every named check to
+ // have run in this run and exited 0 (ADR-0011 R4).
+ const checkPassed=(c:{checks?:number[]}, verdict:string):boolean=> verdict === 'met'
+  && Array.isArray(c.checks) && c.checks.length > 0
+  && c.checks.every((i:number)=> i >= 0 && i < checks.length && checks[i] && checks[i].exitCode === 0);
  const report=opts?.report;
  const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
  const allowed=opts?.allowed ?? (report && !isAbsolute(report.path) ? [report.path] : []);
  const deterministic=new Map<string,'met'|'gap'>();
  for (const c of criteria) {
   const settled=deterministicCriterion(c.text,{changedFiles:runChanged,allowed});
-  if (settled) deterministic.set(c.id,settled);
+  if (settled) deterministic.set(c.qid,settled);
  }
  const evidencePhrase=report
   ? 'based only on the independent check results, the bounded git diff evidence and the analysis report outline and excerpt'
   : 'based only on the independent check results and the bounded git diff evidence';
  const questions:Record<string,GateQuestion> = {};
  for (const c of criteria) {
-  if (deterministic.has(c.id)) continue;
-  questions[c.id] = {
+  if (deterministic.has(c.qid)) continue;
+  questions[c.qid] = {
    type:'bool',
-   instructions:`Acceptance criterion ${c.id}: "${c.text}". Is it satisfied, ${evidencePhrase}?`,
+   instructions:`Acceptance criterion ${c.qid}: "${c.text}". Is it satisfied, ${evidencePhrase}?`,
    criteria:{ true:'Satisfied', false:'Not satisfied' },
   };
   if (c.when) {
-   questions[`${c.id}_when`] = {
+   questions[`${c.qid}_when`] = {
     type:'bool',
-    instructions:`Acceptance criterion ${c.id} applies only when: "${c.when}". Was that condition exercised by this change, ${evidencePhrase}?`,
+    instructions:`Acceptance criterion ${c.qid} applies only when: "${c.when}". Was that condition exercised by this change, ${evidencePhrase}?`,
     criteria:{ true:'Condition exercised', false:'Condition not exercised' },
    };
   }
@@ -1871,19 +1901,23 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
  const answers = {...(result?.answers ?? {}), ...deterministicAnswers};
  const usage = normalizeGateUsage(result?.usage);
  const out:JevCriterion[] = criteria.map((c)=>{
-  const settled=deterministic.get(c.id);
-  if (settled) return { id:c.id, index:c.index, text:c.text, ...(c.when ? { when:c.when } : {}),
-   verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true } };
-  const v = boolVerdict(answers[c.id]);
-  const condition = c.when ? boolVerdict(conditionAnswer(answers, c.id)) : null;
+  const base:{id:string; index:number; text:string; when?:string; mitigates?:string[]} = { id:c.id, index:c.index, text:c.text };
+  if (c.when) base.when=c.when;
+  if (c.mitigates) base.mitigates=c.mitigates;
+  const settled=deterministic.get(c.qid);
+  if (settled) return { ...base,
+   verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true },
+   tier: checkPassed(c, settled) ? 'check_passed' : 'deterministic' };
+  const v = boolVerdict(answers[c.qid]);
+  const condition = c.when ? boolVerdict(conditionAnswer(answers, c.qid)) : null;
   const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
    ? 'not_applicable'
    : v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain';
-  return { id:c.id, index:c.index, text:c.text,
-   ...(c.when ? { when:c.when } : {}),
+  return { ...base,
    verdict, probability: v.probability,
    ...(condition ? { conditionProbability: condition.probability } : {}),
-   answer: answers[c.id] };
+   answer: answers[c.qid],
+   tier: checkPassed(c, verdict) ? 'check_passed' : (v.verdict === 'true' || v.verdict === 'false') ? 'judged' : 'none' };
  });
  const gapIds = out.filter((c)=>c.verdict === 'gap').map((c)=>c.id);
  const uncertainIds = out.filter((c)=>c.verdict === 'uncertain').map((c)=>c.id);
