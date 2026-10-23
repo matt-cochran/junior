@@ -6,7 +6,8 @@
 // or network call is made.
 
 import * as fs from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { ensureLocalExcludes } from './isolation.ts';
 
 /** Command Junior installs as its compact-context SessionStart hook. */
 export const JUNIOR_HOOK_COMMAND = 'junior compact';
@@ -130,6 +131,7 @@ export function installContextHooks(options: ContextHooksOptions): {
   path: string;
   backup: string | null;
   changed: boolean;
+  excludeError?: string;
 } {
   if (!isObject(options) || typeof options.projectDir !== 'string' || options.projectDir.trim().length === 0) {
     throw new TypeError('projectDir must be a non-empty string');
@@ -178,6 +180,17 @@ export function installContextHooks(options: ContextHooksOptions): {
   files.mkdirSync(dirname(path), { recursive: true });
   files.writeFileSync(backup, raw);
   files.writeFileSync(path, JSON.stringify(result.settings, null, 2) + '\n');
+
+  const backupRelative = relative(options.projectDir, backup);
+  if (backupRelative.length > 0 && !backupRelative.startsWith('..') && !isAbsolute(backupRelative)) {
+    const pattern = '/' + backupRelative.split(sep).join('/');
+    try {
+      const excluded = ensureLocalExcludes(options.projectDir, [pattern]);
+      if (excluded.error) return { path, backup, changed: true, excludeError: excluded.error };
+    } catch (e: any) {
+      return { path, backup, changed: true, excludeError: e?.message || String(e) };
+    }
+  }
   return { path, backup, changed: true };
 }
 

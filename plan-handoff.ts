@@ -23,6 +23,20 @@ export function isHoldOutcome(status: unknown): boolean {
   return typeof status === 'string' && HOLD_OUTCOMES.includes(status);
 }
 
+/** A run refused before any worker started: blocked, with no segment and no
+ * observed model. Such a run keeps its lease instead of being marked failed,
+ * so the same contract can be re-run once the manager clears the blocker. */
+export function runNeverStarted(result: any): boolean {
+  if (!result || typeof result !== 'object') return false;
+  if (result.runtime?.stopReason !== 'blocked') return false;
+  const segments = result.segments;
+  const segmentCount = Array.isArray(segments) ? segments.length : segments;
+  if (segmentCount !== 0 && segmentCount != null) return false;
+  const observed = result.model?.observed;
+  if (observed == null) return true;
+  return Array.isArray(observed) && observed.length === 0;
+}
+
 export type PlanHopResult = { ok: boolean; result?: any; error?: { message: string } };
 
 export type PlanHop = (

@@ -516,16 +516,72 @@ export async function codemapContext(
   return context;
 }
 
+/** Project paths that never belong to the synced code roster. */
+export const DEFAULT_CODE_EXCLUDES = [
+  '.changeset/**',
+  '**/package-lock.json',
+  '**/pnpm-lock.yaml',
+  '**/Cargo.lock',
+  '**/__snapshots__/**',
+  '**/*.snap',
+] as const;
+
+/** Convert one forward-slash glob into a full-path regular expression. */
+function globRegExp(pattern: string): RegExp {
+  let source = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === '*') {
+      if (pattern[i + 1] === '*') {
+        i++;
+        if (pattern[i + 1] === '/') {
+          i++;
+          source += '(?:.*/)?';
+        } else {
+          source += '.*';
+        }
+      } else {
+        source += '[^/]*';
+      }
+    } else if (char === '?') {
+      source += '[^/]';
+    } else {
+      source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${source}$`);
+}
+
+/** True when `path` is a code-roster candidate after `.crossmatrix/` and excludes. */
+export function isCodeRosterPath(path: string, excludes: readonly string[]): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (normalized === '.crossmatrix' || normalized.startsWith('.crossmatrix/')) return false;
+  return !excludes.some((pattern) => globRegExp(pattern.replace(/\\/g, '/')).test(normalized));
+}
+
+/** Load `codemap.exclude` from `<dir>/delivery.config.json`, or the defaults. */
+export function loadCodeExcludes(dir: string): readonly string[] {
+  const configPath = join(dir, 'delivery.config.json');
+  if (!fs.existsSync(configPath)) return DEFAULT_CODE_EXCLUDES;
+  const config: unknown = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  if (!isRecord(config) || !isRecord(config.codemap) || !Array.isArray(config.codemap.exclude)) {
+    return DEFAULT_CODE_EXCLUDES;
+  }
+  return config.codemap.exclude.map(String);
+}
+
 /** Tracked files under `dir` with their bytes, as `matrix.ts`'s adapters expect. */
 function trackedFiles(dir: string): MatrixFile[] {
   const listing = spawnSync('git', ['ls-files'], { cwd: dir, encoding: 'utf8' });
   if (listing.status !== 0) {
     throw new Error(`git ls-files failed in ${dir}: ${listing.stderr?.trim() ?? 'unknown error'}`);
   }
+  const excludes = loadCodeExcludes(dir);
   const files: MatrixFile[] = [];
   for (const line of listing.stdout.split('\n')) {
     const p = line.trim();
     if (!p) continue;
+    if (!isCodeRosterPath(p, excludes)) continue;
     files.push({ path: p, content: fs.readFileSync(join(dir, p)) });
   }
   return files;

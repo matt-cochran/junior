@@ -98,7 +98,7 @@ const COMMANDS: Record<string, CommandSpec> = {
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
- model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
+ model: { flags: ['--online', '--offline', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
   help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes] | approve|revoke <key>' },
  plan: { flags: ['--jev'], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
   help: 'Usage: junior plan check <plan.json> [--max-hours N] [--jev] | contracts <plan.json> --out <dir>' },
@@ -448,13 +448,13 @@ async function main(argv: string[]): Promise<void> {
   let plan: any;
   if (task.plan !== undefined && command !== 'qa') {
    validate(task);
-   const { withPlanLease, isHoldOutcome } = await import('./plan-handoff.ts');
+   const { withPlanLease, isHoldOutcome, runNeverStarted } = await import('./plan-handoff.ts');
    const { callHop } = await import('./tools/tools.ts');
    const hopPath = resolve(taskCwd, String(task.hopFrom));
    const lease = await withPlanLease(task, () => run(task, mock, deps), {
     callHop: (tool, request) => callHop(hopPath, tool, request),
     deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
-    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status) || runNeverStarted(r), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
    });
    if (!lease.plan.leased) {
     console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));
