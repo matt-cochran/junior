@@ -86,11 +86,18 @@ A cached 24-hour update check may print one stderr line on `init`, `doctor`,
 companion and unmodified skill.
 
 After a compaction or resume, run `junior compact` and read the block before
-continuing. It rebuilds the active plan, FMECA state, open scientific-process
-hypotheses and unresolved runs from the last 48 hours from the live stores,
-with no model call. `junior setup --context-hooks [--scope local|project]
-[--harness claude|codex|cursor]` installs a Claude Code `SessionStart` hook for
-`compact|resume`, or prints instructions for Codex and Cursor.
+continuing. It rebuilds the active plan, pending decisions with the file to
+read, open notes, FMECA state, open hypotheses, recent unresolved runs, open
+PRs and capture proposals from the live stores, with no model call. Work
+Pending decisions first. For each Capture proposal, either `junior note promote
+<id>` and then record the risk with fmeca, the hypothesis with
+scientific-process or the plan change with cpm yourself, or `junior note dismiss
+<id>`. Capture only writes proposals; it never writes companion stores. Use
+`junior note add` for anything you must come back to. `junior setup
+--context-hooks [--scope local|project] [--harness claude|codex|cursor]`
+installs Claude Code `SessionStart` and `PreCompact` hooks; with `--harness
+codex|cursor` it writes `.codex/hooks.json` or `.cursor/hooks.json` instead
+(trust Codex hooks in `/hooks`).
 
 ## Junior as a junior engineer
 
