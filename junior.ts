@@ -12,8 +12,8 @@
 // so the default is safe (it never silently omits uncommitted work).
 // ---------------------------------------------------------------------------
 
-import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, inspectSkill, type InitOptions } from './setup.ts';
 import { installationDisabled } from './companions.ts';
@@ -33,7 +33,7 @@ function usage(): string {
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
   '  compact [--json] [--max-chars N] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
-  '  note    add <text...> [--kind <kind>] | list [--json] | done|promote|dismiss <id>   manage local session notes',
+  '  note    add <text...> [--kind <kind>] | list [--json] | done|promote|dismiss <id>   manage local session notes; fmeca propose-verified <result.json|run id>   print verified-mitigation proposals',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run] [--context-hooks [--scope local|project] [--remove]]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
   '  update  [--target ...] [--with-triz]    adopt newer managed + companion tools and unmodified skills',
@@ -90,6 +90,8 @@ const COMMANDS: Record<string, CommandSpec> = {
    '       junior note list [--json]',
    '       junior note done|promote|dismiss <id>',
   ].join('\n') },
+ fmeca: { flags: [], valueFlags: [], min: 2, max: 2,
+  help: 'Usage: junior fmeca propose-verified <result.json|run id>' },
  setup: { flags: ['--yes', '--dry-run', '--context-hooks', '--remove'], valueFlags: ['--harness', '--hop', '--scope'], min: 0, max: 0,
   help: [
    'Usage: junior setup [--harness claude|cursor|codex] [--hop <hop.json>] [--yes] [--dry-run]',
@@ -203,6 +205,40 @@ function planFileArg(args: string[]): string {
  throw Error('Usage: junior plan check <plan.json> [--max-hours N] [--jev]');
 }
 
+/** Resolve a `fmeca propose-verified` argument to a result file and its
+ * `<id>/<stamp>` run reference. A path that exists is read directly; anything
+ * else is a run id resolved to the lexically greatest stamp directory under
+ * `<cwd>/.delivery/<id>/` that holds a result.json (ADR 0011 R5). Returns
+ * undefined when a run id has no result.json. */
+function resolveResultArg(arg: string, cwd: string): { file: string; runRef: string } | undefined {
+ if (existsSync(arg) && statSync(arg).isFile()) {
+  const file = resolve(arg);
+  const stampDir = join(file, '..');
+  const atDelivery =
+   basename(file) === 'result.json' &&
+   basename(join(stampDir, '..', '..')) === '.delivery';
+  return {
+   file,
+   runRef: atDelivery ? `${basename(join(stampDir, '..'))}/${basename(stampDir)}` : arg,
+  };
+ }
+ const runDir = join(cwd, '.delivery', arg);
+ let stamps: string[];
+ try {
+  stamps = readdirSync(runDir, { withFileTypes: true })
+   .filter((entry) => entry.isDirectory())
+   .map((entry) => entry.name)
+   .sort();
+ } catch {
+  return undefined;
+ }
+ for (const stamp of stamps.reverse()) {
+  const file = join(runDir, stamp, 'result.json');
+  if (existsSync(file)) return { file, runRef: `${arg}/${stamp}` };
+ }
+ return undefined;
+}
+
 async function main(argv: string[]): Promise<void> {
  const command = argv[0];
  const rest = argv.slice(1);
@@ -312,6 +348,28 @@ async function main(argv: string[]): Promise<void> {
    return;
   }
   throw Error(COMMANDS.note.help);
+ }
+ if (command === 'fmeca') {
+  const [sub, target] = parsed.files;
+  if (sub !== 'propose-verified') throw Error(COMMANDS.fmeca.help);
+  const cwd = process.cwd();
+  const resolved = resolveResultArg(target, cwd);
+  if (!resolved) {
+   console.error(`no result.json found: ${join(cwd, '.delivery', target)}`);
+   process.exitCode = 1;
+   return;
+  }
+  let result: unknown;
+  try {
+   result = JSON.parse(readFileSync(resolved.file, 'utf8'));
+  } catch {
+   console.error(`invalid result.json: ${resolved.file}`);
+   process.exitCode = 1;
+   return;
+  }
+  const { proposeVerified } = await import('./fmeca-verify.ts');
+  console.log(JSON.stringify(proposeVerified(result, resolved.runRef), null, 2));
+  return;
  }
  if (command === 'compact') {
   if (parsed.flags.has('--capture')) {

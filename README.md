@@ -108,6 +108,13 @@ handoffs (`plan check --jev` adds a paid plan-time clarity report), and
 plan, risk, traceability, investigate, restore context). See
 [Models](docs/models.md) and [Planning for Junior](docs/planning.md).
 
+Acceptance criteria can carry a stable `id`, the 0-based `checks` indexes that
+prove them and the fmeca `mitigates` links they verify (ADR 0011). After a run,
+`junior fmeca propose-verified <result.json|run id>` prints a ready
+`set_mitigation_status` request for every criterion met at tier `check_passed`;
+the manager reviews each proposal and applies it with
+`junior tools call fmeca`. A judged criterion is never proposed.
+
 Execution settings live on the contract:
 
 - `maxOutputBytes` (1-32 MiB, default 8 MiB) bounds the retained worker output.

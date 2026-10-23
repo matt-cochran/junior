@@ -463,6 +463,58 @@ test('runPlanCommand reads repository checkouts from delivery.config.json', () =
   assert.equal(written.cwd, repo);
 });
 
+// --- ADR 0011 acceptance objects -------------------------------------------
+
+function acceptanceAgent(acceptance: unknown): any {
+  return agent('a', { junior: { workflow: 'test_first', acceptance, checks: [{ command: 'true' }] } });
+}
+
+test('planContracts copies an acceptance object with an id as is', () => {
+  const acceptance = [{ id: 'req:c1/ac1', text: 'A' }];
+  const [{ contract }] = planContracts(plan(acceptanceAgent(acceptance)), { cwd: '/repo' });
+  assert.deepEqual(contract.acceptance, [{ id: 'req:c1/ac1', text: 'A' }]);
+});
+
+test('planContracts keeps a string acceptance entry as a string', () => {
+  const [{ contract }] = planContracts(plan(acceptanceAgent(['plain criterion'])), { cwd: '/repo' });
+  assert.deepEqual(contract.acceptance, ['plain criterion']);
+});
+
+test('planContracts drops an acceptance entry that is neither a non-empty string nor an object with text', () => {
+  const [{ contract }] = planContracts(plan(acceptanceAgent([42, { id: 'x' }, { text: '' }])), { cwd: '/repo' });
+  assert.deepEqual(contract.acceptance, []);
+});
+
+test('checkPlanForJunior counts an object acceptance entry with text as acceptance', () => {
+  const result = checkPlanForJunior(plan(acceptanceAgent([{ id: 'req:c1/ac1', text: 'A' }])));
+  assert.equal(codes(result).includes('NO_ACCEPTANCE'), false);
+});
+
+test('checkPlanForJunior reports DUPLICATE_ACCEPTANCE_ID when two acceptance objects share an id', () => {
+  const result = checkPlanForJunior(plan(acceptanceAgent([
+    { id: 'x', text: 'A' },
+    { id: 'x', text: 'B' },
+  ])));
+  assert.ok(codes(result).includes('DUPLICATE_ACCEPTANCE_ID'));
+});
+
+test('DUPLICATE_ACCEPTANCE_ID message names the duplicated id', () => {
+  const result = checkPlanForJunior(plan(acceptanceAgent([
+    { id: 'req:c1/ac1', text: 'A' },
+    { id: 'req:c1/ac1', text: 'B' },
+  ])));
+  const message = result.findings.find((finding: any) => finding.code === 'DUPLICATE_ACCEPTANCE_ID')?.message ?? '';
+  assert.match(message, /req:c1\/ac1/);
+});
+
+test('DUPLICATE_ACCEPTANCE_ID cites the deliverable that holds the duplicate', () => {
+  const result = checkPlanForJunior(plan(acceptanceAgent([
+    { id: 'x', text: 'A' },
+    { id: 'x', text: 'B' },
+  ])));
+  assert.deepEqual(result.findings.find((finding: any) => finding.code === 'DUPLICATE_ACCEPTANCE_ID')?.ids, ['a']);
+});
+
 test('scorePlanFile resolves context against the configured repository checkout', async () => {
   const dir = workdir();
   const repo = join(dir, 'triz');
