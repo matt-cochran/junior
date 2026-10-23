@@ -861,6 +861,7 @@ export async function main(argv: string[]): Promise<number> {
           dir: options.dir,
         });
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        if (result.failures.length > 0) process.exitCode = 1;
         return 0;
       }
       const dimensions: MatrixDimension[] = [];

@@ -2,33 +2,34 @@
 // Companion-tool state mirror.
 //
 // `syncState` reads each companion tool's current state through the HOP
-// (`cpm plan.status`, `fmeca state.get`, `elicitation state.get`,
-// `scientific-process state.get`) plus jevitate result JSON files, turns it into
-// crossmatrix observation descriptors with the pure mappers in this module, and
-// emits them through the same content-addressed `observe` command path the
-// code-map uses. Re-running against unchanged state replays byte-for-byte
-// identical request ids, so the server treats the mirror as idempotent.
+// (`cpm plan.get`, `fmeca state.get`) and turns the cross-tool links it finds
+// into crossmatrix observation descriptors. It declares the scales and
+// relations those observations need before writing them, and only declares a
+// relation that at least one observation uses.
 //
-// Missing tools or sessions are skipped with a note, never an error. Evidence
-// excerpts are short summaries built from ids and state tokens only, so no
-// secret or env value can leak into the model.
+// Member status is a roster attribute owned by the source's own sync, so this
+// module writes no status observations. Elicitation, scientific-process and
+// jevitate results have no dimension holding their members yet, so they are
+// reported as not mirrored rather than written to the wrong relation.
+//
+// Re-running against unchanged state replays byte-for-byte identical request
+// ids, so the server treats the mirror as idempotent. Evidence excerpts are
+// short summaries built from ids and state tokens only, so no secret or env
+// value can leak into the model.
 // ---------------------------------------------------------------------------
 
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   CROSSMATRIX_WRITE_SCHEMA_VERSION,
   requestIdFor,
   serverErrorDetail,
+  type CommandRequest,
 } from './matrix-sync.ts';
 import type { CodemapEvidence, CodemapSent } from './codemap.ts';
 import { callHop, loadHop } from './tools/tools.ts';
 import {
   ShapeError,
-  elicitationClaims,
   fmecaFailureModes,
-  planStatusRows,
-  spHypotheses,
+  planDeliverables,
   strictItems,
 } from './companion-shapes.ts';
 
@@ -42,7 +43,7 @@ export interface StateObservation {
   from: string;
   /** Fully-prefixed target member id. */
   to: string;
-  /** State token recorded as the observation (status, standing, verdict ...). */
+  /** State token recorded as the observation. */
   observation: string;
   confidence: 'high' | 'medium' | 'low';
   evidence: CodemapEvidence[];
@@ -59,15 +60,15 @@ export interface StateSyncDeps {
 export interface StateSyncOptions {
   hopPath: string;
   modelId: string;
-  /** cpm plan id whose `plan.status` is mirrored. */
+  /** cpm plan id whose `plan.get` acceptance criteria are mirrored. */
   planId?: string;
   /** fmeca session id whose `state.get` is mirrored. */
   fmecaSession?: string;
-  /** elicitation session id whose `state.get` is mirrored. */
+  /** elicitation session id; not mirrored until a dimension holds its members. */
   elicitationSession?: string;
-  /** scientific-process session id whose `state.get` is mirrored. */
+  /** scientific-process session id; not mirrored until a dimension holds its members. */
   spSession?: string;
-  /** Directory or single file of jevitate journey result JSON. */
+  /** Directory or single file of jevitate journey result JSON; not mirrored. */
   jevitateResults?: string;
   /** Project dir used to resolve a relative `--jevitate-results`; defaults to cwd. */
   dir?: string;
@@ -80,7 +81,65 @@ export interface StateSyncResult {
   sent: CodemapSent[];
   observations: StateObservation[];
   notes: string[];
+  failures: string[];
 }
+
+interface StateRelation {
+  relationId: string;
+  from: string;
+  to: string;
+  relationType: string;
+  scale: string;
+  coveragePolicy: 'none';
+}
+
+/** Scales declared by state sync, in declaration order. */
+const STATE_SCALES = [
+  {
+    id: 'junior-reference',
+    mode: 'categorical',
+    levels: [{ observation: 'references', value: 3 }],
+  },
+  {
+    id: 'junior-mitigation',
+    mode: 'categorical',
+    levels: [
+      { observation: 'planned', value: 1 },
+      { observation: 'implemented', value: 3 },
+      { observation: 'verified', value: 9 },
+    ],
+  },
+] as const;
+
+/** Relations state sync may declare, in declaration order. */
+const STATE_RELATIONS: readonly StateRelation[] = [
+  {
+    relationId: 'junior-fmeca-cpm',
+    from: 'fmeca',
+    to: 'cpm',
+    relationType: 'concerns',
+    scale: 'junior-reference',
+    coveragePolicy: 'none',
+  },
+  {
+    relationId: 'junior-fmeca-code',
+    from: 'fmeca',
+    to: 'code',
+    relationType: 'concerns',
+    scale: 'junior-reference',
+    coveragePolicy: 'none',
+  },
+  {
+    relationId: 'junior-cpm-fmeca',
+    from: 'cpm',
+    to: 'fmeca',
+    relationType: 'mitigates',
+    scale: 'junior-mitigation',
+    coveragePolicy: 'none',
+  },
+];
+
+const MITIGATION_STATUSES = new Set(['planned', 'implemented', 'verified']);
 
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -94,12 +153,6 @@ function text(value: unknown): string {
   return value === null || value === undefined ? '' : String(value);
 }
 
-/** First present array value from a list of candidate keys. */
-function firstArray(source: Record<string, any>, keys: readonly string[]): any[] {
-  for (const key of keys) if (Array.isArray(source[key])) return source[key];
-  return [];
-}
-
 function evidence(
   system: string,
   sourceType: string,
@@ -111,46 +164,127 @@ function evidence(
 }
 
 // ---------------------------------------------------------------------------
-// cpm: deliverable status
+// cpm plan: acceptance criteria that name fmeca mitigations
 // ---------------------------------------------------------------------------
 
-/** Normalise the cpm status vocabulary to complete | in_progress | blocked. */
-function normalizeCpmStatus(raw: unknown): string | null {
-  const value = text(raw).trim().toLowerCase().replace(/\s+/g, '_');
-  if (value === 'complete' || value === 'completed') return 'complete';
-  if (['in_progress', 'in-progress', 'inprogress', 'active', 'started'].includes(value)) return 'in_progress';
-  if (['blocked', 'blocked_by_dependency', 'blocked-by-dependency'].includes(value)) return 'blocked';
-  return null;
+interface PlanDeliverable {
+  id: string;
+  acceptance: unknown[];
 }
 
-/** One status observation per deliverable with a recognised cpm status. */
-export function cpmStatusObservations(status: unknown, planId: string): StateObservation[] {
+/** Deliverables and their `metadata.junior.acceptance` entries from plan.get. */
+function planDeliverableAcceptance(plan: unknown): PlanDeliverable[] {
+  return strictItems(planDeliverables(plan), 'cpm', 'plan.get', plan)
+    .filter(isRecord)
+    .map((deliverable) => {
+      const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
+      return {
+        id: text(deliverable.id),
+        acceptance: asArray(junior.acceptance),
+      };
+    })
+    .filter((deliverable) => deliverable.id.length > 0);
+}
+
+/** criterion id (or AC<n>) -> mitigates entries from one acceptance entry. */
+function acceptanceMitigates(entry: unknown, index: number): { criterionId: string; mitigates: string[] } {
+  if (!isRecord(entry)) return { criterionId: `AC${index + 1}`, mitigates: [] };
+  return {
+    criterionId: text(entry.id) || `AC${index + 1}`,
+    mitigates: asArray(entry.mitigates).map(text).filter(Boolean),
+  };
+}
+
+interface Mitigation {
+  failureModeId: string;
+  status: string;
+}
+
+/** Index every mitigation under its failure mode, in state order. */
+function mitigationIndex(state: unknown): Map<string, Mitigation> {
+  const index = new Map<string, Mitigation>();
+  for (const raw of strictItems(fmecaFailureModes(state), 'fmeca', 'state.get', state)) {
+    if (!isRecord(raw)) continue;
+    const failureModeId = text(raw.id ?? raw.failure_mode_id ?? raw.name);
+    if (!failureModeId) continue;
+    for (const mitigation of asArray(raw.mitigations)) {
+      if (!isRecord(mitigation)) continue;
+      const id = text(mitigation.id ?? mitigation.mitigation_id);
+      if (!id) continue;
+      index.set(id, { failureModeId, status: text(mitigation.status).trim().toLowerCase() });
+    }
+  }
+  return index;
+}
+
+function mitigationObservations(
+  deliverables: readonly PlanDeliverable[],
+  mitigations: Map<string, Mitigation>,
+  planId: string,
+  fmecaSession: string,
+  notes: string[],
+): StateObservation[] {
   const observations: StateObservation[] = [];
-  for (const { id, status: mark } of strictItems(planStatusRows(status), 'cpm', 'plan.status', status)) {
-    if (!id) continue;
-    const normalized = normalizeCpmStatus(mark);
-    if (!normalized) continue;
-    const ref = `cpm:${planId}/${id}`;
-    observations.push({
-      relationId: 'codemap-cpm',
-      from: `cpm:${id}`,
-      to: `cpm:${id}`,
-      observation: normalized,
-      confidence: 'high',
-      evidence: [evidence('cpm', 'deliverable-status', ref, ref, `cpm deliverable ${id} is ${normalized}`)],
-      rationale: `cpm deliverable ${id} status is ${normalized}`,
-      contentVersion: `cpm-status:${normalized}`,
+  for (const deliverable of deliverables) {
+    deliverable.acceptance.forEach((entry, index) => {
+      const { criterionId, mitigates } = acceptanceMitigates(entry, index);
+      for (const reference of mitigates) {
+        const separator = reference.indexOf('/');
+        if (separator < 0) {
+          notes.push(`plan criterion ${criterionId} mitigation '${reference}' skipped: expected '<session>/<mitigation id>'`);
+          continue;
+        }
+        const session = reference.slice(0, separator);
+        const mitigationId = reference.slice(separator + 1);
+        if (session !== fmecaSession) {
+          notes.push(`plan criterion ${criterionId} mitigation ${reference} skipped: another fmeca session`);
+          continue;
+        }
+        const mitigation = mitigations.get(mitigationId);
+        if (!mitigation) {
+          notes.push(`plan criterion ${criterionId} mitigation ${reference} skipped: unknown mitigation`);
+          continue;
+        }
+        if (!MITIGATION_STATUSES.has(mitigation.status)) continue;
+        const criterionRef = `cpm:${planId}/${deliverable.id}`;
+        const mitigationRef = `fmeca:${fmecaSession}/${mitigationId}`;
+        observations.push({
+          relationId: 'junior-cpm-fmeca',
+          from: `cpm:${deliverable.id}`,
+          to: `fm:${mitigation.failureModeId}`,
+          observation: mitigation.status,
+          confidence: 'high',
+          evidence: [
+            evidence(
+              'cpm',
+              'acceptance-mitigation',
+              criterionRef,
+              criterionId,
+              `plan criterion ${criterionId} mitigates ${mitigationId}`,
+            ),
+            evidence(
+              'fmeca',
+              'mitigation-status',
+              mitigationRef,
+              mitigationId,
+              `fmeca mitigation ${mitigationId} is ${mitigation.status}`,
+            ),
+          ],
+          rationale: `plan criterion ${criterionId} links ${deliverable.id} to mitigation ${mitigationId}`,
+          contentVersion: `cpm-mitigation:${criterionId}:${mitigationId}:${mitigation.status}`,
+        });
+      }
     });
   }
   return observations;
 }
 
 // ---------------------------------------------------------------------------
-// fmeca: failure modes -> features/files
+// fmeca: failure-mode refs -> plan deliverables and code
 // ---------------------------------------------------------------------------
 
 const FILE_TOKEN = /[\w@.-]+(?:\/[\w@.-]+)+\.[A-Za-z][A-Za-z0-9]*/g;
-const MEMBER_TOKEN = /\b(?:cpm|job|journey|fmeca|code|test|loc):[\w./:-]+/g;
+const MEMBER_TOKEN = /\b(?:cpm|job|journey|fmeca|code|test|loc|file):[\w./:-]+/g;
 
 function stringsIn(value: unknown, out: string[] = [], depth = 0): string[] {
   if (depth > 4) return out;
@@ -163,7 +297,19 @@ function stringsIn(value: unknown, out: string[] = [], depth = 0): string[] {
 /** Member ids and code paths a failure mode names in its free-text fields. */
 function fmecaTargets(mode: Record<string, any>): string[] {
   const tokens = new Set<string>();
-  const fields = ['feature', 'features', 'files', 'owned_files', 'ownedFiles', 'statement', 'description', 'effect', 'cause', 'name', 'label'];
+  const fields = [
+    'feature',
+    'features',
+    'files',
+    'owned_files',
+    'ownedFiles',
+    'statement',
+    'description',
+    'effect',
+    'cause',
+    'name',
+    'label',
+  ];
   for (const field of fields) {
     for (const value of stringsIn(mode[field])) {
       for (const match of value.matchAll(MEMBER_TOKEN)) tokens.add(match[0]);
@@ -173,188 +319,90 @@ function fmecaTargets(mode: Record<string, any>): string[] {
   return [...tokens];
 }
 
-/** Link each failure mode to the features/files it names (or to itself). */
-export function fmecaStateObservations(state: unknown, sessionId: string): StateObservation[] {
+function looksLikePath(value: string): boolean {
+  return value.includes('/') || /\.[A-Za-z][A-Za-z0-9]*$/.test(value);
+}
+
+function failureModeObservations(
+  state: unknown,
+  sessionId: string,
+  planId: string | undefined,
+  notes: string[],
+): StateObservation[] {
   const observations: StateObservation[] = [];
   for (const raw of strictItems(fmecaFailureModes(state), 'fmeca', 'state.get', state)) {
     if (!isRecord(raw)) continue;
     const id = text(raw.id ?? raw.failure_mode_id ?? raw.name);
     if (!id) continue;
-    const targets = fmecaTargets(raw);
-    const ref = `fmeca:${sessionId}/${id}`;
-    for (const to of targets.length > 0 ? targets : [`fm:${id}`]) {
-      observations.push({
-        relationId: 'codemap-fmeca',
-        from: `fm:${id}`,
-        to,
-        observation: 'touches',
-        confidence: 'medium',
-        evidence: [evidence('fmeca', 'failure-mode', ref, ref, `fmeca failure mode ${id} names ${to}`)],
-        rationale: `fmeca failure mode ${id} names ${to}`,
-        contentVersion: `fmeca-link:${to}`,
-      });
+
+    const targets: Array<{ relationId: string; to: string; ref: string }> = [];
+    const seen = new Set<string>();
+    const add = (relationId: string, to: string, ref: string): void => {
+      if (!to || to === `fm:${id}`) return;
+      const key = `${relationId}\n${to}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      targets.push({ relationId, to, ref });
+    };
+    const addCode = (codePath: string, ref: string): void => {
+      const cleaned = codePath.replace(/^\/+/, '');
+      if (cleaned) add('junior-fmeca-code', `loc:${cleaned}`, ref);
+    };
+
+    // `cpm:<deliverable>` or `cpm:<plan_id>/<deliverable>`; a qualified ref to
+    // another plan names no member of the synced roster.
+    const addCpm = (rest: string, ref: string): void => {
+      const separator = rest.indexOf('/');
+      if (separator < 0) {
+        add('junior-fmeca-cpm', `cpm:${rest}`, ref);
+        return;
+      }
+      const refPlan = rest.slice(0, separator);
+      const target = rest.slice(separator + 1);
+      if (refPlan !== planId) {
+        notes.push(`fmeca failure mode ${id} ref ${ref} skipped: another plan`);
+        return;
+      }
+      if (target.startsWith('loc:') || target.startsWith('file:')) {
+        addCode(target.replace(/^(?:loc|file):/, ''), ref);
+      } else {
+        add('junior-fmeca-cpm', `cpm:${target}`, ref);
+      }
+    };
+
+    for (const ref of asArray(raw.refs).map(text).filter(Boolean)) {
+      if (ref.startsWith('cpm:')) {
+        addCpm(ref.slice('cpm:'.length), ref);
+        continue;
+      }
+      if (ref.startsWith('loc:') || ref.startsWith('file:')) {
+        addCode(ref.replace(/^(?:loc|file):/, ''), ref);
+        continue;
+      }
+      if (!ref.includes(':') && looksLikePath(ref)) addCode(ref, ref);
     }
-  }
-  return observations;
-}
 
-// ---------------------------------------------------------------------------
-// elicitation: claim standing -> jevitate outcome/requirement members
-// ---------------------------------------------------------------------------
-
-/** Resolve the jevitate member a claim id belongs to. */
-function claimTarget(id: string): string | null {
-  const outcome = /^job:([^/]+)\/outcome:.+$/.exec(id);
-  if (outcome) return id;
-  const story = /^job:([^/]+)\/story$/.exec(id);
-  if (story) return `job:${story[1]}`;
-  const job = /^job:([^/]+)$/.exec(id);
-  if (job) return `job:${job[1]}`;
-  return null;
-}
-
-/** Link each claim's standing to the jevitate member it came from. */
-export function elicitationStateObservations(state: unknown, sessionId: string): StateObservation[] {
-  const observations: StateObservation[] = [];
-  for (const raw of strictItems(elicitationClaims(state), 'elicitation', 'state.get', state)) {
-    if (!isRecord(raw)) continue;
-    const id = text(raw.id ?? raw.claim_id ?? raw.claimId);
-    const to = id ? claimTarget(id) : null;
-    if (!id || !to) continue;
-    const standing = text(raw.standing ?? raw.status).toLowerCase() || 'open';
-    const ref = `elicitation:${sessionId}/${id}`;
-    observations.push({
-      relationId: 'codemap-jevitate-jobs',
-      from: `claim:${id}`,
-      to,
-      observation: standing,
-      confidence: 'high',
-      evidence: [evidence('elicitation', 'claim-standing', ref, `elicitation:${sessionId}`, `claim ${id} is ${standing}`)],
-      rationale: `elicitation claim ${id} standing is ${standing}`,
-      contentVersion: `elicitation-standing:${standing}`,
-    });
-  }
-  return observations;
-}
-
-// ---------------------------------------------------------------------------
-// scientific-process: hypothesis verdicts -> features/files
-// ---------------------------------------------------------------------------
-
-function verdictOf(item: Record<string, any>): string {
-  return text(item.verdict ?? item.status ?? item.outcome ?? item.result).trim();
-}
-
-function experimentsFrom(state: unknown): any[] {
-  if (isRecord(state)) return firstArray(state, ['experiments', 'runs']);
-  return [];
-}
-
-/** Link each hypothesis verdict to the files named in its statement/evidence. */
-export function scientificProcessStateObservations(state: unknown, sessionId: string): StateObservation[] {
-  const observations: StateObservation[] = [];
-  const hypotheses = strictItems(spHypotheses(state), 'scientific-process', 'state.get', state).filter(isRecord);
-  for (const hypothesis of hypotheses) {
-    const id = text(hypothesis.id ?? hypothesis.hypothesis_id ?? hypothesis.hypothesisId);
-    if (!id) continue;
-    let verdict = verdictOf(hypothesis);
-    let files = stringsIn([hypothesis.statement, hypothesis.evidence]).flatMap((value) =>
-      [...value.matchAll(FILE_TOKEN)].map((match) => match[0]),
-    );
-    for (const experiment of experimentsFrom(state).filter(isRecord)) {
-      const ref = text(experiment.hypothesis_id ?? experiment.hypothesisId);
-      if (ref && ref === id) {
-        if (!verdict) verdict = verdictOf(experiment);
-        files = files.concat(
-          stringsIn([experiment.statement, experiment.evidence]).flatMap((value) =>
-            [...value.matchAll(FILE_TOKEN)].map((match) => match[0]),
-          ),
-        );
+    for (const token of fmecaTargets(raw)) {
+      if (token.startsWith('cpm:')) {
+        addCpm(token.slice('cpm:'.length), token);
+      } else if (token.startsWith('loc:')) {
+        addCode(token.slice('loc:'.length), token);
+      } else if (token.startsWith('file:')) {
+        addCode(token.slice('file:'.length), token);
       }
     }
-    const targets = [...new Set(files.length > 0 ? files.map((file) => `loc:${file}`) : [`hypothesis:${id}`])];
-    for (const to of targets) {
+
+    const ref = `fmeca:${sessionId}/${id}`;
+    for (const target of targets) {
       observations.push({
-        relationId: 'codemap-scientific-process',
-        from: `hypothesis:${id}`,
-        to,
-        observation: verdict || 'unknown',
-        confidence: 'high',
-        evidence: [
-          evidence(
-            'scientific-process',
-            'hypothesis-verdict',
-            `scientific-process:${sessionId}/${id}`,
-            `scientific-process:${sessionId}`,
-            `hypothesis ${id} verdict is ${verdict || 'unknown'}`,
-          ),
-        ],
-        rationale: `scientific-process hypothesis ${id} verdict is ${verdict || 'unknown'}`,
-        contentVersion: `sp-verdict:${verdict || 'unknown'}`,
-      });
-    }
-  }
-  return observations;
-}
-
-// ---------------------------------------------------------------------------
-// jevitate: journey results -> journeys + desired outcomes
-// ---------------------------------------------------------------------------
-
-/** Passing state of a journey result, or null when it carries no verdict. */
-function journeyPassing(result: Record<string, any>): boolean | null {
-  if (result.outcome !== undefined) return text(result.outcome).toLowerCase() === 'ok';
-  if (result.verdict !== undefined) return text(result.verdict).toLowerCase() === 'passed';
-  if (typeof result.passed === 'boolean') return result.passed;
-  return null;
-}
-
-/** Turn jevitate journey results into journey and desired-outcome observations. */
-export function jevitateResultObservations(results: readonly unknown[]): StateObservation[] {
-  const observations: StateObservation[] = [];
-  for (const value of results) {
-    if (!isRecord(value)) continue;
-    const metadata = isRecord(value.metadata) ? value.metadata : {};
-    const journeyId = text(metadata.id ?? value.journeyId ?? value.id);
-    if (!journeyId) continue;
-    const passing = journeyPassing(value);
-    if (passing === null) continue;
-    const state = passing ? 'passed' : 'failed';
-    observations.push({
-      relationId: 'codemap-jevitate-journeys',
-      from: `journey-result:${journeyId}`,
-      to: `journey:${journeyId}`,
-      observation: state,
-      confidence: 'high',
-      evidence: [
-        evidence('jevitate', 'journey-result', `jevitate:${journeyId}`, `jevitate:${journeyId}`, `journey ${journeyId} ${state}`),
-      ],
-      rationale: `jevitate journey ${journeyId} ${state}`,
-      contentVersion: `journey-result:${state}`,
-    });
-
-    // J9's mapping: metadata.job + metadata.serves/outcomes resolve the
-    // desired-outcome members this journey verifies.
-    const jobId = text(metadata.job ?? value.job ?? value.jobId);
-    const served = asArray(metadata.serves ?? value.serves ?? value.outcomes).map(text).filter(Boolean);
-    for (const outcomeId of served) {
-      observations.push({
-        relationId: 'codemap-jevitate-jobs',
-        from: `journey-result:${journeyId}`,
-        to: jobId ? `job:${jobId}/outcome:${outcomeId}` : `outcome:${outcomeId}`,
-        observation: state,
-        confidence: 'high',
-        evidence: [
-          evidence(
-            'jevitate',
-            'journey-outcome',
-            `jevitate:${journeyId}/${outcomeId}`,
-            `jevitate:${journeyId}`,
-            `journey ${journeyId} ${state} outcome ${outcomeId}`,
-          ),
-        ],
-        rationale: `jevitate journey ${journeyId} ${state} outcome ${outcomeId}`,
-        contentVersion: `journey-outcome:${state}`,
+        relationId: target.relationId,
+        from: `fm:${id}`,
+        to: target.to,
+        observation: 'references',
+        confidence: 'medium',
+        evidence: [evidence('fmeca', 'failure-mode-ref', ref, target.ref, `fmeca failure mode ${id} references ${target.to}`)],
+        rationale: `fmeca failure mode ${id} references ${target.to}`,
+        contentVersion: `fmeca-ref:${target.to}`,
       });
     }
   }
@@ -390,50 +438,54 @@ function assertWriteCapable(load: typeof loadHop, hopPath: string): void {
   }
 }
 
-/** Send one content-addressed `observe` through the codemap write path. */
-async function sendObserve(
-  call: typeof callHop,
-  load: typeof loadHop,
-  hopPath: string,
-  modelId: string,
-  observation: StateObservation,
-): Promise<CodemapSent> {
-  assertWriteCapable(load, hopPath);
-  const version = `${observation.relationId}|${observation.from}|${observation.to}|${observation.observation}|${observation.contentVersion}`;
-  const requestId = requestIdFor(modelId, 'observe', observation.relationId, version);
-  const request = {
+function command(modelId: string, op: CommandRequest['op'], requestId: string): CommandRequest {
+  return {
     schemaVersion: CROSSMATRIX_WRITE_SCHEMA_VERSION,
     requestId,
     modelId,
     actor: { actorType: 'system', persona: 'model_admin' },
-    op: {
-      kind: 'observe',
-      relationId: observation.relationId,
-      from: observation.from,
-      to: observation.to,
-      observation: observation.observation,
-      provenanceClass: 'observed',
-      confidence: observation.confidence,
-      evidence: observation.evidence,
-      rationale: observation.rationale,
-    },
+    op,
   };
+}
+
+interface SendOutcome {
+  ok: boolean;
+  requestId: string;
+  code: string | null;
+  detail: string;
+}
+
+async function send(
+  call: typeof callHop,
+  load: typeof loadHop,
+  hopPath: string,
+  request: CommandRequest,
+): Promise<SendOutcome> {
+  assertWriteCapable(load, hopPath);
   const outcome = await call(hopPath, 'crossmatrix', {
     tool: 'crossmatrix.command',
     arguments: { request },
   });
+  const result = outcome.result;
+  const code = isRecord(result) && isRecord(result.error) && typeof result.error.code === 'string'
+    ? result.error.code
+    : null;
   if (!outcome.ok) {
-    const detail = serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error';
-    throw new Error(`state sync observe failed: ${detail}`);
+    return {
+      ok: false,
+      requestId: request.requestId,
+      code,
+      detail: serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error',
+    };
   }
-  return { requestId, kind: 'observe' };
+  return { ok: true, requestId: request.requestId, code: null, detail: '' };
 }
 
 /** Read one tool's state; a missing/failed tool is a note, never an error. */
 async function readState(
   call: typeof callHop,
   hopPath: string,
-  tool: 'cpm' | 'fmeca' | 'elicitation' | 'scientific-process',
+  tool: 'cpm' | 'fmeca',
   toolName: string,
   args: Record<string, unknown>,
   notes: string[],
@@ -451,31 +503,8 @@ async function readState(
   }
 }
 
-/** Recursively collect `.json` files under `dir`, ignoring dot-directories. */
-function jsonFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith('.')) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...jsonFiles(full));
-    else if (entry.isFile() && entry.name.endsWith('.json')) out.push(full);
-  }
-  return out;
-}
-
-/** Read jevitate result JSON from a directory or a single file. */
-export function readJevitateResults(target: string): unknown[] {
-  const stat = fs.statSync(target);
-  const files = stat.isDirectory() ? jsonFiles(target) : [target];
-  const results: unknown[] = [];
-  for (const file of files) {
-    try {
-      results.push(JSON.parse(fs.readFileSync(file, 'utf8')));
-    } catch {
-      /* an unreadable result file is skipped */
-    }
-  }
-  return results;
+function relationVersion(relation: StateRelation): string {
+  return `${relation.from}|${relation.to}|${relation.relationType}|${relation.scale}|${relation.coveragePolicy}`;
 }
 
 /**
@@ -486,77 +515,191 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
   const call = options.deps?.callHop ?? callHop;
   const load = options.deps?.loadHop ?? loadHop;
   const notes: string[] = [];
+  const failures: string[] = [];
   const observations: StateObservation[] = [];
 
   /** Record a ShapeError as a note; any other error still fails the sync. */
-  const mapOrNote = (map: () => StateObservation[]): void => {
+  const mapOrNote = (map: () => void): void => {
     try {
-      observations.push(...map());
+      map();
     } catch (error) {
       if (!(error instanceof ShapeError)) throw error;
       notes.push(error.message);
     }
   };
 
+  let deliverables: PlanDeliverable[] = [];
   if (options.planId) {
-    const status = await readState(call, options.hopPath, 'cpm', 'plan.status', { plan_id: options.planId }, notes);
-    if (status !== undefined) mapOrNote(() => cpmStatusObservations(status, options.planId!));
+    const plan = await readState(call, options.hopPath, 'cpm', 'plan.get', { plan_id: options.planId }, notes);
+    if (plan !== undefined) {
+      mapOrNote(() => {
+        deliverables = planDeliverableAcceptance(plan);
+      });
+    }
   } else {
-    notes.push('cpm plan.status skipped: no --plan');
+    notes.push('cpm plan.get skipped: no --plan');
   }
 
+  let mitigations = new Map<string, Mitigation>();
   if (options.fmecaSession) {
-    const state = await readState(call, options.hopPath, 'fmeca', 'state.get', { session_id: options.fmecaSession }, notes);
-    if (state !== undefined) mapOrNote(() => fmecaStateObservations(state, options.fmecaSession!));
+    const state = await readState(
+      call,
+      options.hopPath,
+      'fmeca',
+      'state.get',
+      { session_id: options.fmecaSession },
+      notes,
+    );
+    if (state !== undefined) {
+      mapOrNote(() => {
+        observations.push(...failureModeObservations(state, options.fmecaSession!, options.planId, notes));
+      });
+      mapOrNote(() => {
+        mitigations = mitigationIndex(state);
+      });
+    }
   } else {
     notes.push('fmeca state.get skipped: no --fmeca-session');
   }
 
+  if (options.planId && options.fmecaSession) {
+    mapOrNote(() => {
+      observations.push(
+        ...mitigationObservations(
+          deliverables,
+          mitigations,
+          options.planId!,
+          options.fmecaSession!,
+          notes,
+        ),
+      );
+    });
+  }
+
   if (options.elicitationSession) {
-    const state = await readState(
-      call,
-      options.hopPath,
-      'elicitation',
-      'state.get',
-      { session_id: options.elicitationSession },
-      notes,
-    );
-    if (state !== undefined) mapOrNote(() => elicitationStateObservations(state, options.elicitationSession!));
+    notes.push('elicitation not mirrored: no dimension holds its members (ADR 0012 R5)');
   } else {
     notes.push('elicitation state.get skipped: no --elicitation-session');
   }
 
   if (options.spSession) {
-    const state = await readState(
-      call,
-      options.hopPath,
-      'scientific-process',
-      'state.get',
-      { session_id: options.spSession },
-      notes,
-    );
-    if (state !== undefined) mapOrNote(() => scientificProcessStateObservations(state, options.spSession!));
+    notes.push('scientific-process not mirrored: no dimension holds its members (ADR 0012 R5)');
   } else {
     notes.push('scientific-process state.get skipped: no --sp-session');
   }
 
   if (options.jevitateResults) {
-    const target = path.isAbsolute(options.jevitateResults)
-      ? options.jevitateResults
-      : path.resolve(options.dir ?? process.cwd(), options.jevitateResults);
-    if (fs.existsSync(target)) {
-      observations.push(...jevitateResultObservations(readJevitateResults(target)));
-    } else {
-      notes.push(`jevitate results skipped: ${options.jevitateResults} not found`);
-    }
+    notes.push('jevitate not mirrored: no dimension holds its members (ADR 0012 R5)');
   } else {
     notes.push('jevitate results skipped: no --jevitate-results');
   }
 
+  const usedRelations = STATE_RELATIONS.filter((relation) =>
+    observations.some((observation) => observation.relationId === relation.relationId),
+  );
+  const usedScales = new Set(usedRelations.map((relation) => relation.scale));
+
   const sent: CodemapSent[] = [];
-  for (const observation of observations) {
-    sent.push(await sendObserve(call, load, options.hopPath, options.modelId, observation));
+  const unavailableScales = new Set<string>();
+
+  for (const scale of STATE_SCALES) {
+    if (!usedScales.has(scale.id)) continue;
+    const requestId = requestIdFor(options.modelId, 'scale.declare', scale.id, scale.mode);
+    const outcome = await send(
+      call,
+      load,
+      options.hopPath,
+      command(options.modelId, { kind: 'scale.declare', scale }, requestId),
+    );
+    if (outcome.ok) {
+      sent.push({ requestId, kind: 'scale.declare' });
+    } else {
+      unavailableScales.add(scale.id);
+      failures.push(`scale ${scale.id} declare failed: ${outcome.detail}`);
+    }
   }
 
-  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent, observations, notes };
+  for (const relation of usedRelations) {
+    if (unavailableScales.has(relation.scale)) continue;
+    const requestId = requestIdFor(
+      options.modelId,
+      'relation.declare',
+      relation.relationId,
+      relationVersion(relation),
+    );
+    const declaration = await send(
+      call,
+      load,
+      options.hopPath,
+      command(
+        options.modelId,
+        {
+          kind: 'relation.declare',
+          relationId: relation.relationId,
+          from: relation.from,
+          to: relation.to,
+          relationType: relation.relationType,
+          scale: relation.scale,
+          coveragePolicy: relation.coveragePolicy,
+        },
+        requestId,
+      ),
+    );
+    if (!declaration.ok) {
+      if (declaration.code === 'unknown_dimension') {
+        notes.push(`${relation.relationId} not declared: ${declaration.detail}`);
+      } else {
+        failures.push(`${relation.relationId} declare failed: ${declaration.detail}`);
+      }
+      continue;
+    }
+    sent.push({ requestId, kind: 'relation.declare' });
+
+    for (const observation of observations.filter((item) => item.relationId === relation.relationId)) {
+      const version = `${observation.relationId}|${observation.from}|${observation.to}|${observation.observation}|${observation.contentVersion}`;
+      const observeId = requestIdFor(options.modelId, 'observe', observation.relationId, version);
+      const outcome = await send(
+        call,
+        load,
+        options.hopPath,
+        command(
+          options.modelId,
+          {
+            kind: 'observe',
+            relationId: observation.relationId,
+            from: observation.from,
+            to: observation.to,
+            observation: observation.observation,
+            provenanceClass: 'observed',
+            confidence: observation.confidence,
+            evidence: observation.evidence,
+            rationale: observation.rationale,
+          },
+          observeId,
+        ),
+      );
+      if (outcome.ok) {
+        sent.push({ requestId: observeId, kind: 'observe' });
+        continue;
+      }
+      // A reference to a file or deliverable no longer in its roster is stale
+      // fmeca data, not a failed sync.
+      if (outcome.code === 'unknown_member' && observation.observation === 'references') {
+        notes.push(`${observation.relationId} ${observation.from} -> ${observation.to} skipped: ${outcome.detail}`);
+      } else {
+        failures.push(
+          `${observation.relationId} observe ${observation.from} -> ${observation.to} failed: ${outcome.detail}`,
+        );
+      }
+    }
+  }
+
+  return {
+    modelId: options.modelId,
+    requestIds: sent.map((entry) => entry.requestId),
+    sent,
+    observations,
+    notes,
+    failures,
+  };
 }

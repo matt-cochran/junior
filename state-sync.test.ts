@@ -1,249 +1,379 @@
 // Behavioral tests for the companion-tool state mirror (`state-sync.ts`).
 //
-// One half exercises the PURE mappers that turn already-read tool state into
-// crossmatrix observation descriptors; the other drives `syncState` with an
-// injected fake HOP so no MCP server or network is touched. Every scenario
-// asserts exactly one observable outcome through the public module interface.
+// Every scenario drives the real `syncState` code through a real hop whose
+// crossmatrix command is the strict fake server. Companion reads (cpm, fmeca)
+// are injected by wrapping `callHop`; crossmatrix writes always use the real
+// hop so the strict model validation is part of the behaviour under test.
+// Each test asserts exactly one observable outcome through a public interface.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  cpmStatusObservations,
-  elicitationStateObservations,
-  fmecaStateObservations,
-  jevitateResultObservations,
-  scientificProcessStateObservations,
-  syncState,
-  type StateObservation,
-} from './state-sync.ts';
+import { callHop, initHop, loadHop } from './tools/tools.ts';
+import { syncState } from './state-sync.ts';
 
-const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
-function fixture(dir: string, name: string): unknown {
-  return JSON.parse(readFileSync(join(fixturesRoot, dir, `${name}.json`), 'utf8'));
-}
-const cpmFixture = (name: string) => fixture('cpm@0.4.0', name);
-const fmecaFixture = (name: string) => fixture('fmeca@0.2.0', name);
-const elicitFixture = (name: string) => fixture('elicitation@0.1.0', name);
-const spFixture = (name: string) => fixture('scientific-process@0.2.0', name);
+const NODE = process.execPath;
+const FAKE = join(import.meta.dirname, 'tools', 'test-fixtures', 'fake-mcp.mjs');
 
-function observe(op: any) {
-  return op.op ?? op;
+function workdir(): string {
+  return mkdtempSync(join(tmpdir(), 'junior-state-sync-'));
 }
 
-/** A fake HOP: reads come from `states`, writes are appended to `writes`. */
-function harness(states: Record<string, unknown> = {}) {
-  const writes: any[] = [];
-  const thrown = new Set<string>();
-  const callHop = async (_hop: string, tool: string, request: any) => {
-    if (tool === 'crossmatrix') {
-      writes.push(request.arguments.request);
-      return { ok: true, result: { ok: true } };
-    }
-    if (thrown.has(tool)) throw new Error(`${tool} unavailable`);
-    if (!(tool in states)) {
-      return { ok: false, isError: true, note: null, error: { code: 'missing', message: `${tool} missing` } };
-    }
-    return { ok: true, result: states[tool] };
+function writeHop(dir: string): string {
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      crossmatrix: {
+        command: NODE,
+        args: [FAKE],
+        env: {
+          FAKE_MCP_MODE: 'crossmatrix',
+          FAKE_CROSSMATRIX_STATE: join(dir, 'crossmatrix-state.json'),
+        },
+        sourceVersion: '0.4.0',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  return hop;
+}
+
+function request(modelId: string, op: Record<string, unknown>): Record<string, unknown> {
+  return {
+    schemaVersion: '0.3.0',
+    requestId: `seed-${String(op.kind)}-${String(op.dimensionId ?? '')}`,
+    modelId,
+    actor: { actorType: 'system', persona: 'model_admin' },
+    op,
   };
-  const loadHop = (_hop: string) => ({ tools: { crossmatrix: { sourceVersion: '0.3.0' } } });
-  return { callHop, loadHop, writes, thrown };
 }
 
-function options(overrides: Record<string, unknown> = {}) {
-  return { hopPath: '/tmp/hop.json', modelId: 'm1', deps: {}, ...overrides } as any;
+async function seedModel(hop: string, modelId: string, dimensions: Record<string, string[]>): Promise<void> {
+  for (const [dimensionId, members] of Object.entries(dimensions)) {
+    await callHop(hop, 'crossmatrix', {
+      tool: 'crossmatrix.command',
+      arguments: { request: request(modelId, { kind: 'dimension.register', dimensionId }) },
+    });
+    await callHop(hop, 'crossmatrix', {
+      tool: 'crossmatrix.command',
+      arguments: {
+        request: request(modelId, {
+          kind: 'members.sync',
+          dimensionId,
+          members: members.map((id) => ({ id })),
+        }),
+      },
+    });
+  }
 }
 
-// --- pure mappers: cpm ------------------------------------------------------
+/** Injected companion reads; crossmatrix writes go through the real hop. */
+function deps(reads: Record<string, unknown>) {
+  const injected = async (hop: string, tool: string, call: any) => {
+    if (tool === 'crossmatrix') return callHop(hop, tool, call);
+    if (tool in reads) return { ok: true, result: reads[tool] };
+    return {
+      ok: false,
+      isError: true,
+      note: null,
+      error: { code: 'missing', message: `${tool} missing` },
+    };
+  };
+  return { callHop: injected as typeof callHop, loadHop };
+}
 
-test('cpmStatusObservations records a completed deliverable as a complete observation on its member', () => {
-  const observations = cpmStatusObservations({ deliverables: [['d1', 'complete']] }, 'plan1');
+function planGet(deliverables: any[]): unknown {
+  return { plan_id: 'P', graph: { deliverables } };
+}
+
+function acceptance(entries: unknown[]): any[] {
+  return [{ id: 'd1', metadata: { junior: { acceptance: entries } } }];
+}
+
+test('a cpm ref to the synced plan becomes a junior-fmeca-cpm reference observation', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/d1'] }] },
+    }),
+  });
+
   assert.deepEqual(
-    observations.map((o) => [o.from, o.to, o.observation]),
-    [['cpm:d1', 'cpm:d1', 'complete']],
+    result.observations
+      .filter((o) => o.relationId === 'junior-fmeca-cpm')
+      .map((o) => [o.from, o.to, o.observation]),
+    [['fm:f1', 'cpm:d1', 'references']],
   );
 });
 
-test('cpmStatusObservations normalises an in-progress deliverable to in_progress', () => {
-  const observations = cpmStatusObservations({ deliverables: [['d1', 'in-progress']] }, 'plan1');
-  assert.equal(observations[0].observation, 'in_progress');
-});
+test('a verified mitigation referenced by a plan criterion becomes a junior-cpm-fmeca observation', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet(acceptance([{ id: 'req:c1/ac1', text: 't', mitigates: ['S/m1'] }])),
+      fmeca: { failure_modes: [{ id: 'f1', mitigations: [{ id: 'm1', status: 'verified' }] }] },
+    }),
+  });
 
-test('cpmStatusObservations ignores a deliverable with no recognised status', () => {
-  const observations = cpmStatusObservations({ deliverables: [['d1', 'archived']] }, 'plan1');
-  assert.equal(observations.length, 0);
-});
-
-// --- pure mappers: fmeca ----------------------------------------------------
-
-test('fmecaStateObservations links a failure mode to the code file it names', () => {
-  const observations = fmecaStateObservations(
-    { failure_modes: [{ id: 'm1', name: 'Crash on submit', files: ['src/app.ts'] }] },
-    's1',
-  );
-  assert.deepEqual(observations.map((o) => o.to), ['loc:src/app.ts']);
-});
-
-test('fmecaStateObservations links a failure mode to the feature member it names', () => {
-  const observations = fmecaStateObservations(
-    { failure_modes: [{ id: 'm1', name: 'Crash', feature: 'cpm:d1' }] },
-    's1',
-  );
-  assert.deepEqual(observations.map((o) => [o.from, o.to]), [['fm:m1', 'cpm:d1']]);
-});
-
-// --- pure mappers: elicitation ----------------------------------------------
-
-test('elicitationStateObservations links a withstood outcome claim to its jevitate outcome member', () => {
-  const observations = elicitationStateObservations(
-    { claims: [{ id: 'job:j1/outcome:fast', standing: 'withstood' }] },
-    'job:j1',
-  );
   assert.deepEqual(
-    observations.map((o) => [o.from, o.to, o.observation]),
-    [['claim:job:j1/outcome:fast', 'job:j1/outcome:fast', 'withstood']],
+    result.observations
+      .filter((o) => o.relationId === 'junior-cpm-fmeca')
+      .map((o) => [o.from, o.to, o.observation]),
+    [['cpm:d1', 'fm:f1', 'verified']],
   );
 });
 
-test('elicitationStateObservations links a job-story claim to its requirement member', () => {
-  const observations = elicitationStateObservations(
-    { claims: [{ id: 'job:j1/story', standing: 'open' }] },
-    'job:j1',
-  );
-  assert.deepEqual(observations.map((o) => o.to), ['job:j1']);
-});
+test('a repo-relative file named by a failure mode becomes a junior-fmeca-code observation', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', files: ['src/a.ts'] }] },
+    }),
+  });
 
-// --- pure mappers: scientific process ---------------------------------------
-
-test('scientificProcessStateObservations records a Refuted verdict on its hypothesis link', () => {
-  const observations = scientificProcessStateObservations(
-    { hypotheses: [{ id: 'h1', statement: 'src/app.ts handles submit', verdict: 'Refuted' }] },
-    'sp1',
-  );
   assert.deepEqual(
-    observations.map((o) => [o.from, o.observation]),
-    [['hypothesis:h1', 'Refuted']],
+    result.observations
+      .filter((o) => o.relationId === 'junior-fmeca-code')
+      .map((o) => [o.from, o.to]),
+    [['fm:f1', 'loc:src/a.ts']],
   );
 });
 
-// --- pure mappers: jevitate journeys ----------------------------------------
+test('syncState never emits an observation whose from equals its to', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: {
+        failure_modes: [
+          {
+            id: 'f1',
+            refs: ['cpm:P/d1', 'loc:src/a.ts'],
+            files: ['src/a.ts'],
+            feature: 'cpm:d1',
+          },
+        ],
+      },
+    }),
+  });
 
-test('jevitateResultObservations links a failing journey result to its journey member', () => {
-  const observations = jevitateResultObservations([
-    { journeyId: 'checkout', metadata: { job: 'j1', serves: ['fast'] }, outcome: 'heal-exhausted' },
-  ]);
-  const link = observations.find((o) => o.to === 'journey:checkout');
-  assert.equal(link?.observation, 'failed');
+  assert.equal(result.observations.some((o) => o.from === o.to), false);
 });
 
-test('jevitateResultObservations links a failing journey result to the outcomes it verifies', () => {
-  const observations = jevitateResultObservations([
-    { journeyId: 'checkout', metadata: { job: 'j1', serves: ['fast'] }, outcome: 'heal-exhausted' },
-  ]);
-  assert.deepEqual(observations.filter((o) => o.relationId === 'codemap-jevitate-jobs').map((o) => o.to), [
-    'job:j1/outcome:fast',
-  ]);
+test('a missing fmeca dimension is noted with the relation and dimension it needs', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/d1'] }] },
+    }),
+  });
+
+  assert.ok(result.notes.some((note) => note.includes('junior-fmeca-cpm') && note.includes('fmeca')));
 });
 
-// --- syncState --------------------------------------------------------------
+test('a missing fmeca dimension is not recorded as a write failure', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/d1'] }] },
+    }),
+  });
 
-test('syncState records a completed cpm deliverable as a status observation on its member', async () => {
-  const h = harness({ cpm: { deliverables: [['d1', 'complete']] } });
-  const result = await syncState(
-    options({ planId: 'plan1', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
-  );
-  const full = (result as any).observations as StateObservation[];
-  assert.deepEqual(
-    full.map((o) => [o.from, o.observation]),
-    [['cpm:d1', 'complete']],
-  );
+  assert.deepEqual(result.failures, []);
 });
 
-test('syncState resends identical request ids when state is unchanged', async () => {
-  const h = harness({ cpm: { deliverables: [['d1', 'complete']] } });
-  const deps = { callHop: h.callHop, loadHop: h.loadHop };
-  const first = await syncState(options({ planId: 'plan1', deps }));
-  const second = await syncState(options({ planId: 'plan1', deps }));
+test('an elicitation session produces exactly one not-mirrored note', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    elicitationSession: 'job:j1',
+    deps: deps({}),
+  });
+
+  assert.equal(result.notes.filter((note) => note.includes('not mirrored')).length, 1);
+});
+
+test('an elicitation session writes nothing to crossmatrix', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    elicitationSession: 'job:j1',
+    deps: deps({}),
+  });
+
+  assert.equal(result.sent.length, 0);
+});
+
+/** d2 (absent from the cpm roster) then d1, each with a criterion mitigating S/m1. */
+function twoMitigatingDeliverables(): any[] {
+  const criterion = { text: 't', mitigates: ['S/m1'] };
+  return [
+    { id: 'd2', metadata: { junior: { acceptance: [{ id: 'a2', ...criterion }] } } },
+    { id: 'd1', metadata: { junior: { acceptance: [{ id: 'a1', ...criterion }] } } },
+  ];
+}
+
+test('a rejected observe is recorded as a failure', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet(twoMitigatingDeliverables()),
+      fmeca: { failure_modes: [{ id: 'f1', mitigations: [{ id: 'm1', status: 'verified' }] }] },
+    }),
+  });
+
+  assert.equal(result.failures.length, 1);
+});
+
+test('syncState keeps sending the remaining observations after a rejected observe', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet(twoMitigatingDeliverables()),
+      fmeca: { failure_modes: [{ id: 'f1', mitigations: [{ id: 'm1', status: 'verified' }] }] },
+    }),
+  });
+
+  assert.equal(result.sent.filter((entry) => entry.kind === 'observe').length, 1);
+});
+
+test('a cpm token in failure-mode text that names another plan is noted, not observed', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', description: 'slips cpm:OTHER/d9 in delivery' }] },
+    }),
+  });
+
+  assert.deepEqual(result.observations.filter((o) => o.relationId === 'junior-fmeca-cpm'), []);
+});
+
+test('a ref to a deliverable missing from the cpm roster is a note, not a failure', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/gone'] }] },
+    }),
+  });
+
+  assert.deepEqual(result.failures, []);
+});
+
+test('syncState sends identical request ids when state is unchanged', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  const options = {
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet([{ id: 'd1' }]),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/d1'] }] },
+    }),
+  };
+  const first = await syncState(options);
+  const second = await syncState(options);
+
   assert.deepEqual(second.requestIds, first.requestIds);
 });
 
-test('syncState skips a missing elicitation session with a note', async () => {
-  const h = harness({ cpm: { deliverables: [] } });
-  const result = await syncState(
-    options({
-      planId: 'plan1',
-      elicitationSession: 'job:gone',
-      deps: { callHop: h.callHop, loadHop: h.loadHop },
-    }),
-  );
-  assert.ok(result.notes.some((note) => note.includes('elicitation')));
-});
-
-test('syncState skips a tool whose read throws instead of failing', async () => {
-  const h = harness({ cpm: { deliverables: [] } });
-  h.thrown.add('cpm');
-  const result = await syncState(options({ planId: 'plan1', deps: { callHop: h.callHop, loadHop: h.loadHop } }));
-  assert.ok(result.notes.some((note) => note.includes('cpm')));
-});
-
-// --- recorded companion fixtures -------------------------------------------
-
-test('syncState mirrors the cpm plan.status.progress fixture as a completed deliverable observation', async () => {
-  const h = harness({ cpm: cpmFixture('plan.status.progress') });
-  const result = await syncState(
-    options({ planId: 'plan_FIXTURE', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
-  );
-  assert.deepEqual(result.observations.map((o) => [o.from, o.observation]), [['cpm:d-api', 'complete']]);
-});
-
-test('fmecaStateObservations links the fmeca state.get fixture failure mode to its member', () => {
-  const observations = fmecaStateObservations(fmecaFixture('state.get'), 'fixture-fmeca-20261020');
-  assert.deepEqual(observations.map((o) => [o.from, o.to]), [['fm:fm1', 'fm:fm1']]);
-});
-
-test('syncState reads the elicitation state.get fixture without an unrecognized-shape note', async () => {
-  const h = harness({ elicitation: elicitFixture('state.get') });
-  const result = await syncState(
-    options({ elicitationSession: 'fixture-elicit-20261020b', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
-  );
-  assert.equal(result.notes.some((note) => note.includes('Unrecognized')), false);
-});
-
-test('scientificProcessStateObservations records the concluded fixture hypothesis verdict', () => {
-  const observations = scientificProcessStateObservations(spFixture('state.get.concluded'), 'fixture-sp');
-  assert.deepEqual(observations.map((o) => [o.from, o.observation]), [['hypothesis:h1', 'Supported']]);
-});
-
-test('syncState notes an unrecognized cpm plan.status response with its tool, method and keys', async () => {
-  const h = harness({ cpm: { unexpected: [] } });
-  const result = await syncState(
-    options({ planId: 'plan1', deps: { callHop: h.callHop, loadHop: h.loadHop } }),
-  );
-  assert.ok(result.notes.includes('Unrecognized cpm.plan.status response; top-level keys: unexpected'));
-});
-
-test('syncState never copies an env value into an observation excerpt', async () => {
-  const h = harness({
-    elicitation: {
-      claims: [
-        {
-          id: 'job:j1/outcome:fast',
-          standing: 'withstood',
-          env: { API_KEY: 'super-secret' },
-          statement: 'API_KEY=super-secret',
-        },
-      ],
-    },
+test('syncState notes a companion read that throws instead of failing', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], fmeca: ['fm:f1'] });
+  const throwing = async (h: string, tool: string, call: any) => {
+    if (tool === 'crossmatrix') return callHop(h, tool, call);
+    throw new Error(`${tool} exploded`);
+  };
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: { callHop: throwing as typeof callHop, loadHop },
   });
-  const result = await syncState(
-    options({
-      elicitationSession: 'job:j1',
-      deps: { callHop: h.callHop, loadHop: h.loadHop },
+
+  assert.ok(result.notes.some((note) => note.includes('fmeca state.get skipped: fmeca exploded')));
+});
+
+test('syncState never copies an environment value into what it sends', async () => {
+  const hop = writeHop(workdir());
+  await seedModel(hop, 'm1', { cpm: ['cpm:d1'], code: ['loc:src/a.ts'], fmeca: ['fm:f1'] });
+  process.env.JUNIOR_STATE_SYNC_SECRET = 'sk-state-sync-secret-value';
+  const result = await syncState({
+    hopPath: hop,
+    modelId: 'm1',
+    planId: 'P',
+    fmecaSession: 'S',
+    deps: deps({
+      cpm: planGet(acceptance([{ id: 'a1', text: 't', mitigates: ['S/m1'] }])),
+      fmeca: { failure_modes: [{ id: 'f1', refs: ['cpm:P/d1', 'src/a.ts'], mitigations: [{ id: 'm1', status: 'verified' }] }] },
     }),
-  );
-  const excerpts = (result as any).observations.flatMap((o: StateObservation) =>
-    o.evidence.map((e) => e.excerpt),
-  );
-  assert.equal(excerpts.some((excerpt) => excerpt.includes('super-secret')), false);
+  });
+  delete process.env.JUNIOR_STATE_SYNC_SECRET;
+
+  assert.equal(JSON.stringify(result).includes('sk-state-sync-secret-value'), false);
 });
