@@ -1,6 +1,6 @@
 {
   "name": "@matthew-cochran/junior",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Bounded commodity-model deliverables with independently checked handoffs",
   "type": "module",
   "bin": {
