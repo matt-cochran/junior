@@ -405,19 +405,26 @@ never a number you invent.
 2. Federate the entities: `node <cli> matrix sync --hop <hop.json> --model <id>
    --source code --source tests [--source jevitate] [--source playbooks]
    [--source cpm --plan <plan_id>] [--source fmeca --session <id>]`.
-   `--source state` mirrors companion-tool state (`cpm`, `fmeca`,
-   `elicitation`, `scientific-process`, jevitate results) as idempotent
-   observations; `--source playbooks` publishes the capability map. Re-run after
-   changes; an unchanged roster is a no-op.
-3. Autopilot the links once artifacts exist: `matrix bootstrap` proposes
+   The cpm roster carries each deliverable's status and the fmeca roster each
+   failure mode's criticality and standing. `--source state --plan <plan_id>
+   --fmeca-session <id>` links failure modes to the deliverables and files their
+   refs name (`junior-fmeca-cpm`, `junior-fmeca-code`) and deliverables to the
+   failure modes their criteria's `mitigates` verify (`junior-cpm-fmeca`, with
+   the mitigation's status); a relation whose dimension is missing is skipped
+   with a note, and elicitation, scientific-process and jevitate results are not
+   mirrored (ADR 0012). `--source playbooks` publishes the capability map.
+   Re-run after changes; an unchanged roster is a no-op.
+3. Map features to code: `matrix codemap init` declares the code-map relations
+   for the feature dimensions the model has (a missing default is a note), then
+   `matrix link --result <result.json> --feature <dimensionId>:<memberId>` after
+   each accepted handoff.
+4. Autopilot the links once artifacts exist: `matrix bootstrap` proposes
    feature/journey/job/test -> code links with evidence and confidence,
    `matrix confirm --proposals <proposals.json>` records a reviewed selection
    (`--min high|medium|low`, `--only`, `--exclude`), and `matrix autolink --plan
-   <plan_id>` links completed cpm deliverables' results. All three are
-   content-addressed and replay identically.
-4. Map features to code explicitly: `matrix codemap init`, then `matrix link
-   --result <result.json> --feature <dimensionId>:<memberId>` after each
-   accepted handoff.
+   <plan_id>` links completed cpm deliverables' results, found by evidence path,
+   run id or the latest `.delivery/<id>/<stamp>/result.json`, and lists the
+   ones it skipped. All three are content-addressed and replay identically.
 5. Query the graph: `matrix graph --seed <dimensionId>:<memberId>` walks to a
    bounded, deterministic slice and prints a contract `context` array;
    `matrix graph --impact --result <result.json>` reverse-walks changed files

@@ -76,6 +76,8 @@ export interface CodemapResult {
   modelId: string;
   requestIds: string[];
   sent: CodemapSent[];
+  /** Relations skipped because their default dimension is absent from the model. */
+  notes: string[];
 }
 
 /** Parse the leading `major[.minor[.patch]]` of a version string. */
@@ -118,12 +120,17 @@ function command(modelId: string, op: CommandRequest['op'], requestId: string): 
   };
 }
 
-/** Send exactly one write command and surface upstream failures clearly. */
-async function send(
+interface SendAttempt {
+  sent: CodemapSent | null;
+  detail: string | null;
+}
+
+/** Send exactly one write command and return its outcome instead of throwing. */
+async function attemptSend(
   call: typeof callHop,
   hopPath: string,
   request: CommandRequest,
-): Promise<CodemapSent> {
+): Promise<SendAttempt> {
   const outcome = await call(hopPath, 'crossmatrix', {
     tool: 'crossmatrix.command',
     arguments: { request },
@@ -132,9 +139,22 @@ async function send(
   });
   if (!outcome.ok) {
     const detail = serverErrorDetail(outcome) ?? outcome.error?.message ?? outcome.note ?? 'unknown error';
-    throw new Error(`codemap ${request.op.kind} failed: ${detail}`);
+    return { sent: null, detail };
   }
-  return { requestId: request.requestId, kind: request.op.kind };
+  return { sent: { requestId: request.requestId, kind: request.op.kind }, detail: null };
+}
+
+/** Send exactly one write command and surface upstream failures clearly. */
+async function send(
+  call: typeof callHop,
+  hopPath: string,
+  request: CommandRequest,
+): Promise<CodemapSent> {
+  const attempt = await attemptSend(call, hopPath, request);
+  if (!attempt.sent) {
+    throw new Error(`codemap ${request.op.kind} failed: ${attempt.detail ?? 'unknown error'}`);
+  }
+  return attempt.sent;
 }
 
 /** `code` + each feature dimension + the `code -> code` containment relation. */
@@ -144,7 +164,9 @@ export async function codemapInit(options: CodemapInitOptions): Promise<CodemapR
   assertWriteCapable(load, options.hopPath);
 
   const features = options.featureDimensions ?? DEFAULT_FEATURE_DIMENSIONS;
+  const explicitFeatures = options.featureDimensions !== undefined;
   const sent: CodemapSent[] = [];
+  const notes: string[] = [];
 
   const scaleId = requestIdFor(options.modelId, 'scale.declare', 'codemap', 'categorical');
   sent.push(
@@ -162,25 +184,28 @@ export async function codemapInit(options: CodemapInitOptions): Promise<CodemapR
   for (const dimensionId of features) {
     const relationId = `codemap-${dimensionId}`;
     const relationVersion = `${dimensionId}|code|implements|codemap|none`;
-    sent.push(
-      await send(
-        call,
-        options.hopPath,
-        command(
-          options.modelId,
-          {
-            kind: 'relation.declare',
-            relationId,
-            from: dimensionId,
-            to: 'code',
-            relationType: 'implements',
-            scale: 'codemap',
-            coveragePolicy: 'none',
-          },
-          requestIdFor(options.modelId, 'relation.declare', relationId, relationVersion),
-        ),
-      ),
+    const request = command(
+      options.modelId,
+      {
+        kind: 'relation.declare',
+        relationId,
+        from: dimensionId,
+        to: 'code',
+        relationType: 'implements',
+        scale: 'codemap',
+        coveragePolicy: 'none',
+      },
+      requestIdFor(options.modelId, 'relation.declare', relationId, relationVersion),
     );
+    const attempt = await attemptSend(call, options.hopPath, request);
+    if (!attempt.sent) {
+      if (!explicitFeatures && attempt.detail?.startsWith('unknown_dimension')) {
+        notes.push(`codemap-${dimensionId} skipped: dimension ${dimensionId} is not in model ${options.modelId}`);
+        continue;
+      }
+      throw new Error(`codemap ${request.op.kind} failed: ${attempt.detail ?? 'unknown error'}`);
+    }
+    sent.push(attempt.sent);
   }
 
   sent.push(
@@ -203,7 +228,7 @@ export async function codemapInit(options: CodemapInitOptions): Promise<CodemapR
     ),
   );
 
-  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent };
+  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent, notes };
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -365,7 +390,7 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
     );
   }
 
-  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent };
+  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent, notes: [] };
 }
 
 // ---------------------------------------------------------------------------

@@ -106,6 +106,7 @@ export interface AutolinkResult {
   modelId: string;
   requestIds: string[];
   sent: CodemapSent[];
+  skipped: Array<{ deliverable: string; reason: string }>;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -244,6 +245,42 @@ function existingResultPath(evidence: readonly string[], dir: string): string | 
     const candidate = match[1].replace(/[.,;:)\]]+$/, '');
     const abs = path.isAbsolute(candidate) ? candidate : path.resolve(dir, candidate);
     if (fs.existsSync(abs)) return abs;
+  }
+  return null;
+}
+
+/** Resolve an evidence run id `<id>/<stamp>` to `<dir>/.delivery/<id>/<stamp>/result.json`. */
+function runResultPath(evidence: readonly string[], dir: string): string | null {
+  const pattern = /(?:^|[^A-Za-z0-9._-])([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)/g;
+  for (const text of evidence) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const id = match[1].replace(/[.,;:)\]]+$/, '');
+      const stamp = match[2].replace(/[.,;:)\]]+$/, '');
+      const abs = path.resolve(dir, '.delivery', id, stamp, 'result.json');
+      if (fs.existsSync(abs)) return abs;
+    }
+  }
+  return null;
+}
+
+/** The lexically greatest delivery stamp holding a result for this deliverable. */
+function latestRunResultPath(id: string, dir: string): string | null {
+  const base = path.resolve(dir, '.delivery', id);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(base, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const stamps = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (let index = stamps.length - 1; index >= 0; index -= 1) {
+    const candidate = path.join(base, stamps[index], 'result.json');
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
 }
@@ -505,13 +542,19 @@ export async function autolink(options: AutolinkOptions): Promise<AutolinkResult
   }
 
   const sent: CodemapSent[] = [];
+  const skipped: AutolinkResult['skipped'] = [];
   for (const deliverable of deliverables) {
     const id = deliverableId(deliverable);
     if (!id) continue;
     const status = deliverableStatus(deliverable) || statuses?.get(id) || '';
     if (status !== 'complete' && status !== 'completed') continue;
-    const resultPath = existingResultPath(deliverableEvidence(deliverable), dir);
-    if (!resultPath) continue;
+    const evidence = deliverableEvidence(deliverable);
+    const resultPath =
+      existingResultPath(evidence, dir) ?? runResultPath(evidence, dir) ?? latestRunResultPath(id, dir);
+    if (!resultPath) {
+      skipped.push({ deliverable: id, reason: 'no result.json' });
+      continue;
+    }
     const linked = await codemapLink({
       hopPath: options.hopPath,
       modelId: options.modelId,
@@ -521,5 +564,5 @@ export async function autolink(options: AutolinkOptions): Promise<AutolinkResult
     });
     sent.push(...linked.sent);
   }
-  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent };
+  return { modelId: options.modelId, requestIds: sent.map((entry) => entry.requestId), sent, skipped };
 }

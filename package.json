@@ -1,6 +1,6 @@
 {
   "name": "@matthew-cochran/junior",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Bounded commodity-model deliverables with independently checked handoffs",
   "type": "module",
   "bin": {
@@ -32,7 +32,7 @@
   "scripts": {
     "build": "node scripts/build.mjs && node --input-type=module -e \"import { transpile } from './scripts/build.mjs'; import { readFileSync, writeFileSync } from 'node:fs'; for (const name of ['compact','context-hooks','pi-isolation','plan-quality','scope-check']) writeFileSync('dist/'+name+'.js', transpile(name+'.ts', readFileSync(name+'.ts','utf8')));\"",
     "pretest": "npm run build",
-    "test": "node --test companions.test.ts apply.test.ts plan-handoff.test.ts worker-plan-field.test.ts worker.test.ts runtime.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts harness.test.ts update-check.test.ts matrix-autopilot.test.ts readiness.test.ts jtbd-bridge.test.ts state-sync.test.ts tool-routing.test.ts context-graph.test.ts matrix-analyze.test.ts link-qc.test.ts adr.test.ts prepare.test.ts spec-bridge.test.ts clarify.test.ts playbooks.test.ts model-policy.test.ts models.test.ts roster.test.ts model-updates.test.ts model-cli.test.ts doctor-model.test.ts pi-isolation.test.ts scope-check.test.ts plan-quality.test.ts compact.test.ts compact-prs.test.ts notes.test.ts precompact.test.ts context-hooks.test.ts plan-junior.test.ts companion-shapes.test.ts routes.test.ts skill-routing.test.ts scripts/capture-companion-fixtures.test.mjs",
+    "test": "node --test companions.test.ts apply.test.ts plan-handoff.test.ts worker-plan-field.test.ts worker.test.ts runtime.test.ts review.test.ts qa.test.ts hop-context.test.ts cli.test.ts self-update.test.ts report-issue.test.ts mcp.test.ts matrix.test.ts matrix-init.test.ts matrix-sync.test.ts codemap.test.ts auth.test.ts retention.test.ts billing.test.ts tools/tools.test.ts dependencies.test.ts package.test.ts isolation.test.ts pi-guard.test.ts harness.test.ts update-check.test.ts matrix-autopilot.test.ts readiness.test.ts jtbd-bridge.test.ts state-sync.test.ts tool-routing.test.ts context-graph.test.ts matrix-analyze.test.ts link-qc.test.ts adr.test.ts prepare.test.ts spec-bridge.test.ts clarify.test.ts playbooks.test.ts model-policy.test.ts models.test.ts roster.test.ts model-updates.test.ts model-cli.test.ts doctor-model.test.ts pi-isolation.test.ts scope-check.test.ts plan-quality.test.ts compact.test.ts compact-prs.test.ts notes.test.ts precompact.test.ts fake-crossmatrix.test.ts matrix-live.test.ts context-hooks.test.ts plan-junior.test.ts companion-shapes.test.ts routes.test.ts skill-routing.test.ts scripts/capture-companion-fixtures.test.mjs",
     "pack": "npm pack",
     "prepack": "npm run build",
     "release": "npm publish --access public"
