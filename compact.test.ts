@@ -9,9 +9,18 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop, loadHop, saveHop } from './tools/tools.ts';
-import { buildCompactBlock, type CompactDeps } from './compact.ts';
+import { buildCompactBlock as buildCompact, type CompactDeps } from './compact.ts';
+import type { PrSection } from './compact-prs.ts';
+import type { Note } from './notes.ts';
 
 type Outcome = Awaited<ReturnType<NonNullable<CompactDeps['callHop']>>>;
+
+const NO_NOTES = (): { notes: Note[]; proposals: Note[] } => ({ notes: [], proposals: [] });
+const NO_PRS = async (): Promise<PrSection> => ({ status: 'none', prs: [], errors: [] });
+
+function buildCompactBlock(deps: CompactDeps) {
+  return buildCompact({ listNotes: NO_NOTES, openPrs: NO_PRS, ...deps });
+}
 
 function workspace(t: any): string {
   const dir = mkdtempSync(join(tmpdir(), 'junior-compact-'));
@@ -307,9 +316,9 @@ test('the block stays within maxChars when removable detail overflows', async (t
   const block = await buildCompactBlock({
     cwd: dir,
     hopPath: join(dir, 'missing-hop.json'),
-    maxChars: 220,
+    maxChars: 300,
   });
-  assert.ok(block.markdown.length <= 220);
+  assert.ok(block.markdown.length <= 300);
 });
 
 test('truncation drops the oldest in-flight run before newer ones', async (t) => {
@@ -523,4 +532,221 @@ test('a failing plan.status lookup in the default path leaves the run in flight'
     },
   });
   assert.match(block.markdown, /- CLI10: status: checks_failed/);
+});
+
+
+function attemptAt(cwd: string, id: string, stamp: string, status: string, files: string[] = []): string {
+  const dir = join(cwd, '.delivery', id, stamp);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'result.json'), JSON.stringify({ status }));
+  for (const file of files) writeFileSync(join(dir, file), '');
+  return dir;
+}
+
+const DECISION_NOW = new Date(1792000000000 + 3_600_000);
+const DECISION_HOP = (dir: string) => join(dir, 'missing-hop.json');
+
+function managerNote(id: string, kind: Note['kind'], text: string, createdAt: string): Note {
+  return { id, kind, text, source: 'manager', createdAt };
+}
+
+function captureNote(id: string, kind: Note['kind'], text: string, captureId: string, createdAt: string): Note {
+  return { id, kind, text, source: 'capture', captureId, createdAt };
+}
+
+function memoryFixture(t: any): { deps: CompactDeps; dir: string } {
+  const dir = workspace(t);
+  attemptAt(dir, 'X1', '1792000000000', 'needs_answers', ['clarify.md']);
+  const deps: CompactDeps = {
+    cwd: dir,
+    hopPath: hopAt(dir),
+    now: () => DECISION_NOW,
+    callHop: async (_path, _tool, request) =>
+      request.tool === 'plan.status' ? outcome('plan.status', PLAN) : failing(request.tool, 'none'),
+    listNotes: () => ({
+      notes: [managerNote('n-1', 'todo', 'Publish crate', '2026-10-14T17:46:40.000Z')],
+      proposals: [captureNote('n-2', 'decision', 'Ship 0.11 first', 'c-1', '2026-10-14T17:47:40.000Z')],
+    }),
+  };
+  return { deps, dir };
+}
+
+test('a needs_answers run is listed under pending decisions', async (t) => {
+  const dir = workspace(t);
+  attemptAt(dir, 'X1', '1792000000000', 'needs_answers', ['clarify.md']);
+  const block = await buildCompactBlock({ cwd: dir, hopPath: DECISION_HOP(dir), now: () => DECISION_NOW });
+  assert.match(
+    block.markdown,
+    /### Pending decisions\n- X1: needs_answers -> \.delivery\/X1\/1792000000000\/clarify\.md/,
+  );
+});
+
+test('a needs_answers run is absent from in-flight runs', async (t) => {
+  const dir = workspace(t);
+  attemptAt(dir, 'X1', '1792000000000', 'needs_answers', ['clarify.md']);
+  const block = await buildCompactBlock({ cwd: dir, hopPath: DECISION_HOP(dir), now: () => DECISION_NOW });
+  assert.doesNotMatch(block.markdown, /### In-flight runs\n- X1:/);
+});
+
+test('an answered needs_answers run is listed in neither pending decisions nor in-flight runs', async (t) => {
+  const dir = workspace(t);
+  attemptAt(dir, 'X1', '1792000000000', 'needs_answers', ['clarify.md', 'clarified-answers.json']);
+  const block = await buildCompactBlock({ cwd: dir, hopPath: DECISION_HOP(dir), now: () => DECISION_NOW });
+  assert.doesNotMatch(block.markdown, /X1/);
+});
+
+test('a needs_choice run points at its brief', async (t) => {
+  const dir = workspace(t);
+  attemptAt(dir, 'X2', '1792000000000', 'needs_choice', ['brief.md']);
+  const block = await buildCompactBlock({ cwd: dir, hopPath: DECISION_HOP(dir), now: () => DECISION_NOW });
+  assert.match(block.markdown, /- X2: needs_choice -> \.delivery\/X2\/1792000000000\/brief\.md/);
+});
+
+test('a needs_model_approval run points at its model-approval record', async (t) => {
+  const dir = workspace(t);
+  attemptAt(dir, 'X3', '1792000000000', 'needs_model_approval', ['model-approval.json']);
+  const block = await buildCompactBlock({ cwd: dir, hopPath: DECISION_HOP(dir), now: () => DECISION_NOW });
+  assert.match(
+    block.markdown,
+    /- X3: needs_model_approval -> \.delivery\/X3\/1792000000000\/model-approval\.json/,
+  );
+});
+
+test('an open manager note is listed with its kind and id', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: DECISION_HOP(dir),
+    listNotes: () => ({
+      notes: [managerNote('n-1', 'todo', 'Publish crate', '2026-10-14T17:46:40.000Z')],
+      proposals: [],
+    }),
+  });
+  assert.match(block.markdown, /### Open notes\n- \[todo\] Publish crate \(n-1\)/);
+});
+
+test('open notes are listed oldest first', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: DECISION_HOP(dir),
+    listNotes: () => ({
+      notes: [
+        managerNote('n-new', 'note', 'Newer note', '2026-10-14T18:00:00.000Z'),
+        managerNote('n-old', 'note', 'Older note', '2026-10-14T17:00:00.000Z'),
+      ],
+      proposals: [],
+    }),
+  });
+  assert.ok(block.markdown.indexOf('Older note') < block.markdown.indexOf('Newer note'));
+});
+
+test('capture proposals are listed newest first with their capture id', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: DECISION_HOP(dir),
+    listNotes: () => ({
+      notes: [],
+      proposals: [
+        captureNote('n-old', 'risk', 'Older proposal', 'c-1', '2026-10-14T17:00:00.000Z'),
+        captureNote('n-new', 'decision', 'Newer proposal', 'c-2', '2026-10-14T18:00:00.000Z'),
+      ],
+    }),
+  });
+  assert.ok(block.markdown.indexOf('Newer proposal (n-new, c-2)') < block.markdown.indexOf('Older proposal (n-old, c-1)'));
+});
+
+test('openPrs starts before the plan companion call', async (t) => {
+  const dir = workspace(t);
+  const order: string[] = [];
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    openPrs: async () => {
+      order.push('prs');
+      return { status: 'none', prs: [], errors: [] };
+    },
+    callHop: async (_path, _tool, request) => {
+      if (request.tool === 'plan.status') order.push('plan');
+      return failing(request.tool, 'NO_ACTIVE_PLAN');
+    },
+  });
+  assert.deepEqual(order.slice(0, 2), ['prs', 'plan']);
+});
+
+test('an open PR is listed with its head and base branches', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: DECISION_HOP(dir),
+    openPrs: async () => ({
+      status: 'ok',
+      prs: [{ repo: '.', number: 7, title: 'T', base: 'dev', head: 'f', draft: false, url: 'u' }],
+      errors: [],
+    }),
+  });
+  assert.match(block.markdown, /### Open PRs\n- \.#7 T \(f -> dev\)/);
+});
+
+test('trimming removes capture proposals first', async (t) => {
+  const { deps } = memoryFixture(t);
+  const full = await buildCompactBlock({ ...deps, maxChars: 100_000 });
+  const block = await buildCompactBlock({ ...deps, maxChars: full.markdown.length - 1 });
+  assert.doesNotMatch(block.markdown, /Ship 0\.11 first/);
+});
+
+test('trimming preserves open notes after capture proposals are gone', async (t) => {
+  const { deps } = memoryFixture(t);
+  const full = await buildCompactBlock({ ...deps, maxChars: 100_000 });
+  const block = await buildCompactBlock({ ...deps, maxChars: full.markdown.length - 1 });
+  assert.match(block.markdown, /- \[todo\] Publish crate \(n-1\)/);
+});
+
+test('trimming preserves pending decisions after capture proposals are gone', async (t) => {
+  const { deps } = memoryFixture(t);
+  const full = await buildCompactBlock({ ...deps, maxChars: 100_000 });
+  const block = await buildCompactBlock({ ...deps, maxChars: full.markdown.length - 1 });
+  assert.match(block.markdown, /- X1: needs_answers -> \.delivery\/X1\/1792000000000\/clarify\.md/);
+});
+
+test('trimming never removes the active plan section', async (t) => {
+  const { deps } = memoryFixture(t);
+  const full = await buildCompactBlock({ ...deps, maxChars: 100_000 });
+  const block = await buildCompactBlock({ ...deps, maxChars: full.markdown.length - 1 });
+  assert.match(block.markdown, /plan_X/);
+});
+
+test('a rejecting openPrs marks the PR section unavailable', async (t) => {
+  const { deps } = memoryFixture(t);
+  const block = await buildCompactBlock({
+    ...deps,
+    openPrs: async () => {
+      throw new Error('gh down');
+    },
+  });
+  assert.equal(block.sections.prs, 'unavailable');
+});
+
+test('a rejecting openPrs leaves open notes rendered', async (t) => {
+  const { deps } = memoryFixture(t);
+  const block = await buildCompactBlock({
+    ...deps,
+    openPrs: async () => {
+      throw new Error('gh down');
+    },
+  });
+  assert.match(block.markdown, /- \[todo\] Publish crate \(n-1\)/);
+});
+
+test('a throwing listNotes marks the notes section unavailable', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: DECISION_HOP(dir),
+    listNotes: () => {
+      throw new Error('notes store damaged');
+    },
+  });
+  assert.equal(block.sections.notes, 'unavailable');
 });
