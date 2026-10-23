@@ -34,6 +34,12 @@ const writeLog = process.env.FAKE_CROSSMATRIX_WRITES;
 // requestId or op.kind, that command answers with the real 0.3+ error envelope
 // `{ ok: false, error: { code, message } }` (isError: true). Unset = never fail.
 const errorOn = process.env.FAKE_CROSSMATRIX_ERROR;
+// Opt-in strict write-API mode: when set to a JSON file path, crossmatrix.command
+// requests are validated against (and applied to) a model state persisted in
+// that file. The file is re-read for every request because the wrapper starts a
+// fresh server process per call. A missing file starts as an empty state. Without
+// this variable the crossmatrix mode keeps its previous behaviour.
+const strictStateFile = process.env.FAKE_CROSSMATRIX_STATE;
 // Opt-in Crossmatrix query results: a JSON file mapping a query kind to the
 // result object to return. A value may be an array of pages selected by the
 // request's cursor so a client's nextCursor paging can be exercised. Unset
@@ -134,6 +140,47 @@ function structured(value, isError) {
     structuredContent: value,
     isError: isError === true,
   };
+}
+
+function readStrictState() {
+  let state = { models: {} };
+  if (fs.existsSync(strictStateFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(strictStateFile, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        state = parsed;
+      }
+    } catch {
+      /* a corrupt or partial file starts from an empty state */
+    }
+  }
+  if (!state.models || typeof state.models !== "object" || Array.isArray(state.models)) {
+    state.models = {};
+  }
+  return state;
+}
+
+function writeStrictState(state) {
+  try {
+    fs.writeFileSync(strictStateFile, JSON.stringify(state));
+  } catch {
+    /* ignore */
+  }
+}
+
+function ensureStrictModel(state, modelId) {
+  if (!state.models[modelId]) {
+    state.models[modelId] = { dimensions: {}, scales: [], relations: {} };
+  }
+  const model = state.models[modelId];
+  if (!model.dimensions || typeof model.dimensions !== "object" || Array.isArray(model.dimensions)) {
+    model.dimensions = {};
+  }
+  if (!Array.isArray(model.scales)) model.scales = [];
+  if (!model.relations || typeof model.relations !== "object" || Array.isArray(model.relations)) {
+    model.relations = {};
+  }
+  return model;
 }
 
 function handle(line) {
@@ -265,6 +312,118 @@ function handle(line) {
     if (mode === "crossmatrix") {
       if (name === "crossmatrix.command") {
         const req = args?.request ?? {};
+        if (strictStateFile) {
+          if (writeLog) {
+            try {
+              fs.appendFileSync(writeLog, JSON.stringify(req) + "\n");
+            } catch {
+              /* ignore */
+            }
+          }
+          const state = readStrictState();
+          const modelId = typeof req?.modelId === "string" ? req.modelId : "";
+          const op = req?.op && typeof req.op === "object" ? req.op : {};
+          const kind = typeof op.kind === "string" ? op.kind : "unknown";
+          const model = ensureStrictModel(state, modelId);
+          const reject = (code, message) => {
+            send({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: structured({ ok: false, error: { code, message } }, true),
+            });
+          };
+          const accept = () => {
+            writeStrictState(state);
+            send({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: structured({ ok: true, op: kind, validated: true, links: ["query"] }),
+            });
+          };
+
+          if (kind === "dimension.register") {
+            const dimensionId = op.dimensionId;
+            if (typeof dimensionId === "string") {
+              if (!model.dimensions[dimensionId]) model.dimensions[dimensionId] = { members: [] };
+              accept();
+            } else {
+              reject("unknown_dimension", "unknown dimension ''");
+            }
+            return;
+          }
+          if (kind === "members.sync") {
+            const dimensionId = op.dimensionId;
+            const dimension = model.dimensions[dimensionId];
+            if (!dimension) {
+              reject("unknown_dimension", `unknown dimension '${String(dimensionId)}'`);
+              return;
+            }
+            dimension.members = Array.isArray(op.members)
+              ? op.members
+                  .filter((member) => member && typeof member === "object" && typeof member.id === "string")
+                  .map((member) => member.id)
+              : [];
+            accept();
+            return;
+          }
+          if (kind === "scale.declare") {
+            const scaleId = op.scale && typeof op.scale === "object" ? op.scale.id : undefined;
+            if (typeof scaleId === "string" && !model.scales.includes(scaleId)) {
+              model.scales.push(scaleId);
+            }
+            accept();
+            return;
+          }
+          if (kind === "relation.declare") {
+            const { relationId, from, to, scale } = op;
+            const missing = !model.dimensions[from] ? from : !model.dimensions[to] ? to : null;
+            if (missing !== null) {
+              reject("unknown_dimension", `unknown dimension '${String(missing)}'`);
+              return;
+            }
+            if (!model.scales.includes(scale)) {
+              reject("unknown_scale", `unknown scale '${String(scale)}'`);
+              return;
+            }
+            if (typeof relationId === "string") {
+              model.relations[relationId] = { from, to, scale };
+              accept();
+            } else {
+              reject("unknown_relation", "unknown relation ''");
+            }
+            return;
+          }
+          if (kind === "observe") {
+            const { relationId, from, to } = op;
+            const relation = model.relations[relationId];
+            if (!relation) {
+              reject("unknown_relation", `unknown relation '${String(relationId)}'`);
+              return;
+            }
+            const fromMembers = model.dimensions[relation.from]?.members ?? [];
+            if (!fromMembers.includes(from)) {
+              reject(
+                "unknown_member",
+                `unknown member '${String(from)}' in dimension '${String(relation.from)}'`,
+              );
+              return;
+            }
+            const toMembers = model.dimensions[relation.to]?.members ?? [];
+            if (!toMembers.includes(to)) {
+              reject(
+                "unknown_member",
+                `unknown member '${String(to)}' in dimension '${String(relation.to)}'`,
+              );
+              return;
+            }
+            accept();
+            return;
+          }
+
+          // model.open and any other op kind are accepted as-is.
+          accept();
+          return;
+        }
         if (writeLog) {
           try {
             fs.appendFileSync(writeLog, JSON.stringify(req) + "\n");
