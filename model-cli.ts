@@ -1,13 +1,15 @@
 // ---------------------------------------------------------------------------
 // `junior model` command and model adoption during `junior update`.
 //
-// The command is a thin, offline-by-default surface over the existing model
-// policy, roster and update modules: `status` reports the pin, roster and
-// catalog, `list` shows commodity releases, and `upgrade` plans and (with
-// consent) applies same-lineage upgrades to `delivery.config.json`. A frontier
-// or unknown target is never written: `planUpgrades` routes it to `refused`
-// with the policy verdict, and `applyUpgrades` only ever receives commodity
-// changes.
+// The command is a thin surface over the existing model policy, roster and
+// update modules: `status` reports the pin, roster and catalog, `list` shows
+// commodity releases, and `upgrade` plans and (with consent) applies
+// same-lineage upgrades to `delivery.config.json`. `list` and `upgrade` consult
+// the online OpenRouter catalog by default and fall back to Pi's local catalog;
+// `--offline` skips the network, and `--online` remains accepted for
+// compatibility. A frontier or unknown target is never written: `planUpgrades`
+// routes it to `refused` with the policy verdict, and `applyUpgrades` only ever
+// receives commodity changes.
 //
 // The OpenRouter catalog is reached through the injectable `fetch` seam and
 // Pi's local catalog through PI_CODING_AGENT_DIR, so tests never touch the
@@ -194,6 +196,10 @@ function parseModel(argv: string[]): ParsedModel {
   const values: Record<string, string> = {};
   let positional: string | null = null;
   const valueFlags = new Set(['--vendor', '--profile', '--to']);
+  const allowedFlags = new Set<string>([
+    ...(sub === 'status' || sub === 'list' ? ['--online', '--offline'] : []),
+    ...(sub === 'upgrade' ? ['--online', '--offline', '--dry-run', '--yes'] : []),
+  ]);
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.indexOf('=');
@@ -206,6 +212,7 @@ function parseModel(argv: string[]): ParsedModel {
       continue;
     }
     if (name.startsWith('--')) {
+      if (!allowedFlags.has(name)) throw Error(`Unknown option for model ${sub}: ${name}`);
       flags.add(name);
       continue;
     }
@@ -232,7 +239,7 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
 
   if (parsed.sub === 'status') {
     const config = loadModelConfig(cwd);
-    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env, config });
+    const catalog = await catalogIds({ online: parsed.flags.has('--online') && !parsed.flags.has('--offline'), fetch: deps.fetch, env, config });
     const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
     const result = {
       pinned: { provider: config.provider, model: config.model, source: config.source, path: config.path },
@@ -251,7 +258,7 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
   }
 
   if (parsed.sub === 'list') {
-    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env });
+    const catalog = await catalogIds({ online: !parsed.flags.has('--offline'), fetch: deps.fetch, env });
     const vendorFilter = parsed.values['--vendor'];
     const models: string[] = [];
     const vendors: Record<string, string[]> = {};
@@ -292,12 +299,12 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
 
   if (parsed.sub === 'upgrade') {
     const config = loadModelConfig(cwd);
-    const catalog = await catalogIds({ online: parsed.flags.has('--online'), fetch: deps.fetch, env, config });
+    const catalog = await catalogIds({ online: !parsed.flags.has('--offline'), fetch: deps.fetch, env, config });
     const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
     const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices, sources: catalog.sources });
     const dryRun = parsed.flags.has('--dry-run');
     const pricier = plan.changes.filter((change) => change.price.pricier === true);
-    const result: any = { changes: plan.changes, refused: plan.refused, waiting: plan.waiting, applied: false, pricier };
+    const result: any = { changes: plan.changes, refused: plan.refused, waiting: plan.waiting, applied: false, pricier, catalog: catalog.catalog };
 
     let refusedToWrite = false;
     if (plan.changes.length > 0 && !dryRun) {

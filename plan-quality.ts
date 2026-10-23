@@ -1,4 +1,4 @@
-import { assessPreflight, CONFIDENCE_THRESHOLD, type GateClassifier } from './worker.ts';
+import { assessPreflight, CONFIDENCE_THRESHOLD, resolveContext, type GateClassifier } from './worker.ts';
 
 /** Quality verdict for one planned Junior contract. */
 export type ContractScore = {
@@ -89,7 +89,7 @@ export async function scorePlanContracts(
       const index = next;
       next += 1;
       const entry = contracts[index];
-      const preflight = await assessPreflight(entry.contract, classify);
+      const preflight = await assessPreflight(entry.contract, classify, { context: resolveContext(entry.contract) });
       scores[index] = scoreOne(entry.id, preflight);
     }
   }

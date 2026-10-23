@@ -65,6 +65,8 @@ export interface PlanCheckOptions {
 
 export interface ContractOptions {
   cwd: string;
+  /** Repo name -> absolute checkout, used for deliverables with metadata.repo. */
+  repos?: Record<string, string>;
   provider?: string;
   model?: string;
 }
@@ -347,24 +349,35 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
   return deliverablesOf(plan).filter(isAgentDeliverable).map((deliverable) => {
     const id = text(deliverable.id);
     const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
-    const files = ownedFiles(deliverable);
+    const repo = text(deliverable.metadata?.repo).trim();
+    const repoCwd = repo ? opts.repos?.[repo] : undefined;
+    // A plan may address files in another checkout with a `<repo>:` prefix.
+    // Strip it before scope/constraint/registration rules see the path.
+    const files = ownedFiles(deliverable).map((file) =>
+      repo && file.startsWith(`${repo}:`) ? file.slice(repo.length + 1) : file,
+    );
     const checks = asArray(junior.checks);
     const requestedProfile = text(junior.profile).trim();
     const cargoCheck = checks.some((check) => isRecord(check) && text(check.command) === 'cargo');
     const unownedRegistrations = REGISTRATION_FILES.filter((file) => !files.includes(file));
+    const constraints = [
+      `Only modify ${files.join(', ')}`,
+      'Work only inside the current working directory; no commits or pushes; no nested workers',
+      ...(unownedRegistrations.length > 0
+        ? [`Do not edit registration files you do not own (${unownedRegistrations.join(', ')}); if your change needs registering there, say so in your final message instead`]
+        : []),
+    ];
+    for (const entry of asArray(junior.constraints)) {
+      const constraint = text(entry);
+      if (constraint && !constraints.includes(constraint)) constraints.push(constraint);
+    }
     const contract: Record<string, unknown> = {
       id,
       deliverable: text(deliverable.metadata?.artifact),
-      cwd: opts.cwd,
+      cwd: repoCwd || opts.cwd,
       workflow: text(junior.workflow) || 'test_first',
       acceptance: asArray(junior.acceptance).map(text).filter(Boolean),
-      constraints: [
-        `Only modify ${files.join(', ')}`,
-        'Work only inside the current working directory; no commits or pushes; no nested workers',
-        ...(unownedRegistrations.length > 0
-          ? [`Do not edit registration files you do not own (${unownedRegistrations.join(', ')}); if your change needs registering there, say so in your final message instead`]
-          : []),
-      ],
+      constraints,
       checks,
       scope: { owned: files },
       isolation: 'worktree',
@@ -376,6 +389,7 @@ export function planContracts(plan: unknown, opts: ContractOptions): JuniorContr
         ...(isRecord(junior.execution) ? junior.execution : {}),
       },
     };
+    if (Array.isArray(junior.context)) contract.context = junior.context;
     if (planApprovedProfiles.length > 0) contract.approvedProfiles = planApprovedProfiles;
     if (opts.provider !== undefined) contract.provider = opts.provider;
     if (opts.model !== undefined) contract.model = opts.model;
@@ -392,7 +406,8 @@ export async function scorePlanFile(
   opts: { cwd: string },
 ): Promise<PlanQualityReport> {
   const plan = JSON.parse(fs.readFileSync(path.resolve(opts.cwd, planPath), 'utf8'));
-  return scorePlanContracts(planContracts(plan, { cwd: opts.cwd }), classify);
+  const repos = planReposIn(opts.cwd);
+  return scorePlanContracts(planContracts(plan, { cwd: opts.cwd, ...(repos !== undefined ? { repos } : {}) }), classify);
 }
 
 export interface PlanCommandDeps {
@@ -409,6 +424,25 @@ function registeredTestsIn(cwd: string): string[] | undefined {
     return registeredTestFiles(JSON.parse(fs.readFileSync(packagePath, 'utf8')));
   } catch (error) {
     throw new Error(`${packagePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Read `plan.repos` (repo name -> absolute checkout) from delivery.config.json.
+ * A malformed config fails fast, like package.json. */
+function planReposIn(cwd: string): Record<string, string> | undefined {
+  const configPath = path.join(cwd, 'delivery.config.json');
+  if (!fs.existsSync(configPath)) return undefined;
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const repos = isRecord(config.plan) && isRecord(config.plan.repos) ? config.plan.repos : undefined;
+    if (!repos) return undefined;
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(repos)) {
+      if (typeof value === 'string' && value) out[name] = value;
+    }
+    return out;
+  } catch (error) {
+    throw new Error(`${configPath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -459,7 +493,8 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
     const dir = path.resolve(cwd, outDir);
     const written: string[] = [];
-    for (const item of planContracts(plan, { cwd })) {
+    const repos = planReposIn(cwd);
+    for (const item of planContracts(plan, { cwd, ...(repos !== undefined ? { repos } : {}) })) {
       const target = path.join(dir, `${item.id}.json`);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, `${JSON.stringify(item.contract, null, 2)}\n`);

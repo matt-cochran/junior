@@ -98,7 +98,7 @@ const COMMANDS: Record<string, CommandSpec> = {
  },
  prune: { flags: ['--dry-run'], valueFlags: ['--older-than', '--keep-last'], min: 0, max: 0,
   help: 'Usage: junior prune [--older-than 24h] [--keep-last N] [--dry-run]' },
- model: { flags: ['--online', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
+ model: { flags: ['--online', '--offline', '--dry-run', '--yes'], valueFlags: ['--vendor', '--profile', '--to'], min: 1, max: 2,
   help: 'Usage: junior model status [--online] | list [--online] [--vendor v] | upgrade [--profile p] [--to id] [--online] [--dry-run] [--yes] | approve|revoke <key>' },
  plan: { flags: ['--jev'], valueFlags: ['--out', '--max-hours'], min: 1, max: 2,
   help: 'Usage: junior plan check <plan.json> [--max-hours N] [--jev] | contracts <plan.json> --out <dir>' },
