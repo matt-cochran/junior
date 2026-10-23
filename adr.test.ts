@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -255,8 +255,8 @@ test('adr check --record writes a proposed conformance observation', async () =>
 
 // --- seed ADRs --------------------------------------------------------------
 
-test('Junior ships eight seed ADRs', () => {
-  assert.equal(loadAdrs(SEED_DIR).length, 8);
+test('Every ADR file in docs/adr loads as an ADR', () => {
+  assert.equal(loadAdrs(SEED_DIR).length, readdirSync(SEED_DIR).filter((name) => /^\d{4}-.*\.md$/.test(name)).length);
 });
 
 test('Junior seed ADRs lint clean', () => {
