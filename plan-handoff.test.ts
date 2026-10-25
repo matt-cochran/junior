@@ -451,3 +451,56 @@ test('withPlanLease retries a failed deliverable across consecutive CPM revision
   const out = await withPlanLease({ ...TASK, hopRevision: 5 }, async () => 'ok', deps(callHop));
   assert.equal(out.plan.leased, true);
 });
+
+// --- correction actuals -----------------------------------------------------
+
+function acquireAfterFailedCorrection() {
+  let attempts = 0;
+  return () => {
+    attempts += 1;
+    return { ok: true, result: { deliverables: attempts === 1 ? ['other'] : [DELIVERABLE] } };
+  };
+}
+
+test('withPlanLease adds prior CPM actual effort to a failed-correction mark', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFailedCorrection(),
+    'plan.status': failedStatus('checks failed'),
+    'plan.ev': () => ({ ok: true, result: { rows: [{ id: DELIVERABLE, ac: 2.5 }] } }),
+  });
+  const ticks = [0, 3_600_000];
+  let i = 0;
+  const now = () => ticks[Math.min(i++, ticks.length - 1)];
+  await withPlanLease(TASK, async () => 'ok', deps(callHop, { now }));
+  const marks = calls.filter((call) => call.request.tool === 'plan.mark_status');
+  assert.equal(marks.at(-1)?.request.arguments.actual_effort_hours, 3.5);
+});
+
+test('withPlanLease reports cumulative actual effort after completed work is reopened', async () => {
+  const { calls, callHop } = harness({
+    'plan.ev': () => ({ ok: true, result: { rows: [{ id: DELIVERABLE, ac: 2 }] } }),
+  });
+  const ticks = [0, 3_600_000];
+  let i = 0;
+  const now = () => ticks[Math.min(i++, ticks.length - 1)];
+  await withPlanLease(TASK, async () => 'ok', deps(callHop, { now }));
+  assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 3);
+});
+
+test('withPlanLease refuses completed work until it is revised or reopened', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'complete' }, 1, 0, 0]], locks_held: [] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(out.plan.error ?? '', /revised\/reopened/);
+});
+
+test('withPlanLease sends no lockless ready mark for completed work', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'complete' }, 1, 0, 0]], locks_held: [] } }),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(calls.filter((call) => call.request.tool === 'plan.mark_status').length, 0);
+});

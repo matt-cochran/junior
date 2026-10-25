@@ -6,10 +6,11 @@
 // one-deliverable cohort (`plan.acquire_cohort`), runs the handoff, then marks
 // the deliverable `in_progress` on success or `failed` on failure
 // (`plan.mark_status`). A Failed deliverable is returned to Ready through the
-// supported audited lockless mark before it is re-leased; an active lease held
-// by another caller is always refused. The lease is left for the manager to
-// accept; a failing mark is recorded in `plan.error` without discarding the
-// run result.
+// supported audited lockless mark before it is re-leased. Completed work has no
+// lockless complete -> ready path: it must be revised/reopened in the CPM plan
+// graph first, then leased and rereviewed. An active lease held by another
+// caller is always refused. The lease is left for the manager to accept; a
+// failing mark is recorded in `plan.error` without discarding the run result.
 //
 // The cpm calls are injected so the wrapper stays offline and testable. The
 // lease is deliberately not released here: acceptance is a manager action.
@@ -105,8 +106,40 @@ function cohortIds(result: unknown): string[] {
   return strictItems(cohortDeliverableIds(result), 'cpm', 'plan.acquire_cohort', result);
 }
 
-function effortHours(startedAt: number, endedAt: number): number {
-  return Math.max(0.01, Math.round(((endedAt - startedAt) / 3_600_000) * 100) / 100);
+function effortHours(startedAt: number, endedAt: number, prior = 0): number {
+  const total = Math.max(0, prior) + Math.max(0, endedAt - startedAt) / 3_600_000;
+  return Math.max(0.01, Math.round(total * 100) / 100);
+}
+
+function actualHours(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** The reported CPM actual effort for one deliverable, if the read exposes it. */
+function deliverableActualHours(result: unknown, deliverableId: string): number | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const raw = result as any;
+  const rows = Array.isArray(raw.rows) ? raw.rows : Array.isArray(raw.deliverables) ? raw.deliverables : [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const id = Array.isArray(row) ? String(row[0] ?? '') : String(row.id ?? row.deliverable_id ?? row.deliverableId ?? '');
+    if (id !== deliverableId) continue;
+    const item = Array.isArray(row) ? row[1] : row;
+    if (!item || typeof item !== 'object') continue;
+    const hours = actualHours(item.actual_effort_hours)
+      ?? actualHours(item.actualEffortHours)
+      ?? actualHours(item.ac)
+      ?? actualHours(item.actual_cost);
+    if (hours !== undefined) return hours;
+  }
+  const actuals = raw.actuals;
+  if (actuals && typeof actuals === 'object' && !Array.isArray(actuals)) {
+    const item = actuals[deliverableId];
+    if (item && typeof item === 'object') {
+      return actualHours(item.actual_effort_hours) ?? actualHours(item.actualEffortHours) ?? actualHours(item.ac);
+    }
+  }
+  return undefined;
 }
 
 /** Deliverable locks from a cpm `plan.status` response; throws `ShapeError` when unrecognized. */
@@ -117,19 +150,30 @@ function lockHolders(result: unknown): Array<{ deliverableId: string; callerId: 
   }));
 }
 
-/** The recorded reason when a cpm delivery row is Failed; otherwise undefined. */
-function failedReason(result: unknown, deliverableId: string): string | undefined {
+type DeliverableState = { status: string; reason?: string; actualHours?: number };
+
+/** The status, failure reason and reported actuals of one cpm delivery row. */
+function deliverableState(result: unknown, deliverableId: string): DeliverableState | undefined {
   const rows = strictItems(planStatusRows(result), 'cpm', 'plan.status', result);
   const row = rows.find((candidate) => candidate.id === deliverableId);
-  const raw = row?.raw;
-  if (!raw || typeof raw !== 'object') return undefined;
-  const mark = (raw as any).status ?? (raw as any).mark_status ?? (raw as any).markStatus;
-  const status = typeof mark === 'string' ? mark : mark && typeof mark === 'object' ? mark.status : undefined;
-  if (String(status).toLowerCase() !== 'failed') return undefined;
-  const reason = typeof mark === 'object'
+  if (!row) return undefined;
+  const raw = row.raw;
+  const item = raw && typeof raw === 'object' ? raw as any : undefined;
+  const mark = item?.status ?? item?.mark_status ?? item?.markStatus ?? raw;
+  const status = row.status || (typeof mark === 'string' ? mark : mark?.status) || '';
+  const reason = mark && typeof mark === 'object'
     ? typeof mark.reason === 'string' ? mark.reason.trim() : ''
-    : typeof (raw as any).reason === 'string' ? (raw as any).reason.trim() : '';
-  return reason || 'failure reason not recorded';
+    : typeof item?.reason === 'string' ? item.reason.trim() : '';
+  const hours = actualHours(item?.actual_effort_hours)
+    ?? actualHours(item?.actualEffortHours)
+    ?? (mark && typeof mark === 'object'
+      ? actualHours(mark.actual_effort_hours) ?? actualHours(mark.actualEffortHours)
+      : undefined);
+  return {
+    status: String(status).toLowerCase(),
+    ...(reason ? { reason } : {}),
+    ...(hours !== undefined ? { actualHours: hours } : {}),
+  };
 }
 
 /** cpm evidence for a lockless Ready handback that keeps the failed reason. */
@@ -172,6 +216,7 @@ export async function withPlanLease<R>(
       ? contextRevision
       : undefined;
   const ttlSeconds = Math.ceil(deps.deadlineMs / 1000) + 3600;
+  let priorActualHours = 0;
   let acquired: PlanHopResult;
   try {
     acquired = await deps.callHop('cpm', {
@@ -237,20 +282,31 @@ export async function withPlanLease<R>(
       if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
       plan.reentered = true;
     } else {
-      let reason: string | undefined;
+      let state: DeliverableState | undefined;
       try {
-        reason = status.ok ? failedReason(status.result, plan.deliverable) : undefined;
+        state = status.ok ? deliverableState(status.result, plan.deliverable) : undefined;
       } catch (error) {
         plan.error = `plan.status failed: ${messageOf(error)}`;
         return { plan };
       }
+      if (state?.status === 'complete') {
+        // cpm deliberately has no lockless complete -> ready transition. The
+        // manager first revises/reopens the graph, then the reopened work is
+        // leased and rereviewed; never rewrite a completed status here.
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; completed work must be revised/reopened before a new lease`;
+        return { plan };
+      }
+      const reason = state?.status === 'failed'
+        ? state.reason ?? 'failure reason not recorded'
+        : undefined;
       if (reason === undefined) {
         plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
         return { plan };
       }
+      priorActualHours = state?.actualHours ?? 0;
       // cpm 0.4.3 supports Failed -> Ready only as an audited lockless mark;
       // return the deliverable through that lifecycle, never by inventing a
-      // lease or a direct status write.
+      // lease or a direct status write. Completed work is not handled here.
       let ready: PlanHopResult;
       try {
         ready = await deps.callHop('cpm', {
@@ -330,6 +386,21 @@ export async function withPlanLease<R>(
   }
   plan.leased = true;
 
+  // A correction mark reports total effort, not just this run: CPM keeps the
+  // original actuals through a retry or an explicit revise/reopen. Read them
+  // after the lease (a read must not race the acquire baseline) and add this
+  // run's wall hours without replacing the earlier work. An unavailable EV
+  // read is not fatal; the status row may still carry the prior actuals.
+  try {
+    const ev = await deps.callHop('cpm', { tool: 'plan.ev', arguments: { plan_id: plan.id } });
+    if (ev.ok) {
+      const previous = deliverableActualHours(ev.result, plan.deliverable);
+      if (previous !== undefined) priorActualHours = Math.max(priorActualHours, previous);
+    }
+  } catch {
+    // plan.ev is optional for a plan that has not been baselined yet.
+  }
+
   const startedAt = now();
   const mark = async (
     marked: 'in_progress' | 'failed',
@@ -348,7 +419,7 @@ export async function withPlanLease<R>(
           plan_id: plan.id,
           deliverable_id: plan.deliverable,
           status,
-          actual_effort_hours: effortHours(startedAt, now()),
+          actual_effort_hours: effortHours(startedAt, now(), priorActualHours),
           evidence: evidenceLine(summary),
         },
       });
