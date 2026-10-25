@@ -26,7 +26,10 @@ import {
   inspectComputeStatus,
   modeAllowsOperation,
   reclaimComputeLease,
+  reconcileComputeStatus,
   releaseComputeLease,
+  releaseComputeLeaseWithAuthority,
+  stopComputeResource,
   type ComputePolicy,
   type ComputeStatus,
 } from './compute.ts';
@@ -560,4 +563,190 @@ test('unverified ownership denies mutation despite a permissive policy', () => {
     now: NOW,
   });
   assert.equal(result.allowed, false);
+});
+
+test('status inspection is idempotent for one immutable snapshot', () => {
+  const document = status();
+  assert.deepEqual(inspectComputeStatus(document, { now: NOW }), inspectComputeStatus(document, { now: NOW }));
+});
+
+test('reconciliation is idempotent for one immutable snapshot', () => {
+  const document = status();
+  assert.deepEqual(
+    reconcileComputeStatus(document, { now: NOW }),
+    reconcileComputeStatus(document, { now: NOW }),
+  );
+});
+
+test('reconciliation of a verified resource is safe', () => {
+  assert.equal(reconcileComputeStatus(status(), { now: NOW }).safe, true);
+});
+
+test('reconciliation reports ambiguous ownership as unsafe', () => {
+  const result = reconcileComputeStatus(status({ ownership: { status: 'ambiguous' } }), { now: NOW });
+  assert.equal(result.safe, false);
+});
+
+test('reconciliation of uncertain ownership does not mutate the status snapshot', () => {
+  const document = status({ ownership: { status: 'unverifiable' } });
+  const before = structuredClone(document);
+  reconcileComputeStatus(document, { now: NOW });
+  assert.deepEqual(document, before);
+});
+
+test('reconciliation reports desired and observed state drift as a finding', () => {
+  const result = reconcileComputeStatus(status({ desiredState: 'dormant' }), { now: NOW });
+  assert.equal(result.findings.some((finding) => finding.code === 'reconcile.state-drift'), true);
+});
+
+test('reconciliation reports an expired lease as a finding', () => {
+  const base = status();
+  const result = reconcileComputeStatus(status({
+    observedState: 'ready',
+    leases: [{
+      ...base.leases[0],
+      issuedAt: '2026-10-25T09:00:00.000Z',
+      expiresAt: '2026-10-25T10:00:00.000Z',
+      heartbeatAt: '2026-10-25T09:30:00.000Z',
+    }],
+  }), { now: NOW });
+  assert.equal(result.findings.some((finding) => finding.code === 'reconcile.lease-expired'), true);
+});
+
+test('reconciliation reports an adopted resource without mutation authority', () => {
+  const document = status({
+    mode: 'adopt',
+    ownership: { ...status().ownership, mode: 'adopt' },
+    desiredState: 'ready',
+    observedState: 'ready',
+    leases: [],
+  });
+  const result = reconcileComputeStatus(document, { now: NOW });
+  assert.equal(result.mutated, false);
+});
+
+test('stop reports ambiguous ownership as unsafe', () => {
+  const result = stopComputeResource(status({ ownership: { status: 'ambiguous' } }), {
+    policy: SAFE_POLICY,
+    now: NOW,
+  });
+  assert.equal(result.safe, false);
+});
+
+test('stop denies a mutation when ownership is unverifiable', () => {
+  const result = stopComputeResource(status({ ownership: { status: 'unverifiable' } }), {
+    policy: SAFE_POLICY,
+    now: NOW,
+  });
+  assert.equal(result.allowed, false);
+});
+
+test('stop of an unverifiable resource leaves the lease state unchanged', () => {
+  const state = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const before = structuredClone(state);
+  stopComputeResource(status({ ownership: { status: 'unverifiable' } }), {
+    policy: SAFE_POLICY,
+    now: NOW,
+    leaseState: state,
+  });
+  assert.deepEqual(state, before);
+});
+
+test('stop of an adopted resource is denied without delegated authority', () => {
+  const adopted = status({
+    mode: 'adopt',
+    ownership: { ...status().ownership, mode: 'adopt' },
+  });
+  const result = stopComputeResource(adopted, {
+    policy: { ...SAFE_POLICY, mode: 'adopt', provisionOptIn: false },
+    now: NOW,
+  });
+  assert.equal(result.allowed, false);
+});
+
+test('stop is allowed for a verified leased resource under policy authority', () => {
+  const result = stopComputeResource(status(), {
+    policy: SAFE_POLICY,
+    leaseId: 'lease-1',
+    fencingToken: 7,
+    now: NOW,
+  });
+  assert.equal(result.allowed, true);
+});
+
+test('an authorized stop releases the matching local lease', () => {
+  const state = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const acquired = acquireComputeLease(state, {
+    leaseId: 'lease-1',
+    holder: 'worker-1',
+    now: NOW,
+    expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  if (!acquired.ok) throw new Error(acquired.message);
+  const result = stopComputeResource(status({ leases: [acquired.lease] }), {
+    policy: SAFE_POLICY,
+    now: NOW,
+    leaseState: acquired.state,
+  });
+  assert.equal(result.leaseState?.leases[0]?.releasedAt, NOW);
+});
+
+test('release with ambiguous ownership is unsafe and does not mutate lease state', () => {
+  const state = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const acquired = acquireComputeLease(state, {
+    leaseId: 'lease-1',
+    holder: 'worker-1',
+    now: NOW,
+    expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  if (!acquired.ok) throw new Error(acquired.message);
+  const before = structuredClone(acquired.state);
+  const result = releaseComputeLeaseWithAuthority(
+    status({ ownership: { status: 'ambiguous' } }),
+    acquired.state,
+    {
+      leaseId: acquired.lease.id,
+      holder: acquired.lease.holder,
+      fencingToken: acquired.lease.fencingToken,
+      now: NOW,
+    },
+  );
+  assert.deepEqual(result.state, before);
+});
+
+test('release with verified ownership closes the matching lease', () => {
+  const state = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const acquired = acquireComputeLease(state, {
+    leaseId: 'lease-1',
+    holder: 'worker-1',
+    now: NOW,
+    expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  if (!acquired.ok) throw new Error(acquired.message);
+  const result = releaseComputeLeaseWithAuthority(status(), acquired.state, {
+    leaseId: acquired.lease.id,
+    holder: acquired.lease.holder,
+    fencingToken: acquired.lease.fencingToken,
+    now: NOW,
+  });
+  assert.equal(result.ok, true);
+});
+
+test('release with a stale fencing token leaves lease state unchanged', () => {
+  const state = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const acquired = acquireComputeLease(state, {
+    leaseId: 'lease-1',
+    holder: 'worker-1',
+    now: NOW,
+    expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  if (!acquired.ok) throw new Error(acquired.message);
+  const before = structuredClone(acquired.state);
+  const result = releaseComputeLeaseWithAuthority(status(), acquired.state, {
+    leaseId: acquired.lease.id,
+    holder: acquired.lease.holder,
+    fencingToken: acquired.lease.fencingToken + 1,
+    now: NOW,
+  });
+  assert.deepEqual(result.state, before);
 });
