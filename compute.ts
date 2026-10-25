@@ -108,6 +108,8 @@ export type ComputeLease = {
   issuedAt: string;
   expiresAt: string;
   heartbeatAt: string;
+  /** Set when the lease is released or reclaimed; closed leases never authorize work. */
+  releasedAt?: string;
 };
 
 export type ComputeFindingSeverity = 'info' | 'warning' | 'blocking';
@@ -545,7 +547,9 @@ function validateLeases(
       add(issues, 'lease.window', path, 'lease issue, heartbeat and expiry times are not a valid window');
       continue;
     }
-    if (expires <= now) {
+    if (isTimestamp(value.releasedAt)) {
+      // A released or reclaimed lease is historical, not active.
+    } else if (expires <= now) {
       add(issues, 'lease.expired', path, 'lease has expired and cannot authorize work');
     } else {
       activeLeases += 1;
@@ -689,7 +693,7 @@ export function inspectComputeStatus(
   const leases = Array.isArray(input.leases) ? input.leases : [];
   const now = opts.now === undefined ? Date.now() : Date.parse(String(opts.now));
   const activeLeaseCount = leases.filter((lease) => {
-    if (!isRecord(lease)) return false;
+    if (!isRecord(lease) || isTimestamp(lease.releasedAt)) return false;
     const expires = Date.parse(String(lease.expiresAt));
     return Number.isFinite(expires) && expires > now;
   }).length;
@@ -720,4 +724,677 @@ export function assertComputeStatus(input: unknown, opts: { now?: string | numbe
 export function modeAllowsOperation(mode: ComputeMode, operation: ComputeOperation): boolean {
   const operations = COMPUTE_MODE_OPERATIONS[mode];
   return Array.isArray(operations) && operations.includes(operation);
+}
+
+// ---------------------------------------------------------------------------
+// Local control-plane foundation.
+//
+// The pieces below keep policy, lease state, capability advertising and
+// operation authorization local and deterministic. They never talk to a
+// provider: a caller validates a policy before writing it, persists the
+// returned lease state as ordinary JSON, and asks the same pure domain helpers
+// whether an operation is authorized.
+// ---------------------------------------------------------------------------
+
+export const COMPUTE_POLICY_INVARIANTS = [
+  { id: 'policy.object', severity: 'invalid', description: 'Policy is an object.' },
+  { id: 'policy.mode', severity: 'invalid', description: 'Policy mode is null or a documented ownership mode.' },
+  { id: 'policy.flags', severity: 'invalid', description: 'Policy switches are booleans.' },
+  { id: 'policy.capacity', severity: 'invalid', description: 'Capacity bounds are finite, ordered and nonnegative.' },
+  { id: 'policy.budget', severity: 'invalid', description: 'Budget amount, currency and period are finite and documented.' },
+  { id: 'policy.provision-opt-in', severity: 'unsafe', description: 'Provision mode requires explicit opt-in.' },
+  { id: 'policy.encryption', severity: 'unsafe', description: 'Remote modes require encrypted transport and storage.' },
+  { id: 'policy.public-ingress', severity: 'unsafe', description: 'Public ingress requires encrypted transport.' },
+] as const;
+
+export type ComputePolicyIssueSeverity = 'invalid' | 'unsafe';
+export type ComputePolicyIssue = {
+  code: string;
+  severity: ComputePolicyIssueSeverity;
+  path: string;
+  message: string;
+};
+
+export type ComputePolicyInspection = {
+  valid: boolean;
+  safe: boolean;
+  issues: ComputePolicyIssue[];
+};
+
+const POLICY_SEVERITY = new Map<string, ComputePolicyIssueSeverity>(
+  COMPUTE_POLICY_INVARIANTS.map(
+    (invariant): [string, ComputePolicyIssueSeverity] => [invariant.id, invariant.severity],
+  ),
+);
+
+function addPolicyIssue(
+  issues: ComputePolicyIssue[],
+  code: string,
+  path: string,
+  message: string,
+): void {
+  issues.push({ code, severity: POLICY_SEVERITY.get(code) ?? 'invalid', path, message });
+}
+
+/** Validate a policy without touching disk or a provider. A policy can be a
+ * well-formed but unsafe document (for example provision without opt-in);
+ * `safe` is the gate a mutating command must pass. */
+export function inspectComputePolicy(input: unknown): ComputePolicyInspection {
+  const issues: ComputePolicyIssue[] = [];
+  if (!isRecord(input)) {
+    addPolicyIssue(issues, 'policy.object', '', 'policy must be an object');
+    return { valid: false, safe: false, issues };
+  }
+
+  const mode = input.mode;
+  if (mode !== null && !COMPUTE_MODES.includes(mode as ComputeMode)) {
+    addPolicyIssue(issues, 'policy.mode', 'mode', 'mode must be null, adopt, managed-existing or provision');
+  }
+
+  const flags = [
+    'provisionOptIn',
+    'allowLocalFallback',
+    'publicIngress',
+    'encryptedTransport',
+    'encryptedStorage',
+  ] as const;
+  for (const flag of flags) {
+    if (typeof input[flag] !== 'boolean') {
+      addPolicyIssue(issues, 'policy.flags', flag, `${flag} must be a boolean`);
+    }
+  }
+
+  const min = input.minCapacity;
+  const max = input.maxCapacity;
+  if (!isNonNegativeInteger(min) || !isPositiveInteger(max) || min > max) {
+    addPolicyIssue(
+      issues,
+      'policy.capacity',
+      'capacity',
+      'minCapacity must be zero or greater and no larger than a finite maxCapacity',
+    );
+  }
+
+  const budget = input.budget;
+  if (!isRecord(budget)
+    || !(typeof budget.amount === 'number' && Number.isFinite(budget.amount) && budget.amount >= 0)
+    || !isNonEmptyString(budget.currency)
+    || !['hour', 'day', 'month'].includes(String(budget.period))) {
+    addPolicyIssue(
+      issues,
+      'policy.budget',
+      'budget',
+      'budget needs a finite nonnegative amount, currency and hour/day/month period',
+    );
+  }
+
+  if (mode === 'provision' && input.provisionOptIn !== true) {
+    addPolicyIssue(
+      issues,
+      'policy.provision-opt-in',
+      'provisionOptIn',
+      'provision mode requires explicit opt-in',
+    );
+  }
+  if (mode !== null && (input.encryptedTransport !== true || input.encryptedStorage !== true)) {
+    addPolicyIssue(
+      issues,
+      'policy.encryption',
+      'encryption',
+      'a remote mode requires encrypted transport and storage',
+    );
+  }
+  if (input.publicIngress === true && input.encryptedTransport !== true) {
+    addPolicyIssue(
+      issues,
+      'policy.public-ingress',
+      'publicIngress',
+      'public ingress requires encrypted transport',
+    );
+  }
+
+  const valid = !issues.some((issue) => issue.severity === 'invalid');
+  const safe = valid && !issues.some((issue) => issue.severity === 'unsafe');
+  return { valid, safe, issues };
+}
+
+/** Assert that a policy is valid and safe enough to authorize a mutation. */
+export function assertComputePolicy(input: unknown): ComputePolicy {
+  const result = inspectComputePolicy(input);
+  if (!result.safe) {
+    const detail = result.issues.map((issue) => `${issue.path || 'policy'}: ${issue.message}`).join('; ');
+    throw new TypeError(`unsafe compute policy: ${detail}`);
+  }
+  return input as ComputePolicy;
+}
+
+export type ComputeCapabilityInspection = {
+  valid: boolean;
+  ready: boolean;
+  operations: ComputeCapability[];
+  unsupported: ComputeOperation[];
+  unknown: ComputeOperation[];
+  issues: ComputeIssue[];
+};
+
+/** Compare explicit adapter advertisements with the operations a caller
+ * requires. A missing operation is `unsupported`, never an implicit fallback. */
+export function inspectComputeCapabilities(
+  input: unknown,
+  required: readonly ComputeOperation[] = COMPUTE_OPERATIONS,
+): ComputeCapabilityInspection {
+  const issues: ComputeIssue[] = [];
+  const operations: ComputeCapability[] = [];
+  if (!Array.isArray(input)) {
+    add(issues, 'capability.object', '', 'capabilities must be an array');
+    return {
+      valid: false,
+      ready: false,
+      operations,
+      unsupported: [...required],
+      unknown: [],
+      issues,
+    };
+  }
+
+  const seen = new Set<ComputeOperation>();
+  for (const [index, value] of input.entries()) {
+    const path = `capabilities[${index}]`;
+    if (!isRecord(value)) {
+      add(issues, 'capability.object', path, 'capability must be an object');
+      continue;
+    }
+    if (!COMPUTE_OPERATIONS.includes(value.operation as ComputeOperation)) {
+      add(issues, 'capability.operation', `${path}.operation`, 'capability operation is not documented');
+      continue;
+    }
+    if (!COMPUTE_CAPABILITY_STATUSES.includes(value.status as ComputeCapabilityStatus)) {
+      add(issues, 'capability.status', `${path}.status`, 'capability status must be supported, unsupported or unknown');
+      continue;
+    }
+    if (value.reason !== undefined && typeof value.reason !== 'string') {
+      add(issues, 'capability.status', `${path}.reason`, 'capability reason must be a string');
+      continue;
+    }
+    const operation = value.operation as ComputeOperation;
+    if (seen.has(operation)) {
+      add(issues, 'capability.duplicate', path, 'capability operation is advertised more than once');
+      continue;
+    }
+    seen.add(operation);
+    operations.push({
+      operation,
+      status: value.status as ComputeCapabilityStatus,
+      ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    });
+  }
+
+  const requiredOperations = [...new Set(required)];
+  for (const operation of requiredOperations) {
+    if (!COMPUTE_OPERATIONS.includes(operation)) {
+      add(issues, 'capability.required', 'required', `required operation ${String(operation)} is not documented`);
+    }
+  }
+
+  const unsupported = requiredOperations.filter(
+    (operation) => !seen.has(operation) || operations.find((entry) => entry.operation === operation)?.status === 'unsupported',
+  );
+  const unknown = requiredOperations.filter(
+    (operation) => operations.find((entry) => entry.operation === operation)?.status === 'unknown',
+  );
+  for (const operation of unsupported) {
+    add(issues, 'capability.unsupported', operation, `adapter does not support ${operation}`);
+  }
+  for (const operation of unknown) {
+    add(issues, 'capability.unknown', operation, `adapter could not determine support for ${operation}`);
+  }
+
+  const valid = !issues.some((issue) => issue.severity === 'invalid');
+  return {
+    valid,
+    ready: valid && unsupported.length === 0 && unknown.length === 0,
+    operations,
+    unsupported,
+    unknown,
+    issues,
+  };
+}
+
+export const COMPUTE_LEASE_STATE_VERSION = 1;
+
+/** A durable, JSON-serializable lease store for one resource generation.
+ * Keeping closed leases makes the fencing-token history auditable; every new
+ * acquisition still gets a strictly larger token. */
+export type ComputeLeaseState = {
+  schemaVersion: typeof COMPUTE_LEASE_STATE_VERSION;
+  resourceId: string;
+  resourceGeneration: number;
+  nextFencingToken: number;
+  leases: ComputeLease[];
+  updatedAt: string;
+};
+
+export type ComputeLeaseStateInspection = {
+  valid: boolean;
+  safe: boolean;
+  issues: ComputeIssue[];
+};
+
+/** Create an empty durable lease state. The caller persists the returned
+ * object atomically; this module deliberately performs no file I/O. */
+export function createComputeLeaseState(input: {
+  resourceId: string;
+  resourceGeneration: number;
+  now: string;
+}): ComputeLeaseState {
+  return {
+    schemaVersion: COMPUTE_LEASE_STATE_VERSION,
+    resourceId: input.resourceId,
+    resourceGeneration: input.resourceGeneration,
+    nextFencingToken: 1,
+    leases: [],
+    updatedAt: input.now,
+  };
+}
+
+function leaseIsClosed(lease: ComputeLease): boolean {
+  return isTimestamp(lease.releasedAt);
+}
+
+function leaseIsActive(lease: ComputeLease, now: number): boolean {
+  return !leaseIsClosed(lease) && Date.parse(lease.expiresAt) > now;
+}
+
+function leaseIsExpired(lease: ComputeLease, now: number): boolean {
+  return !leaseIsClosed(lease) && Date.parse(lease.expiresAt) <= now;
+}
+
+export function inspectComputeLeaseState(
+  input: unknown,
+  opts: { now?: string | number } = {},
+): ComputeLeaseStateInspection {
+  const issues: ComputeIssue[] = [];
+  if (!isRecord(input)) {
+    add(issues, 'lease-state.object', '', 'lease state must be an object');
+    return { valid: false, safe: false, issues };
+  }
+  if (input.schemaVersion !== COMPUTE_LEASE_STATE_VERSION) {
+    add(issues, 'lease-state.schema-version', 'schemaVersion', `expected lease state version ${COMPUTE_LEASE_STATE_VERSION}`);
+  }
+  if (!isNonEmptyString(input.resourceId)) {
+    add(issues, 'lease-state.resource', 'resourceId', 'lease state needs a resource id');
+  }
+  if (!isPositiveInteger(input.resourceGeneration)) {
+    add(issues, 'lease-state.generation', 'resourceGeneration', 'lease state needs a positive resource generation');
+  }
+  if (!isPositiveInteger(input.nextFencingToken)) {
+    add(issues, 'lease-state.token', 'nextFencingToken', 'next fencing token must be a positive integer');
+  }
+  if (!isTimestamp(input.updatedAt)) {
+    add(issues, 'lease-state.timestamp', 'updatedAt', 'lease state updatedAt must be a valid timestamp');
+  }
+
+  const leases = input.leases;
+  if (!Array.isArray(leases)) {
+    add(issues, 'lease-state.leases', 'leases', 'lease state leases must be an array');
+    return { valid: !issues.some((issue) => issue.severity === 'invalid'), safe: false, issues };
+  }
+
+  const now = opts.now === undefined ? Date.now() : Date.parse(String(opts.now));
+  let active = 0;
+  const ids = new Set<string>();
+  for (const [index, value] of leases.entries()) {
+    const path = `leases[${index}]`;
+    if (!isRecord(value)) {
+      add(issues, 'lease.object', path, 'lease must be an object');
+      continue;
+    }
+    if (!isNonEmptyString(value.id) || !isNonEmptyString(value.holder)) {
+      add(issues, 'lease.id', path, 'lease id and holder must be non-empty');
+    } else if (ids.has(value.id)) {
+      add(issues, 'lease.duplicate-id', `${path}.id`, 'lease id is stored more than once');
+    } else {
+      ids.add(value.id);
+    }
+    if (value.resourceId !== input.resourceId) {
+      add(issues, 'lease.resource-match', `${path}.resourceId`, 'lease names another resource');
+    }
+    if (value.resourceGeneration !== input.resourceGeneration) {
+      add(issues, 'lease.generation-match', `${path}.resourceGeneration`, 'lease names another generation');
+    }
+    if (!isPositiveInteger(value.fencingToken)) {
+      add(issues, 'lease.fencing', `${path}.fencingToken`, 'fencing token must be a positive integer');
+    } else if (isPositiveInteger(input.nextFencingToken) && value.fencingToken >= input.nextFencingToken) {
+      add(issues, 'lease.fencing', `${path}.fencingToken`, 'stored fencing token is not below the next token');
+    }
+    const issued = Date.parse(String(value.issuedAt));
+    const expires = Date.parse(String(value.expiresAt));
+    const heartbeat = Date.parse(String(value.heartbeatAt));
+    if (!Number.isFinite(issued) || !Number.isFinite(expires) || !Number.isFinite(heartbeat)
+      || issued >= expires || heartbeat < issued || heartbeat > expires) {
+      add(issues, 'lease.window', path, 'lease times do not form a valid window');
+      continue;
+    }
+    if (value.releasedAt !== undefined && !isTimestamp(value.releasedAt)) {
+      add(issues, 'lease.window', `${path}.releasedAt`, 'lease releasedAt must be a valid timestamp');
+    }
+    if (leaseIsActive(value as ComputeLease, now)) active += 1;
+  }
+  if (active > 1) {
+    add(issues, 'lease.conflict', 'leases', 'more than one active lease uses this resource generation');
+  }
+  const valid = !issues.some((issue) => issue.severity === 'invalid');
+  const safe = valid && active <= 1;
+  return { valid, safe, issues };
+}
+
+export type ComputeLeaseMutation =
+  | { ok: true; state: ComputeLeaseState; lease?: ComputeLease }
+  | { ok: false; code: string; message: string; state: ComputeLeaseState };
+
+function leaseStateFailure(
+  state: ComputeLeaseState,
+  code: string,
+  message: string,
+): ComputeLeaseMutation {
+  return { ok: false, code, message, state };
+}
+
+/** Acquire the single active lease for a resource generation. Expired leases
+ * remain unreclaimed until `reclaimComputeLease` proves quiescence. */
+export function acquireComputeLease(
+  state: ComputeLeaseState,
+  input: {
+    leaseId: string;
+    holder: string;
+    now: string;
+    expiresAt: string;
+  },
+): ComputeLeaseMutation {
+  const inspection = inspectComputeLeaseState(state, { now: input.now });
+  if (!inspection.valid) {
+    return leaseStateFailure(state, 'lease.state-invalid', 'lease state is invalid');
+  }
+  if (!isNonEmptyString(input.leaseId) || !isNonEmptyString(input.holder)) {
+    return leaseStateFailure(state, 'lease.id', 'lease id and holder must be non-empty');
+  }
+  const now = Date.parse(input.now);
+  const expires = Date.parse(input.expiresAt);
+  if (!Number.isFinite(now) || !Number.isFinite(expires) || now >= expires) {
+    return leaseStateFailure(state, 'lease.window', 'lease expiry must be after its issue time');
+  }
+  if (state.leases.some((lease) => lease.id === input.leaseId)) {
+    return leaseStateFailure(state, 'lease.duplicate-id', 'lease id already exists');
+  }
+  if (state.leases.some((lease) => leaseIsActive(lease, now))) {
+    return leaseStateFailure(state, 'lease.conflict', 'an active lease already owns this resource generation');
+  }
+  if (state.leases.some((lease) => leaseIsExpired(lease, now))) {
+    return leaseStateFailure(state, 'lease.unreclaimed', 'an expired lease must be reclaimed before a new lease');
+  }
+
+  const lease: ComputeLease = {
+    id: input.leaseId,
+    holder: input.holder,
+    resourceId: state.resourceId,
+    resourceGeneration: state.resourceGeneration,
+    fencingToken: state.nextFencingToken,
+    issuedAt: new Date(now).toISOString(),
+    expiresAt: new Date(expires).toISOString(),
+    heartbeatAt: new Date(now).toISOString(),
+  };
+  const next: ComputeLeaseState = {
+    ...state,
+    nextFencingToken: state.nextFencingToken + 1,
+    leases: [...state.leases, lease],
+    updatedAt: new Date(now).toISOString(),
+  };
+  return { ok: true, state: next, lease };
+}
+
+/** Extend one active lease. A stale holder or fencing token is rejected. */
+export function heartbeatComputeLease(
+  state: ComputeLeaseState,
+  input: {
+    leaseId: string;
+    holder: string;
+    fencingToken: number;
+    now: string;
+    expiresAt: string;
+  },
+): ComputeLeaseMutation {
+  const inspection = inspectComputeLeaseState(state, { now: input.now });
+  if (!inspection.valid) {
+    return leaseStateFailure(state, 'lease.state-invalid', 'lease state is invalid');
+  }
+  const index = state.leases.findIndex((lease) => lease.id === input.leaseId);
+  if (index < 0) return leaseStateFailure(state, 'lease.not-found', 'lease does not exist');
+  const current = state.leases[index];
+  if (current.holder !== input.holder || current.fencingToken !== input.fencingToken) {
+    return leaseStateFailure(state, 'lease.fencing', 'holder or fencing token is stale');
+  }
+  if (leaseIsClosed(current)) {
+    return leaseStateFailure(state, 'lease.released', 'lease is already released');
+  }
+  const now = Date.parse(input.now);
+  const expires = Date.parse(input.expiresAt);
+  if (!Number.isFinite(now) || !Number.isFinite(expires) || now >= expires) {
+    return leaseStateFailure(state, 'lease.window', 'heartbeat expiry must be after the heartbeat time');
+  }
+  if (Date.parse(current.expiresAt) <= now) {
+    return leaseStateFailure(state, 'lease.expired', 'expired lease cannot be heartbeated');
+  }
+  const lease: ComputeLease = {
+    ...current,
+    heartbeatAt: new Date(now).toISOString(),
+    expiresAt: new Date(expires).toISOString(),
+  };
+  const next: ComputeLeaseState = {
+    ...state,
+    leases: state.leases.map((entry, entryIndex) => entryIndex === index ? lease : entry),
+    updatedAt: new Date(now).toISOString(),
+  };
+  return { ok: true, state: next, lease };
+}
+
+/** Release a lease on every success, failure, cancellation and timeout path. */
+export function releaseComputeLease(
+  state: ComputeLeaseState,
+  input: {
+    leaseId: string;
+    holder: string;
+    fencingToken: number;
+    now: string;
+  },
+): ComputeLeaseMutation {
+  const inspection = inspectComputeLeaseState(state, { now: input.now });
+  if (!inspection.valid) {
+    return leaseStateFailure(state, 'lease.state-invalid', 'lease state is invalid');
+  }
+  const index = state.leases.findIndex((lease) => lease.id === input.leaseId);
+  if (index < 0) return leaseStateFailure(state, 'lease.not-found', 'lease does not exist');
+  const current = state.leases[index];
+  if (current.holder !== input.holder || current.fencingToken !== input.fencingToken) {
+    return leaseStateFailure(state, 'lease.fencing', 'holder or fencing token is stale');
+  }
+  if (leaseIsClosed(current)) {
+    return leaseStateFailure(state, 'lease.released', 'lease is already released');
+  }
+  const now = Date.parse(input.now);
+  if (!Number.isFinite(now)) {
+    return leaseStateFailure(state, 'lease.window', 'release time must be a valid timestamp');
+  }
+  const lease: ComputeLease = { ...current, releasedAt: new Date(now).toISOString() };
+  const next: ComputeLeaseState = {
+    ...state,
+    leases: state.leases.map((entry, entryIndex) => entryIndex === index ? lease : entry),
+    updatedAt: new Date(now).toISOString(),
+  };
+  return { ok: true, state: next, lease };
+}
+
+/** Reclaim expired leases only after the bounded grace period and a successful
+ * observation that no work is still active. */
+export function reclaimComputeLease(
+  state: ComputeLeaseState,
+  input: {
+    now: string;
+    graceMs: number;
+    quiescent: boolean;
+  },
+): ComputeLeaseMutation {
+  const inspection = inspectComputeLeaseState(state, { now: input.now });
+  if (!inspection.valid) {
+    return leaseStateFailure(state, 'lease.state-invalid', 'lease state is invalid');
+  }
+  const now = Date.parse(input.now);
+  if (!Number.isFinite(now) || !Number.isFinite(input.graceMs) || input.graceMs < 0) {
+    return leaseStateFailure(state, 'lease.window', 'reclaim needs a valid time and nonnegative grace period');
+  }
+  const expired = state.leases.filter(
+    (lease) => leaseIsExpired(lease, now) && Date.parse(lease.expiresAt) + input.graceMs <= now,
+  );
+  if (expired.length === 0) {
+    return leaseStateFailure(state, 'lease.grace', 'no expired lease has completed the grace period');
+  }
+  if (input.quiescent !== true) {
+    return leaseStateFailure(state, 'lease.active-work', 'work is not observed quiescent; retain the lease');
+  }
+  const expiredIds = new Set(expired.map((lease) => lease.id));
+  const next: ComputeLeaseState = {
+    ...state,
+    leases: state.leases.map((lease) => expiredIds.has(lease.id)
+      ? { ...lease, releasedAt: new Date(now).toISOString() }
+      : lease),
+    updatedAt: new Date(now).toISOString(),
+  };
+  return { ok: true, state: next };
+}
+
+const COMPUTE_MUTATING_OPERATIONS: readonly ComputeOperation[] = [
+  'create',
+  'start',
+  'stop',
+  'resize',
+  'destroy',
+  'tag',
+];
+
+export type ComputeOperationAuthorization = {
+  allowed: boolean;
+  operation: ComputeOperation;
+  code: string;
+  message: string;
+  issues: ComputeIssue[];
+};
+
+function operationDecision(
+  operation: ComputeOperation,
+  allowed: boolean,
+  code: string,
+  message: string,
+  issues: ComputeIssue[] = [],
+): ComputeOperationAuthorization {
+  return { allowed, operation, code, message, issues };
+}
+
+/**
+ * Authorize one provider-neutral operation against the local policy, ownership
+ * record, mode ceiling and active lease. This is the last local gate before an
+ * adapter call; an unsafe or uncertain resource never reaches the adapter.
+ */
+export function authorizeComputeOperation(
+  status: ComputeStatus,
+  input: {
+    operation: ComputeOperation;
+    policy?: ComputePolicy;
+    leaseId?: string;
+    fencingToken?: number;
+    now?: string | number;
+  },
+): ComputeOperationAuthorization {
+  const operation = input.operation;
+  if (!COMPUTE_OPERATIONS.includes(operation)) {
+    return operationDecision(operation, false, 'operation.unknown', 'operation is not documented');
+  }
+  const inspection = inspectComputeStatus(status, { now: input.now });
+  if (!inspection.valid) {
+    return operationDecision(operation, false, 'status.invalid', 'status document is invalid', inspection.issues);
+  }
+
+  if (input.policy !== undefined) {
+    const policy = inspectComputePolicy(input.policy);
+    if (!policy.safe) {
+      const issues = policy.issues.map((issue) => ({
+        code: issue.code,
+        severity: 'unsafe' as const,
+        path: issue.path,
+        message: issue.message,
+      }));
+      return operationDecision(operation, false, 'policy.unsafe', 'policy is invalid or unsafe', issues);
+    }
+    if (input.policy.mode === null || input.policy.mode !== status.mode) {
+      return operationDecision(operation, false, 'policy.mode', 'policy does not authorize this resource mode');
+    }
+    if (!modeAllowsOperation(input.policy.mode, operation)) {
+      return operationDecision(operation, false, 'operation.mode', 'policy mode does not allow this operation');
+    }
+  }
+
+  if (!modeAllowsOperation(status.mode, operation)) {
+    return operationDecision(operation, false, 'operation.mode', 'resource mode does not allow this operation');
+  }
+
+  if (operation === 'inspect') {
+    return operationDecision(operation, true, 'allowed', 'inspection is always available');
+  }
+  if (operation === 'reconcile') {
+    return operationDecision(operation, true, 'allowed', 'reconciliation is read-only and reports uncertainty');
+  }
+
+  if (!inspection.safe) {
+    return operationDecision(operation, false, 'ownership.unsafe', 'ownership or resource state is unsafe', inspection.issues);
+  }
+  if (status.ownership.status !== 'verified') {
+    return operationDecision(operation, false, 'ownership.record', 'ownership is not verified');
+  }
+
+  const now = input.now === undefined ? Date.now() : Date.parse(String(input.now));
+  const activeLeases = status.leases.filter((lease) => leaseIsActive(lease, now));
+
+  if (operation === 'destroy') {
+    if (activeLeases.length > 0) {
+      return operationDecision(operation, false, 'operation.lease-active', 'destroy requires a quiescent lease');
+    }
+    if (status.ownership.creator !== 'junior') {
+      return operationDecision(operation, false, 'operation.creator', 'only a junior-created resource may be destroyed');
+    }
+    return operationDecision(operation, true, 'allowed', 'ownership and generation authorize destroy');
+  }
+
+  if (operation === 'create') {
+    if (activeLeases.length > 0) {
+      return operationDecision(operation, false, 'operation.lease-active', 'create requires a quiescent resource generation');
+    }
+    if (status.ownership.creator !== 'junior') {
+      return operationDecision(operation, false, 'operation.creator', 'only a junior-created resource may be created');
+    }
+    return operationDecision(operation, true, 'allowed', 'policy mode authorizes creation');
+  }
+
+  if (COMPUTE_MUTATING_OPERATIONS.includes(operation)) {
+    if (activeLeases.length === 0) {
+      return operationDecision(operation, false, 'lease.required', 'a lifecycle mutation requires an active lease');
+    }
+    const lease = input.leaseId === undefined && input.fencingToken === undefined
+      ? activeLeases[0]
+      : activeLeases.find((entry) =>
+        entry.id === input.leaseId && entry.fencingToken === input.fencingToken);
+    if (!lease) {
+      return operationDecision(operation, false, 'lease.fencing', 'lease id or fencing token does not match an active lease');
+    }
+    return operationDecision(operation, true, 'allowed', 'lease and ownership authorize the mutation');
+  }
+
+  return operationDecision(operation, true, 'allowed', 'operation is authorized');
 }
