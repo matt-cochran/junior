@@ -19,6 +19,7 @@ import {
   assertComputePolicy,
   authorizeComputeOperation,
   createComputeLeaseState,
+  evaluateComputeScaleIn,
   heartbeatComputeLease,
   inspectComputeCapabilities,
   inspectComputeProviderIdentity,
@@ -33,6 +34,7 @@ import {
   stopComputeResource,
   verifyComputeProviderIdentity,
   type ComputePolicy,
+  type ComputeScaleInEvidence,
   type ComputeStatus,
 } from './compute.ts';
 
@@ -795,4 +797,50 @@ test('release with a stale fencing token leaves lease state unchanged', () => {
     now: NOW,
   });
   assert.deepEqual(result.state, before);
+});
+
+
+function idleScaleEvidence(overrides: Partial<ComputeScaleInEvidence> = {}) {
+  return evaluateComputeScaleIn({
+    capacity: { min: 0, max: 1, current: 1 },
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    leaseActive: false,
+    queuedWork: 0,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+    startedAt: '2026-10-25T09:00:00.000Z',
+    minimumLifetimeMs: 60 * 60_000,
+    now: NOW,
+    ...overrides,
+  });
+}
+
+test('busy evidence prevents an idle resource from scaling in', () => {
+  assert.equal(idleScaleEvidence({ busy: true }).allowed, false);
+});
+
+test('unknown busy evidence retains capacity', () => {
+  assert.equal(idleScaleEvidence({ busy: 'unknown' }).allowed, false);
+});
+
+test('an active lease prevents scale-in', () => {
+  assert.equal(idleScaleEvidence({ leaseActive: true }).allowed, false);
+});
+
+test('an unexpired minimum lifetime prevents scale-in', () => {
+  assert.equal(idleScaleEvidence({ minimumLifetimeMs: 4 * 60 * 60_000 }).allowed, false);
+});
+
+test('disk usage above the guardrail prevents scale-in', () => {
+  assert.equal(idleScaleEvidence({ diskUsedPercent: 90 }).allowed, false);
+});
+
+test('idle expiry returns a managed resource to zero', () => {
+  assert.equal(idleScaleEvidence().targetCapacity, 0);
+});
+
+test('idle expiry scales a nonzero minimum only to its explicit floor', () => {
+  assert.equal(idleScaleEvidence({ capacity: { min: 1, max: 2, current: 2 } }).targetCapacity, 1);
 });

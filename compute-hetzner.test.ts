@@ -297,3 +297,109 @@ test('an inventory resource from another account blocks provisioning', async () 
   const result = await provider.provision(provisionRequest());
   assert.equal(result.ok, false);
 });
+
+function routedProvider() {
+  return provisioningProvider();
+}
+
+test('a routed job is assigned to a managed resource under a lease', async () => {
+  const provider = routedProvider();
+  await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const result = await provider.routeJob({
+    requestId: 'route-1',
+    jobId: 'job-1',
+    holder: 'worker-1',
+    now: '2026-10-25T11:00:00.000Z',
+    leaseExpiresAt: '2026-10-25T12:00:00.000Z',
+  });
+  assert.equal(result.ok, true);
+});
+
+test('busy evidence prevents a managed resource from scaling to zero', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const result = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:00:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: true,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.equal(result.capacity, 1);
+});
+
+test('an active job lease prevents a managed resource from scaling to zero', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  await provider.routeJob({
+    requestId: 'route-1',
+    jobId: 'job-1',
+    holder: 'worker-1',
+    now: '2026-10-25T11:00:00.000Z',
+    leaseExpiresAt: '2026-10-25T12:00:00.000Z',
+  });
+  const result = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T11:30:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.equal(result.capacity, 1);
+});
+
+test('disk usage above the guardrail prevents a managed resource from scaling to zero', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const result = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:00:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 95,
+    diskLimitPercent: 80,
+  });
+  assert.equal(result.capacity, 1);
+});
+
+test('idle expiry returns a managed resource to zero capacity', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const result = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:00:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.deepEqual(result.capacity, 0);
+});
+
+test('a completed job leaves a resource that can scale to zero after idle expiry', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  await provider.routeJob({
+    requestId: 'route-1',
+    jobId: 'job-1',
+    holder: 'worker-1',
+    now: '2026-10-25T11:00:00.000Z',
+    leaseExpiresAt: '2026-10-25T12:00:00.000Z',
+  });
+  provider.completeJob({ jobId: 'job-1', now: '2026-10-25T11:30:00.000Z' });
+  const result = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:30:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.equal(result.ok, true);
+});
