@@ -16,6 +16,7 @@ import {
   loadHop,
   type HopManifest,
 } from './tools/tools.ts';
+import { resolveHop } from './hop-context.ts';
 import { planStatusRows, spHypotheses } from './companion-shapes.ts';
 import { listOpen, type Note } from './notes.ts';
 import { openPullRequests, prLines, type PrSection } from './compact-prs.ts';
@@ -132,6 +133,11 @@ function planLines(plan: JsonObject): string[] {
   if (plan.name !== undefined) lines.push(`- name: ${text(plan.name)}`);
   if (plan.variant !== undefined) lines.push(`- variant: ${text(plan.variant)}`);
   if (plan.plan_id !== undefined) lines.push(`- plan_id: ${text(plan.plan_id)}`);
+  const planRevision =
+    numberOrNull(plan.revision) ??
+    numberOrNull(plan.plan_revision) ??
+    numberOrNull(plan.planRevision);
+  if (planRevision !== null) lines.push(`- revision: ${planRevision}`);
   const baseline =
     numberOrNull(plan.baseline_number) ??
     (isObject(plan.baseline) ? numberOrNull(plan.baseline.baseline_number) : null);
@@ -406,6 +412,13 @@ async function planBlock(
     }
     const plan = planRecord(outcome.result);
     if (plan === null) return block;
+    if (isObject(outcome.result)) {
+      const revision =
+        numberOrNull(outcome.result.revision) ??
+        numberOrNull(outcome.result.plan_revision) ??
+        numberOrNull(outcome.result.planRevision);
+      if (revision !== null && plan.revision === undefined) plan.revision = revision;
+    }
     const lines = planLines(plan);
     if (lines.length === 0) return block;
     return { ...block, status: 'ok', lines };
@@ -646,15 +659,24 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
   const readFile = deps.readFile ?? ((path: string) => readFileSync(path, 'utf8'));
   const exists = deps.exists ?? ((path: string) => existsSync(path));
   const callHop = deps.callHop ?? defaultCallHop;
-  const hopPath = deps.hopPath ?? join(deps.cwd, '.delivery', 'setup', 'hop.json');
-  const hopExists = exists(hopPath);
+  const resolution = deps.hopPath === undefined
+    ? resolveHop(deps.cwd)
+    : resolveHop(deps.cwd, { explicit: deps.hopPath });
+  const ambiguous = deps.hopPath === undefined && resolution.status === 'ambiguous';
+  const hopPath = resolution.status === 'selected'
+    ? resolution.path
+    : deps.hopPath ?? join(deps.cwd, '.delivery', 'setup', 'hop.json');
+  const hopExists = !ambiguous && exists(hopPath);
 
   const generated = now();
   if (!(generated instanceof Date) || Number.isNaN(generated.getTime())) {
     throw new TypeError('now must return a valid Date');
   }
   const header = ['## Junior compact context', `- generated: ${generated.toISOString()}`];
-  if (hopExists) {
+  if (ambiguous) {
+    header.push(`- hop: ambiguous: ${resolution.message}`);
+  } else if (hopExists) {
+    header.push(`- hop: ${hopPath}`);
     try {
       header.push(`- hop revision: ${inspectHop(hopPath).revision}`);
     } catch (error) {
