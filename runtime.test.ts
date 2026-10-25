@@ -15,6 +15,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { executeWorkerStreaming, executeCheck, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
+import { compactHandoff } from './handoff.ts';
 
 const fakeChild = () => {
   const ee = new EventEmitter();
@@ -298,4 +299,87 @@ test('outputBreakdown.largestToolResults lists a tool call once when it also arr
   fake.end(0);
   const res: any = await promise;
   assert.deepEqual(res.outputBreakdown.largestToolResults.map((r: any) => r.toolCallId), ['c1']);
+});
+
+// --- #125 bounded-context enforcement ---
+
+test('A budget stop is reported as incomplete rather than completed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-budget-stop-'));
+  const { fake, promise } = runStream(dir, { budget: { maxToolCalls: 1, mode: 'enforce' } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'a.ts' } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'read', args: { path: 'b.ts' } });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.incomplete, true);
+});
+
+test('A budget stop reports the exceeded field', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-budget-field-'));
+  const { fake, promise } = runStream(dir, { budget: { maxToolCalls: 1, mode: 'enforce' } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'a.ts' } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'read', args: { path: 'b.ts' } });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.budget?.exceededField, 'maxToolCalls');
+});
+
+test('Read accounting counts observed files and bytes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-read-accounting-'));
+  const { fake, promise } = runStream(dir, { readScope: { mode: 'context-only', paths: ['a.ts'] } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'a.ts' } });
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'read', result: { content: [{ type: 'text', text: 'x'.repeat(40) }] } });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.budget?.used.readFiles, 1);
+});
+
+test('Read accounting counts observed read bytes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-read-bytes-'));
+  const { fake, promise } = runStream(dir, { readScope: { mode: 'context-only', paths: ['a.ts'] } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'a.ts' } });
+  fake.emit({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'read', result: { content: [{ type: 'text', text: 'x'.repeat(40) }] } });
+  fake.end(0);
+  const res = await promise;
+  assert.ok((res.outputBreakdown.budget?.used.readBytes ?? 0) > 0);
+});
+
+test('A read outside context-only scope stops as needs_manager_scope', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-scope-stop-'));
+  const { fake, promise } = runStream(dir, { readScope: { mode: 'context-only', paths: ['a.ts'] } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'secret.ts' } });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.stopReason, 'needs_manager_scope');
+});
+
+test('Phase accounting reports observed model usage from message_end', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-phase-usage-'));
+  const { fake, promise } = runStream(dir, { budget: { maxToolCalls: 10, mode: 'enforce' } });
+  fake.emit({ type: 'message_end', message: { role: 'assistant', provider: 'openrouter', model: 'm', stopReason: 'stop', usage: { input: 7, output: 3, totalTokens: 10 } } });
+  fake.emit({ type: 'agent_settled' });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.outputBreakdown.phaseAccounting?.[0]?.totalTokens, 10);
+});
+
+test('The compact handoff exposes observed read accounting from the runtime breakdown', () => {
+  const result = {
+    id: 'bounded', status: 'output_truncated', artifactDir: null, checks: [],
+    outputBreakdown: { rawBytes: 200, retainedBytes: 120, byType: {}, largestToolResults: [],
+      budget: { requested: { maxToolCalls: 2 }, readScope: { mode: 'context-only', paths: ['a.ts'] }, mode: 'enforce',
+        used: { readFiles: 2, readCalls: 2, readBytes: 100, toolCalls: 2, responseCalls: 1, inputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 7, toolOutputBytes: 100, files: 2, bytes: 100, tokens: 7 },
+        exceeded: true, exceededField: 'maxToolCalls', stopReason: 'budget_exceeded', largestReads: [], phases: [] } },
+  };
+  assert.equal(compactHandoff(result).output?.budget?.used.readFiles, 2);
+});
+
+test('The compact handoff lists a bounded-context stop as unresolved', () => {
+  const result = {
+    id: 'bounded', status: 'output_truncated', artifactDir: null, checks: [],
+    outputBreakdown: { rawBytes: 0, retainedBytes: 0, byType: {}, largestToolResults: [],
+      budget: { requested: { maxToolCalls: 1 }, readScope: null, mode: 'enforce',
+        used: { readFiles: 0, readCalls: 0, readBytes: 0, toolCalls: 2, responseCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, toolOutputBytes: 0, files: 0, bytes: 0, tokens: 0 },
+        exceeded: true, exceededField: 'maxToolCalls', stopReason: 'budget_exceeded', largestReads: [], phases: [] } },
+  };
+  assert.ok(compactHandoff(result).unresolved.includes('bounded context budget_exceeded: maxToolCalls'));
 });

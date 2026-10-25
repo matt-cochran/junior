@@ -15,6 +15,7 @@
 import { join } from 'node:path';
 import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 import type { ScopeResult } from './scope-check.ts';
+import type { BudgetAccounting, PhaseAccounting } from './runtime.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -49,7 +50,11 @@ export type CompactHandoff = {
  unresolved: string[];
  /** Streaming output accounting: raw versus retained bytes and the largest
   * tool results. Null when the result has no stream breakdown (mock/legacy). */
- output: { rawBytes: number; retainedBytes: number; largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[] } | null;
+ output: { rawBytes: number; retainedBytes: number; largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[]; budget?: BudgetAccounting; phaseAccounting?: PhaseAccounting[] } | null;
+ /** Requested versus observed bounded-context usage. Null for an unbounded contract. */
+ budget: BudgetAccounting | null;
+ /** Observed reads and model usage by runtime phase. Null for an unbounded contract. */
+ phaseAccounting: PhaseAccounting[] | null;
  model: {
   requested: { provider: string; model: string; source?: string } | null;
   /** The Jev model-routing record, or null when this result predates routing. */
@@ -189,6 +194,8 @@ export function unresolvedIssues(result: any): string[] {
  const isolationProblems = result?.piIsolation?.verification?.problems;
  if (Array.isArray(isolationProblems) && isolationProblems.length > 0) out.push(`isolation not honored: ${isolationProblems.join('; ')}`);
  if (Array.isArray(result?.scope?.outOfScope) && result.scope.outOfScope.length > 0) out.push(`out of scope: ${result.scope.outOfScope.join(', ')}`);
+ const budget = result?.budget ?? result?.outputBreakdown?.budget;
+ if (budget?.exceeded) out.push(`bounded context ${budget.stopReason ?? 'limit exceeded'}${budget.exceededField ? `: ${budget.exceededField}` : ''}`);
  return out;
 }
 
@@ -259,6 +266,8 @@ export function compactHandoff(result: any): CompactHandoff {
  const cacheTotal = cacheInput + cacheRead;
  const hitRate = cacheTotal > 0 ? Math.round((cacheRead / cacheTotal) * 100) / 100 : null;
  const report = typeof r.analysis?.report === 'string' ? r.analysis.report : null;
+ const budget = r.budget ?? r.outputBreakdown?.budget ?? null;
+ const phaseAccounting = r.phaseAccounting ?? r.outputBreakdown?.phaseAccounting ?? null;
  const analysis = r.analysis && typeof r.analysis === 'object' ? {
   workflow: String(r.analysis.workflow ?? ''),
   report,
@@ -304,7 +313,9 @@ export function compactHandoff(result: any): CompactHandoff {
    ...(c?.error ? { error: String(c.error) } : {}),
   })),
   unresolved: unresolvedIssues(r),
-  output: r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults } : null,
+  output: r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults, ...(r.outputBreakdown.budget ? { budget: r.outputBreakdown.budget } : {}), ...(r.outputBreakdown.phaseAccounting ? { phaseAccounting: r.outputBreakdown.phaseAccounting } : {}) } : null,
+  budget,
+  phaseAccounting,
   model: {
    requested: r.receipt?.requested ?? null,
    routing: r.modelRouting ?? null,
