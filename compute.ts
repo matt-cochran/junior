@@ -1107,6 +1107,84 @@ export function assertComputePolicy(input: unknown): ComputePolicy {
   return input as ComputePolicy;
 }
 
+// ---------------------------------------------------------------------------
+// Explicit local fallback (ADR 0014 R9).
+//
+// Fallback is a policy decision with a recorded reason, never a silent retry
+// and never a remote mutation. When the policy disables it the caller fails
+// with an actionable reason instead of quietly changing where work runs.
+// ---------------------------------------------------------------------------
+
+export type ComputeFallbackDecision = {
+  allowed: boolean;
+  fallback: ComputeFallback | null;
+  code: 'fallback.allowed' | 'fallback.disabled' | 'fallback.invalid';
+  message: string;
+  issues: ComputeIssue[];
+};
+
+/** Decide whether local execution may replace unavailable remote compute. */
+export function decideComputeFallback(input: {
+  reason: unknown;
+  occurredAt: unknown;
+  policy?: ComputePolicy | null;
+  allowLocalFallback?: unknown;
+}): ComputeFallbackDecision {
+  const issues: ComputeIssue[] = [];
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (reason === '') {
+    issues.push({
+      code: 'fallback.reason',
+      severity: 'invalid',
+      path: 'reason',
+      message: 'a local fallback must record why remote execution was not used',
+    });
+  }
+  if (!isTimestamp(input.occurredAt)) {
+    issues.push({
+      code: 'fallback.time',
+      severity: 'invalid',
+      path: 'occurredAt',
+      message: 'a local fallback must record when it occurred',
+    });
+  }
+  if (issues.length > 0) {
+    return {
+      allowed: false,
+      fallback: null,
+      code: 'fallback.invalid',
+      message: 'the local fallback record is incomplete; no fallback is reported',
+      issues,
+    };
+  }
+
+  const enabled = input.policy != null
+    ? input.policy.allowLocalFallback === true
+    : input.allowLocalFallback === true;
+  if (!enabled) {
+    return {
+      allowed: false,
+      fallback: null,
+      code: 'fallback.disabled',
+      message: 'local fallback is disabled; enable allowLocalFallback in the project policy or fail the run',
+      issues: [{
+        code: 'fallback.disabled',
+        severity: 'unsafe',
+        path: 'allowLocalFallback',
+        message: 'project policy does not allow local execution',
+      }],
+    };
+  }
+
+  return {
+    allowed: true,
+    fallback: { reason, occurredAt: input.occurredAt as string },
+    code: 'fallback.allowed',
+    message: 'local fallback is allowed and records its reason',
+    issues: [],
+  };
+}
+
 export type ComputeCapabilityInspection = {
   valid: boolean;
   ready: boolean;
