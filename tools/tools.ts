@@ -1380,8 +1380,6 @@ async function cliInit(args: string[]): Promise<HopManifest> {
 const CALL_USAGE =
   "Usage: junior tools call [<hop.json>] <fmeca|cpm|crossmatrix|scientific-process|elicitation> <request.json|-> [key=value ...] [--full]";
 
-const DEFAULT_HOP_REL = path.join(".delivery", "setup", "hop.json");
-
 function isToolName(value: string | undefined): value is ToolName {
   return value !== undefined && (TOOL_NAMES as readonly string[]).includes(value);
 }
@@ -1437,7 +1435,20 @@ function buildCallRequest(rest: string[]): CallRequest {
 
 async function cliCall(args: string[]): Promise<CallOutcome> {
   const defaultHop = isToolName(args[0]);
-  const hopPath = defaultHop ? path.join(process.cwd(), DEFAULT_HOP_REL) : (args[0] ?? "");
+  let hopPath = defaultHop ? "" : (args[0] ?? "");
+  if (defaultHop) {
+    // Resolve late so the tools module does not form an import cycle with the
+    // hop-context module (hop-context itself imports inspectHop from here).
+    const { resolveHop } = await import("../hop-context.ts");
+    const resolution = resolveHop(process.cwd());
+    if (resolution.status === "ambiguous") {
+      throw new HopError(
+        "BAD_REQUEST",
+        `${resolution.message} Use: ${resolution.candidates.map((hop) => hop.selectCommand).join(" or ")}`,
+      );
+    }
+    hopPath = resolution.path;
+  }
   const tool = defaultHop ? args[0] : args[1];
   const rest = args.slice(defaultHop ? 1 : 2);
   if (!hopPath || tool === undefined) throw new HopError("USAGE", CALL_USAGE);
