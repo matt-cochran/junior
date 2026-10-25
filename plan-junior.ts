@@ -14,7 +14,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { scorePlanContracts, type PlanQualityReport } from './plan-quality.ts';
+import { scorePlanContracts, vetPlanEdges, type PlanQualityReport } from './plan-quality.ts';
 import type { GateClassifier } from './worker.ts';
 
 /** Registration files whose edits serialize otherwise independent cohorts. */
@@ -48,10 +48,50 @@ export interface PlanFinding {
   message: string;
 }
 
+export interface CriticalPathStep {
+  id: string;
+  owner: string;
+  manual: boolean;
+  hours: number;
+}
+
+export interface CriticalPathLag {
+  from: string;
+  to: string;
+  hours: number;
+}
+
+export interface CriticalPathFanOut {
+  id: string;
+  dependents: string[];
+  consumes: string;
+}
+
+export interface CriticalPathDrift {
+  detected: boolean;
+  expected: string[];
+  actual: string[];
+  reason: string | null;
+}
+
+/** What actually sets the pace of the plan, with each documented risk class. */
+export interface CriticalPathReport {
+  path: string[];
+  hours: number;
+  ownerWork: CriticalPathStep[];
+  manualWork: CriticalPathStep[];
+  lags: CriticalPathLag[];
+  longRunning: CriticalPathStep[];
+  fanOut: CriticalPathFanOut[];
+  drift: CriticalPathDrift;
+  risks: PlanFinding[];
+}
+
 export interface JuniorPlanCheck {
   ok: boolean;
   findings: PlanFinding[];
   cohorts: string[][];
+  criticalPath: CriticalPathReport;
 }
 
 export interface PlanCheckOptions {
@@ -61,6 +101,10 @@ export interface PlanCheckOptions {
   hotFiles?: readonly string[];
   /** Test files registered in package.json; enables the registration-scope rule. */
   registeredTests?: readonly string[];
+  /** Known critical path (for example from plan.status) to compare against. */
+  expectedCriticalPath?: readonly string[];
+  /** A cpm plan.status snapshot to reconcile before execution. */
+  status?: unknown;
 }
 
 export interface ContractOptions {
@@ -272,6 +316,199 @@ function agentCohorts(agent: Array<Record<string, any>>, all: Array<Record<strin
   return cohorts;
 }
 
+
+function scheduledHours(deliverable: Record<string, any>): number {
+  const duration = deliverable.duration_hours;
+  if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) return duration;
+  const likely = likelyHours(deliverable);
+  return Number.isFinite(likely) && likely >= 0 ? likely : 0;
+}
+
+function realPathIds(path: readonly string[]): string[] {
+  return path.filter((id) => id !== '__start__' && id !== '__finish__');
+}
+
+function sameIds(first: readonly string[], second: readonly string[]): boolean {
+  return first.length === second.length && first.every((id, index) => id === second[index]);
+}
+
+function expectedCriticalPath(plan: unknown, opts: PlanCheckOptions): string[] | undefined {
+  if (opts.expectedCriticalPath !== undefined) return [...opts.expectedCriticalPath];
+  const sources = [isRecord(opts.status) ? opts.status : undefined, isRecord(plan) ? plan : undefined].filter(Boolean) as Array<Record<string, any>>;
+  for (const source of sources) {
+    if (Array.isArray(source.critical_path)) return source.critical_path.map(text);
+    if (Array.isArray(source.critical_ids)) return source.critical_ids.map(text);
+    if (Array.isArray(source.schedule)) {
+      return source.schedule
+        .filter((row) => isRecord(row) && row.critical === true && row.synthetic !== true)
+        .map((row) => text(row.id));
+    }
+    if (isRecord(source.baseline)) {
+      if (Array.isArray(source.baseline.critical_path)) return source.baseline.critical_path.map(text);
+      if (Array.isArray(source.baseline.critical_ids)) return source.baseline.critical_ids.map(text);
+    }
+    const junior = isRecord(source.metadata?.junior) ? source.metadata.junior : {};
+    if (Array.isArray(junior.criticalPath)) return junior.criticalPath.map(text);
+  }
+  return undefined;
+}
+
+/** Longest finish-to-start chain with prerequisite lags. Cycles are bounded by
+ * the visiting set and fall back to the node itself rather than recursing. */
+function criticalPathOf(deliverables: Array<Record<string, any>>): { path: string[]; hours: number } {
+  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
+  const memo = new Map<string, { path: string[]; hours: number }>();
+  const visiting = new Set<string>();
+
+  const bestTo = (id: string): { path: string[]; hours: number } => {
+    const cached = memo.get(id);
+    if (cached) return cached;
+    const deliverable = byId.get(id) ?? {};
+    const duration = scheduledHours(deliverable);
+    let best = { path: [id], hours: duration };
+    if (visiting.has(id)) return best;
+    visiting.add(id);
+    for (const edge of asArray(deliverable.prerequisites)) {
+      const dependency = text(typeof edge === 'string' ? edge : isRecord(edge) ? edge.id : '');
+      if (!dependency || dependency === id || !byId.has(dependency)) continue;
+      const lagRaw = isRecord(edge) ? edge.lag_hours : undefined;
+      const lag = typeof lagRaw === 'number' && Number.isFinite(lagRaw) && lagRaw > 0 ? lagRaw : 0;
+      const candidate = bestTo(dependency);
+      const hours = candidate.hours + lag + duration;
+      if (hours > best.hours || (hours === best.hours && candidate.path.concat(id).join('\u0000') > best.path.join('\u0000'))) {
+        best = { path: candidate.path.concat(id), hours };
+      }
+    }
+    visiting.delete(id);
+    memo.set(id, best);
+    return best;
+  };
+
+  let longest = { path: [] as string[], hours: 0 };
+  for (const id of [...byId.keys()].sort()) {
+    const candidate = bestTo(id);
+    if (candidate.hours > longest.hours || (candidate.hours === longest.hours && candidate.path.join('\u0000') > longest.path.join('\u0000'))) longest = candidate;
+  }
+  return longest;
+}
+
+function criticalPathReport(
+  plan: unknown,
+  deliverables: Array<Record<string, any>>,
+  agentCount: number,
+  maxHours: number,
+  opts: PlanCheckOptions,
+): CriticalPathReport {
+  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
+  const longest = criticalPathOf(deliverables);
+  const path = ['__start__', ...longest.path, '__finish__'];
+  const real = realPathIds(path);
+  const ownerWork: CriticalPathStep[] = [];
+  const manualWork: CriticalPathStep[] = [];
+  const longRunning: CriticalPathStep[] = [];
+  for (const id of real) {
+    const deliverable = byId.get(id) ?? {};
+    const owner = text(deliverable.metadata?.owner).trim().toLowerCase() || 'agent';
+    const manual = text(deliverable.metadata?.kind).trim().toLowerCase() === 'manual';
+    const step = { id, owner, manual, hours: scheduledHours(deliverable) };
+    if (manual) manualWork.push(step);
+    else if (owner !== 'agent' && owner !== 'worker') ownerWork.push(step);
+    if (step.hours > maxHours) longRunning.push(step);
+  }
+
+  const lags: CriticalPathLag[] = [];
+  for (let i = 1; i < real.length; i++) {
+    const from = real[i - 1];
+    const to = real[i];
+    const edge = asArray(byId.get(to)?.prerequisites).find((candidate) => text(typeof candidate === 'string' ? candidate : isRecord(candidate) ? candidate.id : '') === from);
+    const raw = isRecord(edge) ? edge.lag_hours : undefined;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) lags.push({ from, to, hours: raw });
+  }
+
+  const dependents = new Map<string, Array<{ id: string; consumes: string }>>();
+  for (const deliverable of deliverables) {
+    const to = text(deliverable.id);
+    for (const edge of asArray(deliverable.prerequisites)) {
+      const from = text(typeof edge === 'string' ? edge : isRecord(edge) ? edge.id : '');
+      if (!from) continue;
+      const list = dependents.get(from) ?? [];
+      list.push({ id: to, consumes: edgeConsumes(edge).trim() });
+      dependents.set(from, list);
+    }
+  }
+  const fanOut: CriticalPathFanOut[] = [];
+  for (const [id, list] of dependents) {
+    const groups = new Map<string, string[]>();
+    for (const item of list) {
+      if (!item.consumes) continue;
+      const ids = groups.get(item.consumes) ?? [];
+      ids.push(item.id);
+      groups.set(item.consumes, ids);
+    }
+    for (const [consumes, ids] of groups) {
+      if (ids.length >= 3) fanOut.push({ id, dependents: ids.sort(), consumes });
+    }
+  }
+
+  const expected = expectedCriticalPath(plan, opts);
+  let drift: CriticalPathDrift = { detected: false, expected: [], actual: real, reason: null };
+  if ((isRecord(plan) && plan.definition_drift === true) || (isRecord(opts.status) && opts.status.definition_drift === true)) {
+    drift = { detected: true, expected: expected ?? [], actual: real, reason: 'definition_drift is true: the plan file and stored head disagree' };
+  } else if (expected !== undefined) {
+    const expectedReal = realPathIds(expected.map(text));
+    if (!sameIds(expectedReal, real)) {
+      drift = {
+        detected: true,
+        expected: expectedReal,
+        actual: real,
+        reason: `critical path changed: expected ${expectedReal.join(' -> ') || '(none)'}, computed ${real.join(' -> ') || '(none)'}`,
+      };
+    } else {
+      drift = { detected: false, expected: expectedReal, actual: real, reason: null };
+    }
+  }
+  if (!drift.detected) {
+    const statuses = new Map(deliverables.map((deliverable) => [text(deliverable.id), text(deliverable.status).toLowerCase()]));
+    for (const deliverable of deliverables) {
+      if (text(deliverable.status).toLowerCase() !== 'complete') continue;
+      const incomplete = prerequisiteIds(deliverable).filter((id) => statuses.get(id) !== 'complete');
+      if (incomplete.length > 0) {
+        drift = {
+          detected: true,
+          expected: incomplete,
+          actual: [text(deliverable.id)],
+          reason: `${text(deliverable.id)} is complete before ${incomplete.join(', ')}; reconcile the plan with the real order`,
+        };
+        break;
+      }
+    }
+  }
+
+  const risks: PlanFinding[] = [];
+  if (agentCount > 0) {
+    for (const step of ownerWork) {
+      risks.push(finding('OWNER_ON_CRITICAL_PATH', 'warning', [step.id], `${step.id} is ${step.owner} work on the critical path; front-load this decision`));
+    }
+    for (const step of manualWork) {
+      risks.push(finding('MANUAL_ON_CRITICAL_PATH', 'warning', [step.id], `${step.id} is manual work on the critical path; front-load this sign-off`));
+    }
+  }
+  for (const lag of lags) {
+    risks.push(finding('LAG_ON_CRITICAL_PATH', 'warning', [lag.from, lag.to], `${lag.from} -> ${lag.to} carries a ${lag.hours}h lag on the critical path; protect or shorten it`));
+  }
+  for (const step of longRunning) {
+    risks.push(finding('LONG_RUNNING_ON_CRITICAL_PATH', 'warning', [step.id], `${step.id} is a ${step.hours}h step on the critical path; make its pool or wall-clock duration explicit`));
+  }
+  for (const item of fanOut) {
+    risks.push(finding('FAN_OUT', 'warning', [item.id, ...item.dependents], `${item.id} fans out to ${item.dependents.length} dependents with identical consumes '${item.consumes}'; prefer pair ordering`));
+  }
+  if (drift.detected) {
+    risks.push(finding('PLAN_DRIFT', 'error', [ ...drift.expected, ...drift.actual ].filter(Boolean), drift.reason ?? 'plan drift detected'));
+  }
+
+  return { path, hours: longest.hours, ownerWork, manualWork, lags, longRunning, fanOut, drift, risks };
+}
+
 /** Lint a cpm plan for safe Junior execution and describe its cohorts. */
 export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): JuniorPlanCheck {
   const maxHours = typeof opts.maxHours === 'number' && Number.isFinite(opts.maxHours) ? opts.maxHours : 4;
@@ -373,10 +610,14 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
     }
   }
 
+  const criticalPath = criticalPathReport(plan, deliverables, agent.length, maxHours, opts);
+  findings.push(...criticalPath.risks);
+
   return {
     ok: !findings.some((entry) => entry.severity === 'error'),
     findings,
     cohorts: agentCohorts(agent, deliverables),
+    criticalPath,
   };
 }
 
@@ -494,6 +735,7 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
   const positional: string[] = [];
   let maxHours = 4;
   let outDir = '';
+  let statusFile = '';
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
     const eq = arg.indexOf('=');
@@ -505,6 +747,10 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     }
     if (name === '--out') {
       outDir = String(inline ?? args[++i]);
+      continue;
+    }
+    if (name === '--status') {
+      statusFile = String(inline ?? args[++i]);
       continue;
     }
     if (name === '--jev') {
@@ -519,7 +765,21 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     if (!file) throw new Error('Usage: junior plan check <plan.json> [--max-hours N]');
     const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
     const registeredTests = registeredTestsIn(cwd);
-    const result = checkPlanForJunior(plan, { maxHours, ...(registeredTests !== undefined ? { registeredTests } : {}) });
+    const status = statusFile ? JSON.parse(fs.readFileSync(path.resolve(cwd, statusFile), 'utf8')) : undefined;
+    const result = checkPlanForJunior(plan, {
+      maxHours,
+      ...(registeredTests !== undefined ? { registeredTests } : {}),
+      ...(status !== undefined ? { status } : {}),
+    });
+    out(JSON.stringify(result, null, 2));
+    return { exitCode: result.ok ? 0 : 1, result };
+  }
+
+  if (sub === 'vet') {
+    const file = positional[0];
+    if (!file) throw new Error('Usage: junior plan vet <plan.json>');
+    const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
+    const result = vetPlanEdges(plan);
     out(JSON.stringify(result, null, 2));
     return { exitCode: result.ok ? 0 : 1, result };
   }
