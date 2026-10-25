@@ -386,3 +386,56 @@ test('withPlanLease uses EV actuals when a reopened correction has them', async 
   await withPlanLease(TASK, async () => 'ok', deps(callHop, { now: () => ticks[Math.min(index++, ticks.length - 1)] }));
   assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 3);
 });
+
+// --- lease revision refresh -------------------------------------------------
+
+test('withPlanLease sends the contract expected revision with the acquire', async () => {
+  const { calls, callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: [DELIVERABLE] }, revision: 6 }) });
+  await withPlanLease({ ...TASK, hopRevision: 5 }, async () => 'ok', deps(callHop));
+  const acquire = calls.find((call) => call.request.tool === 'plan.acquire_cohort');
+  assert.equal(acquire?.request.arguments.expectedRevision, 5);
+});
+
+test('withPlanLease refreshes the expected revision after acquiring the lease', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: [DELIVERABLE] }, revision: 6 }) });
+  const task: any = { ...TASK, hopRevision: 5 };
+  await withPlanLease(task, async () => 'ok', deps(callHop));
+  assert.equal(task.hopRevision, 6);
+});
+
+test('withPlanLease reports the revision its lease advanced the Hop to', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: [DELIVERABLE] }, revision: 6 }) });
+  const out = await withPlanLease({ ...TASK, hopRevision: 5 }, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.revision, 6);
+});
+
+test('withPlanLease refreshes the expected revision after re-entering a lease', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] }, revision: 6 }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'junior-worker' }] }, revision: 7 }),
+  });
+  const task: any = { ...TASK, hopRevision: 5 };
+  await withPlanLease(task, async () => 'ok', deps(callHop));
+  assert.equal(task.hopRevision, 7);
+});
+
+test('withPlanLease does not run when an unrelated mutation made the acquire revision stale', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: false, error: { message: 'expected revision 5 but manifest is at 7' } }) });
+  let ran = false;
+  await withPlanLease({ ...TASK, hopRevision: 5 }, async () => { ran = true; return 'ok'; }, deps(callHop));
+  assert.equal(ran, false);
+});
+
+test('withPlanLease uses the contract hop context revision as the acquire baseline', async () => {
+  const { calls, callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: [DELIVERABLE] }, revision: 6 }) });
+  await withPlanLease({ ...TASK, hopContext: { revision: 5 } }, async () => 'ok', deps(callHop));
+  const acquire = calls.find((call) => call.request.tool === 'plan.acquire_cohort');
+  assert.equal(acquire?.request.arguments.expectedRevision, 5);
+});
+
+test('withPlanLease does not absorb a lease revision that skipped a concurrent mutation', async () => {
+  const { callHop } = harness({ 'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: [DELIVERABLE] }, revision: 8 }) });
+  let ran = false;
+  await withPlanLease({ ...TASK, hopRevision: 5 }, async () => { ran = true; return 'ok'; }, deps(callHop));
+  assert.equal(ran, false);
+});
