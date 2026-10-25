@@ -9,17 +9,23 @@
 
 import {
   COMPUTE_OPERATIONS,
+  acquireComputeLease,
+  createComputeLeaseState,
+  evaluateComputeScaleIn,
   inspectComputeCapabilities,
   inspectComputeProviderIdentity,
+  releaseComputeLease,
   verifyComputeProviderIdentity,
   type ComputeCapability,
   type ComputeCapabilityStatus,
   type ComputeIssue,
+  type ComputeLeaseState,
   type ComputeOperation,
   type ComputeOwnershipRecord,
   type ComputeProviderIdentity,
   type ComputeProviderIdentityVerification,
   type ComputeResource,
+  type ComputeScaleInDecision,
 } from './compute.ts';
 
 export const HETZNER_SCHEMA_VERSION = 1;
@@ -293,6 +299,10 @@ export type FakeHetznerRecordedResource = {
   generation?: number;
   tags?: Record<string, string>;
   ownership?: ComputeOwnershipRecord;
+  /** Resource creation time; the scale-in lifetime guardrail uses it. */
+  createdAt?: string;
+  /** Recorded disk observation for scale-in guardrails. */
+  disk?: { usedPercent?: number; limitPercent?: number };
 };
 
 export type FakeHetznerProviderRecorded = {
@@ -337,6 +347,55 @@ export type HetznerProvisionResult = {
   issues: ComputeIssue[];
 };
 
+/** One job routed to a managed resource under a fencing lease. */
+export type HetznerJobRouteRequest = {
+  requestId: string;
+  jobId: string;
+  holder: string;
+  region?: string;
+  serverType?: string;
+  now?: string;
+  leaseExpiresAt?: string;
+  tags?: Record<string, string>;
+};
+
+export type HetznerJobRouteStatus = 'routed' | 'replayed' | 'rejected';
+
+export type HetznerJobRouteResult = {
+  ok: boolean;
+  status: HetznerJobRouteStatus;
+  requestId: string;
+  jobId: string;
+  resourceId: string | null;
+  leaseId: string | null;
+  fencingToken: number | null;
+  expiresAt: string | null;
+  issues: ComputeIssue[];
+};
+
+/** Evidence supplied by the caller when asking to scale one resource to zero. */
+export type HetznerScaleToZeroRequest = {
+  resourceId: string;
+  now?: string;
+  idleSince?: string;
+  idleTimeoutMs: number;
+  busy?: boolean | number | 'unknown';
+  queuedWork?: number | 'unknown';
+  diskUsedPercent?: number | 'unknown';
+  diskLimitPercent?: number;
+  minimumLifetimeMs?: number;
+  minCapacity?: number;
+};
+
+export type HetznerScaleToZeroResult = {
+  ok: boolean;
+  action: 'retain' | 'scale-to-zero';
+  resourceId: string;
+  capacity: number;
+  decision: ComputeScaleInDecision;
+  issues: ComputeIssue[];
+};
+
 type HetznerPlacement = {
   region: string;
   serverType: string;
@@ -349,6 +408,8 @@ type FakeHetznerResource = ComputeResource & {
   region: string;
   serverType: string;
   ownership: ComputeOwnershipRecord;
+  createdAt: string;
+  disk?: { usedPercent?: number; limitPercent?: number };
 };
 
 function placementPoolId(region: string, serverType: string): string {
@@ -428,10 +489,15 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
     generation: resource.generation ?? 1,
     tags: { ...(resource.tags ?? {}) },
     ownership: resource.ownership ?? { status: 'unverifiable', resourceId: resource.id },
+    createdAt: resource.createdAt ?? resource.ownership?.recordedAt ?? '1970-01-01T00:00:00.000Z',
   }));
   const initialResourceCount = resources.length;
   const placements = normalizeHetznerPlacement(recorded.placement);
   const requests = new Map<string, { fingerprint: string; result: HetznerProvisionResult }>();
+  const leases = new Map<string, { state: ComputeLeaseState; jobId: string; requestId: string }>();
+  const jobRoutes = new Map<string, { fingerprint: string; result: HetznerJobRouteResult }>();
+  const jobIndex = new Map<string, { resourceId: string; leaseId: string; requestId: string }>();
+  const lastIdleAt = new Map<string, string>();
   const serialize = serialQueue();
   let nextResource = 1;
 
@@ -624,6 +690,7 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       region: normalized.region,
       serverType: normalized.serverType,
       ownership,
+      createdAt: recordedAt,
     };
     resources.push(resource);
     const result: HetznerProvisionResult = {
@@ -639,6 +706,215 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
     requests.set(requestId, { fingerprint, result });
     return result;
   });
+
+  const routeJob = (input: unknown): Promise<HetznerJobRouteResult> => serialize(() => {
+    const request = isRecord(input) ? input as Partial<HetznerJobRouteRequest> : {};
+    const reject = (code: string, path: string, message: string): HetznerJobRouteResult => ({
+      ok: false,
+      status: 'rejected',
+      requestId: typeof request.requestId === 'string' ? request.requestId : '',
+      jobId: typeof request.jobId === 'string' ? request.jobId : '',
+      resourceId: null,
+      leaseId: null,
+      fencingToken: null,
+      expiresAt: null,
+      issues: [requestIssue(code, path, message)],
+    });
+    if (typeof request.requestId !== 'string' || request.requestId.trim() === '') {
+      return reject('request.id', 'requestId', 'job routing requires a non-empty request id');
+    }
+    if (typeof request.jobId !== 'string' || request.jobId.trim() === '') {
+      return reject('job.id', 'jobId', 'job routing requires a non-empty job id');
+    }
+    if (typeof request.holder !== 'string' || request.holder.trim() === '') {
+      return reject('job.holder', 'holder', 'job routing requires an explicit holder');
+    }
+    const requestId = request.requestId.trim();
+    const jobId = request.jobId.trim();
+    const fingerprint = JSON.stringify(stableValue({
+      jobId,
+      holder: request.holder.trim(),
+      region: request.region,
+      serverType: request.serverType,
+      tags: request.tags,
+      leaseExpiresAt: request.leaseExpiresAt,
+    }));
+    const prior = jobRoutes.get(requestId);
+    if (prior !== undefined) {
+      if (prior.fingerprint !== fingerprint) {
+        return reject('request.id-conflict', 'requestId', `request id ${requestId} was already used with different routing content`);
+      }
+      return { ...prior.result, status: 'replayed' };
+    }
+    const now = typeof request.now === 'string' && Number.isFinite(Date.parse(request.now))
+      ? request.now
+      : '1970-01-01T00:00:00.000Z';
+    const expiresAt = typeof request.leaseExpiresAt === 'string' && Date.parse(request.leaseExpiresAt) > Date.parse(now)
+      ? request.leaseExpiresAt
+      : new Date(Date.parse(now) + 60 * 60_000).toISOString();
+    const candidate = resources.find((resource) => {
+      if (resource.ownership.status !== 'verified') return false;
+      if (typeof request.region === 'string' && resource.region !== request.region) return false;
+      if (typeof request.serverType === 'string' && resource.serverType !== request.serverType) return false;
+      if (request.tags !== undefined) {
+        if (!isRecord(request.tags)) return false;
+        for (const [key, value] of Object.entries(request.tags)) {
+          if (resource.tags?.[key] !== value) return false;
+        }
+      }
+      const lease = leases.get(resource.id);
+      if (lease === undefined) return true;
+      const active = lease.state.leases.some((entry) =>
+        entry.releasedAt === undefined && Date.parse(entry.expiresAt) > Date.parse(now));
+      const unreclaimed = lease.state.leases.some((entry) =>
+        entry.releasedAt === undefined && Date.parse(entry.expiresAt) <= Date.parse(now));
+      return !active && !unreclaimed;
+    });
+    if (candidate === undefined) {
+      return reject('route.unavailable', 'resources', 'no managed resource can accept this job');
+    }
+    const state = leases.get(candidate.id)
+      ?? createComputeLeaseState({ resourceId: candidate.id, resourceGeneration: candidate.generation, now });
+    const leaseId = `lease-${jobId}`;
+    const acquired = acquireComputeLease(state, {
+      leaseId,
+      holder: request.holder.trim(),
+      now,
+      expiresAt,
+    });
+    if (!acquired.ok || acquired.lease === undefined) {
+      return reject(acquired.code, 'lease', acquired.message);
+    }
+    leases.set(candidate.id, { state: acquired.state, jobId, requestId });
+    lastIdleAt.delete(candidate.id);
+    const result: HetznerJobRouteResult = {
+      ok: true,
+      status: 'routed',
+      requestId,
+      jobId,
+      resourceId: candidate.id,
+      leaseId,
+      fencingToken: acquired.lease.fencingToken,
+      expiresAt,
+      issues: [],
+    };
+    jobRoutes.set(requestId, { fingerprint, result });
+    jobIndex.set(jobId, { resourceId: candidate.id, leaseId, requestId });
+    return result;
+  });
+
+  const completeJob = (input: unknown): { ok: boolean; jobId: string; issues: ComputeIssue[] } => {
+    const request = isRecord(input) ? input : {};
+    const jobId = typeof request.jobId === 'string' ? request.jobId : '';
+    const routed = jobIndex.get(jobId);
+    if (routed === undefined) {
+      return {
+        ok: false,
+        jobId,
+        issues: [requestIssue('route.not-found', 'jobId', 'job has no routed lease')],
+      };
+    }
+    const leaseEntry = leases.get(routed.resourceId);
+    const lease = leaseEntry?.state.leases.find((entry) => entry.id === routed.leaseId);
+    const now = typeof request.now === 'string' && Number.isFinite(Date.parse(request.now))
+      ? request.now
+      : (leaseEntry?.state.updatedAt ?? '1970-01-01T00:00:00.000Z');
+    if (lease === undefined || leaseEntry === undefined) {
+      return {
+        ok: false,
+        jobId,
+        issues: [requestIssue('lease.not-found', 'leaseId', 'routed lease does not exist')],
+      };
+    }
+    const released = releaseComputeLease(leaseEntry.state, {
+      leaseId: lease.id,
+      holder: lease.holder,
+      fencingToken: lease.fencingToken,
+      now,
+    });
+    if (!released.ok) {
+      return {
+        ok: false,
+        jobId,
+        issues: [requestIssue(released.code, 'lease', released.message)],
+      };
+    }
+    leases.set(routed.resourceId, { ...leaseEntry, state: released.state });
+    lastIdleAt.set(routed.resourceId, now);
+    jobIndex.delete(jobId);
+    return { ok: true, jobId, issues: [] };
+  };
+
+  const scaleToZero = (input: unknown): HetznerScaleToZeroResult => {
+    const request = isRecord(input) ? input as Partial<HetznerScaleToZeroRequest> : {};
+    const resourceId = typeof request.resourceId === 'string' ? request.resourceId : '';
+    const rejected = (decision: ComputeScaleInDecision): HetznerScaleToZeroResult => ({
+      ok: false,
+      action: 'retain',
+      resourceId,
+      capacity: decision.targetCapacity,
+      decision,
+      issues: decision.reasons.map((reason) =>
+        requestIssue(`scale.${reason}`, reason, decision.message)),
+    });
+    const resource = resources.find((entry) => entry.id === resourceId);
+    if (resource === undefined) {
+      return rejected({
+        allowed: false,
+        action: 'retain',
+        targetCapacity: 0,
+        code: 'scale.not-found',
+        message: 'managed resource does not exist',
+        reasons: ['resource'],
+      });
+    }
+    if (resource.ownership.status !== 'verified') {
+      return rejected({
+        allowed: false,
+        action: 'retain',
+        targetCapacity: 1,
+        code: 'scale.ownership',
+        message: 'resource ownership is not verified; retain capacity',
+        reasons: ['ownership'],
+      });
+    }
+    const now = typeof request.now === 'string' && Number.isFinite(Date.parse(request.now))
+      ? request.now
+      : resource.createdAt;
+    const lease = leases.get(resource.id);
+    const leaseActive = lease !== undefined && lease.state.leases.some((entry) => entry.releasedAt === undefined);
+    const idleSince = typeof request.idleSince === 'string'
+      ? request.idleSince
+      : (lastIdleAt.get(resource.id) ?? resource.createdAt);
+    const decision = evaluateComputeScaleIn({
+      capacity: { min: request.minCapacity ?? 0, max: 1, current: 1 },
+      idleSince,
+      idleTimeoutMs: request.idleTimeoutMs,
+      busy: request.busy ?? false,
+      leaseActive,
+      queuedWork: request.queuedWork ?? 0,
+      diskUsedPercent: request.diskUsedPercent ?? resource.disk?.usedPercent ?? HETZNER_UNKNOWN,
+      diskLimitPercent: request.diskLimitPercent ?? resource.disk?.limitPercent ?? 80,
+      startedAt: resource.createdAt,
+      minimumLifetimeMs: request.minimumLifetimeMs ?? 0,
+      now,
+    });
+    if (!decision.allowed || decision.targetCapacity > 0) {
+      return rejected(decision);
+    }
+    const index = resources.findIndex((entry) => entry.id === resource.id);
+    if (index >= 0) resources.splice(index, 1);
+    leases.delete(resource.id);
+    lastIdleAt.delete(resource.id);
+    return {
+      ok: true,
+      action: 'scale-to-zero',
+      resourceId,
+      capacity: 0,
+      decision,
+      issues: [],
+    };
+  };
 
   return {
     recorded: {
@@ -659,6 +935,15 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
     },
     provision(input: unknown): Promise<HetznerProvisionResult> {
       return provision(input);
+    },
+    routeJob(input: unknown): Promise<HetznerJobRouteResult> {
+      return routeJob(input);
+    },
+    completeJob(input: unknown): { ok: boolean; jobId: string; issues: ComputeIssue[] } {
+      return completeJob(input);
+    },
+    scaleToZero(input: unknown): HetznerScaleToZeroResult {
+      return scaleToZero(input);
     },
     listResources(): ComputeResource[] {
       return resources.map((resource) => ({
