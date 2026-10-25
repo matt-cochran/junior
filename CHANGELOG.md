@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-25
+
+### Added
+
+- Bounded local and Hetzner remote-compute control, including authenticated
+  Pi transport, safe pool provisioning/scaling, reconciliation, and worker
+  runtime budget enforcement (#101, #102, #103, #117, #121-#128).
+- Explicit disclosure and consent before source context can be sent to an
+  external model provider; clarification remains available before consent is
+  required for execution.
+
+### Fixed
+
+- Clarification now takes precedence over external-context consent so unclear
+  contracts return actionable questions instead of prematurely blocking.
+
 ## [0.12.0] - 2026-10-23
 
 ### Added
