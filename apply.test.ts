@@ -4,7 +4,8 @@
 // Every scenario builds disposable real Git repositories with a linked
 // worktree, writes a result.json artifact and drives the public applyHandoff
 // API. Each test asserts exactly one observable outcome: a source file's
-// content or existence, or the refusal error. No fixture is left behind.
+// content or existence, the apply receipt, or the refusal error. No fixture is
+// left behind.
 // ---------------------------------------------------------------------------
 
 import { test } from 'node:test';
@@ -41,15 +42,29 @@ const sourceRepo = (root: string): string => {
 
 /** A handoff artifact under <source>/.delivery/<id>/<stamp> with a detached
  * worktree mutated by `mutate`, plus a result.json the apply API can read. */
-const makeRun = (source: string, id: string, stamp: string, mutate: (wt: string) => void, status = 'ready_for_review') => {
+const makeRun = (source: string, id: string, stamp: string, mutate: (wt: string) => void, status = 'ready_for_review', extra: Record<string, unknown> = {}) => {
   const art = join(source, '.delivery', id, stamp);
   const wt = join(art, 'worktree');
   mkdirSync(art, { recursive: true });
   const added = git(source, ['worktree', 'add', '-q', '--detach', wt, 'HEAD']);
   if (added.status !== 0) throw Error(added.stderr || `git worktree add exited ${added.status}`);
   mutate(wt);
-  writeFileSync(join(art, 'result.json'), JSON.stringify({ id, status, isolation: { mode: 'worktree', worktree: wt } }));
+  writeFileSync(join(art, 'result.json'), JSON.stringify({ id, status, isolation: { mode: 'worktree', worktree: wt }, ...extra }));
   return { art, wt, resultPath: join(art, 'result.json') };
+};
+
+/** A primary checkout at commit A with a linked worktree on descendant B. */
+const linkedSource = (root: string): { primary: string; lane: string } => {
+  const primary = sourceRepo(root);
+  const base = git(primary, ['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(primary, 'base.txt'), 'descendant\n');
+  git(primary, ['add', 'base.txt']);
+  git(primary, ['commit', '-qm', 'descendant']);
+  const lane = join(root, 'lane');
+  const added = git(primary, ['worktree', 'add', '-q', '-b', 'lane', lane, 'HEAD']);
+  if (added.status !== 0) throw Error(added.stderr || `git worktree add exited ${added.status}`);
+  git(primary, ['reset', '--hard', '-q', base]);
+  return { primary, lane };
 };
 
 // --- id resolution -----------------------------------------------------------
@@ -116,6 +131,45 @@ test('applyHandoff refuses a worktree whose HEAD is not an ancestor of source HE
   });
   const r = applyHandoff(resultPath, { cwd: source });
   assert.match(r.error ?? '', /ancestor/);
+});
+
+// --- recorded source worktree -------------------------------------------------
+
+test('applyHandoff dry run validates ancestry against the recorded source worktree HEAD', (t) => {
+  const root = arena(t);
+  const { primary, lane } = linkedSource(root);
+  const { resultPath } = makeRun(lane, 'handoff-lane-dry', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', { sourceCwd: lane });
+  const r = applyHandoff(resultPath, { cwd: primary, dryRun: true });
+  assert.equal(r.error, undefined);
+});
+
+test('applyHandoff applies the diff to the recorded source worktree', (t) => {
+  const root = arena(t);
+  const { primary, lane } = linkedSource(root);
+  const { resultPath } = makeRun(lane, 'handoff-lane-apply', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', { sourceCwd: lane });
+  applyHandoff(resultPath, { cwd: primary });
+  assert.equal(readFileSync(join(lane, 'base.txt'), 'utf8'), 'worktree\n');
+});
+
+test('applyHandoff leaves the primary checkout untouched when the recorded source is a linked worktree', (t) => {
+  const root = arena(t);
+  const { primary, lane } = linkedSource(root);
+  git(primary, ['reset', '--hard', '-q', 'lane']);
+  writeFileSync(join(primary, 'primary-only.txt'), 'primary\n');
+  git(primary, ['add', 'primary-only.txt']);
+  git(primary, ['commit', '-qm', 'primary descendant']);
+  const { resultPath } = makeRun(lane, 'handoff-lane-primary', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', { sourceCwd: lane });
+  applyHandoff(resultPath, { cwd: primary });
+  assert.equal(readFileSync(join(primary, 'base.txt'), 'utf8'), 'descendant\n');
+});
+
+test('applyHandoff records the resolved source worktree as the apply target', (t) => {
+  const root = arena(t);
+  const { primary, lane } = linkedSource(root);
+  const { art, resultPath } = makeRun(lane, 'handoff-lane-record', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', { sourceCwd: lane });
+  applyHandoff(resultPath, { cwd: primary });
+  const record = JSON.parse(readFileSync(join(art, 'applied.json'), 'utf8'));
+  assert.equal(record.target, lane);
 });
 
 // --- dry run -----------------------------------------------------------------
