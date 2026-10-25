@@ -73,6 +73,7 @@ function taskFixture(dir: string, extra: Record<string, unknown> = {}): any {
     isolation: 'none',
     acceptance: ['Widget works'],
     checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+    externalContextConsent: true,
     ...extra,
   };
 }

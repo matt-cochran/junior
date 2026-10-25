@@ -12,7 +12,7 @@ function stream(reason:string) {return [{type:'session',id:'review-fixture'}, {t
 
 test('An output-limited worker cannot hand back success despite passing checks', async t=>{
  const cwd=temp(t);
- const result=await run({id:'limited',cwd,deliverable:'Required behavior',acceptance:['Required behavior is delivered'],workflow:'checks_first',checks:[{command:process.execPath,args:['-e','process.exit(0)']}]},false,{spawnPi:()=>({status:0,stdout:stream('length')})});
+ const result=await run({id:'limited',cwd,deliverable:'Required behavior',acceptance:['Required behavior is delivered'],workflow:'checks_first',checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true},false,{spawnPi:()=>({status:0,stdout:stream('length')})});
  assert.equal(result.status,'receipt_failed');
 });
 
@@ -47,7 +47,7 @@ test('Compact status rejects a malformed saved result',t=>{
  assert.match(result.stderr,/Malformed result: missing id/);
 });
 
-const gateTask={id:'routing',deliverable:'Implement an approved bounded behavior',acceptance:['Public behavior matches the contract'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]};
+const gateTask={id:'routing',deliverable:'Implement an approved bounded behavior',acceptance:['Public behavior matches the contract'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true};
 const routingClassifier=(probability?:number):any=>async()=>({stopReason:'stop',answers:{contract_clear:{type:'bool',probability:0.95},blocking_assumptions:{type:'bool',probability:0.05},...(probability===undefined?{}:{requires_frontier:{type:'bool',probability}})}});
 test('A frontier-required task is assigned to frontier attention',async()=>{
  assert.equal((await assessPreflight(gateTask,routingClassifier(0.95))).attention.target,'frontier');

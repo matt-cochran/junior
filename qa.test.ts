@@ -45,6 +45,7 @@ const qaTask = (cwd: string, reviewFrom?: string, extra: any = {}) => ({
  id: 'qa-1', deliverable: 'Review the widget deliverable', cwd, provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash',
  workflow: 'qa', acceptance: ['Review completed'],
  checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+ externalContextConsent: true,
  ...(reviewFrom ? { reviewFrom } : {}), ...extra,
 });
 
