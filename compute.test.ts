@@ -19,6 +19,7 @@ import {
   assertComputePolicy,
   authorizeComputeOperation,
   createComputeLeaseState,
+  decideComputeFallback,
   evaluateComputeScaleIn,
   heartbeatComputeLease,
   inspectComputeCapabilities,
@@ -843,4 +844,65 @@ test('idle expiry returns a managed resource to zero', () => {
 
 test('idle expiry scales a nonzero minimum only to its explicit floor', () => {
   assert.equal(idleScaleEvidence({ capacity: { min: 1, max: 2, current: 2 } }).targetCapacity, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Explicit local fallback (ADR 0014 R9).
+//
+// Fallback is a policy decision with a recorded reason, never a silent retry
+// and never a remote mutation.
+// ---------------------------------------------------------------------------
+
+function fallbackDecision(overrides: {
+  reason?: unknown;
+  occurredAt?: unknown;
+  allowLocalFallback?: boolean;
+} = {}) {
+  return decideComputeFallback({
+    reason: overrides.reason ?? 'remote provider unavailable',
+    occurredAt: overrides.occurredAt ?? NOW,
+    policy: { ...DEFAULT_COMPUTE_POLICY, allowLocalFallback: overrides.allowLocalFallback ?? true },
+  });
+}
+
+test('a policy that allows local fallback permits the fallback', () => {
+  assert.equal(fallbackDecision().allowed, true);
+});
+
+test('a policy that forbids local fallback refuses the fallback', () => {
+  assert.equal(fallbackDecision({ allowLocalFallback: false }).allowed, false);
+});
+
+test('a permitted fallback records its reason and time', () => {
+  assert.deepEqual(fallbackDecision().fallback, {
+    reason: 'remote provider unavailable',
+    occurredAt: NOW,
+  });
+});
+
+test('a refused fallback records no fallback', () => {
+  assert.equal(fallbackDecision({ allowLocalFallback: false }).fallback, null);
+});
+
+test('a refused fallback explains the policy flag to change', () => {
+  assert.match(fallbackDecision({ allowLocalFallback: false }).message, /allowLocalFallback/);
+});
+
+test('a fallback without a reason is invalid', () => {
+  assert.equal(fallbackDecision({ reason: '' }).issues[0]?.code, 'fallback.reason');
+});
+
+test('a fallback with an invalid time is invalid', () => {
+  assert.equal(fallbackDecision({ occurredAt: 'not-a-time' }).issues[0]?.code, 'fallback.time');
+});
+
+test('a status with a recorded local fallback remains valid', () => {
+  assert.equal(inspect(status({ fallback: { reason: 'provider unavailable', occurredAt: NOW } })).valid, true);
+});
+
+test('a status with a fallback that lacks a reason is invalid', () => {
+  assert.equal(
+    inspect(status({ fallback: { reason: '', occurredAt: NOW } })).issues[0]?.code,
+    'fallback.reason',
+  );
 });

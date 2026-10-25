@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { DEFAULT_COMPUTE_POLICY } from './compute.ts';
 import {
   HETZNER_PROVIDER,
   createFakeHetznerProvider,
@@ -402,4 +403,150 @@ test('a completed job leaves a resource that can scale to zero after idle expiry
     diskLimitPercent: 80,
   });
   assert.equal(result.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// Explicit local fallback and reconciled fake-provider mutations.
+//
+// Fallback is observable policy, not a silent retry, and it never touches the
+// fake provider inventory. Every mutation reports reconciliation evidence so a
+// caller never has to assume that a request succeeded.
+// ---------------------------------------------------------------------------
+
+const FALLBACK_NOW = '2026-10-25T12:00:00.000Z';
+
+function fallbackRequest(allowLocalFallback: boolean) {
+  return {
+    reason: 'remote provider unavailable',
+    occurredAt: FALLBACK_NOW,
+    policy: { ...DEFAULT_COMPUTE_POLICY, allowLocalFallback },
+  };
+}
+
+test('a policy that allows local fallback permits the provider fallback', () => {
+  const provider = provisioningProvider();
+  assert.equal(provider.localFallback(fallbackRequest(true)).allowed, true);
+});
+
+test('a permitted provider fallback records its reason', () => {
+  const provider = provisioningProvider();
+  assert.equal(provider.localFallback(fallbackRequest(true)).fallback?.reason, 'remote provider unavailable');
+});
+
+test('a refused provider fallback records no fallback', () => {
+  const provider = provisioningProvider();
+  assert.equal(provider.localFallback(fallbackRequest(false)).fallback, null);
+});
+
+test('a refused provider fallback explains the policy flag to change', () => {
+  const provider = provisioningProvider();
+  assert.match(provider.localFallback(fallbackRequest(false)).message, /allowLocalFallback/);
+});
+
+test('a provider fallback leaves the fake provider inventory unchanged', async () => {
+  const provider = provisioningProvider();
+  await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const before = provider.listResources().map((resource) => resource.id);
+  provider.localFallback(fallbackRequest(true));
+  assert.deepEqual(provider.listResources().map((resource) => resource.id), before);
+});
+
+test('a provider fallback is reported as non-mutating', () => {
+  const provider = provisioningProvider();
+  assert.equal(provider.localFallback(fallbackRequest(true)).mutated, false);
+});
+
+test('a provisioned resource reconciles safely', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  assert.equal(result.reconciliation?.safe, true);
+});
+
+test('a provisioned resource reports its mutation', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  assert.equal(result.mutated, true);
+});
+
+test('a rejected provision reports no mutation', async () => {
+  const provider = provisioningProvider({ quota: { limits: { servers: 0 }, usage: { servers: 0 } } });
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.mutated, false);
+});
+
+test('a routed job reconciles as leased', async () => {
+  const provider = routedProvider();
+  await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const routed = await provider.routeJob({
+    requestId: 'route-1',
+    jobId: 'job-1',
+    holder: 'worker-1',
+    now: '2026-10-25T11:00:00.000Z',
+    leaseExpiresAt: '2026-10-25T12:00:00.000Z',
+  });
+  assert.equal(routed.reconciliation?.observedState, 'leased');
+});
+
+test('a completed job reconciles as ready', async () => {
+  const provider = routedProvider();
+  await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  await provider.routeJob({
+    requestId: 'route-1',
+    jobId: 'job-1',
+    holder: 'worker-1',
+    now: '2026-10-25T11:00:00.000Z',
+    leaseExpiresAt: '2026-10-25T12:00:00.000Z',
+  });
+  const completed = provider.completeJob({ jobId: 'job-1', now: '2026-10-25T11:30:00.000Z' });
+  assert.equal(completed.reconciliation?.observedState, 'ready');
+});
+
+test('a scaled-to-zero resource reconciles as destroyed', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const scaled = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:00:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.equal(scaled.reconciliation?.observedState, 'destroyed');
+});
+
+test('a mutating scale-to-zero reports its mutation', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const scaled = provider.scaleToZero({
+    resourceId: provisioned.resource?.id,
+    now: '2026-10-25T12:00:00.000Z',
+    idleSince: '2026-10-25T10:00:00.000Z',
+    idleTimeoutMs: 60 * 60_000,
+    busy: false,
+    diskUsedPercent: 10,
+    diskLimitPercent: 80,
+  });
+  assert.equal(scaled.mutated, true);
+});
+
+test('reconciling a created resource is safe', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const reconciled = provider.reconcile({ resourceId: provisioned.resource?.id, now: '2026-10-25T10:00:00.000Z' });
+  assert.equal(reconciled.safe, true);
+});
+
+test('reconciling an unknown resource requires an operator', () => {
+  const provider = routedProvider();
+  const reconciled = provider.reconcile({ resourceId: 'missing', now: '2026-10-25T10:00:00.000Z' });
+  assert.equal(reconciled.requiresOperator, true);
+});
+
+test('reconciliation never reports a mutation', async () => {
+  const provider = routedProvider();
+  const provisioned = await provider.provision(provisionRequest({ now: '2026-10-25T09:00:00.000Z' }));
+  const reconciled = provider.reconcile({ resourceId: provisioned.resource?.id, now: '2026-10-25T10:00:00.000Z' });
+  assert.equal(reconciled.mutated, false);
 });

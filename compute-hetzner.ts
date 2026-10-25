@@ -9,26 +9,37 @@
 
 import {
   COMPUTE_OPERATIONS,
+  COMPUTE_SCHEMA_VERSION,
   acquireComputeLease,
   createComputeLeaseState,
+  decideComputeFallback,
   evaluateComputeScaleIn,
   inspectComputeCapabilities,
   inspectComputeProviderIdentity,
+  reconcileComputeStatus,
   releaseComputeLease,
   verifyComputeProviderIdentity,
   type ComputeCapability,
   type ComputeCapabilityStatus,
+  type ComputeFallback,
+  type ComputeFallbackDecision,
   type ComputeIssue,
+  type ComputeLease,
   type ComputeLeaseState,
+  type ComputeLifecycleState,
   type ComputeOperation,
   type ComputeOwnershipRecord,
+  type ComputePolicy,
   type ComputeProviderIdentity,
   type ComputeProviderIdentityVerification,
+  type ComputeReconciliation,
   type ComputeResource,
   type ComputeScaleInDecision,
+  type ComputeStatus,
 } from './compute.ts';
 
 export const HETZNER_SCHEMA_VERSION = 1;
+export const HETZNER_ADAPTER_VERSION = '1.0.0';
 export const HETZNER_PROVIDER = 'hetzner';
 export const HETZNER_UNKNOWN = 'unknown' as const;
 
@@ -345,6 +356,10 @@ export type HetznerProvisionResult = {
   ownership: ComputeOwnershipRecord | null;
   quota: HetznerQuota;
   issues: ComputeIssue[];
+  /** True only when this call created a fake-provider resource. */
+  mutated: boolean;
+  /** Post-mutation reconciliation evidence; null when nothing was created. */
+  reconciliation: ComputeReconciliation | null;
 };
 
 /** One job routed to a managed resource under a fencing lease. */
@@ -371,6 +386,20 @@ export type HetznerJobRouteResult = {
   fencingToken: number | null;
   expiresAt: string | null;
   issues: ComputeIssue[];
+  /** True only when this call acquired a fake-provider lease. */
+  mutated: boolean;
+  /** Post-mutation reconciliation evidence; null when nothing was routed. */
+  reconciliation: ComputeReconciliation | null;
+};
+
+export type HetznerJobCompletionResult = {
+  ok: boolean;
+  jobId: string;
+  issues: ComputeIssue[];
+  /** True only when this call released a fake-provider lease. */
+  mutated: boolean;
+  /** Post-mutation reconciliation evidence; null when nothing was released. */
+  reconciliation: ComputeReconciliation | null;
 };
 
 /** Evidence supplied by the caller when asking to scale one resource to zero. */
@@ -394,6 +423,22 @@ export type HetznerScaleToZeroResult = {
   capacity: number;
   decision: ComputeScaleInDecision;
   issues: ComputeIssue[];
+  /** True only when this call removed a fake-provider resource. */
+  mutated: boolean;
+  /** Post-mutation reconciliation evidence; null when capacity was retained. */
+  reconciliation: ComputeReconciliation | null;
+};
+
+export type HetznerLocalFallbackResult = ComputeFallbackDecision & {
+  /** Local fallback is never a remote mutation. */
+  mutated: false;
+};
+
+export type HetznerReconcileRequest = {
+  resourceId: string;
+  now?: string;
+  /** Optional fallback record included in the reconciliation receipt. */
+  fallback?: ComputeFallback | null;
 };
 
 type HetznerPlacement = {
@@ -500,6 +545,54 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
   const lastIdleAt = new Map<string, string>();
   const serialize = serialQueue();
   let nextResource = 1;
+  const recordedIdentity = inspectHetznerProviderIdentity(recorded.identity);
+
+  /** Build the provider-neutral status for one observed fake resource. */
+  const statusFor = (
+    resource: FakeHetznerResource,
+    options: {
+      now: string;
+      observedState?: ComputeLifecycleState;
+      capacityCurrent?: number;
+      fallback?: ComputeFallback | null;
+    },
+  ): ComputeStatus => {
+    const leaseEntry = leases.get(resource.id);
+    const resourceLeases: ComputeLease[] = leaseEntry === undefined
+      ? []
+      : leaseEntry.state.leases.map((lease) => ({ ...lease }));
+    const active = resourceLeases.some((lease) =>
+      lease.releasedAt === undefined && Date.parse(lease.expiresAt) > Date.parse(options.now));
+    return {
+      schemaVersion: COMPUTE_SCHEMA_VERSION,
+      provider: HETZNER_PROVIDER,
+      adapterVersion: HETZNER_ADAPTER_VERSION,
+      mode: 'provision',
+      ...(recordedIdentity.verified && recordedIdentity.identity !== null
+        ? { providerIdentity: recordedIdentity.identity }
+        : {}),
+      resource: { id: resource.id, generation: resource.generation, tags: { ...resource.tags } },
+      ownership: { ...resource.ownership, tags: { ...(resource.ownership.tags ?? {}) } },
+      desiredState: 'active',
+      observedState: options.observedState ?? (active ? 'leased' : 'ready'),
+      leases: resourceLeases,
+      capacity: { min: 0, max: 1, current: options.capacityCurrent ?? 1 },
+      cost: { currency: 'EUR', amount: 'unknown' },
+      findings: [],
+      fallback: options.fallback ?? null,
+      updatedAt: options.now,
+    };
+  };
+
+  const reconcileResource = (
+    resource: FakeHetznerResource,
+    options: {
+      now: string;
+      observedState?: ComputeLifecycleState;
+      capacityCurrent?: number;
+      fallback?: ComputeFallback | null;
+    },
+  ): ComputeReconciliation => reconcileComputeStatus(statusFor(resource, options), { now: options.now });
 
   const currentQuota = (): HetznerQuota => {
     const base = normalizeHetznerQuota(recorded.quota);
@@ -527,6 +620,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
     ownership: null,
     quota: currentQuota(),
     issues: [issue],
+    mutated: false,
+    reconciliation: null,
   });
 
   const provision = (input: unknown): Promise<HetznerProvisionResult> => serialize(() => {
@@ -566,7 +661,7 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
           `request id ${requestId} was already used with different provisioning content`,
         ));
       }
-      return { ...prior.result, status: 'replayed', quota: currentQuota() };
+      return { ...prior.result, status: 'replayed', quota: currentQuota(), mutated: false };
     }
 
     const identity = verifyHetznerProviderIdentity(
@@ -702,6 +797,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       ownership: { ...ownership, tags: { ...(ownership.tags ?? {}) } },
       quota: currentQuota(),
       issues: [],
+      mutated: true,
+      reconciliation: reconcileResource(resource, { now: recordedAt }),
     };
     requests.set(requestId, { fingerprint, result });
     return result;
@@ -719,6 +816,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       fencingToken: null,
       expiresAt: null,
       issues: [requestIssue(code, path, message)],
+      mutated: false,
+      reconciliation: null,
     });
     if (typeof request.requestId !== 'string' || request.requestId.trim() === '') {
       return reject('request.id', 'requestId', 'job routing requires a non-empty request id');
@@ -744,7 +843,7 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       if (prior.fingerprint !== fingerprint) {
         return reject('request.id-conflict', 'requestId', `request id ${requestId} was already used with different routing content`);
       }
-      return { ...prior.result, status: 'replayed' };
+      return { ...prior.result, status: 'replayed', mutated: false };
     }
     const now = typeof request.now === 'string' && Number.isFinite(Date.parse(request.now))
       ? request.now
@@ -797,13 +896,15 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       fencingToken: acquired.lease.fencingToken,
       expiresAt,
       issues: [],
+      mutated: true,
+      reconciliation: reconcileResource(candidate, { now }),
     };
     jobRoutes.set(requestId, { fingerprint, result });
     jobIndex.set(jobId, { resourceId: candidate.id, leaseId, requestId });
     return result;
   });
 
-  const completeJob = (input: unknown): { ok: boolean; jobId: string; issues: ComputeIssue[] } => {
+  const completeJob = (input: unknown): HetznerJobCompletionResult => {
     const request = isRecord(input) ? input : {};
     const jobId = typeof request.jobId === 'string' ? request.jobId : '';
     const routed = jobIndex.get(jobId);
@@ -812,6 +913,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
         ok: false,
         jobId,
         issues: [requestIssue('route.not-found', 'jobId', 'job has no routed lease')],
+        mutated: false,
+        reconciliation: null,
       };
     }
     const leaseEntry = leases.get(routed.resourceId);
@@ -824,6 +927,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
         ok: false,
         jobId,
         issues: [requestIssue('lease.not-found', 'leaseId', 'routed lease does not exist')],
+        mutated: false,
+        reconciliation: null,
       };
     }
     const released = releaseComputeLease(leaseEntry.state, {
@@ -837,12 +942,21 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
         ok: false,
         jobId,
         issues: [requestIssue(released.code, 'lease', released.message)],
+        mutated: false,
+        reconciliation: null,
       };
     }
     leases.set(routed.resourceId, { ...leaseEntry, state: released.state });
     lastIdleAt.set(routed.resourceId, now);
     jobIndex.delete(jobId);
-    return { ok: true, jobId, issues: [] };
+    const resource = resources.find((entry) => entry.id === routed.resourceId);
+    return {
+      ok: true,
+      jobId,
+      issues: [],
+      mutated: true,
+      reconciliation: resource === undefined ? null : reconcileResource(resource, { now }),
+    };
   };
 
   const scaleToZero = (input: unknown): HetznerScaleToZeroResult => {
@@ -856,6 +970,8 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       decision,
       issues: decision.reasons.map((reason) =>
         requestIssue(`scale.${reason}`, reason, decision.message)),
+      mutated: false,
+      reconciliation: null,
     });
     const resource = resources.find((entry) => entry.id === resourceId);
     if (resource === undefined) {
@@ -913,7 +1029,64 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
       capacity: 0,
       decision,
       issues: [],
+      mutated: true,
+      reconciliation: reconcileResource(resource, {
+        now,
+        observedState: 'destroyed',
+        capacityCurrent: 0,
+      }),
     };
+  };
+
+  const localFallback = (input: unknown): HetznerLocalFallbackResult => {
+    const request = isRecord(input) ? input : {};
+    const decision = decideComputeFallback({
+      reason: request.reason,
+      occurredAt: request.occurredAt,
+      ...(isRecord(request.policy) ? { policy: request.policy as ComputePolicy } : {}),
+      ...(request.allowLocalFallback === undefined
+        ? {}
+        : { allowLocalFallback: request.allowLocalFallback }),
+    });
+    return { ...decision, mutated: false };
+  };
+
+  const reconcile = (input: unknown): ComputeReconciliation => {
+    const request = isRecord(input) ? input as Partial<HetznerReconcileRequest> : {};
+    const resourceId = typeof request.resourceId === 'string' ? request.resourceId : '';
+    const now = typeof request.now === 'string' && Number.isFinite(Date.parse(request.now))
+      ? request.now
+      : '1970-01-01T00:00:00.000Z';
+    const resource = resources.find((entry) => entry.id === resourceId);
+    if (resource === undefined) {
+      return {
+        schemaVersion: COMPUTE_SCHEMA_VERSION,
+        operation: 'reconcile',
+        provider: HETZNER_PROVIDER,
+        adapterVersion: HETZNER_ADAPTER_VERSION,
+        mode: 'provision',
+        resourceId,
+        resourceGeneration: 0,
+        ownership: 'unverifiable',
+        desiredState: 'active',
+        observedState: 'destroyed',
+        valid: true,
+        safe: false,
+        mutated: false,
+        requiresOperator: true,
+        findings: [{
+          code: 'reconcile.resource-missing',
+          severity: 'blocking',
+          message: 'managed resource does not exist in the fake provider',
+          evidence: resourceId,
+        }],
+        issues: [],
+      };
+    }
+    return reconcileResource(resource, {
+      now,
+      ...(request.fallback === undefined ? {} : { fallback: request.fallback }),
+    });
   };
 
   return {
@@ -939,11 +1112,17 @@ export function createFakeHetznerProvider(recorded: FakeHetznerProviderRecorded)
     routeJob(input: unknown): Promise<HetznerJobRouteResult> {
       return routeJob(input);
     },
-    completeJob(input: unknown): { ok: boolean; jobId: string; issues: ComputeIssue[] } {
+    completeJob(input: unknown): HetznerJobCompletionResult {
       return completeJob(input);
     },
     scaleToZero(input: unknown): HetznerScaleToZeroResult {
       return scaleToZero(input);
+    },
+    localFallback(input: unknown): HetznerLocalFallbackResult {
+      return localFallback(input);
+    },
+    reconcile(input: unknown): ComputeReconciliation {
+      return reconcile(input);
     },
     listResources(): ComputeResource[] {
       return resources.map((resource) => ({
