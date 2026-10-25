@@ -50,6 +50,7 @@ export const TASK_FIELDS = [
  'approveModel','approvedProfiles','modelProfile',
  'plan',
  'hopFrom','hopRevision','hopContext','piContext','clarifiedFrom','scope',
+ 'readScope','budget','scopeExpansion',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
 
@@ -144,6 +145,187 @@ export function validateContext(context:unknown, cwd:string):void {
  }
 }
 
+/** Read-scope modes. `context-only` reads only the contract's explicit scope;
+ * `context-plus-dependencies` also allows declared dependency paths. */
+export const READ_SCOPE_MODES = ['context-only','context-plus-dependencies'] as const;
+export type ReadScopeMode = typeof READ_SCOPE_MODES[number];
+export const READ_SCOPE_FIELDS = ['mode','paths','maxFiles','maxBytes','allowGraft'] as const;
+
+/** Token, tool-call and retained-output budgets. `warn` records an overrun;
+ * `enforce` stops it before it becomes a completed handback. */
+export const BUDGET_MODES = ['warn','enforce'] as const;
+export const BUDGET_FIELDS = [
+ 'maxInputTokens','maxFreshInputTokens','maxCacheReadTokens','maxCachedInputTokens',
+ 'maxOutputTokens','maxTotalTokens','maxToolCalls','maxToolOutputBytes','maxResponseCalls','mode',
+] as const;
+
+export const SCOPE_EXPANSION_FIELDS = ['paths','reason'] as const;
+
+/** One relative, workspace-contained path or glob used by a read scope or an
+ * explicit scope expansion. Absolute paths and dot-dot escapes are rejected. */
+function validateScopedPath(value:unknown, cwd:string, label:string):void {
+ if (typeof value !== 'string' || !value.trim()) throw Error(`${label} (expected a non-empty string)`);
+ const raw=value.trim();
+ if (isAbsolute(raw)) throw Error(`${label} (expected a relative path)`);
+ const abs=resolve(resolve(cwd), raw);
+ if (!withinWorkspace(resolve(cwd), abs)) throw Error(`${label} (outside the workspace)`);
+}
+
+/** Validate the optional contract `readScope`. The mode is required when the
+ * block is present; paths are relative and contained by the contract cwd. */
+export function validateReadScope(readScope:unknown, cwd:string):void {
+ if (!readScope || typeof readScope !== 'object' || Array.isArray(readScope)) throw Error('Invalid readScope (expected an object)');
+ const scope:any=readScope;
+ for (const k of Object.keys(scope)) if (!(READ_SCOPE_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown readScope field: ${k}`);
+ if (typeof scope.mode !== 'string' || !(READ_SCOPE_MODES as readonly string[]).includes(scope.mode)) {
+  throw Error(`Invalid readScope.mode (expected ${READ_SCOPE_MODES.join(' or ')})`);
+ }
+ if (scope.paths !== undefined) {
+  if (!Array.isArray(scope.paths)) throw Error('Invalid readScope.paths (expected an array of relative paths)');
+  for (const path of scope.paths) validateScopedPath(path, cwd, 'Invalid readScope.paths');
+ }
+ for (const key of ['maxFiles','maxBytes'] as const) {
+  const value=scope[key];
+  if (value === undefined) continue;
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+   throw Error(`Invalid readScope.${key} (expected a positive integer)`);
+  }
+ }
+ if (scope.allowGraft !== undefined && typeof scope.allowGraft !== 'boolean') throw Error('Invalid readScope.allowGraft (expected a boolean)');
+}
+
+/** Validate the optional contract `budget` block before any paid call. Token
+ * and byte budgets are positive integers; call budgets may be zero. */
+export function validateBudget(budget:unknown):void {
+ if (!budget || typeof budget !== 'object' || Array.isArray(budget)) throw Error('Invalid budget (expected an object)');
+ const b:any=budget;
+ for (const k of Object.keys(b)) if (!(BUDGET_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown budget field: ${k}`);
+ if (b.mode !== undefined && (typeof b.mode !== 'string' || !(BUDGET_MODES as readonly string[]).includes(b.mode))) {
+  throw Error(`Invalid budget.mode (expected ${BUDGET_MODES.join(' or ')})`);
+ }
+ for (const key of Object.keys(b)) {
+  if (key === 'mode') continue;
+  const value=b[key];
+  const allowZero=key === 'maxToolCalls' || key === 'maxResponseCalls';
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < (allowZero ? 0 : 1)) {
+   throw Error(`Invalid budget.${key} (expected a ${allowZero ? 'nonnegative' : 'positive'} integer)`);
+  }
+ }
+}
+
+/** Validate an optional explicit scope-expansion request. It carries one or
+ * more relative paths and a non-empty reason; there is no implicit broadening. */
+export function validateScopeExpansion(expansion:unknown, cwd:string):void {
+ if (!expansion || typeof expansion !== 'object' || Array.isArray(expansion)) throw Error('Invalid scopeExpansion (expected an object)');
+ const e:any=expansion;
+ for (const k of Object.keys(e)) if (!(SCOPE_EXPANSION_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown scopeExpansion field: ${k}`);
+ if (!Array.isArray(e.paths) || !e.paths.length) throw Error('Invalid scopeExpansion.paths (expected a non-empty array of relative paths)');
+ for (const path of e.paths) validateScopedPath(path, cwd, 'Invalid scopeExpansion.paths');
+ if (typeof e.reason !== 'string' || !e.reason.trim()) throw Error('Invalid scopeExpansion.reason (expected a non-empty string)');
+}
+
+/** Canonical expansion paths: trimmed, slash-normalized, deduplicated and
+ * sorted, so the same request always grants the same paths in the same order. */
+export function scopeExpansionPaths(t:any):string[] {
+ const expansion=t?.scopeExpansion;
+ if (!expansion || typeof expansion !== 'object' || Array.isArray(expansion) || !Array.isArray(expansion.paths)) return [];
+ return [...new Set(expansion.paths.filter((p:any)=>typeof p === 'string' && p.trim()).map((p:string)=>p.trim().replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'')).filter(Boolean))].sort();
+}
+
+/** Deterministic scope-expansion request, or null when the contract has none. */
+export function scopeExpansionRequest(t:any):{paths:string[];reason:string}|null {
+ const paths=scopeExpansionPaths(t);
+ const reason=t?.scopeExpansion?.reason;
+ if (!paths.length || typeof reason !== 'string' || !reason.trim()) return null;
+ return {paths,reason:reason.trim()};
+}
+
+function normalizeScopedPath(path:string):string {
+ return path.trim().replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+}
+
+/** Match one declared read path (exact path, directory prefix or simple glob). */
+export function readScopePathMatches(pattern:string, candidate:string):boolean {
+ const p=normalizeScopedPath(pattern);
+ const c=normalizeScopedPath(candidate);
+ if (!p || !c) return false;
+ if (p === c) return true;
+ if (!/[*?]/.test(p)) return c.startsWith(`${p}/`);
+ let re='^';
+ for (let i=0;i<p.length;i++) {
+  const ch=p[i];
+  if (ch === '*') {
+   if (p[i+1] === '*') { re+='.*'; i++; }
+   else re+='[^/]*';
+  } else if (ch === '?') re+='[^/]';
+  else if (/[\\^$.*+?()[\]{}|]/.test(ch)) re+='\\'+ch;
+  else re+=ch;
+ }
+ re+='$';
+ try { return new RegExp(re).test(c); } catch { return false; }
+}
+
+/** Resolved allowed read paths, or null when the contract sets no read scope. */
+export function readScopeAllowedPaths(t:any):string[]|null {
+ const scope=t?.readScope;
+ if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return null;
+ const declared=Array.isArray(scope.paths) ? scope.paths : [];
+ const context=(Array.isArray(t?.context) ? t.context : []).map((e:any)=>e?.path).filter((p:any)=>typeof p === 'string' && p.trim());
+ const base=scope.mode === 'context-only'
+  ? (declared.length ? declared : context)
+  : [...declared, ...context];
+ return [...new Set([...base, ...scopeExpansionPaths(t)].map(normalizeScopedPath).filter(Boolean))].sort();
+}
+
+/** True when a read is inside the contract's configured scope. A contract
+ * without `readScope` keeps the previous unrestricted behavior. */
+export function isReadAllowed(t:any, path:string):boolean {
+ const allowed=readScopeAllowedPaths(t);
+ if (!allowed) return true;
+ return allowed.some((pattern)=>readScopePathMatches(pattern,path));
+}
+
+/** Throw before reading a file outside the configured scope, so no content can
+ * leak into the prompt or a paid call. */
+export function assertReadAllowed(t:any, path:string):void {
+ if (!isReadAllowed(t,path)) throw Error(`read outside contract scope: ${path}`);
+}
+
+/** Read one file only after the scope check, returning an error entry instead
+ * of content when it is outside the contract's read scope. */
+export function readScopedFile(t:any, path:string):{path:string;text?:string;error?:string} {
+ const abs=resolve(resolve(String(t?.cwd ?? '.')), path);
+ if (!withinWorkspace(resolve(String(t?.cwd ?? '.')), abs)) return {path,error:'outside the workspace'};
+ if (!isReadAllowed(t,path)) return {path,error:'read outside contract scope'};
+ try { return {path,text:readFileSync(abs,'utf8')}; }
+ catch(err) { return {path,error:msg(err)}; }
+}
+
+/** One deterministic prompt block naming the read scope, budgets and any
+ * explicitly approved expansion. */
+export function boundedContextBlock(t:any):string|null {
+ const lines:string[]=[];
+ const scope=t?.readScope;
+ if (scope && typeof scope === 'object' && !Array.isArray(scope)) {
+  const paths=Array.isArray(scope.paths) ? scope.paths.map((p:any)=>String(p)) : [];
+  lines.push(`Read scope: ${scope.mode}${paths.length ? `; allowed paths: ${paths.join(', ')}` : ''}.`);
+  if (scope.maxFiles !== undefined) lines.push(`Read scope max files: ${scope.maxFiles}.`);
+  if (scope.maxBytes !== undefined) lines.push(`Read scope max bytes: ${scope.maxBytes}.`);
+  if (scope.allowGraft === true) lines.push('A repository index such as graft may be used for bounded discovery; do not dump raw file trees.');
+  lines.push(scope.mode === 'context-only'
+   ? 'Read only paths inside this explicit scope; an out-of-scope read stops the run and must not be replaced by a broad search.'
+   : 'Read declared paths and their graph-derived dependencies only; do not broaden into unrelated files.');
+ }
+ const budget=t?.budget;
+ if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
+  const parts:any=Object.entries(budget).filter(([k])=>k !== 'mode').map(([k,v])=>`${k}=${v}`);
+  if (parts.length) lines.push(`Budgets${budget.mode ? ` (${budget.mode})` : ''}: ${parts.join(', ')}.`);
+ }
+ const expansion=scopeExpansionRequest(t);
+ if (expansion) lines.push(`Scope expansion approved: ${expansion.paths.join(', ')} (${expansion.reason})`);
+ return lines.length ? lines.join('\n') : null;
+}
+
 /** Validate the optional `plan` link to a cpm plan deliverable. `id` and
  * `deliverable` identify the deliverable; `callerId` is an optional identity.
  * Unknown keys are rejected so a typo fails before the worker starts. */
@@ -168,6 +350,7 @@ export function resolveContext(t:any):ResolvedContextEntry[] {
   const rel=typeof e?.path==='string' ? e.path : '';
   const abs=resolve(cwd, rel);
   if (!rel || !withinWorkspace(cwd, abs)) return {path:rel,error:'outside the workspace'};
+  if (!isReadAllowed(t, rel)) return {path:rel,error:'read outside contract scope'};
   let raw:string;
   try { raw=readFileSync(abs,'utf8'); }
   catch(err) { return {path:rel,error:msg(err)}; }
@@ -292,6 +475,9 @@ export function validate(t: any) {
   if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');
  }
  if (t.context !== undefined) validateContext(t.context, t.cwd);
+ if (t.readScope !== undefined) validateReadScope(t.readScope, t.cwd);
+ if (t.budget !== undefined) validateBudget(t.budget);
+ if (t.scopeExpansion !== undefined) validateScopeExpansion(t.scopeExpansion, t.cwd);
  if (t.piContext !== undefined) {
   const problem = validatePiContext(t.piContext);
   if (problem) throw Error(problem);
@@ -1235,6 +1421,8 @@ export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo
  if (parts.report) blocks.push(parts.report);
  if (parts.review) blocks.push(parts.review);
  if (parts.context) blocks.push(parts.context);
+ const bounded=boundedContextBlock(t);
+ if (bounded) blocks.push(bounded);
  if (parts.resume) blocks.push(parts.resume);
  // The contract must name the checkout the worker actually runs in, never the
  // source checkout a worktree run is isolated from.
