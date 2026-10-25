@@ -95,6 +95,42 @@ test("the managed tool registry includes scientific-process and elicitation", ()
   );
 });
 
+test("init emits CPM_PLANNER_DB anchored beside the generated Hop", () => {
+  const dir = tmpdir();
+  const manifest = initHopManifest(path.join(dir, "hop.json"), { probeVersion: () => null });
+  assert.equal(manifest.tools.cpm.env.CPM_PLANNER_DB, path.join(dir, "cpm-planner.db"));
+});
+
+function cpmLoggingHop(dir, openedDbExpression) {
+  const script = path.join(dir, "cpm-logs-db.mjs");
+  fs.writeFileSync(
+    script,
+    `console.error("opening planner database db=" + (${openedDbExpression}));\n` +
+      `await import(${JSON.stringify(FAKE)});\n`,
+  );
+  return initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo", { command: NODE, args: [script] }),
+      crossmatrix: toolEntry("crossmatrix"),
+    },
+  });
+}
+
+test("a cpm call rejects a planner that opened the default database", () => {
+  const dir = tmpdir();
+  const hop = cpmLoggingHop(dir, JSON.stringify(path.join(dir, "default-cpm-planner.db")));
+  const out = cliJson(runCli(["call", "--full", hop, "cpm", "plan.status"]));
+  assert.equal(out.error.code, "UPSTREAM_ERROR");
+});
+
+test("a cpm call accepts a planner that opened the project database", () => {
+  const dir = tmpdir();
+  const hop = cpmLoggingHop(dir, "process.env.CPM_PLANNER_DB");
+  const out = cliJson(runCli(["call", "--full", hop, "cpm", "plan.status"]));
+  assert.equal(out.ok, true);
+});
+
 test("init persists a stable project id across a later call", () => {
   const dir = tmpdir();
   const hop = initHop(dir);
