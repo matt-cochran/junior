@@ -6,12 +6,15 @@ import {
   createFakePiTransport,
   createPiArtifactManifest,
   createPiProtocol,
+  createPiSecretBroker,
   createPiWorkspaceManifest,
+  executePiRemoteJob,
   inspectPiHostIdentity,
   verifyPiManifest,
   verifyPiHostIdentity,
   type PiHostIdentity,
 } from './compute-pi.ts';
+import { acquireComputeLease, createComputeLeaseState } from './compute.ts';
 
 const verifiedHost: PiHostIdentity = {
   status: 'verified',
@@ -162,4 +165,118 @@ test('a completed operation returns a content-addressed artifact manifest', asyn
     sourceCommit: 'abc123',
   });
   assert.equal(verifyPiManifest(result.artifacts), true);
+});
+
+
+const NOW = '2026-10-25T12:00:00.000Z';
+
+function acquiredLease() {
+  const state = createComputeLeaseState({ resourceId: 'srv-123', resourceGeneration: 7, now: NOW });
+  const acquired = acquireComputeLease(state, {
+    leaseId: 'lease-job-1',
+    holder: 'worker-1',
+    now: NOW,
+    expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  if (!acquired.ok) throw new Error(acquired.message);
+  return { state: acquired.state, lease: acquired.lease };
+}
+
+function remoteJob(lease: ReturnType<typeof acquiredLease>) {
+  return {
+    jobId: 'job-1',
+    requestId: 'req-job-1',
+    expectedHost: verifiedHost,
+    operation: 'run',
+    workspace: workspace(),
+    lease: {
+      leaseId: lease.lease.id,
+      holder: lease.lease.holder,
+      fencingToken: lease.lease.fencingToken,
+      resourceId: lease.lease.resourceId,
+      resourceGeneration: lease.lease.resourceGeneration,
+    },
+    leaseState: lease.state,
+  };
+}
+
+test('transport rejects a host key recreated after verification', async () => {
+  const transport = createFakePiTransport({
+    observedHost: { hostKeyFingerprint: 'SHA256:recreated-host-key' },
+  });
+  await assert.rejects(
+    () => createPiProtocol(transport).connect({ expectedHost: verifiedHost }),
+    (error: PiProtocolError) => error.code === 'host.mismatch',
+  );
+});
+
+test('a cancelled remote job releases its lease', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport({ executionDelayMs: 5_000 });
+  const controller = new AbortController();
+  const operation = executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 10);
+  const result = await operation;
+  assert.notEqual(result.leaseState.leases[0]?.releasedAt, undefined);
+});
+
+test('a cancelled remote job records the cancelled outcome on its lease', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport({ executionDelayMs: 5_000 });
+  const controller = new AbortController();
+  const operation = executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 10);
+  assert.equal((await operation).lease.outcome, 'cancelled');
+});
+
+test('a timed out remote job releases its lease', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport({ executionDelayMs: 5_000 });
+  const result = await executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    timeoutMs: 20,
+  });
+  assert.notEqual(result.leaseState.leases[0]?.releasedAt, undefined);
+});
+
+test('a remote job returns artifacts with the source commit identity', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport({
+    execute: async () => ({ exitCode: 0, files: [{ path: 'out.txt', content: 'done\n' }] }),
+  });
+  const result = await executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    sourceCommit: 'abc123',
+  });
+  assert.equal(result.artifacts.sourceCommit, 'abc123');
+});
+
+test('a remote job redacts brokered secrets from returned logs', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport({
+    execute: async () => ({ exitCode: 0, stdout: 'using token s3cr3t\n' }),
+  });
+  const result = await executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    secretNames: ['API_TOKEN'],
+    secretBroker: createPiSecretBroker({ API_TOKEN: 's3cr3t' }),
+  });
+  assert.equal(result.logs, 'using token [redacted:API_TOKEN]\n');
+});
+
+test('a remote job supplies brokered secrets to the transport at use time', async () => {
+  const lease = acquiredLease();
+  const transport = createFakePiTransport();
+  await executePiRemoteJob(createPiProtocol(transport), {
+    ...remoteJob(lease),
+    secretNames: ['API_TOKEN'],
+    secretBroker: createPiSecretBroker({ API_TOKEN: 's3cr3t' }),
+  });
+  assert.equal(transport.lastExecutionEnvironment?.API_TOKEN, 's3cr3t');
 });

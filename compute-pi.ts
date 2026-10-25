@@ -10,6 +10,11 @@
 
 import { createHash } from 'node:crypto';
 
+import {
+  releaseComputeLease,
+  type ComputeLeaseState,
+} from './compute.ts';
+
 export const COMPUTE_PI_SCHEMA_VERSION = 1;
 
 export const PI_HOST_IDENTITY_STATUSES = [
@@ -390,8 +395,11 @@ export type PiTransportConnectRequest = {
 export type PiTransportExecuteRequest = {
   operation: string;
   requestId: string;
+  jobId?: string;
   workspace: PiWorkspaceManifest;
   sourceCommit?: string;
+  /** Resolved at use time by the secret broker; never persisted in a receipt. */
+  environment?: Readonly<Record<string, string>>;
   signal: AbortSignal;
   timeoutMs?: number;
 };
@@ -424,8 +432,14 @@ export type PiExecuteRequest = {
   expectedHost: PiHostIdentity;
   operation: string;
   requestId: string;
+  /** Remote job this operation belongs to, when it is leased work. */
+  jobId?: string;
   workspace: PiWorkspaceManifest;
   sourceCommit?: string;
+  /** Resolved at use time by the secret broker; never persisted in a receipt. */
+  environment?: Readonly<Record<string, string>>;
+  /** Redacts secret material before it reaches logs, results or errors. */
+  redact?: (value: string) => string;
   signal?: AbortSignal;
   timeoutMs?: number;
 };
@@ -436,6 +450,8 @@ export type PiOperationResult = {
   schemaVersion: typeof COMPUTE_PI_SCHEMA_VERSION;
   requestId: string;
   operation: string;
+  jobId: string | null;
+  sourceCommit: string;
   status: PiOperationStatus;
   host: {
     resourceId: string;
@@ -449,6 +465,8 @@ export type PiOperationResult = {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  /** Redacted stdout/stderr combined for log collection. */
+  logs: string;
   cancellation: null | {
     reason: 'caller' | 'timeout';
     propagated: boolean;
@@ -467,6 +485,69 @@ export type PiProtocol = {
   connect(request: PiConnectRequest): Promise<PiSession>;
   execute(request: PiExecuteRequest): Promise<PiOperationResult>;
 };
+
+// ---------------------------------------------------------------------------
+// Secret brokering
+// ---------------------------------------------------------------------------
+
+export type PiSecretBroker = {
+  /** Resolve names at use time; a missing secret fails the operation. */
+  resolve(names: readonly string[]): Promise<Record<string, string>>;
+  /** Replace every resolved secret value with a stable marker. */
+  redact(value: string): string;
+};
+
+/** Replace secret values in text without revealing their names or contents. */
+export function redactPiSecrets(
+  value: string,
+  secrets: Readonly<Record<string, string | undefined>>,
+): string {
+  let redacted = value;
+  for (const [name, secret] of Object.entries(secrets)) {
+    if (typeof secret !== 'string' || secret.length === 0) continue;
+    redacted = redacted.split(secret).join(`[redacted:${name}]`);
+  }
+  return redacted;
+}
+
+export type PiSecretSource =
+  | Readonly<Record<string, string | undefined>>
+  | { get(name: string): string | undefined | Promise<string | undefined> };
+
+/**
+ * Build a use-time secret broker over a local source or secret manager. It
+ * stores only resolved values in memory so every emitted record can be redacted.
+ */
+export function createPiSecretBroker(source: PiSecretSource = {}): PiSecretBroker {
+  const resolved = new Map<string, string>();
+  const lookup = async (name: string): Promise<string | undefined> => {
+    if ('get' in source && typeof source.get === 'function') return await source.get(name);
+    return (source as Readonly<Record<string, string | undefined>>)[name];
+  };
+  return {
+    async resolve(names: readonly string[]): Promise<Record<string, string>> {
+      const environment: Record<string, string> = {};
+      for (const name of names) {
+        let value = resolved.get(name);
+        if (value === undefined) {
+          value = await lookup(name);
+          if (value === undefined || value === '') {
+            throw new PiProtocolError('secret.missing', `required secret ${name} is unavailable`);
+          }
+          resolved.set(name, value);
+        }
+        environment[name] = value;
+      }
+      return environment;
+    },
+    redact(value: string): string {
+      return redactPiSecrets(value, Object.fromEntries(resolved));
+    },
+  };
+}
+
+export const brokerPiSecrets = createPiSecretBroker;
+export const redactPiLogs = redactPiSecrets;
 
 type AbortScope = {
   signal: AbortSignal;
@@ -544,16 +625,23 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function redactorFor(request: Omit<PiExecuteRequest, 'expectedHost'>): (value: string) => string {
+  return request.redact ?? ((value) => value);
+}
+
 function cancellationResult(input: {
   request: Omit<PiExecuteRequest, 'expectedHost'>;
   expectedHost: PiHostIdentity;
   reason: 'caller' | 'timeout';
   startedAt: string;
 }): PiOperationResult {
+  const redact = redactorFor(input.request);
   return {
     schemaVersion: COMPUTE_PI_SCHEMA_VERSION,
     requestId: input.request.requestId,
     operation: input.request.operation,
+    jobId: input.request.jobId ?? null,
+    sourceCommit: input.request.sourceCommit ?? 'unknown',
     status: input.reason === 'timeout' ? 'timed_out' : 'cancelled',
     host: {
       resourceId: input.expectedHost.resourceId,
@@ -570,6 +658,7 @@ function cancellationResult(input: {
     exitCode: null,
     stdout: '',
     stderr: '',
+    logs: redact(''),
     cancellation: { reason: input.reason, propagated: true },
     error: null,
   };
@@ -582,10 +671,13 @@ function failedResult(input: {
   error: unknown;
 }): PiOperationResult {
   const error = input.error instanceof Error ? input.error : new Error(String(input.error));
+  const redact = redactorFor(input.request);
   return {
     schemaVersion: COMPUTE_PI_SCHEMA_VERSION,
     requestId: input.request.requestId,
     operation: input.request.operation,
+    jobId: input.request.jobId ?? null,
+    sourceCommit: input.request.sourceCommit ?? 'unknown',
     status: 'failed',
     host: {
       resourceId: input.expectedHost.resourceId,
@@ -602,8 +694,9 @@ function failedResult(input: {
     exitCode: null,
     stdout: '',
     stderr: '',
+    logs: redact(''),
     cancellation: null,
-    error: { code: 'operation.failed', message: error.message },
+    error: { code: 'operation.failed', message: redact(error.message) },
   };
 }
 
@@ -668,8 +761,10 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
             Promise.resolve(connection.execute({
               operation: request.operation,
               requestId: request.requestId,
+              ...(request.jobId === undefined ? {} : { jobId: request.jobId }),
               workspace: request.workspace,
               ...(request.sourceCommit === undefined ? {} : { sourceCommit: request.sourceCommit }),
+              ...(request.environment === undefined ? {} : { environment: request.environment }),
               signal: executionScope.signal,
               ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
             })),
@@ -703,10 +798,34 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
         if (!verifyPiManifest(artifacts) || artifacts.kind !== 'artifact') {
           throw new PiProtocolError('artifact.invalid', 'artifact manifest is not content-addressed');
         }
+        const requestedCommit = request.sourceCommit ?? 'unknown';
+        if (request.sourceCommit !== undefined
+          && artifacts.sourceCommit !== 'unknown'
+          && artifacts.sourceCommit !== request.sourceCommit) {
+          throw new PiProtocolError(
+            'artifact.source-commit',
+            'artifact manifest does not match the requested source commit',
+          );
+        }
+        const attachedArtifacts = artifacts.sourceCommit === requestedCommit
+          ? artifacts
+          : {
+            ...artifacts,
+            sourceCommit: requestedCommit,
+            root: manifestRoot('artifact', artifacts.entries, {
+              sourceCommit: requestedCommit,
+              workspaceRoot: artifacts.workspaceRoot,
+            }),
+          };
+        const redact = redactorFor(request);
+        const stdout = redact(execution.stdout ?? '');
+        const stderr = redact(execution.stderr ?? '');
         return {
           schemaVersion: COMPUTE_PI_SCHEMA_VERSION,
           requestId: request.requestId,
           operation: request.operation,
+          jobId: request.jobId ?? null,
+          sourceCommit: requestedCommit,
           status: (execution.exitCode ?? 0) === 0 ? 'succeeded' : 'failed',
           host: {
             resourceId: observedHost.resourceId,
@@ -714,16 +833,17 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
             hostKeyFingerprint: observedHost.hostKeyFingerprint,
           },
           workspaceRoot: request.workspace.root,
-          artifacts,
+          artifacts: attachedArtifacts,
           startedAt,
           completedAt: clock(),
           exitCode: execution.exitCode ?? 0,
-          stdout: execution.stdout ?? '',
-          stderr: execution.stderr ?? '',
+          stdout,
+          stderr,
+          logs: redact([stdout, stderr].filter((value) => value !== '').join('\n')),
           cancellation: null,
           error: (execution.exitCode ?? 0) === 0
             ? null
-            : { code: 'operation.exit', message: `remote command exited with ${execution.exitCode}` },
+            : { code: 'operation.exit', message: redact(`remote command exited with ${execution.exitCode}`) },
         };
       } finally {
         executionScope.dispose();
@@ -752,8 +872,11 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
         return await session.execute({
           operation: request.operation,
           requestId: request.requestId,
+          ...(request.jobId === undefined ? {} : { jobId: request.jobId }),
           workspace: request.workspace,
           ...(request.sourceCommit === undefined ? {} : { sourceCommit: request.sourceCommit }),
+          ...(request.environment === undefined ? {} : { environment: request.environment }),
+          ...(request.redact === undefined ? {} : { redact: request.redact }),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
           ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
         });
@@ -763,6 +886,113 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Leased remote jobs
+// ---------------------------------------------------------------------------
+
+/** The fencing lease a remote job was routed under before Pi executes it. */
+export type PiRemoteJobLease = {
+  leaseId: string;
+  holder: string;
+  fencingToken: number;
+  resourceId: string;
+  resourceGeneration: number;
+};
+
+export type PiRemoteJobRequest = Omit<PiExecuteRequest, 'jobId' | 'environment' | 'redact'> & {
+  jobId: string;
+  lease: PiRemoteJobLease;
+  leaseState: ComputeLeaseState;
+  /** Secret names resolved through the broker immediately before execution. */
+  secretNames?: readonly string[];
+  secretBroker?: PiSecretBroker;
+  /** Clock used to timestamp the lease release. */
+  now?: () => string;
+};
+
+export type PiRemoteJobLeaseOutcome = {
+  leaseId: string;
+  holder: string;
+  fencingToken: number;
+  releasedAt: string | null;
+  released: boolean;
+  /** Operation outcome recorded against the lease, even when cancelled. */
+  outcome: PiOperationStatus;
+  code: string;
+};
+
+export type PiRemoteJobResult = PiOperationResult & {
+  leaseState: ComputeLeaseState;
+  lease: PiRemoteJobLeaseOutcome;
+};
+
+/**
+ * Execute a routed remote job over Pi and always release its fencing lease.
+ * Secrets are resolved at use time and redacted from every returned log,
+ * result and error. Cancellation and timeout still record an outcome and
+ * release the lease before the caller observes the result.
+ */
+export async function executePiRemoteJob(
+  protocol: PiProtocol,
+  request: PiRemoteJobRequest,
+): Promise<PiRemoteJobResult> {
+  const clock = request.now ?? nowIso;
+  const broker = request.secretBroker ?? createPiSecretBroker();
+  const secretNames = request.secretNames ?? [];
+  let environment: Record<string, string> | undefined;
+  let result: PiOperationResult | undefined;
+  let released = request.leaseState;
+  let releaseCode = 'lease.not-released';
+  try {
+    if (secretNames.length > 0) environment = await broker.resolve(secretNames);
+    result = await protocol.execute({
+      expectedHost: request.expectedHost,
+      operation: request.operation,
+      requestId: request.requestId,
+      jobId: request.jobId,
+      workspace: request.workspace,
+      ...(request.sourceCommit === undefined ? {} : { sourceCommit: request.sourceCommit }),
+      ...(environment === undefined ? {} : { environment }),
+      redact: (value) => broker.redact(value),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+    });
+  } finally {
+    const release = releaseComputeLease(request.leaseState, {
+      leaseId: request.lease.leaseId,
+      holder: request.lease.holder,
+      fencingToken: request.lease.fencingToken,
+      now: clock(),
+    });
+    if (release.ok) {
+      released = release.state;
+      releaseCode = 'lease.released';
+    } else {
+      releaseCode = release.code;
+    }
+  }
+  if (result === undefined) {
+    throw new PiProtocolError('job.no-result', 'remote job did not produce an operation result');
+  }
+  const lease = released.leases.find((entry) => entry.id === request.lease.leaseId);
+  return {
+    ...result,
+    leaseState: released,
+    lease: {
+      leaseId: request.lease.leaseId,
+      holder: request.lease.holder,
+      fencingToken: request.lease.fencingToken,
+      releasedAt: lease?.releasedAt ?? null,
+      released: lease?.releasedAt !== undefined,
+      outcome: result.status,
+      code: releaseCode,
+    },
+  };
+}
+
+export const runPiRemoteJob = executePiRemoteJob;
+export const attachPiRemoteJob = executePiRemoteJob;
 
 // ---------------------------------------------------------------------------
 // Local fake transport
@@ -781,6 +1011,7 @@ export type FakePiTransport = PiTransport & {
   executeCalls: number;
   lastExecutionSignal: AbortSignal | undefined;
   lastExecutionRequest: PiTransportExecuteRequest | undefined;
+  lastExecutionEnvironment: Readonly<Record<string, string>> | undefined;
 };
 
 /** A deterministic local transport. It never opens sockets or spawns SSH. */
@@ -790,6 +1021,7 @@ export function createFakePiTransport(options: FakePiTransportOptions = {}): Fak
     executeCalls: 0,
     lastExecutionSignal: undefined,
     lastExecutionRequest: undefined,
+    lastExecutionEnvironment: undefined,
     async connect(request: PiTransportConnectRequest): Promise<PiTransportConnection> {
       fake.connectCalls += 1;
       if (request.signal.aborted) throw abortError('fake Pi connection cancelled');
@@ -803,6 +1035,7 @@ export function createFakePiTransport(options: FakePiTransportOptions = {}): Fak
           fake.executeCalls += 1;
           fake.lastExecutionSignal = execution.signal;
           fake.lastExecutionRequest = execution;
+          fake.lastExecutionEnvironment = execution.environment;
           if (options.execute !== undefined) {
             if (execution.signal.aborted) throw abortError('fake Pi execution cancelled');
             return await options.execute(execution);
