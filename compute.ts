@@ -59,6 +59,26 @@ export const COMPUTE_OWNERSHIP_STATUSES = [
 ] as const;
 export type ComputeOwnershipStatus = typeof COMPUTE_OWNERSHIP_STATUSES[number];
 
+/** Account-level identity observed from a provider control API. */
+export const COMPUTE_PROVIDER_IDENTITY_STATUSES = [
+  'verified',
+  'missing',
+  'ambiguous',
+  'unverified',
+  'mismatch',
+] as const;
+export type ComputeProviderIdentityStatus = typeof COMPUTE_PROVIDER_IDENTITY_STATUSES[number];
+
+export type ComputeProviderIdentity = {
+  status: ComputeProviderIdentityStatus;
+  provider: string;
+  account: string;
+  project?: string;
+  endpoint?: string;
+  evidence?: string;
+  verifiedAt?: string;
+};
+
 /** Maximum provider-neutral operations for each ownership mode. Ownership
  * records, leases and generation checks still have to pass before a mutating
  * operation is allowed. */
@@ -88,6 +108,7 @@ export type ComputeOwnershipRecord = {
   status: ComputeOwnershipStatus;
   provider?: string;
   account?: string;
+  project?: string;
   resourceId?: string;
   mode?: ComputeMode;
   owner?: string;
@@ -135,6 +156,8 @@ export type ComputeStatus = {
   provider: string;
   adapterVersion: string;
   mode: ComputeMode;
+  /** Observed provider/account identity; when present it must match ownership. */
+  providerIdentity?: ComputeProviderIdentity;
   resource: ComputeResource;
   ownership: ComputeOwnershipRecord;
   desiredState: ComputeLifecycleState;
@@ -358,6 +381,15 @@ export const COMPUTE_STATUS_SCHEMA = {
     provider: { type: 'string', minLength: 1 },
     adapterVersion: { type: 'string', minLength: 1 },
     mode: { enum: COMPUTE_MODES },
+    providerIdentity: {
+      type: 'object',
+      required: ['status', 'provider', 'account'],
+      properties: {
+        status: { enum: COMPUTE_PROVIDER_IDENTITY_STATUSES },
+        provider: { type: 'string', minLength: 1 },
+        account: { type: 'string', minLength: 1 },
+      },
+    },
     resource: {
       type: 'object',
       required: ['id', 'generation', 'tags'],
@@ -434,6 +466,203 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
+}
+
+export type ComputeProviderIdentityInspection = {
+  valid: boolean;
+  verified: boolean;
+  issues: ComputeIssue[];
+  identity: ComputeProviderIdentity | null;
+};
+
+export type ComputeProviderIdentityVerification = {
+  verified: boolean;
+  code: 'provider.verified' | 'provider.invalid' | 'provider.unverified' | 'provider.mismatch';
+  message: string;
+  issues: ComputeIssue[];
+};
+
+function providerIdentityIssue(
+  code: string,
+  path: string,
+  message: string,
+  severity: ComputeIssueSeverity = 'invalid',
+): ComputeIssue {
+  return { code, severity, path, message };
+}
+
+/** Validate a recorded provider/account identity before any provider call. */
+export function inspectComputeProviderIdentity(input: unknown): ComputeProviderIdentityInspection {
+  const issues: ComputeIssue[] = [];
+  if (!isRecord(input)) {
+    return {
+      valid: false,
+      verified: false,
+      issues: [providerIdentityIssue('provider.invalid', '', 'provider identity must be an object')],
+      identity: null,
+    };
+  }
+  const raw = input as Partial<ComputeProviderIdentity>;
+  if (!COMPUTE_PROVIDER_IDENTITY_STATUSES.includes(raw.status as ComputeProviderIdentityStatus)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'status', 'provider identity status is invalid'));
+  } else if (raw.status !== 'verified') {
+    issues.push(providerIdentityIssue(
+      'provider.unverified',
+      'status',
+      `provider identity is ${raw.status}; a verified identity is required`,
+      'unsafe',
+    ));
+  }
+  if (!isNonEmptyString(raw.provider)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'provider', 'provider identity provider is required'));
+  }
+  if (!isNonEmptyString(raw.account)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'account', 'provider identity account is required'));
+  }
+  if (raw.project !== undefined && !isNonEmptyString(raw.project)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'project', 'provider identity project must be non-empty'));
+  }
+  if (raw.endpoint !== undefined && !isNonEmptyString(raw.endpoint)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'endpoint', 'provider identity endpoint must be non-empty'));
+  }
+  if (raw.verifiedAt !== undefined && !isTimestamp(raw.verifiedAt)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'verifiedAt', 'provider identity verifiedAt is invalid'));
+  }
+  if (raw.evidence !== undefined && !isNonEmptyString(raw.evidence)) {
+    issues.push(providerIdentityIssue('provider.invalid', 'evidence', 'provider identity evidence must be non-empty'));
+  }
+
+  const valid = !issues.some((issue) => issue.severity === 'invalid');
+  return {
+    valid,
+    verified: valid && raw.status === 'verified',
+    issues,
+    identity: valid ? {
+      status: raw.status as ComputeProviderIdentityStatus,
+      provider: raw.provider as string,
+      account: raw.account as string,
+      ...(raw.project === undefined ? {} : { project: raw.project }),
+      ...(raw.endpoint === undefined ? {} : { endpoint: raw.endpoint }),
+      ...(raw.evidence === undefined ? {} : { evidence: raw.evidence }),
+      ...(raw.verifiedAt === undefined ? {} : { verifiedAt: raw.verifiedAt }),
+    } : null,
+  };
+}
+
+/** Compare the recorded provider/account identity with the one just observed. */
+export function verifyComputeProviderIdentity(
+  expectedInput: unknown,
+  observedInput: unknown,
+): ComputeProviderIdentityVerification {
+  const expected = inspectComputeProviderIdentity(expectedInput);
+  if (!expected.valid) {
+    return {
+      verified: false,
+      code: 'provider.invalid',
+      message: 'the recorded provider identity is invalid',
+      issues: expected.issues,
+    };
+  }
+  if (!expected.verified) {
+    return {
+      verified: false,
+      code: 'provider.unverified',
+      message: 'the recorded provider identity is not verified',
+      issues: expected.issues,
+    };
+  }
+  const observed = inspectComputeProviderIdentity(observedInput);
+  if (!observed.valid || !observed.verified) {
+    return {
+      verified: false,
+      code: 'provider.invalid',
+      message: 'the observed provider identity is invalid or unverified',
+      issues: observed.issues,
+    };
+  }
+  const expectedIdentity = expected.identity as ComputeProviderIdentity;
+  const observedIdentity = observed.identity as ComputeProviderIdentity;
+  const fields: Array<keyof Pick<ComputeProviderIdentity, 'provider' | 'account' | 'project' | 'endpoint'>> = [
+    'provider',
+    'account',
+    'project',
+    'endpoint',
+  ];
+  const mismatches = fields
+    .filter((field) => expectedIdentity[field] !== undefined && observedIdentity[field] !== expectedIdentity[field])
+    .map((field) => providerIdentityIssue(
+      'provider.mismatch',
+      field,
+      `observed provider ${field} does not match the verified record`,
+      'unsafe',
+    ));
+  if (mismatches.length > 0) {
+    return {
+      verified: false,
+      code: 'provider.mismatch',
+      message: 'the observed provider account does not match the verified identity; provider calls are refused',
+      issues: mismatches,
+    };
+  }
+  return {
+    verified: true,
+    code: 'provider.verified',
+    message: 'the observed provider identity matches the verified account',
+    issues: [],
+  };
+}
+
+export function assertVerifiedComputeProviderIdentity(input: unknown): ComputeProviderIdentity {
+  const inspection = inspectComputeProviderIdentity(input);
+  if (!inspection.valid || !inspection.verified || inspection.identity === null) {
+    const detail = inspection.issues.map((issue) => `${issue.path || 'identity'}: ${issue.message}`).join('; ');
+    throw new TypeError(`unverified compute provider identity: ${detail}`);
+  }
+  return inspection.identity;
+}
+
+function validateProviderIdentity(
+  status: Record<string, unknown>,
+  ownership: ComputeOwnershipRecord,
+  issues: ComputeIssue[],
+): void {
+  if (status.providerIdentity === undefined) return;
+  const inspection = inspectComputeProviderIdentity(status.providerIdentity);
+  issues.push(...inspection.issues);
+  const identity = inspection.identity;
+  if (identity === null) return;
+  if (identity.provider !== status.provider) {
+    issues.push(providerIdentityIssue(
+      'provider.identity-mismatch',
+      'providerIdentity.provider',
+      'observed provider identity does not match the status provider',
+      'unsafe',
+    ));
+  }
+  if (ownership.account !== identity.account) {
+    issues.push(providerIdentityIssue(
+      'provider.identity-mismatch',
+      'providerIdentity.account',
+      'observed provider account does not match the ownership account',
+      'unsafe',
+    ));
+  }
+  if (ownership.project !== undefined && ownership.project !== identity.project) {
+    issues.push(providerIdentityIssue(
+      'provider.identity-mismatch',
+      'providerIdentity.project',
+      'observed provider project does not match the ownership project',
+      'unsafe',
+    ));
+  }
+  if (identity.status !== 'verified') {
+    issues.push(providerIdentityIssue(
+      'provider.identity-mismatch',
+      'providerIdentity.status',
+      'the observed provider identity is not verified',
+      'unsafe',
+    ));
+  }
 }
 
 function resolveEpoch(value: string | number | undefined): number {
@@ -693,6 +922,11 @@ export function inspectComputeStatus(
   }
 
   validateOwnership(input, resource, issues);
+  validateProviderIdentity(
+    input,
+    (isRecord(input.ownership) ? input.ownership : {}) as ComputeOwnershipRecord,
+    issues,
+  );
   validateLeases(input, resource, resolveEpoch(opts.now), issues);
 
   const leases = Array.isArray(input.leases) ? input.leases : [];
