@@ -436,6 +436,11 @@ function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
+function resolveEpoch(value: string | number | undefined): number {
+  if (value === undefined) return Date.now();
+  return typeof value === 'number' ? value : Date.parse(value);
+}
+
 function sameTags(left: unknown, right: unknown): boolean {
   if (!isRecord(left) || !isRecord(right)) return false;
   const leftKeys = Object.keys(left).sort();
@@ -688,10 +693,10 @@ export function inspectComputeStatus(
   }
 
   validateOwnership(input, resource, issues);
-  validateLeases(input, resource, opts.now === undefined ? Date.now() : Date.parse(String(opts.now)), issues);
+  validateLeases(input, resource, resolveEpoch(opts.now), issues);
 
   const leases = Array.isArray(input.leases) ? input.leases : [];
-  const now = opts.now === undefined ? Date.now() : Date.parse(String(opts.now));
+  const now = resolveEpoch(opts.now);
   const activeLeaseCount = leases.filter((lease) => {
     if (!isRecord(lease) || isTimestamp(lease.releasedAt)) return false;
     const expires = Date.parse(String(lease.expiresAt));
@@ -1040,7 +1045,7 @@ export function inspectComputeLeaseState(
     return { valid: !issues.some((issue) => issue.severity === 'invalid'), safe: false, issues };
   }
 
-  const now = opts.now === undefined ? Date.now() : Date.parse(String(opts.now));
+  const now = resolveEpoch(opts.now);
   let active = 0;
   const ids = new Set<string>();
   for (const [index, value] of leases.entries()) {
@@ -1359,7 +1364,7 @@ export function authorizeComputeOperation(
     return operationDecision(operation, false, 'ownership.record', 'ownership is not verified');
   }
 
-  const now = input.now === undefined ? Date.now() : Date.parse(String(input.now));
+  const now = resolveEpoch(input.now);
   const activeLeases = status.leases.filter((lease) => leaseIsActive(lease, now));
 
   if (operation === 'destroy') {
@@ -1397,4 +1402,350 @@ export function authorizeComputeOperation(
   }
 
   return operationDecision(operation, true, 'allowed', 'operation is authorized');
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation and authority-checked stop/release.
+//
+// Reconciliation is a pure comparison: it never changes the recorded status,
+// the lease history or a provider resource. Repeating it with the same
+// observation produces the same findings. Stop and lease release are expressed
+// as local decisions; only release may change the durable lease state, and only
+// after ownership and fencing checks succeed.
+// ---------------------------------------------------------------------------
+
+export type ComputeReconciliation = {
+  schemaVersion: typeof COMPUTE_SCHEMA_VERSION;
+  operation: 'reconcile';
+  provider: string;
+  adapterVersion: string;
+  mode: ComputeMode;
+  resourceId: string;
+  resourceGeneration: number;
+  ownership: ComputeOwnershipStatus;
+  desiredState: ComputeLifecycleState;
+  observedState: ComputeLifecycleState;
+  valid: boolean;
+  safe: boolean;
+  mutated: false;
+  requiresOperator: boolean;
+  findings: ComputeFinding[];
+  issues: ComputeIssue[];
+};
+
+function finding(
+  code: string,
+  severity: ComputeFindingSeverity,
+  message: string,
+  evidence?: string,
+): ComputeFinding {
+  return { code, severity, message, ...(evidence === undefined ? {} : { evidence }) };
+}
+
+function issueFinding(issue: ComputeIssue): ComputeFinding {
+  if (issue.severity === 'invalid') {
+    return finding('reconcile.status-invalid', 'blocking', issue.message, issue.path);
+  }
+  if (issue.code.startsWith('ownership.')) {
+    return finding('reconcile.ownership-uncertain', 'blocking', issue.message, issue.path);
+  }
+  if (issue.code.startsWith('lease.') || issue.code.startsWith('state.')) {
+    return finding('reconcile.lease-uncertain', 'blocking', issue.message, issue.path);
+  }
+  return finding('reconcile.unsafe', 'blocking', issue.message, issue.path);
+}
+
+/**
+ * Compare desired state, observed state and ownership without forcing either
+ * side. The result is deterministic for one observation and never mutates the
+ * supplied status. Uncertain ownership is reported as unsafe; drift and lease
+ * anomalies become findings with stable codes.
+ */
+export function reconcileComputeStatus(
+  input: ComputeStatus,
+  opts: { now?: string | number } = {},
+): ComputeReconciliation {
+  const now = resolveEpoch(opts.now);
+  const inspection = inspectComputeStatus(input, { now });
+  const findings: ComputeFinding[] = Array.isArray(input.findings)
+    ? input.findings.map((entry) => ({ ...entry }))
+    : [];
+
+  const seen = new Set(findings.map((entry) => `${entry.code}:${entry.evidence ?? ''}`));
+  const append = (entry: ComputeFinding): void => {
+    const key = `${entry.code}:${entry.evidence ?? ''}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      findings.push(entry);
+    }
+  };
+
+  for (const issue of inspection.issues) {
+    append(issueFinding(issue));
+  }
+
+  if (input.desiredState !== input.observedState) {
+    append(finding(
+      'reconcile.state-drift',
+      'warning',
+      `desired state ${input.desiredState} differs from observed state ${input.observedState}`,
+      `desired=${input.desiredState};observed=${input.observedState}`,
+    ));
+  }
+
+  const leases = Array.isArray(input.leases) ? input.leases : [];
+  const expired = leases.filter((lease) => {
+    if (leaseIsClosed(lease)) return false;
+    const expires = Date.parse(String(lease.expiresAt));
+    return Number.isFinite(expires) && expires <= now;
+  });
+  if (expired.length > 0) {
+    append(finding(
+      'reconcile.lease-expired',
+      'warning',
+      `${expired.length} lease(s) have expired and await reclaim`,
+      expired.map((lease) => lease.id).sort().join(','),
+    ));
+  }
+
+  const active = leases.filter((lease) => leaseIsActive(lease, now));
+  if (active.length > 0 && input.observedState !== 'leased' && input.observedState !== 'active') {
+    append(finding(
+      'reconcile.lease-observed-idle',
+      'warning',
+      'an active lease exists but the observed state is not leased or active',
+      active.map((lease) => lease.id).sort().join(','),
+    ));
+  }
+
+  if (input.cost && input.cost.amount === 'unknown') {
+    append(finding('reconcile.cost-unknown', 'info', 'observed cost is explicitly unknown'));
+  }
+
+  const safe = inspection.safe;
+  return {
+    schemaVersion: COMPUTE_SCHEMA_VERSION,
+    operation: 'reconcile',
+    provider: input.provider,
+    adapterVersion: input.adapterVersion,
+    mode: input.mode,
+    resourceId: input.resource.id,
+    resourceGeneration: input.resource.generation,
+    ownership: input.ownership.status,
+    desiredState: input.desiredState,
+    observedState: input.observedState,
+    valid: inspection.valid,
+    safe,
+    mutated: false,
+    requiresOperator: !safe,
+    findings,
+    issues: inspection.issues,
+  };
+}
+
+/** Alias that names the resource being reconciled rather than its status. */
+export const reconcileComputeResource = reconcileComputeStatus;
+
+export type ComputeStopResult = {
+  schemaVersion: typeof COMPUTE_SCHEMA_VERSION;
+  operation: 'stop';
+  resourceId: string;
+  resourceGeneration: number;
+  valid: boolean;
+  safe: boolean;
+  allowed: boolean;
+  mutated: boolean;
+  code: string;
+  message: string;
+  authorization: ComputeOperationAuthorization;
+  reconciliation: ComputeReconciliation;
+  findings: ComputeFinding[];
+  issues: ComputeIssue[];
+  leaseState?: ComputeLeaseState;
+  lease?: ComputeLease;
+};
+
+/**
+ * Decide whether a stop may be attempted and optionally release the matching
+ * local lease when the caller supplies lease state. Ownership, policy mode and
+ * fencing are checked before anything changes. An unsafe or uncertain resource
+ * returns the original lease state with `mutated: false`.
+ */
+export function stopComputeResource(
+  status: ComputeStatus,
+  input: {
+    policy?: ComputePolicy;
+    leaseId?: string;
+    fencingToken?: number;
+    now?: string | number;
+    leaseState?: ComputeLeaseState;
+  } = {},
+): ComputeStopResult {
+  const now = resolveEpoch(input.now);
+  const reconciliation = reconcileComputeStatus(status, { now });
+  const authorization = authorizeComputeOperation(status, {
+    operation: 'stop',
+    ...(input.policy === undefined ? {} : { policy: input.policy }),
+    ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+    ...(input.fencingToken === undefined ? {} : { fencingToken: input.fencingToken }),
+    now,
+  });
+
+  const base = {
+    schemaVersion: COMPUTE_SCHEMA_VERSION,
+    operation: 'stop' as const,
+    resourceId: status.resource.id,
+    resourceGeneration: status.resource.generation,
+    valid: reconciliation.valid,
+    safe: reconciliation.safe,
+    allowed: authorization.allowed,
+    mutated: false,
+    code: authorization.code,
+    message: authorization.message,
+    authorization,
+    reconciliation,
+    findings: reconciliation.findings,
+    issues: authorization.issues.length > 0 ? authorization.issues : reconciliation.issues,
+    ...(input.leaseState === undefined ? {} : { leaseState: input.leaseState }),
+  };
+
+  if (!authorization.allowed || input.leaseState === undefined) {
+    return base;
+  }
+
+  const matching = status.leases.find((lease) =>
+    leaseIsActive(lease, now)
+    && (input.leaseId === undefined || lease.id === input.leaseId)
+    && (input.fencingToken === undefined || lease.fencingToken === input.fencingToken));
+  if (!matching) return base;
+
+  const released = releaseComputeLeaseWithAuthority(status, input.leaseState, {
+    leaseId: matching.id,
+    holder: matching.holder,
+    fencingToken: matching.fencingToken,
+    now: new Date(now).toISOString(),
+  });
+  if (!released.ok) {
+    return { ...base, code: released.code, message: released.message, issues: released.issues };
+  }
+  return {
+    ...base,
+    mutated: true,
+    code: 'stop.authorized',
+    message: 'stop is authorized and the matching local lease is released',
+    leaseState: released.state,
+    lease: released.lease,
+  };
+}
+
+/** Alias for callers that name the operation rather than the resource. */
+export const stopCompute = stopComputeResource;
+
+export type ComputeAuthorizedLeaseRelease =
+  | {
+    ok: true;
+    mutated: true;
+    safe: boolean;
+    state: ComputeLeaseState;
+    lease: ComputeLease;
+    code: string;
+    message: string;
+    issues: ComputeIssue[];
+    findings: ComputeFinding[];
+  }
+  | {
+    ok: false;
+    mutated: false;
+    safe: boolean;
+    state: ComputeLeaseState;
+    code: string;
+    message: string;
+    issues: ComputeIssue[];
+    findings: ComputeFinding[];
+  };
+
+/**
+ * Release one lease only after the ownership record and the lease fencing
+ * checks pass. Uncertain ownership is unsafe and leaves the lease state
+ * untouched; a stale holder or token is likewise rejected without mutation.
+ */
+export function releaseComputeLeaseWithAuthority(
+  status: ComputeStatus,
+  state: ComputeLeaseState,
+  input: {
+    leaseId: string;
+    holder: string;
+    fencingToken: number;
+    now: string;
+  },
+): ComputeAuthorizedLeaseRelease {
+  const now = Date.parse(input.now);
+  const inspection = inspectComputeStatus(status, { now });
+  if (!inspection.valid) {
+    return {
+      ok: false,
+      mutated: false,
+      safe: false,
+      state,
+      code: 'status.invalid',
+      message: 'status document is invalid',
+      issues: inspection.issues,
+      findings: inspection.issues.map(issueFinding),
+    };
+  }
+  if (!inspection.safe || status.ownership.status !== 'verified') {
+    return {
+      ok: false,
+      mutated: false,
+      safe: false,
+      state,
+      code: 'ownership.unsafe',
+      message: 'ownership or resource state is unsafe; the lease is retained',
+      issues: inspection.issues,
+      findings: inspection.issues.map(issueFinding),
+    };
+  }
+  if (state.resourceId !== status.resource.id
+    || state.resourceGeneration !== status.resource.generation) {
+    return {
+      ok: false,
+      mutated: false,
+      safe: true,
+      state,
+      code: 'lease.generation-match',
+      message: 'lease state does not describe the observed resource generation',
+      issues: [{
+        code: 'lease.generation-match',
+        severity: 'unsafe',
+        path: 'leaseState',
+        message: 'lease state does not describe the observed resource generation',
+      }],
+      findings: [],
+    };
+  }
+
+  const mutation = releaseComputeLease(state, input);
+  if (!mutation.ok) {
+    return {
+      ok: false,
+      mutated: false,
+      safe: true,
+      state: mutation.state,
+      code: mutation.code,
+      message: mutation.message,
+      issues: [],
+      findings: [],
+    };
+  }
+  return {
+    ok: true,
+    mutated: true,
+    safe: true,
+    state: mutation.state,
+    lease: mutation.lease as ComputeLease,
+    code: 'lease.released',
+    message: 'ownership and fencing authorize the release',
+    issues: [],
+    findings: [],
+  };
 }
