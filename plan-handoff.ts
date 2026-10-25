@@ -37,7 +37,7 @@ export function runNeverStarted(result: any): boolean {
   return Array.isArray(observed) && observed.length === 0;
 }
 
-export type PlanHopResult = { ok: boolean; result?: any; error?: { message: string } };
+export type PlanHopResult = { ok: boolean; result?: any; revision?: number; error?: { message: string } };
 
 export type PlanHop = (
   tool: 'cpm',
@@ -47,6 +47,12 @@ export type PlanHop = (
 export interface PlanLeaseTask {
   id: string;
   plan: { id: string; deliverable: string; callerId?: string };
+  /** The Hop revision the contract was written against. The lease call itself
+   * advances the Hop, so it is refreshed to the acquisition revision before the
+   * run starts. A mutation before the lease is rejected as stale. */
+  hopRevision?: number;
+  /** The integrity-checked context a contract may carry instead of hopRevision. */
+  hopContext?: { revision?: number | null };
 }
 
 export interface PlanLeaseSummary {
@@ -74,6 +80,8 @@ export interface PlanLeaseOutcome<R> {
     leased: boolean;
     marked: 'in_progress' | 'failed' | null;
     reentered?: boolean;
+    /** The Hop revision the run should be checked against after the lease. */
+    revision?: number;
     error?: string;
   };
 }
@@ -129,6 +137,12 @@ export async function withPlanLease<R>(
     marked: null,
   };
 
+  const contextRevision = task.hopContext?.revision;
+  const expectedRevision = typeof task.hopRevision === 'number' && Number.isInteger(task.hopRevision) && task.hopRevision >= 0
+    ? task.hopRevision
+    : typeof contextRevision === 'number' && Number.isInteger(contextRevision) && contextRevision >= 0
+      ? contextRevision
+      : undefined;
   const ttlSeconds = Math.ceil(deps.deadlineMs / 1000) + 3600;
   let acquired: PlanHopResult;
   try {
@@ -140,6 +154,7 @@ export async function withPlanLease<R>(
         ids: [plan.deliverable],
         max_count: 1,
         ttl_seconds: ttlSeconds,
+        ...(expectedRevision !== undefined ? { expectedRevision } : {}),
       },
     });
   } catch (error) {
@@ -148,6 +163,12 @@ export async function withPlanLease<R>(
   }
   if (!acquired.ok) {
     plan.error = `plan.acquire_cohort failed: ${acquired.error?.message ?? 'unknown error'}`;
+    return { plan };
+  }
+  // The lease is one Hop mutation. Accept exactly that step and fail closed on
+  // any larger change, so a mutation that raced the lease is never absorbed.
+  if (expectedRevision !== undefined && typeof acquired.revision === 'number' && acquired.revision !== expectedRevision + 1) {
+    plan.error = `plan.acquire_cohort advanced the HOP to revision ${acquired.revision}; expected ${expectedRevision + 1}`;
     return { plan };
   }
   let leasedIds: string[];
@@ -182,7 +203,19 @@ export async function withPlanLease<R>(
         : `plan.acquire_cohort did not lease ${plan.deliverable}`;
       return { plan };
     }
+    if (typeof acquired.revision === 'number' && typeof status.revision === 'number' && status.revision !== acquired.revision + 1) {
+      plan.error = `plan.status advanced the HOP to revision ${status.revision}; expected ${acquired.revision + 1}`;
+      return { plan };
+    }
+    if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
     plan.reentered = true;
+  }
+  // The run is checked against the revision the lease left behind, not the
+  // pre-lease revision that the lease itself invalidated.
+  if (typeof acquired.revision === 'number') {
+    plan.revision = acquired.revision;
+    task.hopRevision = acquired.revision;
+    if (task.hopContext) task.hopContext.revision = acquired.revision;
   }
   plan.leased = true;
 
