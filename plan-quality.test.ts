@@ -201,3 +201,107 @@ test('scorePlanContracts sends the resolved context excerpt to the classifier', 
   await scorePlanContracts([entry], classify);
   assert.equal(sent.includes('excerpt-marker'), true);
 });
+
+// --- dependency-edge vetting (#122) ---------------------------------------
+
+import { vetPlanEdges, vetPlanEdgesWithClassifier } from './plan-quality.ts';
+
+function vetAgent(id: string, opts: any = {}): any {
+  return {
+    id,
+    owned_files: opts.owned_files ?? [],
+    prerequisites: opts.prerequisites ?? [],
+    metadata: {
+      artifact: opts.artifact ?? `produce ${id}`,
+      owner: opts.owner ?? 'agent',
+      ...(opts.metadata ?? {}),
+      ...(opts.junior === undefined ? {} : { junior: opts.junior }),
+    },
+  };
+}
+
+function vetPlan(...deliverables: any[]): any {
+  return { deliverables };
+}
+
+const namedEdge = (id: string, consumes: string, extra: any = {}) => ({ id, consumes, ...extra });
+
+test('vetPlanEdges records supporting evidence for a named dependency edge', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['schema.ts'] }),
+    vetAgent('b', {
+      owned_files: ['b.ts'],
+      prerequisites: [namedEdge('a', 'schema')],
+      junior: { acceptance: ['uses schema.ts from a'], checks: [{ command: 'true' }], context: [{ path: 'schema.ts' }] },
+    }),
+  ));
+  assert.equal(report.findings[0].supporting.length > 0, true);
+});
+
+test('vetPlanEdges records counterfactual evidence for every reviewed edge', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['schema.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: [namedEdge('a', 'schema')] }),
+  ));
+  assert.equal(report.findings.every((finding) => finding.counterfactual.length > 0), true);
+});
+
+test('vetPlanEdges refutes an edge that names nothing consumed', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['a.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  ));
+  assert.equal(report.findings[0].verdict, 'refuted');
+});
+
+test('vetPlanEdges proposes removing a refuted edge instead of applying it', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['a.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  ));
+  assert.deepEqual(report.findings[0].proposals, [{ op: 'remove_edge', from: 'a', to: 'b' }]);
+});
+
+test('vetPlanEdges reviews every prerequisite edge', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['a.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: [namedEdge('a', 'schema')] }),
+    vetAgent('c', { owned_files: ['c.ts'], prerequisites: [namedEdge('b', 'api')] }),
+  ));
+  assert.equal(report.findings.length, 2);
+});
+
+test('vetPlanEdges leaves the plan unchanged', () => {
+  const value = vetPlan(
+    vetAgent('a', { owned_files: ['a.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  );
+  vetPlanEdges(value);
+  assert.deepEqual(value.deliverables[1].prerequisites, ['a']);
+});
+
+test('vetPlanEdgesWithClassifier records the positive and negative answers as evidence', async () => {
+  const classify = async () => ({ positive: 0.9, negative: 0.1 });
+  const report = await vetPlanEdgesWithClassifier(
+    vetPlan(vetAgent('a', { owned_files: ['a.ts'] }), vetAgent('b', { owned_files: ['b.ts'], prerequisites: [namedEdge('a', 'schema')] })),
+    classify,
+  );
+  assert.equal(report.findings[0].supporting.some((item) => item.kind === 'two-sided'), true);
+});
+
+test('vetPlanEdgesWithClassifier marks contradictory two-sided answers uncertain', async () => {
+  const classify = async () => ({ positive: 0.9, negative: 0.9 });
+  const report = await vetPlanEdgesWithClassifier(
+    vetPlan(vetAgent('a', { owned_files: ['a.ts'] }), vetAgent('b', { owned_files: ['b.ts'], prerequisites: [namedEdge('a', 'schema')] })),
+    classify,
+  );
+  assert.equal(report.findings[0].verdict, 'uncertain');
+});
+
+test('vetPlanEdges records supporting evidence for every reviewed edge', () => {
+  const report = vetPlanEdges(vetPlan(
+    vetAgent('a', { owned_files: ['a.ts'] }),
+    vetAgent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  ));
+  assert.equal(report.findings.every((finding) => finding.supporting.length > 0), true);
+});

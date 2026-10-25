@@ -534,3 +534,123 @@ test('scorePlanFile resolves context against the configured repository checkout'
   await scorePlanFile(file, classify, { cwd: dir });
   assert.equal(sent.includes('repo-excerpt-marker'), true);
 });
+
+// --- critical-path assurance (#121) ---------------------------------------
+
+const hours = (likely: number) => ({ optimistic: likely, likely, pessimistic: likely });
+
+test('checkPlanForJunior exposes the computed critical path', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(2) }),
+    agent('b', { owned_files: ['b.ts'], estimate: hours(3), prerequisites: [{ id: 'a', consumes: 'schema' }] }),
+  ));
+  assert.deepEqual(result.criticalPath.path, ['__start__', 'a', 'b', '__finish__']);
+});
+
+test('critical-path report names owner work on the path', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(2) }),
+    agent('owner-review', { owner: 'owner', owned_files: ['review.md'], estimate: hours(1), prerequisites: [{ id: 'a', consumes: 'implementation' }] }),
+  ));
+  assert.deepEqual(result.criticalPath.ownerWork.map((step) => step.id), ['owner-review']);
+});
+
+test('critical-path report names manual work on the path', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(2) }),
+    agent('manual-signoff', { owned_files: [], junior: null, estimate: hours(1), metadata: { kind: 'manual' }, prerequisites: [{ id: 'a', consumes: 'implementation' }] }),
+  ));
+  assert.deepEqual(result.criticalPath.manualWork.map((step) => step.id), ['manual-signoff']);
+});
+
+test('critical-path report records prerequisite lags on the path', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(2) }),
+    agent('b', { owned_files: ['b.ts'], estimate: hours(1), prerequisites: [{ id: 'a', consumes: 'schema', lag_hours: 4 }] }),
+  ));
+  assert.deepEqual(result.criticalPath.lags, [{ from: 'a', to: 'b', hours: 4 }]);
+});
+
+test('critical-path report names long-running steps on the path', () => {
+  const result = checkPlanForJunior(plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(2) }),
+    agent('slow', { owned_files: ['slow.ts'], estimate: hours(9), prerequisites: [{ id: 'a', consumes: 'schema' }] }),
+  ));
+  assert.deepEqual(result.criticalPath.longRunning.map((step) => step.id), ['slow']);
+});
+
+test('critical-path report flags a merge milestone fanning out with identical consumes', () => {
+  const merge = agent('merge', { owned_files: [], estimate: hours(1) });
+  const dependents = ['x', 'y', 'z'].map((id) => agent(id, {
+    owned_files: [`${id}.ts`],
+    estimate: hours(2),
+    prerequisites: [{ id: 'merge', consumes: 'batch merge' }],
+  }));
+  const result = checkPlanForJunior(plan(merge, ...dependents));
+  assert.deepEqual(result.criticalPath.fanOut.map((item) => item.id), ['merge']);
+});
+
+test('checkPlanForJunior flags plan drift when the stored critical path disagrees', () => {
+  const value = {
+    deliverables: [
+      agent('a', { owned_files: ['a.ts'], estimate: hours(1) }),
+      agent('b', { owned_files: ['b.ts'], estimate: hours(1), prerequisites: [{ id: 'a', consumes: 'schema' }] }),
+    ],
+    critical_path: ['__start__', 'b', 'a', '__finish__'],
+  };
+  assert.ok(codes(checkPlanForJunior(value)).includes('PLAN_DRIFT'));
+});
+
+test('checkPlanForJunior is not ok when plan drift is detected', () => {
+  const value = {
+    deliverables: [
+      agent('a', { owned_files: ['a.ts'], estimate: hours(1) }),
+      agent('b', { owned_files: ['b.ts'], estimate: hours(1), prerequisites: [{ id: 'a', consumes: 'schema' }] }),
+    ],
+    critical_path: ['__start__', 'b', 'a', '__finish__'],
+  };
+  assert.equal(checkPlanForJunior(value).ok, false);
+});
+
+test('checkPlanForJunior exposes drift detected from a definition_drift snapshot', () => {
+  const value = {
+    deliverables: [agent('a', { owned_files: ['a.ts'], estimate: hours(1) })],
+    definition_drift: true,
+  };
+  assert.equal(checkPlanForJunior(value).criticalPath.drift.detected, true);
+});
+
+// --- plan vet CLI (#122) ---------------------------------------------------
+
+test('runPlanCommand prints the vet findings JSON', () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(
+    agent('a', { owned_files: ['a.ts'] }),
+    agent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  ));
+  const lines: string[] = [];
+  runPlanCommand(['vet', file], { cwd: dir, out: (line) => lines.push(line) });
+  assert.equal(JSON.parse(lines.join('\n')).findings[0].verdict, 'refuted');
+});
+
+test('runPlanCommand exits 1 when plan vet refutes an edge', () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(
+    agent('a', { owned_files: ['a.ts'] }),
+    agent('b', { owned_files: ['b.ts'], prerequisites: ['a'] }),
+  ));
+  const { exitCode } = runPlanCommand(['vet', file], { cwd: dir, out: () => {} });
+  assert.equal(exitCode, 1);
+});
+
+test('runPlanCommand detects drift against a supplied plan status', () => {
+  const dir = workdir();
+  const file = writePlan(dir, plan(
+    agent('a', { owned_files: ['a.ts'], estimate: hours(1) }),
+    agent('b', { owned_files: ['b.ts'], estimate: hours(1), prerequisites: [{ id: 'a', consumes: 'schema' }] }),
+  ));
+  const status = join(dir, 'status.json');
+  writeFileSync(status, JSON.stringify({ critical_path: ['__start__', 'b', 'a', '__finish__'] }));
+  const { result } = runPlanCommand(['check', file, '--status', status], { cwd: dir, out: () => {} });
+  assert.ok(codes(result).includes('PLAN_DRIFT'));
+});
