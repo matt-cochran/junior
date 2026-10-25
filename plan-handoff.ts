@@ -5,14 +5,17 @@
 // handoff starts and records its progress after it finishes: it acquires a
 // one-deliverable cohort (`plan.acquire_cohort`), runs the handoff, then marks
 // the deliverable `in_progress` on success or `failed` on failure
-// (`plan.mark_status`). The lease is left for the manager to accept; a failing
-// mark is recorded in `plan.error` without discarding the run result.
+// (`plan.mark_status`). A Failed deliverable is returned to Ready through the
+// supported audited lockless mark before it is re-leased; an active lease held
+// by another caller is always refused. The lease is left for the manager to
+// accept; a failing mark is recorded in `plan.error` without discarding the
+// run result.
 //
 // The cpm calls are injected so the wrapper stays offline and testable. The
 // lease is deliberately not released here: acceptance is a manager action.
 // ---------------------------------------------------------------------------
 
-import { cohortDeliverableIds, planLocks, strictItems } from './companion-shapes.ts';
+import { cohortDeliverableIds, planLocks, planStatusRows, strictItems } from './companion-shapes.ts';
 
 /** Outcomes that stop a run to wait for the manager or the human: the lease is
  * kept (a rerun by the same caller is re-entrant) and the deliverable is not
@@ -80,6 +83,11 @@ export interface PlanLeaseOutcome<R> {
     leased: boolean;
     marked: 'in_progress' | 'failed' | null;
     reentered?: boolean;
+    /** A failed deliverable was returned to ready through the supported cpm
+     * lifecycle before this lease. */
+    retried?: boolean;
+    /** The failure reason carried into the retry evidence. */
+    retryReason?: string;
     /** The Hop revision the run should be checked against after the lease. */
     revision?: number;
     error?: string;
@@ -107,6 +115,26 @@ function lockHolders(result: unknown): Array<{ deliverableId: string; callerId: 
     deliverableId: lock.deliverableId,
     callerId: lock.callerId,
   }));
+}
+
+/** The recorded reason when a cpm delivery row is Failed; otherwise undefined. */
+function failedReason(result: unknown, deliverableId: string): string | undefined {
+  const rows = strictItems(planStatusRows(result), 'cpm', 'plan.status', result);
+  const row = rows.find((candidate) => candidate.id === deliverableId);
+  const raw = row?.raw;
+  if (!raw || typeof raw !== 'object') return undefined;
+  const mark = (raw as any).status ?? (raw as any).mark_status ?? (raw as any).markStatus;
+  const status = typeof mark === 'string' ? mark : mark && typeof mark === 'object' ? mark.status : undefined;
+  if (String(status).toLowerCase() !== 'failed') return undefined;
+  const reason = typeof mark === 'object'
+    ? typeof mark.reason === 'string' ? mark.reason.trim() : ''
+    : typeof (raw as any).reason === 'string' ? (raw as any).reason.trim() : '';
+  return reason || 'failure reason not recorded';
+}
+
+/** cpm evidence for a lockless Ready handback that keeps the failed reason. */
+function retryEvidence(reason: string): string {
+  return `retry after failure: ${reason}`.slice(0, 2048);
 }
 
 /** One line describing where the run landed, its outcome and its model. */
@@ -197,18 +225,101 @@ export async function withPlanLease<R>(
       plan.error = `plan.status failed: ${messageOf(error)}`;
       return { plan };
     }
-    if (!held || held.callerId !== callerId) {
-      plan.error = held
-        ? `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`
-        : `plan.acquire_cohort did not lease ${plan.deliverable}`;
+    if (held && held.callerId !== callerId) {
+      plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`;
       return { plan };
     }
-    if (typeof acquired.revision === 'number' && typeof status.revision === 'number' && status.revision !== acquired.revision + 1) {
-      plan.error = `plan.status advanced the HOP to revision ${status.revision}; expected ${acquired.revision + 1}`;
-      return { plan };
+    if (held) {
+      if (typeof acquired.revision === 'number' && typeof status.revision === 'number' && status.revision !== acquired.revision + 1) {
+        plan.error = `plan.status advanced the HOP to revision ${status.revision}; expected ${acquired.revision + 1}`;
+        return { plan };
+      }
+      if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
+      plan.reentered = true;
+    } else {
+      let reason: string | undefined;
+      try {
+        reason = status.ok ? failedReason(status.result, plan.deliverable) : undefined;
+      } catch (error) {
+        plan.error = `plan.status failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (reason === undefined) {
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
+        return { plan };
+      }
+      // cpm 0.4.3 supports Failed -> Ready only as an audited lockless mark;
+      // return the deliverable through that lifecycle, never by inventing a
+      // lease or a direct status write.
+      let ready: PlanHopResult;
+      try {
+        ready = await deps.callHop('cpm', {
+          tool: 'plan.mark_status',
+          arguments: {
+            caller_id: callerId,
+            plan_id: plan.id,
+            deliverable_id: plan.deliverable,
+            status: { status: 'ready' },
+            evidence: retryEvidence(reason),
+          },
+        });
+      } catch (error) {
+        plan.error = `plan.mark_status failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!ready.ok) {
+        plan.error = `plan.mark_status failed: ${ready.error?.message ?? 'unknown error'}`;
+        return { plan };
+      }
+      if (typeof status.revision === 'number' && typeof ready.revision === 'number' && ready.revision !== status.revision + 1) {
+        plan.error = `plan.mark_status advanced the HOP to revision ${ready.revision}; expected ${status.revision + 1}`;
+        return { plan };
+      }
+      const retryRevision = typeof ready.revision === 'number'
+        ? ready.revision
+        : typeof status.revision === 'number'
+          ? status.revision
+          : expectedRevision;
+      let retried: PlanHopResult;
+      try {
+        retried = await deps.callHop('cpm', {
+          tool: 'plan.acquire_cohort',
+          arguments: {
+            plan_id: plan.id,
+            caller_id: callerId,
+            ids: [plan.deliverable],
+            max_count: 1,
+            ttl_seconds: ttlSeconds,
+            ...(retryRevision !== undefined ? { expectedRevision: retryRevision } : {}),
+          },
+        });
+      } catch (error) {
+        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!retried.ok) {
+        plan.error = `plan.acquire_cohort failed: ${retried.error?.message ?? 'unknown error'}`;
+        return { plan };
+      }
+      if (retryRevision !== undefined && typeof retried.revision === 'number' && retried.revision !== retryRevision + 1) {
+        plan.error = `plan.acquire_cohort advanced the HOP to revision ${retried.revision}; expected ${retryRevision + 1}`;
+        return { plan };
+      }
+      let retriedIds: string[];
+      try {
+        retriedIds = cohortIds(retried.result);
+      } catch (error) {
+        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!retriedIds.includes(plan.deliverable)) {
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable} after returning it to ready`;
+        return { plan };
+      }
+      acquired = retried;
+      plan.retried = true;
+      plan.retryReason = reason;
     }
-    if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
-    plan.reentered = true;
   }
   // The run is checked against the revision the lease left behind, not the
   // pre-lease revision that the lease itself invalidated.
