@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop } from './tools/tools.ts';
 import { checkPi, doctor } from './setup.ts';
+import { runComputeCommand } from './cli.ts';
+import { COMPUTE_OPERATIONS, DEFAULT_COMPUTE_POLICY } from './compute.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -685,4 +687,142 @@ test('junior fmeca propose-verified reports invalid JSON on stderr', () => {
   const file = join(dir, 'result.json');
   writeFileSync(file, 'not json');
   assert.match(runJunior(['fmeca', 'propose-verified', file], dir).stderr, /invalid result\.json/);
+});
+
+
+// --- compute init/doctor/status (issue #123) --------------------------------
+
+const COMPUTE_DIR = ['.delivery', 'compute'] as const;
+
+function computeFile(cwd: string, ...parts: string[]): string {
+  return join(cwd, ...COMPUTE_DIR, ...parts);
+}
+
+function writeComputeJson(cwd: string, parts: string[], value: unknown): void {
+  const path = computeFile(cwd, ...parts);
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, JSON.stringify(value, null, 2));
+}
+
+function computeDeps(cwd: string) {
+  return { cwd, out: () => {} };
+}
+
+function fakePolicy(overrides: Record<string, unknown> = {}) {
+  return { ...DEFAULT_COMPUTE_POLICY, ...overrides };
+}
+
+function fakeCapabilities(status: 'supported' | 'unsupported' = 'supported') {
+  return COMPUTE_OPERATIONS.map((operation) => ({ operation, status }));
+}
+
+function fakeStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    provider: 'fake',
+    adapterVersion: '1.0.0',
+    mode: 'adopt',
+    resource: { id: 'resource-1', generation: 3, tags: { role: 'worker' } },
+    ownership: {
+      status: 'verified',
+      provider: 'fake',
+      account: 'account-1',
+      resourceId: 'resource-1',
+      mode: 'adopt',
+      owner: 'project-1',
+      creator: 'external',
+      generation: 3,
+      tags: { role: 'worker' },
+      evidence: 'creation receipt',
+      recordedAt: '2099-01-01T09:00:00.000Z',
+    },
+    desiredState: 'active',
+    observedState: 'leased',
+    leases: [{
+      id: 'lease-1',
+      holder: 'worker-1',
+      resourceId: 'resource-1',
+      resourceGeneration: 3,
+      fencingToken: 7,
+      issuedAt: '2099-01-01T11:00:00.000Z',
+      expiresAt: '2099-01-01T13:00:00.000Z',
+      heartbeatAt: '2099-01-01T11:30:00.000Z',
+    }],
+    capacity: { min: 0, max: 1, current: 1 },
+    cost: { currency: 'EUR', amount: 'unknown' },
+    findings: [],
+    fallback: null,
+    updatedAt: '2099-01-01T11:30:00.000Z',
+    ...overrides,
+  };
+}
+
+test('compute init writes a validated explicit-mode policy', async () => {
+  const dir = workdir();
+  await runComputeCommand(['init', '--mode', 'adopt'], computeDeps(dir));
+  assert.equal(JSON.parse(readFileSync(computeFile(dir, 'policy.json'), 'utf8')).mode, 'adopt');
+});
+
+test('compute init rejects an invalid policy before writing', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['input.json'], fakePolicy({ mode: 'owner-everything' }));
+  await runComputeCommand(['init', '--config', computeFile(dir, 'input.json')], computeDeps(dir));
+  assert.equal(existsSync(computeFile(dir, 'policy.json')), false);
+});
+
+test('compute init rejects provision without opt-in before writing', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['input.json'], fakePolicy({ mode: 'provision', provisionOptIn: false }));
+  await runComputeCommand(['init', '--config', computeFile(dir, 'input.json')], computeDeps(dir));
+  assert.equal(existsSync(computeFile(dir, 'policy.json')), false);
+});
+
+test('compute init reports an unsafe policy with the unsafe exit code', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['input.json'], fakePolicy({ mode: 'provision', provisionOptIn: false }));
+  const { exitCode } = await runComputeCommand(['init', '--config', computeFile(dir, 'input.json')], computeDeps(dir));
+  assert.equal(exitCode, 1);
+});
+
+test('compute init --dry-run validates without writing', async () => {
+  const dir = workdir();
+  await runComputeCommand(['init', '--mode', 'adopt', '--dry-run'], computeDeps(dir));
+  assert.equal(existsSync(computeFile(dir, 'policy.json')), false);
+});
+
+test('compute doctor reports an unsupported required capability', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['policy.json'], fakePolicy({ mode: 'adopt' }));
+  writeComputeJson(dir, ['capabilities.json'], fakeCapabilities('unsupported'));
+  const { result } = await runComputeCommand(['doctor'], computeDeps(dir));
+  assert.equal(result.capabilities.ready, false);
+});
+
+test('compute doctor reports ambiguous ownership as unsafe', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['policy.json'], fakePolicy({ mode: 'adopt' }));
+  writeComputeJson(dir, ['capabilities.json'], fakeCapabilities('supported'));
+  writeComputeJson(dir, ['status', 'resource-1.json'], fakeStatus({ ownership: { ...fakeStatus().ownership, status: 'ambiguous' } }));
+  const { result } = await runComputeCommand(['doctor'], computeDeps(dir));
+  assert.equal(result.resources[0].safe, false);
+});
+
+test('compute status emits the versioned machine-readable document', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['status', 'resource-1.json'], fakeStatus());
+  const { result } = await runComputeCommand(['status', '--resource', 'resource-1'], computeDeps(dir));
+  assert.equal(result.schemaVersion, 1);
+});
+
+test('compute status exposes unsafe ownership in its inspection', async () => {
+  const dir = workdir();
+  writeComputeJson(dir, ['status', 'resource-1.json'], fakeStatus({ ownership: { ...fakeStatus().ownership, status: 'ambiguous' } }));
+  const { result } = await runComputeCommand(['status', '--resource', 'resource-1'], computeDeps(dir));
+  assert.equal(result.inspection.safe, false);
+});
+
+test('compute status fails closed when the resource status is missing', async () => {
+  const dir = workdir();
+  const { exitCode } = await runComputeCommand(['status', '--resource', 'resource-1'], computeDeps(dir));
+  assert.equal(exitCode, 3);
 });
