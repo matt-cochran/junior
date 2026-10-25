@@ -439,3 +439,78 @@ test('withPlanLease does not absorb a lease revision that skipped a concurrent m
   await withPlanLease({ ...TASK, hopRevision: 5 }, async () => { ran = true; return 'ok'; }, deps(callHop));
   assert.equal(ran, false);
 });
+
+// --- failed retry lifecycle -------------------------------------------------
+
+function failedStatus(reason: string) {
+  return () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'failed', reason }]], locks_held: [] } });
+}
+
+function acquireAfterFirstLease() {
+  let attempts = 0;
+  return () => {
+    attempts += 1;
+    return { ok: true, result: { deliverables: attempts === 1 ? ['other'] : [DELIVERABLE] } };
+  };
+}
+
+test('withPlanLease returns a failed deliverable to ready through the CPM retry lifecycle', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('checks failed'),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.leased, true);
+});
+
+test('withPlanLease sends a lockless ready mark before retrying a failed deliverable', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('checks failed'),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.deepEqual(markCall(calls)?.request.arguments.status, { status: 'ready' });
+});
+
+test('withPlanLease retains the earlier failure reason in the retry evidence', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('earlier checks failed'),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(String(markCall(calls)?.request.arguments.evidence ?? ''), /earlier checks failed/);
+});
+
+test('withPlanLease does not return an unfailed deliverable to ready', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'pending' }]], locks_held: [] } }),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(markCall(calls), undefined);
+});
+
+test('withPlanLease does not return a deliverable to ready while another caller holds its lease', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { locks_held: [{ deliverable_id: DELIVERABLE, caller_id: 'agent-9' }] } }),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(markCall(calls), undefined);
+});
+
+test('withPlanLease retries a failed deliverable across consecutive CPM revisions', async () => {
+  let acquireCalls = 0;
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => {
+      acquireCalls += 1;
+      return acquireCalls === 1
+        ? { ok: true, result: { deliverables: ['other'] }, revision: 6 }
+        : { ok: true, result: { deliverables: [DELIVERABLE] }, revision: 9 };
+    },
+    'plan.status': () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'failed', reason: 'checks failed' }]], locks_held: [] }, revision: 7 }),
+    'plan.mark_status': () => ({ ok: true, result: { ok: true }, revision: 8 }),
+  });
+  const out = await withPlanLease({ ...TASK, hopRevision: 5 }, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.leased, true);
+});
