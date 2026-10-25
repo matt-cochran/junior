@@ -49,6 +49,7 @@ function taskFixture(dir: string, extra: Record<string, unknown> = {}): any {
     acceptance: ['Widget works'],
     assumptions: ['The widget API is stable'],
     checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }],
+    externalContextConsent: true,
     ...extra,
   };
 }

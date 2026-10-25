@@ -108,6 +108,7 @@ function taskFile(dir: string, over: any = {}): string {
     acceptance: ['The mock handoff completes'],
     isolation: 'none',
     checks: [{ command: NODE, args: ['-e', 'process.exit(0)'] }],
+    externalContextConsent: true,
     ...over,
   }));
   return p;

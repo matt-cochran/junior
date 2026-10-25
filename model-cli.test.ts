@@ -541,7 +541,7 @@ test('junior model status prints JSON with the pinned model', () => {
 test('junior handoff accepts --approve-model', () => {
   const dir = workdir();
   const taskPath = join(dir, 'task.json');
-  writeFileSync(taskPath, JSON.stringify({ id: 'approve-cli', deliverable: 'd', cwd: dir, acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], isolation: 'none' }));
+  writeFileSync(taskPath, JSON.stringify({ id: 'approve-cli', deliverable: 'd', cwd: dir, acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], isolation: 'none', externalContextConsent: true }));
   const res = spawnSync(process.execPath, [JUNIOR, 'handoff', taskPath, '--mock', '--quiet', '--approve-model', 'long-horizon'], {
     cwd: dir,
     encoding: 'utf8',

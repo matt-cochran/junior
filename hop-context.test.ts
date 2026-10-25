@@ -14,7 +14,7 @@ function fixture(t:any) {
  const tools=Object.fromEntries(['fmeca','cpm','crossmatrix'].map(name=>[name,{command:process.execPath,args:[join(import.meta.dirname,'tools/test-fixtures/fake-mcp.mjs')],env:{FAKE_MCP_MODE:'echo'},sourceVersion:'test',sourceSha:'0'.repeat(40)}]));
  initHop(path,{projectId:'shared',tools});return {dir,path};
 }
-function task(dir:string,path:string) {return {id:'hop-task',cwd:dir,hopFrom:path,deliverable:'Use the shared handoff',acceptance:['Shared state is considered'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],jev:{mode:'shadow'}};}
+function task(dir:string,path:string) {return {id:'hop-task',cwd:dir,hopFrom:path,deliverable:'Use the shared handoff',acceptance:['Shared state is considered'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true,jev:{mode:'shadow'}};}
 
 function project(t:any) {
  const root=mkdtempSync(join(tmpdir(),'junior-hop-discovery-'));t.after(()=>rmSync(root,{recursive:true,force:true}));

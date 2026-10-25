@@ -1,3 +1,22 @@
+---
+id: ADR-0013
+title: Open-issues production release scope
+status: accepted
+date: 2026-10-25
+supersedes: []
+applies_to:
+  - worker.ts
+  - compute.ts
+  - compute-hetzner.ts
+  - package.json
+  - docs/adr/0013-open-issues-release-scope.md
+rules:
+  - id: R1
+    text: The #101, #102, #103, #117, and #121-#128 release scope is implemented and verified through bounded local or fixture-backed execution before release acceptance.
+  - id: R2
+    text: External model-context handoffs must retain the provider, model, scope, evidence and cost receipt; cloud provisioning, SSH targets and npm publication require an explicit owner-controlled action.
+---
+
 # 0013: Open-issues production release scope
 
 ## Status
