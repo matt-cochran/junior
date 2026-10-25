@@ -149,6 +149,7 @@ export function discoverInstalledPi(deps:SetupDeps = {}):{name:string;version:st
 }
 
 export type PiVersionStatus = 'match' | 'patch' | 'minor' | 'major' | 'older' | 'unknown';
+export type PiProbeStatus = 'ok' | 'blocked' | 'failed' | 'missing';
 export type PiCheck = {
  found:boolean;
  executable:string|null;
@@ -164,6 +165,11 @@ export type PiCheck = {
  versionWarning:boolean;
  versionNote?:string;
  note?:string;
+ /** How the bounded `pi --version` probe concluded. `blocked` means the host
+  * refused to spawn the probe (for example EPERM); it does not mean Pi is
+  * missing or unusable. */
+ probeStatus:PiProbeStatus;
+ probeBlocked:boolean;
  /** Isolation flags the installed Pi help advertises, including `--tools`.
   * `supported` is null when the help probe failed (see `note`): unknown, not
   * missing, so doctor does not advise an update it cannot justify. */
@@ -173,6 +179,10 @@ export type PiCheck = {
 /** Classify an installed Pi version against the tested pin without blocking any
  * command: an equal version matches, a newer patch is informational, and a
  * major/minor difference or an older install is a (nonblocking) warning. */
+function isBlockedProbeError(error:string|undefined):boolean {
+ return /\bEPERM\b/i.test(String(error ?? ''));
+}
+
 function classifyPiVersion(installed:string|null, tested:string):{status:PiVersionStatus; match:boolean; warning:boolean; note?:string} {
  if (!installed) return {status:'unknown', match:false, warning:false};
  const a=parseSemver(installed), b=parseSemver(tested);
@@ -195,18 +205,24 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  const requiredIsolation=[...ISOLATION_FLAGS, '--tools'];
  if (!executable) return {found:false, executable:null, version:null, location:null, pathMismatch:false,
   testedVersion, versionMatch:false, versionStatus:'unknown', versionWarning:false,
+  probeStatus:'missing', probeBlocked:false,
   isolation:{supported:false, missing:requiredIsolation}};
  const exec=deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o));
  const execOptions={timeout:DOCTOR_TIMEOUT_MS, env:{...env, PI_OFFLINE:'1', PI_SKIP_VERSION_CHECK:'1'}};
  let version:string|null=null;
  let note:string|undefined;
+ let versionProbeBlocked=false;
  try {
   const r=exec('pi',['--offline','--no-approve','--version'],execOptions);
-  if (r.error) note=`pi --version failed: ${r.error}`;
-  else if (r.status !== 0) note=`pi --version exited ${r.status}`;
+  if (r.error) {
+   note=`pi --version failed: ${r.error}`;
+   versionProbeBlocked=isBlockedProbeError(r.error);
+  } else if (r.status !== 0) note=`pi --version exited ${r.status}`;
   else version=firstSemver(r.stdout || '');
  } catch (e) {
-  note=`pi --version failed: ${e instanceof Error ? e.message : String(e)}`;
+  const message=e instanceof Error ? e.message : String(e);
+  note=`pi --version failed: ${message}`;
+  versionProbeBlocked=isBlockedProbeError(message);
  }
  let capabilities:{ flags:ReadonlySet<string> }|null=null;
  try {
@@ -223,9 +239,11 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  const pathMismatch=location !== nodeDir;
  if (pathMismatch) note=`pi resolves from ${location} but node runs from ${nodeDir}; a different PATH or nvm version may hide the global install`;
  const pairing=classifyPiVersion(version,testedVersion);
+ const probeStatus:PiProbeStatus=version ? 'ok' : versionProbeBlocked ? 'blocked' : 'failed';
  return {found:true, executable, version, location, pathMismatch,
   testedVersion, versionMatch:pairing.match, versionStatus:pairing.status, versionWarning:pairing.warning,
   ...(pairing.note?{versionNote:pairing.note}:{}), ...(note?{note}:{}),
+  probeStatus, probeBlocked:probeStatus === 'blocked',
   isolation:{supported:capabilities ? missingIsolation.length === 0 : null, missing:missingIsolation}};
 }
 
@@ -514,9 +532,15 @@ export function inspectGateways(cwd:string, deps:SetupDeps = {}):GatewaysResult 
 }
 
 export type DoctorCheck = { id:string; ok:boolean; detail:string };
+export type DoctorVerdict = 'ready' | 'degraded' | 'failed';
 export type DoctorResult = {
  command:'doctor';
  ok:boolean;
+ /** Machine-readable summary: ready, non-fatally degraded, or failed. */
+ verdict:DoctorVerdict;
+ /** Process exit code that agrees with `verdict` (failed is the only non-zero). */
+ exitCode:0 | 1;
+ degraded:boolean;
  /** Non-blocking advisories, such as running on a slow Windows-mounted
   * checkout. They never change Pi execution readiness (`ok`). */
  warnings:string[];
@@ -542,6 +566,8 @@ export type DoctorResult = {
  checks:DoctorCheck[];
  remediation:string[];
 };
+
+const BLOCKED_PROBE_WARNING='Pi version probe was blocked by the host (EPERM); Pi execution readiness is unverified and doctor is degraded.';
 
 const slowMountWarning=(cwd:string,fstype:string,mountPoint:string):string=>
  `Slow Windows-mounted checkout: ${cwd} is on a ${fstype} filesystem mounted at ${mountPoint}. Use a Linux-native path (for example under your home directory) for a worktree handoff to avoid slow file operations.`;
@@ -595,6 +621,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const remediation:string[]=[];
  if (!supported) remediation.push(`Install Node ${SUPPORTED_NODE_MIN} or newer (for example \`nvm install 24\`) and re-run \`doctor\`.`);
  if (!pi.found) remediation.push(`Install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm.`);
+ else if (pi.probeBlocked) { /* degraded warning below; the executable is not known to be unusable */ }
  else if (!pi.version) remediation.push('Pi could not run successfully; check its executable and active Node installation.');
  else if (pi.pathMismatch) remediation.push('Install Pi with the active nvm Node so `pi` and `node` resolve from the same bin directory.');
  if (pi.found && pi.isolation.missing.length > 0) remediation.push(`Pi is missing isolation flags (${pi.isolation.missing.join(', ')}); install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm to update it.`);
@@ -607,6 +634,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  if (model.policy && !policyOk) remediation.push(`Junior executes only commodity/open-weight models: ${model.policy.reason}. Pin a commodity model in delivery.config.json (see \`junior model status\`).`);
 
  const warnings:string[]=[];
+ if (pi.probeBlocked) warnings.push(BLOCKED_PROBE_WARNING);
  const slowMount=detectSlowMount(cwd,deps);
  if (slowMount) warnings.push(slowMount);
  for (const update of model.newer ?? []) {
@@ -619,7 +647,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
 
  const checks:DoctorCheck[]=[
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
-  { id:'pi', ok:pi.found && !!pi.version, detail:pi.found ? `${pi.executable} (${pi.version ?? 'version unknown'}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
+  { id:'pi', ok:pi.found && (!!pi.version || pi.probeBlocked), detail:pi.found ? `${pi.executable} (${pi.version ?? (pi.probeBlocked ? 'version probe blocked by EPERM' : 'version unknown')}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
   { id:'credentials', ok:credentials.present, detail:credentials.present ? `${provider} credential present (${credentials.sources.join(', ')})` : `no ${provider} credential` },
   { id:'model', ok:model.available, detail:model.available ? `${provider}/${defaults.model} in ${model.source}` : (model.note as string) },
  ];
@@ -648,7 +676,9 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const skillLines=skillMessageLines(skill).filter((line)=>!(juniorSkillFound && line.startsWith('Junior skill is not installed')));
  warnings.push(...skillLines);
  remediation.push(...skillLines);
- return { command:'doctor', ok:checks.every((c)=>c.ok) && policyOk, warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, gateways, checks, remediation };
+ const ok=checks.every((c)=>c.ok) && policyOk;
+ const verdict:DoctorVerdict=ok ? (pi.probeBlocked ? 'degraded' : 'ready') : 'failed';
+ return { command:'doctor', ok, verdict, exitCode:verdict === 'failed' ? 1 : 0, degraded:verdict === 'degraded', warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, gateways, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };
