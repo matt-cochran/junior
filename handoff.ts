@@ -38,6 +38,9 @@ export type CompactHandoff = {
   * happened in an isolated worktree. */
  sourceCwd: string | null;
  execution: { cwd: string | null; artifact: string | null; isolation: string };
+ /** External-context egress preflight and its recorded authorization, or null
+  * when the result predates the check. */
+ externalContext: any | null;
  /** Scope classification when the contract named an owned list, else null. */
  scope: ScopeResult | null;
  /** Pi isolation flags applied for the run, or null when it did not probe. */
@@ -296,6 +299,7 @@ export function compactHandoff(result: any): CompactHandoff {
    incidental: Array.isArray(r.scope.incidental) ? r.scope.incidental : [],
    outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
   } : null,
+  externalContext: r.externalContext && typeof r.externalContext === 'object' ? r.externalContext : null,
   piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {
    applied: Array.isArray(r.piIsolation.applied) ? r.piIsolation.applied : [],
    missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],

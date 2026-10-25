@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { resolve, join, dirname, relative, isAbsolute, sep, delimiter, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { doctor, init, parseInitOptions } from './setup.ts';
+import { doctor as setupDoctor, init, parseInitOptions, type SetupDeps } from './setup.ts';
 import { collectGitEvidence, evidenceDelta, type GitEvidence, type EvidenceDelta } from './evidence.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, lockPathFor, headOf, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
 import { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, type ExecutionSettings, type WorkerStreamResult, type SpawnChild, type RuntimeSnapshot, type RuntimePhase } from './runtime.ts';
@@ -23,6 +23,7 @@ import { clarificationApplies, clarityGateApplies, resolveDiscoverReport, startC
 import { validatePiContext, buildIsolationArgs, parsePiCapabilities, verifyIsolation, DEFAULT_PI_TOOLS, type PiCapabilities, type IsolationVerdict } from './pi-isolation.ts';
 import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { resolveJevGateway, validateJevProvider, GatewayError, type JevProvider, type GatewayDeps, type ResolvedJevGateway } from './gateway.ts';
+import { readExternalContextConsent, verifyExternalContextConsentToken, externalContextCredentialSource, doctorExternalContextAuthorization } from './auth.ts';
 
 // Re-export the billing surface so callers and tests have one entry point.
 export { captureBilling, validateBilling, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPath, BILLING_MODES, BILLING_ENDPOINT, BILLING_MAX_TIMEOUT_MS, BILLING_DEFAULT_TIMEOUT_MS, BILLING_MAX_GENERATIONS } from './billing.ts';
@@ -37,6 +38,16 @@ export type { IsolationMode, LockHandle } from './isolation.ts';
 export { resolveExecutionSettings, validateExecutionSettings, executeWorkerStreaming, executeCheck, spawnChildDetached, ToolWatchdog, RuntimeHeartbeat, EXECUTION_DEFAULTS, EXECUTION_BOUNDS, DEFAULT_MAX_OUTPUT_BYTES, TOOL_TEXT_LIMIT_BYTES, compactEventLine, sanitizeToolCallId } from './runtime.ts';
 export type { ExecutionSettings, WorkerStreamResult, SpawnChild, RuntimeSnapshot, RuntimeState, RuntimePhase } from './runtime.ts';
 
+/** Doctor wrapper that keeps runtime readiness distinct from external-context
+ * authorization. The underlying `doctor` result is unchanged; this adds one
+ * non-gating `externalContextAuthorization` section. */
+export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):any {
+ const result:any=setupDoctor(deps,opts);
+ const project=deps.cwd ?? process.cwd();
+ result.externalContextAuthorization=doctorExternalContextAuthorization(project,result.credentials?.provider ?? '',result.ok);
+ return result;
+}
+
 /** Every top-level contract field the worker understands. A nested `execution`
  * object is also supported (its keys are validated by
  * resolveExecutionSettings), and its runtime settings may also be given
@@ -50,6 +61,7 @@ export const TASK_FIELDS = [
  'approveModel','approvedProfiles','modelProfile',
  'plan',
  'hopFrom','hopRevision','hopContext','piContext','clarifiedFrom','scope',
+ 'externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext',
  'readScope','budget','scopeExpansion',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
 ] as const;
@@ -125,6 +137,128 @@ export type ContextEntry = { path:string; start?:number; end?:number };
  * excerpt; `error` is set instead when the file cannot be read; `truncated`
  * marks an excerpt cut to the per-entry or total bound. */
 export type ResolvedContextEntry = { path:string; start?:number; end?:number; text?:string; error?:string; truncated?:boolean };
+
+/** Known public destinations for the providers Junior can hand off to. An
+ * unknown custom provider keeps its configured provider name as the
+ * destination rather than inventing a URL. */
+export function externalContextDestination(provider:string):string {
+ const destinations:Record<string,string>={
+  openrouter:'https://openrouter.ai/api/v1',
+  typesafe:'https://typesafe.ai/api/v1',
+  openai:'https://api.openai.com/v1',
+  anthropic:'https://api.anthropic.com/v1',
+  google:'https://generativelanguage.googleapis.com/v1beta',
+  zai:'https://api.z.ai/api/paas/v4',
+  moonshotai:'https://api.moonshot.ai/v1',
+  qwen:'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  'z-ai':'https://api.z.ai/api/paas/v4',
+  litellm:'configured litellm base URL',
+ };
+ return destinations[provider] ?? `provider:${provider}`;
+}
+
+/** Local providers never leave the harness, so they need no external consent. */
+export function externalContextRequired(provider:string):boolean {
+ return !['local','ollama','lmstudio','llamacpp','llama.cpp'].includes(provider);
+}
+
+const EXTERNAL_CONSENT_FIELDS=['granted','consent','token','provider','project','destination','model','scope'] as const;
+
+/** Shape-check an optional contract consent flag/token before any paid call. */
+export function validateExternalContextConsent(value:unknown):void {
+ if (value === undefined || value === null || typeof value === 'boolean' || typeof value === 'string') return;
+ if (typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid externalContextConsent (expected a flag, token or object)');
+ for (const key of Object.keys(value)) if (!(EXTERNAL_CONSENT_FIELDS as readonly string[]).includes(key)) throw Error(`Unknown externalContextConsent field: ${key}`);
+ const v:any=value;
+ for (const key of ['granted','consent'] as const) if (v[key] !== undefined && typeof v[key] !== 'boolean') throw Error(`Invalid externalContextConsent.${key} (expected a boolean)`);
+ for (const key of ['token','provider','project','destination','model'] as const) if (v[key] !== undefined && typeof v[key] !== 'string') throw Error(`Invalid externalContextConsent.${key} (expected a string)`);
+ if (v.scope !== undefined && (!Array.isArray(v.scope) || v.scope.some((p:any)=>typeof p !== 'string'))) throw Error('Invalid externalContextConsent.scope (expected an array of strings)');
+}
+
+/** The file/context scope a handoff may disclose. The list is descriptive: it
+ * names every contract-selected path without reading or transmitting it here. */
+export function externalContextFiles(t:any):string[] {
+ const files:string[]=[];
+ const add=(value:any):void=>{
+  if (typeof value !== 'string' || !value.trim()) return;
+  let path=value.trim().replaceAll('\\','/');
+  while (path.startsWith('./')) path=path.slice(2);
+  if (path && !files.includes(path)) files.push(path);
+ };
+ for (const entry of Array.isArray(t?.context) ? t.context : []) add(entry?.path);
+ for (const path of Array.isArray(t?.readScope?.paths) ? t.readScope.paths : []) add(path);
+ for (const entry of Array.isArray(t?.scope?.owned) ? t.scope.owned : []) add(typeof entry === 'string' ? entry : entry?.path);
+ for (const path of scopeExpansionPaths(t)) add(path);
+ return files.sort();
+}
+
+export type ExternalContextAuthorization = {
+ required:true;
+ granted:boolean;
+ source:'run'|'project'|null;
+ token:string|null;
+ reason:string;
+};
+
+/** Resolve explicit run consent or a recorded project/provider decision. A run
+ * token must be bound to the same provider and project; a bare `true` is the
+ * deliberate flag form. */
+function projectConfigConsent(cwd:string, provider:string):{granted:boolean; source:'project'|null; token:string|null; reason:string} {
+ let config:any=null;
+ try { config=JSON.parse(readFileSync(join(cwd,'delivery.config.json'),'utf8')); } catch { return {granted:false,source:null,token:null,reason:'no project consent config'}; }
+ if (!config || typeof config !== 'object' || Array.isArray(config)) return {granted:false,source:null,token:null,reason:'project consent config is malformed'};
+ const candidates:any[]=[config.externalContextConsent,config.externalContext,config.privacy?.externalContextConsent,config.privacy?.externalContext];
+ for (const value of candidates) {
+  if (value === true) return {granted:true,source:'project',token:null,reason:'project consent config grants external context egress'};
+  const providers=Array.isArray(value) ? value : (value && typeof value === 'object' ? (value.approved ?? value.approvedProviders ?? value.providers ?? null) : null);
+  if (Array.isArray(providers) && providers.includes(provider)) return {granted:true,source:'project',token:typeof value?.token==='string'?value.token:null,reason:'project consent config names this provider'};
+  if (value && typeof value === 'object' && value.provider === provider && (value.granted === true || value.consent === true)) return {granted:true,source:'project',token:typeof value.token==='string'?value.token:null,reason:'project consent config grants this provider'};
+ }
+ return {granted:false,source:null,token:null,reason:'project consent config does not authorize this provider'};
+}
+
+export function resolveExternalContextAuthorization(t:any, cwd:string, provider:string):ExternalContextAuthorization {
+ const candidates:any[]=[t?.externalContextConsent,t?.externalProviderConsent,t?.approveExternalContext,t?.externalContextAuthorization,t?.externalContextApproved,t?.externalConsent,t?.consentExternalContext];
+ for (const value of candidates) {
+  if (value === true) return { required:true, granted:true, source:'run', token:null, reason:'explicit run consent flag' };
+  if (typeof value === 'string' && value.trim()) {
+   const token=value.trim();
+   if (verifyExternalContextConsentToken(cwd,provider,token)) return { required:true, granted:true, source:'run', token, reason:'explicit run consent token matched the provider and project' };
+   if (token === provider) return { required:true, granted:true, source:'run', token, reason:'explicit run consent names the provider' };
+   return { required:true, granted:false, source:null, token:null, reason:'the run consent token is not bound to this provider and project' };
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+   const v:any=value;
+   if (v.provider && v.provider !== provider) continue;
+   if (typeof v.token === 'string' && v.token.trim()) return resolveExternalContextAuthorization({externalContextConsent:v.token},cwd,provider);
+   if (v.granted === true || v.consent === true) return { required:true, granted:true, source:'run', token:null, reason:'explicit run consent object' };
+   return { required:true, granted:false, source:null, token:null, reason:'the run consent object does not grant consent' };
+  }
+ }
+ const project=readExternalContextConsent(cwd, provider);
+ if (project.granted) return { required:true, granted:true, source:'project', token:project.token, reason:'recorded project consent for this provider' };
+ const configured=projectConfigConsent(cwd, provider);
+ if (configured.granted) return { required:true, granted:true, source:'project', token:configured.token, reason:configured.reason };
+ return { required:true, granted:false, source:null, token:null, reason:'no run consent and no recorded project/provider consent' };
+}
+
+/** Build the machine-readable preflight shown before source text can egress. */
+export function buildExternalContextPreflight(t:any, cwd:string, requested:{provider:string;model:string}, deps:GateDeps={}):any {
+ const files=externalContextFiles(t);
+ const credential=externalContextCredentialSource(requested.provider, deps.env ? {env:deps.env} : {});
+ const authorization=resolveExternalContextAuthorization(t,cwd,requested.provider);
+ const possible=externalContextRequired(requested.provider);
+ return {
+  schemaVersion:1,
+  provider:requested.provider,
+  destination:externalContextDestination(requested.provider),
+  model:requested.model,
+  credential:{ category:credential.category, source:credential.name },
+  scope:{ files, context:files.filter((f)=>Array.isArray(t?.context) && t.context.some((e:any)=>e?.path===f)), readScope:Array.isArray(t?.readScope?.paths)?[...t.readScope.paths]:[], owned:Array.isArray(t?.scope?.owned)?t.scope.owned.map((e:any)=>typeof e==='string'?e:e?.path).filter(Boolean):[], entries:Array.isArray(t?.context)?t.context.length:0 },
+  egress:{ possible, sourceTextMayTransmit:possible, reason:possible ? `source/context selected by the contract may be sent to ${requested.provider} at ${externalContextDestination(requested.provider)}` : 'the configured provider is local; no external egress is expected' },
+  authorization,
+ };
+}
 
 /** Validate the contract `context` array shape before any paid call. Paths must
  * be relative, stay inside the contract cwd, and use 1-based inclusive line
@@ -475,6 +609,7 @@ export function validate(t: any) {
   if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');
  }
  if (t.context !== undefined) validateContext(t.context, t.cwd);
+ for (const key of ['externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext']) validateExternalContextConsent(t[key]);
  if (t.readScope !== undefined) validateReadScope(t.readScope, t.cwd);
  if (t.budget !== undefined) validateBudget(t.budget);
  if (t.scopeExpansion !== undefined) validateScopeExpansion(t.scopeExpansion, t.cwd);
@@ -2540,6 +2675,30 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  const routingEligible=routingSkipped === undefined;
  const modelProfiles=routingEligible ? rosterChoiceCriteria(modelConfig.roster) : undefined;
 
+ // External-context preflight: before any classifier or worker provider call,
+ // disclose the destination/model/scope and require recorded consent. Without
+ // it the run fails closed with an inspectable request, never a paid attempt.
+ let externalContext:any=null;
+ if (externalContextRequired(requested.provider)) {
+  const preflight=buildExternalContextPreflight(t, sourceCwd, requested, deps);
+  externalContext={ preflight, authorization:preflight.authorization };
+  writeFileSync(join(dir,'external-context-preflight.json'),JSON.stringify(preflight,null,2));
+  if (!preflight.authorization.granted) {
+   const request={ provider:requested.provider, destination:preflight.destination, model:requested.model,
+    scope:preflight.scope, reason:preflight.authorization.reason,
+    approve:{ run:'set "externalContextConsent": true in the contract, or pass a provider/project consent token', project:`junior auth consent ${requested.provider} --project ${sourceCwd}` } };
+   heartbeat.setState('failed',{stopReason:'needs_external_context_consent', error:request.reason});
+   emit('finished needs_external_context_consent');
+   const out:any={ id:t.id, simulated:mock, status:'needs_external_context_consent', workerExitCode:null,
+    workerError:`external-context consent required: ${request.reason}`, checks:[], artifactDir:dir,
+    runtime:heartbeat.snapshot(), lineage, sourceCwd, executionCwd:sourceCwd, isolation:{ mode:isolation },
+    modelRouting:stickyRoute ?? { mode, eligible:routingEligible, profile:null, confidence:null, applied:false, ...requested, reason:'awaiting external-context consent' },
+    externalContext, externalContextConsent:request };
+   writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+   return out;
+  }
+ }
+
  // Resolve an explicit continuation (or an explicit repair) before spending any
  // classifier or worker cost.
  if (t.hopFrom !== undefined) {
@@ -2795,6 +2954,27 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    model:requested.model,
    approval:modelRoute.approval ?? null,
   });
+
+  // Refresh the disclosure with the final model/provider that will receive the
+  // source text. A routed provider still needs its own consent.
+  if (externalContextRequired(requested.provider)) {
+   const preflight=buildExternalContextPreflight(t, sourceCwd, requested, deps);
+   externalContext={ preflight, authorization:preflight.authorization };
+   writeFileSync(join(dir,'external-context-preflight.json'),JSON.stringify(preflight,null,2));
+   if (!preflight.authorization.granted) {
+    const request={ provider:requested.provider, destination:preflight.destination, model:requested.model,
+     scope:preflight.scope, reason:preflight.authorization.reason,
+     approve:{ run:'set "externalContextConsent": true in the contract, or pass a provider/project consent token', project:`junior auth consent ${requested.provider} --project ${sourceCwd}` } };
+    heartbeat.setState('failed',{stopReason:'needs_external_context_consent', error:request.reason});
+    emit('finished needs_external_context_consent');
+    const out:any={ id:t.id, simulated:mock, status:'needs_external_context_consent', workerExitCode:null,
+     workerError:`external-context consent required: ${request.reason}`, checks:[], artifactDir:dir,
+     runtime:heartbeat.snapshot(), lineage, sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+     modelRouting:modelRoute, externalContext, externalContextConsent:request };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   }
+  }
 
   // Pin OpenRouter's upstream provider per deliverable so its prompt cache
   // stays warm across continuation segments, repairs and re-dispatches. The
@@ -3262,6 +3442,7 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
    } catch { /* an unreadable event stream leaves the run unverified */ }
   }
   if (piIsolation) result.piIsolation=piIsolation;
+  if (externalContext) result.externalContext=externalContext;
   if (scopeResult) result.scope=scopeResult;
   if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
   result.unresolved=[];
