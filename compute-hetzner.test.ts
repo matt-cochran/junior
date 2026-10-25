@@ -136,3 +136,164 @@ test('a fake provider never requires or emits a credential', () => {
   });
   assert.equal(JSON.stringify(provider.recorded).includes('token'), false);
 });
+
+function provisioningProvider(overrides: {
+  quota?: unknown;
+  placement?: unknown;
+  resources?: unknown[];
+} = {}) {
+  return createFakeHetznerProvider({
+    identity: verifiedIdentity,
+    capabilities: recordedCapabilities(),
+    quota: overrides.quota ?? { limits: { servers: 2 }, usage: { servers: 0 } },
+    placement: overrides.placement ?? [
+      { region: 'fsn1', serverType: 'cx22', capacity: 2 },
+    ],
+    resources: overrides.resources,
+  });
+}
+
+function provisionRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    requestId: 'request-1',
+    owner: 'project-junior',
+    project: 'project-junior',
+    region: 'fsn1',
+    serverType: 'cx22',
+    ...overrides,
+  };
+}
+
+test('concurrent provisioning requests cannot over-provision a pool', async () => {
+  const provider = provisioningProvider({
+    quota: { limits: { servers: 1 }, usage: { servers: 0 } },
+  });
+  const results = await Promise.all([
+    provider.provision(provisionRequest({ requestId: 'request-1' })),
+    provider.provision(provisionRequest({ requestId: 'request-2' })),
+  ]);
+  assert.equal(results.filter((result) => result.ok).length, 1);
+});
+
+test('an over-provisioned pool contains exactly one created resource', async () => {
+  const provider = provisioningProvider({
+    quota: { limits: { servers: 1 }, usage: { servers: 0 } },
+  });
+  await Promise.all([
+    provider.provision(provisionRequest({ requestId: 'request-1' })),
+    provider.provision(provisionRequest({ requestId: 'request-2' })),
+  ]);
+  assert.equal(provider.listResources().length, 1);
+});
+
+test('a quota failure creates no resource', async () => {
+  const provider = provisioningProvider({
+    quota: { limits: { servers: 0 }, usage: { servers: 0 } },
+  });
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.resource, null);
+});
+
+test('a quota failure leaves the provider without an unowned resource', async () => {
+  const provider = provisioningProvider({
+    quota: { limits: { servers: 0 }, usage: { servers: 0 } },
+  });
+  await provider.provision(provisionRequest());
+  assert.deepEqual(provider.listResources(), []);
+});
+
+test('an unknown quota fails closed before creating a resource', async () => {
+  const provider = provisioningProvider({ quota: {} });
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ok, false);
+});
+
+test('a placement outside the recorded pool creates no resource', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest({ region: 'nbg1' }));
+  assert.equal(result.resource, null);
+});
+
+test('a placement failure leaves the provider without an unowned resource', async () => {
+  const provider = provisioningProvider();
+  await provider.provision(provisionRequest({ region: 'nbg1' }));
+  assert.deepEqual(provider.listResources(), []);
+});
+
+test('a pool at its recorded placement capacity rejects another resource', async () => {
+  const provider = provisioningProvider({
+    placement: [{ region: 'fsn1', serverType: 'cx22', capacity: 0 }],
+  });
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ok, false);
+});
+
+test('replaying one request id returns the original resource', async () => {
+  const provider = provisioningProvider();
+  const first = await provider.provision(provisionRequest());
+  const replay = await provider.provision(provisionRequest());
+  assert.equal(replay.resource?.id, first.resource?.id);
+});
+
+test('replaying one request id creates no second resource', async () => {
+  const provider = provisioningProvider();
+  await provider.provision(provisionRequest());
+  await provider.provision(provisionRequest());
+  assert.equal(provider.listResources().length, 1);
+});
+
+test('a reused request id with different content is rejected', async () => {
+  const provider = provisioningProvider();
+  await provider.provision(provisionRequest());
+  const conflict = await provider.provision(provisionRequest({ owner: 'project-other' }));
+  assert.equal(conflict.ok, false);
+});
+
+test('a provisioning request without a request id is rejected', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest({ requestId: '' }));
+  assert.equal(result.ok, false);
+});
+
+test('a provisioning request without an owner is rejected', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest({ owner: '' }));
+  assert.equal(result.ok, false);
+});
+
+test('a created resource has a verified ownership record', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ownership?.status, 'verified');
+});
+
+test('a created resource records the requesting owner', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ownership?.owner, 'project-junior');
+});
+
+test('a created resource is recorded as junior-created', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ownership?.creator, 'junior');
+});
+
+test('a created resource records its request id as evidence', async () => {
+  const provider = provisioningProvider();
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ownership?.evidence?.includes('request-1'), true);
+});
+
+test('an inventory resource from another account blocks provisioning', async () => {
+  const provider = provisioningProvider({
+    resources: [{
+      id: 'server-foreign',
+      account: 'account-other',
+      region: 'fsn1',
+      serverType: 'cx22',
+    }],
+  });
+  const result = await provider.provision(provisionRequest());
+  assert.equal(result.ok, false);
+});
