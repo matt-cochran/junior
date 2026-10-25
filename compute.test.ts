@@ -21,6 +21,7 @@ import {
   createComputeLeaseState,
   heartbeatComputeLease,
   inspectComputeCapabilities,
+  inspectComputeProviderIdentity,
   inspectComputeLeaseState,
   inspectComputePolicy,
   inspectComputeStatus,
@@ -30,6 +31,7 @@ import {
   releaseComputeLease,
   releaseComputeLeaseWithAuthority,
   stopComputeResource,
+  verifyComputeProviderIdentity,
   type ComputePolicy,
   type ComputeStatus,
 } from './compute.ts';
@@ -174,6 +176,50 @@ test('an ownership provider mismatch is reported', () => {
     ownership: { ...status().ownership, provider: 'other-provider' },
   }));
   assert.deepEqual(result.issues.map((issue) => issue.code), ['ownership.provider-match']);
+});
+
+test('an observed provider account mismatch is not verified', () => {
+  const expected = {
+    status: 'verified',
+    provider: 'fake',
+    account: 'account-1',
+    endpoint: 'https://provider.example/v1',
+  } as const;
+  const result = verifyComputeProviderIdentity(expected, { ...expected, account: 'account-2' });
+  assert.equal(result.verified, false);
+});
+
+test('a status with a mismatched provider identity is unsafe', () => {
+  const result = inspect(status({
+    providerIdentity: {
+      status: 'verified',
+      provider: 'fake',
+      account: 'account-2',
+      endpoint: 'https://provider.example/v1',
+    },
+  }));
+  assert.equal(result.safe, false);
+});
+
+test('a status with a matching provider identity remains safe', () => {
+  const result = inspect(status({
+    providerIdentity: {
+      status: 'verified',
+      provider: 'fake',
+      account: 'account-1',
+      endpoint: 'https://provider.example/v1',
+    },
+  }));
+  assert.equal(result.safe, true);
+});
+
+test('a provider identity without an account is invalid', () => {
+  const result = inspectComputeProviderIdentity({
+    status: 'verified',
+    provider: 'fake',
+    account: '',
+  });
+  assert.equal(result.valid, false);
 });
 
 test('an ownership generation mismatch is reported', () => {
