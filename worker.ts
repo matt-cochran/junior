@@ -2683,20 +2683,6 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   const preflight=buildExternalContextPreflight(t, sourceCwd, requested, deps);
   externalContext={ preflight, authorization:preflight.authorization };
   writeFileSync(join(dir,'external-context-preflight.json'),JSON.stringify(preflight,null,2));
-  if (!preflight.authorization.granted) {
-   const request={ provider:requested.provider, destination:preflight.destination, model:requested.model,
-    scope:preflight.scope, reason:preflight.authorization.reason,
-    approve:{ run:'set "externalContextConsent": true in the contract, or pass a provider/project consent token', project:`junior auth consent ${requested.provider} --project ${sourceCwd}` } };
-   heartbeat.setState('failed',{stopReason:'needs_external_context_consent', error:request.reason});
-   emit('finished needs_external_context_consent');
-   const out:any={ id:t.id, simulated:mock, status:'needs_external_context_consent', workerExitCode:null,
-    workerError:`external-context consent required: ${request.reason}`, checks:[], artifactDir:dir,
-    runtime:heartbeat.snapshot(), lineage, sourceCwd, executionCwd:sourceCwd, isolation:{ mode:isolation },
-    modelRouting:stickyRoute ?? { mode, eligible:routingEligible, profile:null, confidence:null, applied:false, ...requested, reason:'awaiting external-context consent' },
-    externalContext, externalContextConsent:request };
-   writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
-   return out;
-  }
  }
 
  // Resolve an explicit continuation (or an explicit repair) before spending any
@@ -2957,25 +2943,6 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
 
   // Refresh the disclosure with the final model/provider that will receive the
   // source text. A routed provider still needs its own consent.
-  if (externalContextRequired(requested.provider)) {
-   const preflight=buildExternalContextPreflight(t, sourceCwd, requested, deps);
-   externalContext={ preflight, authorization:preflight.authorization };
-   writeFileSync(join(dir,'external-context-preflight.json'),JSON.stringify(preflight,null,2));
-   if (!preflight.authorization.granted) {
-    const request={ provider:requested.provider, destination:preflight.destination, model:requested.model,
-     scope:preflight.scope, reason:preflight.authorization.reason,
-     approve:{ run:'set "externalContextConsent": true in the contract, or pass a provider/project consent token', project:`junior auth consent ${requested.provider} --project ${sourceCwd}` } };
-    heartbeat.setState('failed',{stopReason:'needs_external_context_consent', error:request.reason});
-    emit('finished needs_external_context_consent');
-    const out:any={ id:t.id, simulated:mock, status:'needs_external_context_consent', workerExitCode:null,
-     workerError:`external-context consent required: ${request.reason}`, checks:[], artifactDir:dir,
-     runtime:heartbeat.snapshot(), lineage, sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
-     modelRouting:modelRoute, externalContext, externalContextConsent:request };
-    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
-    return out;
-   }
-  }
-
   // Pin OpenRouter's upstream provider per deliverable so its prompt cache
   // stays warm across continuation segments, repairs and re-dispatches. The
   // affinity key is the lineage root, so a repair chain shares the provider the
@@ -3066,6 +3033,27 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
     // A session that cannot open must not crash the run; record it and fall
     // through to the normal prepare/implement decision.
     emit(`clarify unavailable: ${msg(e)}`);
+   }
+  }
+  // Clarification has no worker/provider handoff. Enforce the final disclosure
+  // only once the contract is clear, immediately before Pi or a provider can
+  // receive source text.
+  if (externalContextRequired(requested.provider)) {
+   const preflight=buildExternalContextPreflight(t, sourceCwd, requested, deps);
+   externalContext={ preflight, authorization:preflight.authorization };
+   writeFileSync(join(dir,'external-context-preflight.json'),JSON.stringify(preflight,null,2));
+   if (!preflight.authorization.granted) {
+    const request={ provider:requested.provider, destination:preflight.destination, model:requested.model,
+     scope:preflight.scope, reason:preflight.authorization.reason,
+     approve:{ run:'set "externalContextConsent": true in the contract, or pass a provider/project consent token', project:`junior auth consent ${requested.provider} --project ${sourceCwd}` } };
+    heartbeat.setState('failed',{stopReason:'needs_external_context_consent', error:request.reason});
+    emit('finished needs_external_context_consent');
+    const out:any={ id:t.id, simulated:mock, status:'needs_external_context_consent', workerExitCode:null,
+     workerError:`external-context consent required: ${request.reason}`, checks:[], artifactDir:dir,
+     runtime:heartbeat.snapshot(), lineage, sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+     modelRouting:modelRoute, externalContext, externalContextConsent:request };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
    }
   }
   // Probe the installed Pi CLI once for this non-mock run, before the first
