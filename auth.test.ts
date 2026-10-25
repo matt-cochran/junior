@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { removeProviderKey, setProviderKey } from './auth.ts';
+import { removeProviderKey, setProviderKey, recordExternalContextConsent, removeExternalContextConsent, readExternalContextConsent, verifyExternalContextConsentToken, doctorExternalContextAuthorization } from './auth.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -211,4 +211,31 @@ test('junior --help stays at twelve lines or fewer', () => {
 test('junior auth set --verify reports that a non-openrouter provider cannot be verified online', () => {
   const dir = workdir();
   assert.match(runAuth(['set', 'github', '--verify'], dir, 'ghp_piped_key\n').stdout, /online verification is only available for openrouter/);
+});
+
+// --- external-context consent ----------------------------------------------
+
+test('recording external-context consent authorizes that provider for the project', () => {
+  const dir = workdir();
+  recordExternalContextConsent(dir, 'openrouter');
+  assert.equal(readExternalContextConsent(dir, 'openrouter').granted, true);
+});
+
+test('removing external-context consent revokes that provider for the project', () => {
+  const dir = workdir();
+  recordExternalContextConsent(dir, 'openrouter');
+  removeExternalContextConsent(dir, 'openrouter');
+  assert.equal(readExternalContextConsent(dir, 'openrouter').granted, false);
+});
+
+test('a consent token is bound to its provider and project', () => {
+  const dir = workdir();
+  const token = recordExternalContextConsent(dir, 'openrouter').token;
+  assert.equal(verifyExternalContextConsentToken(join(dir, 'other-project'), 'openrouter', token), false);
+});
+
+test('external-context authorization stays separate from runtime readiness', () => {
+  const dir = workdir();
+  const readiness = doctorExternalContextAuthorization(dir, 'openrouter', true);
+  assert.equal(readiness.readyForDelegation, false);
 });
