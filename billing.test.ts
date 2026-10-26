@@ -29,7 +29,7 @@ const okBodyExtra = (id: string, model: string, total: number, extra: any) => ({
 const U = { input: 1, output: 2, totalTokens: 3, cost: { total: 0 } };
 const assistant = (over: any = {}) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', provider: 'openrouter', model: 'm', usage: U, stopReason: 'stop', ...over } });
 const stream = (...records: any[]) => records.map((r: any) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n';
-const task = (extra: any = {}) => ({ id: 'billing', deliverable: 'billing', cwd: mkdtempSync(join(tmpdir(), 'billing-')), acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], ...extra });
+const task = (extra: any = {}) => ({ id: 'billing', deliverable: 'billing', cwd: mkdtempSync(join(tmpdir(), 'billing-')), acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], externalContextConsent: true, ...extra });
 const spawnOk = (responseId?: string) => (_c: string, _a: string[]) => ({ status: 0, stdout: stream({ type: 'session', id: 's' }, assistant(responseId ? { responseId } : {}), { type: 'agent_settled' }), stderr: '' });
 
 // --- contract validation (offline) ---

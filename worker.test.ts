@@ -6,7 +6,7 @@ import { join, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
+import { validate,run as runWorker,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  jevMode,assessPreflight,assessPostflight,boundEvidence,boundedGitEvidence,resolveClassifierModel,reportEvidence,deterministicCriterion,
  createTypesafeClassifier,createJevClassifier,
  estimateCost,validatePricing,CONTRACT_PARTS,
@@ -17,12 +17,17 @@ import { validate,run,parseReceipt,mockReceipt,receiptValid,emptyUsage,
  collectGitEvidence,evidenceDelta,resolveIsolation,sourceDirty,createDetachedWorktree,
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
- ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor } from './worker.ts';
+ ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor,
+ validateReadScope,validateBudget,validateScopeExpansion,scopeExpansionPaths,resolveContext,readScopePathMatches,doctor as workerDoctor } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH,TESTED_PI_VERSION } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
+import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
-const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],...extra});
+// Existing behavioral scenarios exercise non-consent behavior; inject the new
+// explicit external-context consent unless the scenario overrides it.
+const run=(t:any,mock?:boolean,deps?:any)=>runWorker('externalContextConsent' in (t ?? {}) ? t : {...t,externalContextConsent:true},mock,deps);
+const task=(code=0,extra:any={})=>({id:'smoke',deliverable:'Smoke test',cwd:mkdtempSync(join(tmpdir(),'delivery-')),acceptance:['Check passes'],checks:[{command:process.execPath,args:['-e',`process.exit(${code})`]}],externalContextConsent:true,...extra});
 const COMMODITY_MODEL='deepseek/deepseek-v4.1-flash';
 const ROUTED_MODEL='moonshotai/kimi-k2.7-code';
 const cli=(args:string[])=>spawnSync(process.execPath,['worker.ts',...args],{encoding:'utf8'});
@@ -1391,6 +1396,17 @@ test('A run with no explicit model and no config records the builtin default and
  const r=await run(task(),true);
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:COMMODITY_MODEL,source:'builtin'});
 });
+test('A default routed profile retains the exact project pin and reports its source',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-project-pin-'));
+ const pinned='deepseek/deepseek-v4.1-flash-1017';
+ writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({
+  provider:'openrouter',model:pinned,models:{routing:'auto',autoUpgrade:false},
+ }));
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'}}),true,{classify:modelGate('general',0.9)});
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:pinned,source:'project'});
+ assert.equal(r.modelRouting.applied,false);
+ assert.equal(r.modelRouting.profile,'general');
+});
 test('Auto routing applies a confident non-default model profile with a run approval',async()=>{
  const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:ROUTED_MODEL,source:'routed'});
@@ -2494,7 +2510,7 @@ test('junior.ts handoff defaults to worktree isolation and prints compact JSON',
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const cfg=mkdtempSync(join(tmpdir(),'junior-cfg-'));
  const taskPath=join(cfg,'task.json');
- writeFileSync(taskPath,JSON.stringify({id:'junior-h',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ writeFileSync(taskPath,JSON.stringify({id:'junior-h',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true}));
  const r=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(r.status,0,r.stderr);
  const o=JSON.parse(r.stdout);
@@ -2503,7 +2519,7 @@ test('junior.ts handoff defaults to worktree isolation and prints compact JSON',
  assert.equal(o.execution.isolation,'worktree');
  assert.ok(o.artifacts.result && existsSync(o.artifacts.result));
 
- writeFileSync(taskPath,JSON.stringify({id:'junior-none',deliverable:'x',cwd:repo.dir,acceptance:['ok'],isolation:'none',checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ writeFileSync(taskPath,JSON.stringify({id:'junior-none',deliverable:'x',cwd:repo.dir,acceptance:['ok'],isolation:'none',checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true}));
  const r2=spawnSync(process.execPath,['junior.ts','handoff',taskPath,'--mock'],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(r2.status,0,r2.stderr);
  assert.equal(JSON.parse(r2.stdout).execution.isolation,'none');
@@ -2513,7 +2529,7 @@ test('junior.ts validate and status --full use the existing worker structures',(
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const cfg=mkdtempSync(join(tmpdir(),'junior-cfg-'));
  const taskPath=join(cfg,'t.json');
- writeFileSync(taskPath,JSON.stringify({id:'su',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}]}));
+ writeFileSync(taskPath,JSON.stringify({id:'su',deliverable:'x',cwd:repo.dir,acceptance:['ok'],checks:[{command:process.execPath,args:['-e','process.exit(0)']}],externalContextConsent:true}));
  const v=spawnSync(process.execPath,['junior.ts','validate',taskPath],{encoding:'utf8',env:{...process.env,JUNIOR_NO_INSTALL:'1'}});
  assert.equal(v.status,0,v.stderr);
  assert.equal(JSON.parse(v.stdout).valid,true);
@@ -3859,4 +3875,113 @@ test('The compact handoff carries the run scope classification',()=>{
 test('The compact handoff lists out-of-scope changes as unresolved',()=>{
  const scope={checked:true,inScope:[],incidental:[],outOfScope:['src/a.ts','src/b.ts']};
  assert.ok(compactHandoff(handoffResult({scope})).unresolved.includes('out of scope: src/a.ts, src/b.ts'));
+});
+
+// --- #125: bounded read scope, budgets and explicit scope expansion ---
+const bounded=(extra:any={})=>task(0,{
+ readScope:{mode:'context-plus-dependencies',paths:['src/a.ts'],maxFiles:30,maxBytes:500000,allowGraft:true},
+ budget:{maxInputTokens:150000,maxOutputTokens:20000,maxToolCalls:60,maxToolOutputBytes:1000000},
+ ...extra,
+});
+
+test('validate accepts a complete bounded-context contract',()=>{
+ assert.doesNotThrow(()=>validate(bounded()));
+});
+test('validate rejects an unknown readScope mode',()=>{
+ assert.throws(()=>validate(bounded({readScope:{mode:'everything'}})),/Invalid readScope\.mode/);
+});
+test('validate rejects a readScope path that escapes cwd',()=>{
+ assert.throws(()=>validate(bounded({readScope:{mode:'context-only',paths:['../secret.ts']}})),/Invalid readScope\.paths/);
+});
+test('validate rejects a non-positive readScope maxFiles',()=>{
+ assert.throws(()=>validate(bounded({readScope:{mode:'context-only',paths:[],maxFiles:0}})),/Invalid readScope\.maxFiles/);
+});
+test('validate rejects a non-boolean readScope allowGraft',()=>{
+ assert.throws(()=>validate(bounded({readScope:{mode:'context-only',paths:[],allowGraft:'yes'}})),/Invalid readScope\.allowGraft/);
+});
+test('validate rejects a negative budget maxToolCalls',()=>{
+ assert.throws(()=>validate(bounded({budget:{maxToolCalls:-1}})),/Invalid budget\.maxToolCalls/);
+});
+test('validate rejects a fractional budget maxInputTokens',()=>{
+ assert.throws(()=>validate(bounded({budget:{maxInputTokens:1.5}})),/Invalid budget\.maxInputTokens/);
+});
+test('validate rejects an unknown budget field',()=>{
+ assert.throws(()=>validate(bounded({budget:{maxSpend:1}})),/Unknown budget field/);
+});
+test('validate rejects a scope expansion without a reason',()=>{
+ assert.throws(()=>validate(bounded({scopeExpansion:{paths:['src/b.ts']}})),/Invalid scopeExpansion\.reason/);
+});
+test('validate rejects a scope expansion with an absolute path',()=>{
+ assert.throws(()=>validate(bounded({scopeExpansion:{paths:[join(tmpdir(),'b.ts')],reason:'need it'}})),/Invalid scopeExpansion\.paths/);
+});
+test('context-only refuses an undeclared context read without returning its text',()=>{
+ const dir=contextdir('secret.ts','TOP SECRET\n');
+ const t=task(0,{cwd:dir,readScope:{mode:'context-only',paths:['allowed.ts']},context:[{path:'secret.ts'}]});
+ const [entry]=resolveContext(t);
+ assert.equal(entry.text,undefined);
+});
+test('context-only permits a context path named in its read scope',()=>{
+ const dir=contextdir('allowed.ts','ALLOWED\n');
+ const t=task(0,{cwd:dir,readScope:{mode:'context-only',paths:['allowed.ts']},context:[{path:'allowed.ts'}]});
+ const [entry]=resolveContext(t);
+ assert.equal(entry.text,'ALLOWED');
+});
+test('scope expansion paths are returned in deterministic sorted order',()=>{
+ const t=bounded({scopeExpansion:{paths:['src/z.ts','src/a.ts','src/z.ts'],reason:'needed'}});
+ assert.deepEqual(scopeExpansionPaths(t),['src/a.ts','src/z.ts']);
+});
+test('an absent scope expansion grants no paths',()=>{
+ assert.deepEqual(scopeExpansionPaths(bounded()),[]);
+});
+test('a read-scope path treats dots literally',()=>{
+ assert.equal(readScopePathMatches('src/a.ts','src/aXts'),false);
+});
+test('the worker prompt states the context-only read boundary',()=>{
+ const prompt=buildPrompt(bounded({readScope:{mode:'context-only',paths:['src/a.ts']}}),'test_first');
+ assert.match(prompt,/Read scope: context-only/);
+});
+test('the worker prompt names an approved scope expansion',()=>{
+ const prompt=buildPrompt(bounded({scopeExpansion:{paths:['src/b.ts'],reason:'needed for the fix'}}),'test_first');
+ assert.match(prompt,/Scope expansion approved: src\/b\.ts \(needed for the fix\)/);
+});
+
+// --- external-context consent before provider work -------------------------
+
+test('a run without external-context consent needs consent before provider work', async () => {
+ const r=await run(task(0,{externalContextConsent:false}),true);
+ assert.equal(r.status,'needs_external_context_consent');
+});
+
+test('external-context preflight names the destination and egress possibility', async () => {
+ const r=await run(task(0,{externalContextConsent:false}),true);
+ assert.equal(r.externalContext.preflight.destination,'https://openrouter.ai/api/v1');
+});
+
+test('external-context preflight discloses the model and context file scope', async () => {
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
+ writeFileSync(join(cwd,'source.ts'),'secret source text\n');
+ const r=await run(task(0,{cwd,context:[{path:'source.ts'}],externalContextConsent:false}),true);
+ assert.deepEqual(r.externalContext.preflight.scope.files,['source.ts']);
+});
+
+test('a recorded project consent authorizes the provider handoff', async () => {
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
+ recordExternalContextConsent(cwd,'openrouter');
+ const r=await run(task(0,{cwd,externalContextConsent:false}),true);
+ assert.equal(r.status,'simulation_passed');
+});
+
+test('a consented run receipt records the external-context authorization source', async () => {
+ const r=await run(task(0,{externalContextConsent:true}),true);
+ assert.equal(r.externalContext.authorization.source,'run');
+});
+
+test('compact handoff exposes external-context egress and authorization', () => {
+ const h=compactHandoff({id:'x',status:'simulation_passed',checks:[],artifactDir:'/tmp/a',externalContext:{preflight:{provider:'openrouter',destination:'https://openrouter.ai/api/v1',model:'m',egress:{possible:true}},authorization:{granted:true,source:'run'}}});
+ assert.equal(h.externalContext.authorization.source,'run');
+});
+
+test('doctor separates runtime readiness from external-context authorization', () => {
+ const d=workerDoctor({cwd:mkdtempSync(join(tmpdir(),'delivery-'))});
+ assert.equal(d.externalContextAuthorization.readyForDelegation,false);
 });

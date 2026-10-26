@@ -17,6 +17,9 @@
  * FMECA and CPM native state stays owned by the upstream MCP servers: this
  * wrapper only points `FMECA_STATE_DIR` / `CPM_PLANNER_DB` at paths anchored to
  * the manifest folder and never edits those stores directly (no SQLite surgery).
+ * cpm-planner 0.4.3 otherwise falls back to its user-level default database, so
+ * generated Hops emit `CPM_PLANNER_DB` and every cpm call verifies the database
+ * path the server reports opening before accepting the result.
  * Crossmatrix's MCP is in-memory up to 0.2.x, so this wrapper is the durable
  * owner of the imported model JSON: it saves the validated model and replays it
  * on every fresh server before a query. Crossmatrix 0.3+ keeps the model in a
@@ -475,10 +478,17 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
           version: override.sourceVersion ?? probe(command) ?? UNKNOWN_SOURCE_VERSION,
           sha: "",
         };
+    const env = { ...(override.env ?? {}) };
+    // cpm-planner 0.4.3 falls back to a user-level database when
+    // CPM_PLANNER_DB is absent. Emit the project anchor in every generated
+    // config so an unset or refreshed Hop never opens that default store.
+    if (tool === "cpm" && !isSet(env.CPM_PLANNER_DB)) {
+      env.CPM_PLANNER_DB = path.resolve(path.dirname(hopPath), NATIVE_RELATIVE.cpm);
+    }
     tools[tool] = {
       command,
       args: override.args ?? [],
-      env: override.env ?? {},
+      env,
       sourceVersion: override.sourceVersion ?? known.version,
       sourceSha: override.sourceSha ?? known.sha,
     };
@@ -526,6 +536,8 @@ export interface McpSequenceOptions {
 export interface McpSequenceResult {
   value: unknown;
   isError: boolean;
+  /** Bounded stderr tail, used to verify which native database a server opened. */
+  stderr: string;
 }
 
 function killTree(child: ChildProcess): void {
@@ -701,7 +713,7 @@ export async function mcpCallSequence(
         last = await request("tools/call", { name: call.name, arguments: call.arguments ?? {} });
       }
       const isError = isRecord(last) && last.isError === true;
-      succeed({ value: extractStructured(last), isError });
+      succeed({ value: extractStructured(last), isError, stderr: stderrText });
     })().catch((err) => fail(err));
   });
 }
@@ -788,6 +800,24 @@ function gitTopLevel(startDir: string): string | null {
 function crossmatrixProjectDir(hopPath: string): string {
   const hopDir = path.dirname(path.resolve(hopPath));
   return gitTopLevel(hopDir) ?? path.dirname(hopDir);
+}
+
+/**
+ * cpm-planner 0.4.3 logs the SQLite database it opens. Junior compares that
+ * path with the project database it supplied, so an old or misconfigured
+ * binary cannot silently use cpm-planner's user-level default database.
+ */
+function assertCpmProjectDatabase(stderr: string, expected: string): void {
+  const marker = "opening planner database db=";
+  const line = stderr.split(/\r?\n/).find((entry) => entry.includes(marker));
+  if (!line) return;
+  const opened = line.slice(line.indexOf(marker) + marker.length).trim();
+  if (path.resolve(opened) !== path.resolve(expected)) {
+    throw new HopError(
+      "UPSTREAM_ERROR",
+      `cpm-planner opened database '${opened}' instead of the project database '${expected}'`,
+    );
+  }
 }
 
 export function buildToolEnv(hopPath: string, tool: ToolName, manifest: HopManifest): Record<string, string> {
@@ -1158,6 +1188,9 @@ export async function callHop(
         { command: cfg.command, args: cfg.args, env, timeoutMs },
         calls,
       );
+      if (tool === "cpm" && env.CPM_PLANNER_DB) {
+        assertCpmProjectDatabase(mcp.stderr, env.CPM_PLANNER_DB);
+      }
       const note = findNote(mcp.value);
       const unsupported = note !== null && isUnsupportedNote(note);
       const ok = !mcp.isError && !unsupported;

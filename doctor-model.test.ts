@@ -35,6 +35,58 @@ const fixture=(over:any={})=>{
  return {cwd,agent,bin,deps:setupDeps(cwd,{env:{PATH:bin,HOME:cwd,PI_CODING_AGENT_DIR:agent},execPath:join(bin,'node'),...(over.deps||{})})};
 };
 
+// --- blocked Pi version probe ----------------------------------------------
+
+/** Ready fixture whose `pi --version` probe is blocked by the host, while
+ * `pi --help` still proves the executable is runnable. */
+const blockedVersionProbe=()=>({
+ exec:(_cmd:string,args:string[])=>args.includes('--version')
+  ? {status:null,stdout:'',stderr:'',error:'spawnSync pi EPERM'}
+  : okExec(_cmd,args),
+});
+
+const epermFixture=()=>{const {deps}=fixture();return {deps:{...deps,...blockedVersionProbe()}};};
+
+test('doctor stays non-fatal when the Pi version probe is blocked by EPERM', () => {
+ assert.equal(doctor(epermFixture().deps).ok,true);
+});
+
+test('doctor reports a degraded verdict when the Pi version probe is blocked by EPERM', () => {
+ assert.equal(doctor(epermFixture().deps).verdict,'degraded');
+});
+
+test('doctor exits zero when the Pi version probe is blocked by EPERM', () => {
+ assert.equal(doctor(epermFixture().deps).exitCode,0);
+});
+
+test('doctor marks the Pi check ready when the version probe is blocked but Pi is runnable', () => {
+ const d=doctor(epermFixture().deps);
+ assert.equal(d.checks.find((c)=>c.id==='pi')?.ok,true);
+});
+
+test('doctor warns that the Pi version probe was blocked', () => {
+ assert.match(doctor(epermFixture().deps).warnings.join(' '),/version probe was blocked.*EPERM/);
+});
+
+test('doctor fails when Pi is missing', () => {
+ const {cwd}=fixture();
+ const deps=setupDeps(cwd,{env:{PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent')}});
+ assert.equal(doctor(deps).verdict,'failed');
+});
+
+test('doctor exits one when Pi is missing', () => {
+ const {cwd}=fixture();
+ const deps=setupDeps(cwd,{env:{PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent')}});
+ assert.equal(doctor(deps).exitCode,1);
+});
+
+test('doctor fails when the Pi executable cannot be executed', () => {
+ const {deps}=fixture({deps:{exec:(_cmd:string,args:string[])=>args.includes('--version')
+  ? {status:null,stdout:'',stderr:'',error:'spawnSync pi EACCES'}
+  : okExec(_cmd,args)}});
+ assert.equal(doctor(deps).verdict,'failed');
+});
+
 // --- pinned identity --------------------------------------------------------
 
 test('doctor reports the builtin pinned provider and id', () => {
