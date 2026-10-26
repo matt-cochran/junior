@@ -313,15 +313,77 @@ export const KILL_GRACE_MS = 2000;
  * exhaustion from a runaway process. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-type StreamStopReason = 'tool_timeout' | 'deadline' | 'interrupt' | 'startup_error' | 'stream_error' | 'output_truncated';
+type StreamStopReason = 'tool_timeout' | 'deadline' | 'interrupt' | 'startup_error' | 'stream_error' | 'output_truncated' | 'budget' | 'scope';
+
+/** Contract-level limits for a bounded worker run. Every field is optional so
+ * an unconstrained contract keeps the previous behavior. */
+export type BudgetLimits = {
+ maxInputTokens?: number;
+ maxFreshInputTokens?: number;
+ maxCacheReadTokens?: number;
+ maxCachedInputTokens?: number;
+ maxOutputTokens?: number;
+ maxTotalTokens?: number;
+ maxToolCalls?: number;
+ maxToolOutputBytes?: number;
+ maxResponseCalls?: number;
+ mode?: 'warn' | 'enforce';
+};
+
+/** Optional read boundary for the worker's read-like tool calls. */
+export type ReadScopeLimit = {
+ mode?: 'context-only' | 'context-plus-dependencies' | string;
+ paths?: string[];
+ maxFiles?: number;
+ maxBytes?: number;
+ allowGraft?: boolean;
+};
+
+/** Accounting for one runtime phase. The worker stream currently reports one
+ * phase, but the shape keeps readiness/checks accounting additive. */
+export type PhaseAccounting = {
+ phase: string;
+ readFiles: number;
+ readCalls: number;
+ readBytes: number;
+ toolCalls: number;
+ responseCalls: number;
+ inputTokens: number;
+ outputTokens: number;
+ cacheReadTokens: number;
+ cacheWriteTokens: number;
+ totalTokens: number;
+ toolOutputBytes: number;
+ /** Short aliases used by compact receipts. */
+ files: number;
+ bytes: number;
+ tokens: number;
+};
+
+/** Requested versus observed bounded-context usage. */
+export type BudgetAccounting = {
+ requested: BudgetLimits;
+ readScope: ReadScopeLimit | null;
+ mode: 'warn' | 'enforce';
+ used: Omit<PhaseAccounting, 'phase'>;
+ exceeded: boolean;
+ exceededField: string | null;
+ stopReason: string | null;
+ largestReads: { toolCallId: string; toolName: string | null; path: string | null; bytes: number }[];
+ phases: PhaseAccounting[];
+};
 
 /** Per-run output accounting: total raw stdout bytes, retained (compacted)
- * bytes, per-event-type raw byte counts, and the three largest tool results. */
+ * bytes, per-event-type raw byte counts, and the three largest tool results.
+ * When a bounded contract supplies `budget` or `readScope`, the optional
+ * `budget`/`phaseAccounting` fields report observed reads and model usage. */
 export type OutputBreakdown = {
  rawBytes: number;
  retainedBytes: number;
  byType: Record<string, number>;
  largestToolResults: { toolCallId: string; toolName: string | null; bytes: number }[];
+ budget?: BudgetAccounting;
+ phaseAccounting?: PhaseAccounting[];
 };
 
 export type WorkerStreamResult = {
@@ -339,12 +401,18 @@ export type WorkerStreamResult = {
  deadlineExceeded: boolean;
  /** True when stdout/stderr exceeded the accumulation cap; the receipt is not complete. */
  outputTruncated: boolean;
+ /** True when a bounded-context limit stopped the worker before completion. */
+ incomplete?: boolean;
+ budgetExceeded?: boolean;
+ scopeExceeded?: boolean;
  stopReason: string;
  /** The tool whose execution exceeded the per-tool limit, when the run stopped
   * on `tool_timeout`. `command` is the `tool_execution_start` `args.command`. */
  timedOutTool?: { name: string; command?: string };
  runtime: RuntimeSnapshot;
  outputBreakdown: OutputBreakdown;
+ budget?: BudgetAccounting;
+ phaseAccounting?: PhaseAccounting[];
 };
 
 export type ExecuteWorkerOptions = {
@@ -367,6 +435,16 @@ export type ExecuteWorkerOptions = {
  /** Optional shared heartbeat so one runtime.json reflects every phase of the
   * whole run, not only the worker phase. */
  heartbeat?: RuntimeHeartbeat;
+ /** Optional bounded-context budget. `enforce` stops the worker as soon as an
+  * observed limit is crossed; `warn` records the overrun and continues. */
+ budget?: BudgetLimits;
+ /** Optional read boundary for read-like tool calls. */
+ readScope?: ReadScopeLimit;
+ /** Optional explicit context paths allowed by a `context-only` read scope. */
+ contextPaths?: string[];
+ /** Optional contract context entries; their paths are allowed by a
+  * `context-only` read scope in addition to `readScope.paths`. */
+ context?: Array<{ path?: string } | string>;
 };
 
 /** Split strict JSONL incrementally. Returns complete lines and leaves an
@@ -445,11 +523,59 @@ export function compactEventLine(rawLine: string, eventsPath: string, written: S
  return rawLine;
 }
 
+/** Normalize a read path for deterministic scope matching. */
+export function normalizeReadPath(path: unknown): string {
+ return String(path ?? '').trim().replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+}
+
+/** Match one declared read path: exact file, directory prefix or simple glob. */
+export function readPathMatches(pattern: string, candidate: string): boolean {
+ const p = normalizeReadPath(pattern);
+ const c = normalizeReadPath(candidate);
+ if (!p || !c) return false;
+ if (p === c) return true;
+ if (!/[*?]/.test(p)) return c.startsWith(`${p}/`);
+ let re = '^';
+ for (let i = 0; i < p.length; i++) {
+  const ch = p[i];
+  if (ch === '*') { if (p[i + 1] === '*') { re += '.*'; i++; } else re += '[^/]*'; }
+  else if (ch === '?') re += '[^/]';
+  else if (/[\\^$.*+?()[\]{}|]/.test(ch)) re += '\\' + ch;
+  else re += ch;
+ }
+ re += '$';
+ try { return new RegExp(re).test(c); } catch { return false; }
+}
+
+const READ_TOOL_NAMES = new Set(['read','read_file','file_read','view','open','cat','head','tail','grep','rg','glob','list','ls','find','tree']);
+/** True when a tool call is a read-like operation subject to the read scope. */
+export function isReadLikeTool(name: string | null | undefined): boolean {
+ return !!name && READ_TOOL_NAMES.has(String(name).toLowerCase());
+}
+
+/** Extract the path a read-like tool names in its arguments. */
+export function readToolPath(ev: any): string | null {
+ const args = ev?.args ?? ev?.arguments ?? ev?.message?.args ?? null;
+ if (!args || typeof args !== 'object') return null;
+ for (const key of ['path','file_path','filePath','file','filename','target','cwd']) {
+  const value = (args as any)[key];
+  if (typeof value === 'string' && value.trim()) return value;
+ }
+ return null;
+}
+
+function emptyPhaseAccounting(phase: string): PhaseAccounting {
+ return { phase, readFiles:0, readCalls:0, readBytes:0, toolCalls:0, responseCalls:0,
+  inputTokens:0, outputTokens:0, cacheReadTokens:0, cacheWriteTokens:0, totalTokens:0,
+  toolOutputBytes:0, files:0, bytes:0, tokens:0 };
+}
+
 /** Execute a live Pi child with streaming persistence, heartbeat and bounds.
  * Always resolves with an inspectable result, even on startup error, malformed
  * or partial events, timeout, deadline breach or interruption. Completion is
  * driven by `close`, not `exit`, so trailing stdout/stderr bytes are never
- * dropped. */
+ * dropped. A bounded contract (`budget`/`readScope`) is enforced from observed
+ * events and its accounting is attached to `outputBreakdown`. */
 export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promise<WorkerStreamResult> {
  const { settings, spawnChild, command, args, cwd, eventsPath, logPath, runtimePath } = opts;
  const startedAt = Date.now();
@@ -486,6 +612,128 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  let completionRequested = false;
  let child: ChildProcessLike | undefined;
  let monitor: ReturnType<typeof setInterval> | undefined;
+ const budgetLimits = opts.budget;
+ const readScope = opts.readScope ?? null;
+ const readContextPaths = [
+  ...(Array.isArray(opts.contextPaths) ? opts.contextPaths : []),
+  ...(Array.isArray(opts.context) ? opts.context.map((entry) => typeof entry === 'string' ? entry : entry?.path ?? '') : []),
+ ].filter((path): path is string => typeof path === 'string' && !!path.trim());
+ const readAllowedPaths = readScope
+  ? [...(Array.isArray(readScope.paths) ? readScope.paths : []), ...readContextPaths]
+  : [];
+ const budgetMode: 'warn' | 'enforce' = budgetLimits?.mode === 'warn' ? 'warn' : 'enforce';
+ let budgetExceeded = false;
+ let scopeExceeded = false;
+ let exceededField: string | null = null;
+ let readCalls = 0;
+ let readBytes = 0;
+ let toolCalls = 0;
+ let responseCalls = 0;
+ let inputTokens = 0;
+ let outputTokens = 0;
+ let cacheReadTokens = 0;
+ let cacheWriteTokens = 0;
+ let totalTokens = 0;
+ const readFiles = new Set<string>();
+ const readMeta = new Map<string, { toolName: string; path: string | null }>();
+ const toolBytes = new Map<string, number>();
+ const readBytesByCall = new Map<string, number>();
+ let largestReads: { toolCallId: string; toolName: string | null; path: string | null; bytes: number }[] = [];
+ const budgetPhase = opts.phase ?? 'worker';
+ const boundedRequested = !!(budgetLimits || readScope);
+
+ function sumValues(map: Map<string, number>): number {
+  let total = 0;
+  for (const value of map.values()) total += value;
+  return total;
+ }
+
+ function phaseAccounting(): PhaseAccounting {
+  const bytes = readBytes;
+  const tokens = totalTokens;
+  return { phase: budgetPhase, readFiles: readFiles.size, readCalls, readBytes: bytes,
+   toolCalls, responseCalls, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+   totalTokens: tokens, toolOutputBytes: sumValues(toolBytes), files: readFiles.size, bytes, tokens };
+ }
+
+ function budgetAccounting(): BudgetAccounting | undefined {
+  if (!boundedRequested) return undefined;
+  const used = phaseAccounting();
+  const { phase: _phase, ...withoutPhase } = used;
+  return { requested: budgetLimits ?? {}, readScope, mode: budgetMode, used: withoutPhase,
+   exceeded: budgetExceeded || scopeExceeded, exceededField, stopReason: stopReason === 'budget' ? 'budget_exceeded' : stopReason === 'scope' ? 'needs_manager_scope' : null,
+   largestReads: largestReads.slice(0, 3), phases: [used] };
+ }
+
+ function recordRead(toolCallId: string, toolName: string | null, path: string | null): void {
+  if (!isReadLikeTool(toolName)) return;
+  if (!readMeta.has(toolCallId)) {
+   readMeta.set(toolCallId, { toolName: String(toolName), path });
+   readCalls++;
+   if (path) readFiles.add(normalizeReadPath(path));
+   if (readScope) {
+    const allowed = readAllowedPaths.some((pattern) => readPathMatches(pattern, path ?? ''));
+    if (!allowed || !path) { scopeExceeded = true; if (!exceededField) exceededField = 'readScope'; requestStop('scope'); }
+   }
+  } else if (!readMeta.get(toolCallId)?.path && path) {
+   const prior = readMeta.get(toolCallId)!;
+   prior.path = path;
+   readFiles.add(normalizeReadPath(path));
+  }
+ }
+
+ function recordToolBytes(toolCallId: string, bytes: number): void {
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  const prior = toolBytes.get(toolCallId) ?? 0;
+  if (bytes > prior) toolBytes.set(toolCallId, bytes);
+  const meta = readMeta.get(toolCallId);
+  if (meta) {
+   const priorRead = readBytesByCall.get(toolCallId) ?? 0;
+   if (bytes > priorRead) { readBytes += bytes - priorRead; readBytesByCall.set(toolCallId, bytes); }
+   const existing = largestReads.find((r) => r.toolCallId === toolCallId);
+   const entry = { toolCallId, toolName: meta.toolName, path: meta.path, bytes: Math.max(priorRead, bytes) };
+   if (existing) Object.assign(existing, entry); else largestReads.push(entry);
+   largestReads.sort((a, b) => b.bytes - a.bytes);
+   if (largestReads.length > 3) largestReads.length = 3;
+  }
+ }
+
+ function addUsage(usage: any): void {
+  if (!usage || typeof usage !== 'object') return;
+  const n = (v: any) => typeof v === 'number' && Number.isFinite(v) ? v : 0;
+  inputTokens += n(usage.input);
+  outputTokens += n(usage.output);
+  cacheReadTokens += n(usage.cacheRead);
+  cacheWriteTokens += n(usage.cacheWrite);
+  totalTokens += n(usage.totalTokens) || n(usage.input) + n(usage.output) + n(usage.cacheRead) + n(usage.cacheWrite);
+ }
+
+ function checkBudget(): void {
+  if (!budgetLimits && !readScope) return;
+  const fields: [keyof BudgetLimits, number][] = [
+   ['maxInputTokens', inputTokens], ['maxFreshInputTokens', inputTokens],
+   ['maxCacheReadTokens', cacheReadTokens], ['maxCachedInputTokens', cacheReadTokens + cacheWriteTokens],
+   ['maxOutputTokens', outputTokens], ['maxTotalTokens', totalTokens || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens],
+   ['maxToolCalls', toolCalls], ['maxToolOutputBytes', sumValues(toolBytes)], ['maxResponseCalls', responseCalls],
+  ];
+  for (const [field, value] of fields) {
+   const limit = budgetLimits?.[field];
+   if (typeof limit === 'number' && value > limit) {
+    budgetExceeded = true;
+    if (!exceededField) exceededField = String(field);
+    if (budgetMode === 'enforce') requestStop('budget');
+    break;
+   }
+  }
+  if (readScope) {
+   if (typeof readScope.maxFiles === 'number' && readFiles.size > readScope.maxFiles) {
+    scopeExceeded = true; if (!exceededField) exceededField = 'readScope.maxFiles'; requestStop('scope');
+   }
+   if (typeof readScope.maxBytes === 'number' && readBytes > readScope.maxBytes) {
+    scopeExceeded = true; if (!exceededField) exceededField = 'readScope.maxBytes'; requestStop('scope');
+   }
+  }
+ }
 
  let resolveDone!: (r: WorkerStreamResult) => void;
  const done = new Promise<WorkerStreamResult>((res) => { resolveDone = res; });
@@ -515,10 +763,21 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   else if (stopReason === 'startup_error') heartbeat.setState('failed', { error: startupError, stopReason: 'failed', exitCode, signal: exitSignal });
   else if (stopReason === 'stream_error') heartbeat.setState('failed', { error: streamError, stopReason: 'failed', exitCode, signal: exitSignal });
   else if (stopReason === 'output_truncated') heartbeat.setState('failed', { stopReason: 'output_truncated', outputTruncated: true, exitCode, signal: exitSignal });
+  else if (stopReason === 'budget') heartbeat.setState('failed', { stopReason: 'budget_exceeded', outputTruncated: true, budgetExceeded: true, incomplete: true, exitCode, signal: exitSignal });
+  else if (stopReason === 'scope') heartbeat.setState('failed', { stopReason: 'needs_manager_scope', outputTruncated: true, scopeExceeded: true, incomplete: true, exitCode, signal: exitSignal });
   else heartbeat.setState(exitCode === 0 ? 'running' : 'failed', { stopReason: exitCode === 0 ? 'completed' : 'failed', exitCode, signal: exitSignal });
   const runtime = heartbeat.snapshot();
   const reason = runtime.stopReason ?? (exitCode === 0 ? 'completed' : 'failed');
-  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated, stopReason: reason, timedOutTool, runtime, outputBreakdown: { rawBytes: rawStdoutBytes, retainedBytes: stdout.length, byType, largestToolResults } });
+  const accounting = budgetAccounting();
+  const phases = accounting?.phases;
+  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error: startupError, streamError, persistError, interrupted, timedOut, deadlineExceeded, outputTruncated,
+   ...(stopReason === 'budget' || stopReason === 'scope' ? { incomplete: true } : {}),
+   ...(budgetExceeded ? { budgetExceeded: true } : {}),
+   ...(scopeExceeded ? { scopeExceeded: true } : {}),
+   stopReason: reason, timedOutTool, runtime,
+   outputBreakdown: { rawBytes: rawStdoutBytes, retainedBytes: stdout.length, byType, largestToolResults, ...(accounting ? { budget: accounting, phaseAccounting: phases } : {}) },
+   ...(accounting ? { budget: accounting } : {}),
+   ...(phases ? { phaseAccounting: phases } : {}) });
  }
 
  function requestStop(reason: StreamStopReason): void {
@@ -527,6 +786,8 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   if (reason === 'tool_timeout') timedOut = true;
   else if (reason === 'deadline') deadlineExceeded = true;
   else if (reason === 'interrupt') interrupted = true;
+  else if (reason === 'budget') { budgetExceeded = true; outputTruncated = true; }
+  else if (reason === 'scope') { scopeExceeded = true; outputTruncated = true; }
   if (child) {
    killChildGroup(child, 'SIGTERM');
    killTimer = setTimeout(() => { if (child) killChildGroup(child, 'SIGKILL'); killEscalationComplete = true; if (completionRequested) finalize(); }, KILL_GRACE_MS);
@@ -540,11 +801,41 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
   else opts.signal.addEventListener?.('abort', onAbort);
  }
 
+ function trackBudgetEvent(ev: any): void {
+  if (!ev || typeof ev !== 'object') return;
+  const type = ev.type;
+  const jsonBytesLocal = (v: any): number => { try { const text = JSON.stringify(v); return typeof text === 'string' ? text.length : 0; } catch { return 0; } };
+  if (type === 'tool_execution_start') {
+   toolCalls++;
+   const id = typeof ev.toolCallId === 'string' && ev.toolCallId ? ev.toolCallId : 'unknown';
+   const name = typeof ev.toolName === 'string' && ev.toolName ? ev.toolName : null;
+   recordRead(id, name, readToolPath(ev));
+  } else if (type === 'tool_execution_end') {
+   const id = typeof ev.toolCallId === 'string' && ev.toolCallId ? ev.toolCallId : 'unknown';
+   const name = typeof ev.toolName === 'string' && ev.toolName ? ev.toolName : null;
+   recordRead(id, name, readToolPath(ev));
+   recordToolBytes(id, jsonBytesLocal(ev.result));
+  } else if (type === 'message_end') {
+   const message = ev.message;
+   if (message && typeof message === 'object' && message.role === 'assistant') {
+    responseCalls++;
+    addUsage(message.usage);
+   }
+   if (message && typeof message === 'object' && message.role === 'toolResult') {
+    const id = typeof message.toolCallId === 'string' && message.toolCallId ? message.toolCallId : 'unknown';
+    const name = typeof message.toolName === 'string' && message.toolName ? message.toolName : null;
+    recordRead(id, name, readToolPath(ev));
+    recordToolBytes(id, jsonBytesLocal(message));
+   }
+  }
+  checkBudget();
+ }
+
  function handleLine(line: string): void {
   const now = Date.now();
   let ev: any = null;
   if (line.trim()) { try { ev = JSON.parse(line.endsWith('\r') ? line.slice(0, -1) : line); } catch { ev = null; } }
-  if (ev && typeof ev === 'object') watchdog.onEvent(ev, now);
+  if (ev && typeof ev === 'object') { watchdog.onEvent(ev, now); trackBudgetEvent(ev); }
   heartbeat.activity(now, watchdog.currentTool());
   const longest = watchdog.longest(now);
   heartbeat.poll(now, watchdog.currentTool(), longest ? longest.elapsedMs : null);
