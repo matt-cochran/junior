@@ -1,6 +1,6 @@
 import {loadHopContext} from './hop-context.ts';
 import {isDirectEntry} from './cli-entry.ts';
-import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, realpathSync, symlinkSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { resolve, join, dirname, relative, isAbsolute, sep, delimiter, basename } from 'node:path';
@@ -1603,6 +1603,30 @@ export function buildPiArgs(requested:{provider:string;model:string}, sessionId?
  return args;
 }
 
+/**
+ * Give Pi a writable, run-local agent directory without copying credentials
+ * out of its configured store. Pi creates `auth.json.lock` beside auth.json;
+ * that fails in sandboxed Codex runs when HOME is deliberately read-only.
+ * A symlink keeps the credential at its original protected location while the
+ * lock and any transient state stay below the ignored run artifact directory.
+ */
+export function preparePiAgentOverlay(artifactDir:string, env:NodeJS.ProcessEnv = process.env):{dir?:string;error?:string} {
+ const source=piAgentDir(env);
+ const dir=join(artifactDir,'pi-agent');
+ try {
+  mkdirSync(dir,{recursive:true,mode:0o700});
+  chmodSync(dir,0o700);
+  for (const name of ['auth.json','models.json','models-store.json']) {
+   const from=join(source,name), to=join(dir,name);
+   if (!existsSync(from) || existsSync(to)) continue;
+   symlinkSync(from,to);
+  }
+  return {dir};
+ } catch (e:any) {
+  return {error:`cannot create workspace-local Pi credential state: ${e?.message ?? String(e)}`};
+ }
+}
+
 /** Probe the installed Pi CLI for the long options it supports. The probe is
  * offline and bounded; any failure (missing binary, non-zero status, timeout)
  * yields null so the caller can fall back to assuming every flag works. */
@@ -3137,7 +3161,10 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
   // fails only that tool call and returns a tool error to the model. The guard
   // also confines writes to the execution checkout and keeps a worktree run out
   // of the source checkout.
-  const piBashEnv:any = { ...process.env, JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
+  const piBashEnv:any = { ...(deps.env ?? process.env), JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
+  const piOverlay=preparePiAgentOverlay(dir,piBashEnv);
+  if (!piOverlay.dir) return blocked(`Pi worker was not started: ${piOverlay.error}. Ensure the repository .delivery directory is writable.`);
+  piBashEnv.PI_CODING_AGENT_DIR=piOverlay.dir;
   if (isolation === 'worktree') {
    piBashEnv.JUNIOR_PI_WRITE_ROOTS = [executionCwd, dir].join(delimiter);
    piBashEnv.JUNIOR_PI_SOURCE_ROOT = sourceCwd;
