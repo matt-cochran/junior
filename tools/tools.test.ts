@@ -170,6 +170,32 @@ test("call defaults the hop to .delivery/setup/hop.json under the current direct
   assert.equal(result.status, 0);
 });
 
+function nestedProjectHop(root, name) {
+  const dir = path.join(root, ".delivery", name);
+  fs.mkdirSync(dir, { recursive: true });
+  return initHop(dir);
+}
+
+test("call uses the persisted active Hop selection when no Hop is explicit", () => {
+  const root = tmpdir();
+  nestedProjectHop(root, "alpha");
+  const selected = nestedProjectHop(root, "beta");
+  fs.writeFileSync(path.join(root, ".delivery", "active-hop.json"), JSON.stringify({ hop: ".delivery/beta/hop.json" }));
+  runCli(["call", "fmeca", "state.get", "session_id=s1"], 30000, {}, { cwd: root });
+  const manifest = JSON.parse(fs.readFileSync(selected, "utf8"));
+  assert.equal(manifest.revision, 1);
+});
+
+test("an explicit Hop path wins over the persisted active selection", () => {
+  const root = tmpdir();
+  const explicit = nestedProjectHop(root, "alpha");
+  nestedProjectHop(root, "beta");
+  fs.writeFileSync(path.join(root, ".delivery", "active-hop.json"), JSON.stringify({ hop: ".delivery/beta/hop.json" }));
+  runCli(["call", explicit, "fmeca", "state.get", "session_id=s1"], 30000, {}, { cwd: root });
+  const manifest = JSON.parse(fs.readFileSync(explicit, "utf8"));
+  assert.equal(manifest.revision, 1);
+});
+
 test("inline key=value arguments decode JSON values and keep bare tokens as strings", () => {
   const dir = tmpdir();
   const hop = initHop(dir);
@@ -634,11 +660,15 @@ test("buildToolEnv points CROSSMATRIX_DIR at the git project's store", () => {
   assert.deepEqual(env, { CROSSMATRIX_DIR: path.join(project, ".crossmatrix") });
 });
 
-test("buildToolEnv falls back to the hop file's grandparent outside a git repo", () => {
+test("buildToolEnv falls back to the nearest project marker when git cannot resolve a repository", () => {
   const root = tmpdir();
   const project = path.join(root, "project");
   const hopDir = path.join(project, "sub");
   fs.mkdirSync(hopDir, { recursive: true });
+  // Keep the fallback bounded to this fixture even when the OS temp root sits
+  // inside an unrelated repository. The empty marker makes `git rev-parse`
+  // fail, so the walk below exercises the fallback path.
+  fs.mkdirSync(path.join(project, ".git"));
   fs.mkdirSync(path.join(project, ".crossmatrix"));
   const env = buildToolEnv(path.join(hopDir, "hop.json"), "crossmatrix", crossmatrixManifest());
   assert.deepEqual(env, { CROSSMATRIX_DIR: path.join(project, ".crossmatrix") });

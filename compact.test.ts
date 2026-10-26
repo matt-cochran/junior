@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initHop, loadHop, saveHop } from './tools/tools.ts';
@@ -91,6 +91,58 @@ test('the header is stamped with the hop revision', async (t) => {
   const dir = workspace(t);
   const block = await buildCompactBlock({ cwd: dir, hopPath: hopAt(dir), now: () => new Date('2026-01-02T03:04:05Z') });
   assert.match(block.markdown, /hop revision: 7/);
+});
+
+function selectedNestedHop(dir: string): string {
+  const path = join(dir, '.delivery', 'team', 'hop.json');
+  initHop(path, {
+    projectId: 'nested-compact-test',
+    probeVersion: () => 'test',
+    tools: {
+      cpm: { command: 'cpm-planner', sourceVersion: 'test' },
+      fmeca: { command: 'fmeca-mcp', sourceVersion: 'test' },
+      'scientific-process': { command: 'scientific-process', sourceVersion: 'test' },
+    },
+  });
+  return path;
+}
+
+test('compact prints the canonical selected Hop path', async (t) => {
+  const dir = workspace(t);
+  const hop = selectedNestedHop(dir);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    callHop: async (_path, _tool, request) =>
+      request.tool === 'plan.status' ? failing('plan.status', 'NO_ACTIVE_PLAN') : failing(request.tool, 'none'),
+  });
+  assert.ok(block.markdown.includes(`- hop: ${realpathSync(hop)}`));
+});
+
+test('the active plan is read from the canonical selected Hop', async (t) => {
+  const dir = workspace(t);
+  const hop = selectedNestedHop(dir);
+  let planPath = '';
+  await buildCompactBlock({
+    cwd: dir,
+    callHop: async (path, tool, request) => {
+      if (tool === 'cpm' && request.tool === 'plan.status') {
+        planPath = path;
+        return outcome('plan.status', PLAN);
+      }
+      return failing(request.tool, 'none');
+    },
+  });
+  assert.equal(planPath, realpathSync(hop));
+});
+
+test('the plan section carries the plan revision', async (t) => {
+  const dir = workspace(t);
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    callHop: async () => outcome('plan.status', { ...PLAN, revision: 12 }),
+  });
+  assert.match(block.markdown, /revision: 12/);
 });
 
 test('the header is stamped with the generation time', async (t) => {

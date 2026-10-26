@@ -3,11 +3,12 @@
 //
 // A handoff artifact records a detached Git worktree created at the source
 // HEAD. This module rebuilds that worktree's full change set (tracked edits
-// plus new untracked files) as a binary patch and applies it to the source with
-// a three-way merge. Safety comes first: a non-ready status, a foreign or moved
-// worktree, or a worktree HEAD that is no longer an ancestor of the source HEAD
-// is refused, and a failed apply restores every touched file so the source
-// working tree is left exactly as it was. No shell is ever used.
+// plus new untracked files) as a binary patch and applies it to the contract's
+// recorded source checkout with a three-way merge. Safety comes first: a
+// non-ready status, a foreign or moved worktree, or a worktree HEAD that is no
+// longer an ancestor of the recorded source HEAD is refused, and a failed apply
+// restores every touched file so that source working tree is left exactly as it
+// was. No shell is ever used.
 // ---------------------------------------------------------------------------
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -20,6 +21,8 @@ export type ApplyHandoffResult = {
  dryRun: boolean;
  files: string[];
  artifactDir: string;
+ /** The resolved source checkout the patch was checked against or applied to. */
+ target?: string;
  conflicts?: string[];
  error?: string;
 };
@@ -94,21 +97,42 @@ export function hashPatch(patch: string): string {
  return createHash('sha256').update(patch).digest('hex');
 }
 
-/** Apply a reviewed handoff to `opts.cwd`. Refuses on a non-ready status
- * (unless `force`), a non-worktree or missing worktree, or a worktree HEAD
- * that is not an ancestor of the source HEAD. `dryRun` only checks the patch.
- * A failed three-way merge restores every touched file and reports the
- * conflicts; nothing is committed or pushed. */
+/** Resolve the exact source checkout recorded by the contract. A run executed
+ * from a linked worktree records that worktree as `sourceCwd`; applying against
+ * the caller's primary checkout would check and write the wrong HEAD. Older
+ * results without `sourceCwd` keep the caller's cwd for compatibility. */
+function resolveSourceCwd(result: any, fallback: string): { dir?: string; error?: string } {
+ const recorded = typeof result?.sourceCwd === 'string' && result.sourceCwd.trim() ? result.sourceCwd.trim() : null;
+ if (!recorded) return { dir: fallback };
+ const dir = resolve(fallback, recorded);
+ try {
+  if (!statSync(dir).isDirectory()) return { error: `recorded source worktree is not a directory: ${dir}` };
+ } catch {
+  return { error: `recorded source worktree is missing or no longer exists: ${dir}` };
+ }
+ return { dir };
+}
+
+/** Apply a reviewed handoff to the contract's recorded source checkout (or
+ * `opts.cwd` for older results). Refuses on a non-ready status (unless `force`),
+ * a non-worktree or missing worktree, or a worktree HEAD that is not an
+ * ancestor of that source HEAD. `dryRun` only checks the patch. A failed
+ * three-way merge restores every touched file and reports the conflicts;
+ * nothing is committed or pushed. */
 export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boolean; force?: boolean }): ApplyHandoffResult {
- const cwd = resolve(opts.cwd);
+ const callerCwd = resolve(opts.cwd);
  const dryRun = opts.dryRun === true;
- const resolved = resolveArtifactDir(target, cwd);
+ const resolved = resolveArtifactDir(target, callerCwd);
  if (!resolved.dir) return fail(dryRun, '', [], resolved.error!);
  const artifactDir = resolved.dir;
 
  let result: any;
  try { result = JSON.parse(readFileSync(join(artifactDir, 'result.json'), 'utf8')); }
  catch (e) { return fail(dryRun, artifactDir, [], `could not read ${join(artifactDir, 'result.json')}: ${message(e)}`); }
+
+ const source = resolveSourceCwd(result, callerCwd);
+ if (!source.dir) return fail(dryRun, artifactDir, [], source.error!);
+ const cwd = source.dir;
 
  if (result?.status !== 'ready_for_review' && !opts.force) {
   return fail(dryRun, artifactDir, [], `handoff status is "${result?.status ?? 'unknown'}"; expected "ready_for_review" (pass force to override)`);
@@ -137,7 +161,7 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
    const conflicts = conflictsFrom(`${check.stdout}\n${check.stderr}`);
    return fail(true, artifactDir, files, `handoff does not apply cleanly: ${conflicts.length ? conflicts.join(', ') : check.stderr.trim() || check.error || 'git apply --check failed'}`, conflicts);
   }
-  return { applied: false, dryRun: true, files, artifactDir };
+  return { applied: false, dryRun: true, files, artifactDir, target: cwd };
  }
 
  // Preserve each touched working-tree file so a failed three-way merge can be
@@ -161,7 +185,7 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
  // reviewed once its diff still hashes to the same bytes. Best effort: a write
  // failure never turns a successful apply into a reported failure.
  try {
-  writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString(), patchSha256: sha256 }, null, 2) + '\n');
+  writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString(), patchSha256: sha256, target: cwd, sourceCwd: cwd }, null, 2) + '\n');
  } catch { /* the applied record is best effort */ }
- return { applied: true, dryRun: false, files, artifactDir };
+ return { applied: true, dryRun: false, files, artifactDir, target: cwd };
 }
