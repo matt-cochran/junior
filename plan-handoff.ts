@@ -5,14 +5,17 @@
 // handoff starts and records its progress after it finishes: it acquires a
 // one-deliverable cohort (`plan.acquire_cohort`), runs the handoff, then marks
 // the deliverable `in_progress` on success or `failed` on failure
-// (`plan.mark_status`). The lease is left for the manager to accept; a failing
-// mark is recorded in `plan.error` without discarding the run result.
+// (`plan.mark_status`). A Failed deliverable is returned to Ready through the
+// supported audited lockless mark before it is re-leased. Completed work has no
+// lockless complete -> ready path: it must be revised/reopened in CPM first.
+// The lease is left for the manager to accept; a failing mark is recorded in
+// `plan.error` without discarding the run result.
 //
 // The cpm calls are injected so the wrapper stays offline and testable. The
 // lease is deliberately not released here: acceptance is a manager action.
 // ---------------------------------------------------------------------------
 
-import { cohortDeliverableIds, planLocks, strictItems } from './companion-shapes.ts';
+import { cohortDeliverableIds, planLocks, planStatusRows, strictItems } from './companion-shapes.ts';
 
 /** Outcomes that stop a run to wait for the manager or the human: the lease is
  * kept (a rerun by the same caller is re-entrant) and the deliverable is not
@@ -74,6 +77,10 @@ export interface PlanLeaseOutcome<R> {
     leased: boolean;
     marked: 'in_progress' | 'failed' | null;
     reentered?: boolean;
+    /** A failed deliverable was returned to ready before this lease. */
+    retried?: boolean;
+    /** The failure reason retained in the retry evidence. */
+    retryReason?: string;
     error?: string;
   };
 }
@@ -89,8 +96,32 @@ function cohortIds(result: unknown): string[] {
   return strictItems(cohortDeliverableIds(result), 'cpm', 'plan.acquire_cohort', result);
 }
 
-function effortHours(startedAt: number, endedAt: number): number {
-  return Math.max(0.01, Math.round(((endedAt - startedAt) / 3_600_000) * 100) / 100);
+function effortHours(startedAt: number, endedAt: number, prior = 0): number {
+  const total = Math.max(0, prior) + Math.max(0, endedAt - startedAt) / 3_600_000;
+  return Math.max(0.01, Math.round(total * 100) / 100);
+}
+
+function actualHours(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function deliverableActualHours(result: unknown, deliverableId: string): number | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const raw = result as any;
+  const rows = Array.isArray(raw.rows) ? raw.rows : Array.isArray(raw.deliverables) ? raw.deliverables : [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const id = Array.isArray(row) ? String(row[0] ?? '') : String(row.id ?? row.deliverable_id ?? row.deliverableId ?? '');
+    if (id !== deliverableId) continue;
+    const item = Array.isArray(row) ? row[1] : row;
+    if (!item || typeof item !== 'object') continue;
+    const hours = actualHours(item.actual_effort_hours)
+      ?? actualHours(item.actualEffortHours)
+      ?? actualHours(item.ac)
+      ?? actualHours(item.actual_cost);
+    if (hours !== undefined) return hours;
+  }
+  return undefined;
 }
 
 /** Deliverable locks from a cpm `plan.status` response; throws `ShapeError` when unrecognized. */
@@ -99,6 +130,35 @@ function lockHolders(result: unknown): Array<{ deliverableId: string; callerId: 
     deliverableId: lock.deliverableId,
     callerId: lock.callerId,
   }));
+}
+
+type DeliverableState = { status: string; reason?: string; actualHours?: number };
+
+function deliverableState(result: unknown, deliverableId: string): DeliverableState | undefined {
+  const rows = strictItems(planStatusRows(result), 'cpm', 'plan.status', result);
+  const row = rows.find((candidate) => candidate.id === deliverableId);
+  if (!row) return undefined;
+  const raw = row.raw;
+  const item = raw && typeof raw === 'object' ? raw as any : undefined;
+  const mark = item?.status ?? item?.mark_status ?? item?.markStatus ?? raw;
+  const status = row.status || (typeof mark === 'string' ? mark : mark?.status) || '';
+  const reason = mark && typeof mark === 'object'
+    ? typeof mark.reason === 'string' ? mark.reason.trim() : ''
+    : typeof item?.reason === 'string' ? item.reason.trim() : '';
+  const hours = actualHours(item?.actual_effort_hours)
+    ?? actualHours(item?.actualEffortHours)
+    ?? (mark && typeof mark === 'object'
+      ? actualHours(mark.actual_effort_hours) ?? actualHours(mark.actualEffortHours)
+      : undefined);
+  return {
+    status: String(status).toLowerCase(),
+    ...(reason ? { reason } : {}),
+    ...(hours !== undefined ? { actualHours: hours } : {}),
+  };
+}
+
+function retryEvidence(reason: string): string {
+  return `retry after failure: ${reason}`.slice(0, 2048);
 }
 
 /** One line describing where the run landed, its outcome and its model. */
@@ -130,6 +190,7 @@ export async function withPlanLease<R>(
   };
 
   const ttlSeconds = Math.ceil(deps.deadlineMs / 1000) + 3600;
+  let priorActualHours = 0;
   let acquired: PlanHopResult;
   try {
     acquired = await deps.callHop('cpm', {
@@ -176,15 +237,90 @@ export async function withPlanLease<R>(
       plan.error = `plan.status failed: ${messageOf(error)}`;
       return { plan };
     }
-    if (!held || held.callerId !== callerId) {
-      plan.error = held
-        ? `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`
-        : `plan.acquire_cohort did not lease ${plan.deliverable}`;
+    if (held && held.callerId !== callerId) {
+      plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`;
       return { plan };
     }
-    plan.reentered = true;
+    if (held) {
+      plan.reentered = true;
+    } else {
+      let state: DeliverableState | undefined;
+      try {
+        state = status.ok ? deliverableState(status.result, plan.deliverable) : undefined;
+      } catch (error) {
+        plan.error = `plan.status failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (state?.status === 'complete') {
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; completed work must be revised/reopened before a new lease`;
+        return { plan };
+      }
+      const reason = state?.status === 'failed' ? state.reason ?? 'failure reason not recorded' : undefined;
+      if (reason === undefined) {
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
+        return { plan };
+      }
+      priorActualHours = state.actualHours ?? 0;
+      let ready: PlanHopResult;
+      try {
+        ready = await deps.callHop('cpm', {
+          tool: 'plan.mark_status',
+          arguments: {
+            caller_id: callerId,
+            plan_id: plan.id,
+            deliverable_id: plan.deliverable,
+            status: { status: 'ready' },
+            evidence: retryEvidence(reason),
+          },
+        });
+      } catch (error) {
+        plan.error = `plan.mark_status failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!ready.ok) {
+        plan.error = `plan.mark_status failed: ${ready.error?.message ?? 'unknown error'}`;
+        return { plan };
+      }
+      let retried: PlanHopResult;
+      try {
+        retried = await deps.callHop('cpm', {
+          tool: 'plan.acquire_cohort',
+          arguments: { plan_id: plan.id, caller_id: callerId, ids: [plan.deliverable], max_count: 1, ttl_seconds: ttlSeconds },
+        });
+      } catch (error) {
+        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!retried.ok) {
+        plan.error = `plan.acquire_cohort failed: ${retried.error?.message ?? 'unknown error'}`;
+        return { plan };
+      }
+      let retriedIds: string[];
+      try {
+        retriedIds = cohortIds(retried.result);
+      } catch (error) {
+        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+        return { plan };
+      }
+      if (!retriedIds.includes(plan.deliverable)) {
+        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable} after returning it to ready`;
+        return { plan };
+      }
+      plan.retried = true;
+      plan.retryReason = reason;
+    }
   }
   plan.leased = true;
+
+  try {
+    const ev = await deps.callHop('cpm', { tool: 'plan.ev', arguments: { plan_id: plan.id } });
+    if (ev.ok) {
+      const previous = deliverableActualHours(ev.result, plan.deliverable);
+      if (previous !== undefined) priorActualHours = Math.max(priorActualHours, previous);
+    }
+  } catch {
+    // An unbaselined plan need not expose earned-value rows.
+  }
 
   const startedAt = now();
   const mark = async (
@@ -204,7 +340,7 @@ export async function withPlanLease<R>(
           plan_id: plan.id,
           deliverable_id: plan.deliverable,
           status,
-          actual_effort_hours: effortHours(startedAt, now()),
+          actual_effort_hours: effortHours(startedAt, now(), priorActualHours),
           evidence: evidenceLine(summary),
         },
       });
