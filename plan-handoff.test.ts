@@ -323,3 +323,66 @@ test('a blocked run without segment or model fields never started', () => {
   const result = { status: 'needs_review', runtime: { stopReason: 'blocked' } };
   assert.equal(runNeverStarted(result), true);
 });
+
+// --- failed retry lifecycle -------------------------------------------------
+
+function failedStatus(reason: string, actual_effort_hours?: number) {
+  return () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'failed', reason, ...(actual_effort_hours === undefined ? {} : { actual_effort_hours }) }]], locks_held: [] } });
+}
+
+function acquireAfterFirstLease() {
+  let attempts = 0;
+  return () => ({ ok: true, result: { deliverables: ++attempts === 1 ? ['other'] : [DELIVERABLE] } });
+}
+
+test('withPlanLease returns a failed deliverable to ready then retries it', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('checks failed'),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.equal(out.plan.leased, true);
+  assert.equal(out.plan.retried, true);
+  assert.deepEqual(calls.find((call) => call.request.tool === 'plan.mark_status')?.request.arguments.status, { status: 'ready' });
+});
+
+test('withPlanLease retains the failure reason in retry evidence', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('earlier checks failed'),
+  });
+  await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  const ready = calls.find((call) => call.request.tool === 'plan.mark_status');
+  assert.match(String(ready?.request.arguments.evidence), /earlier checks failed/);
+});
+
+test('withPlanLease refuses completed work until CPM reopens it', async () => {
+  const { callHop } = harness({
+    'plan.acquire_cohort': () => ({ ok: true, result: { deliverables: ['other'] } }),
+    'plan.status': () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'complete' }]], locks_held: [] } }),
+  });
+  const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
+  assert.match(out.plan.error ?? '', /revised\/reopened/);
+});
+
+test('withPlanLease accumulates failed actuals with the new run', async () => {
+  const { calls, callHop } = harness({
+    'plan.acquire_cohort': acquireAfterFirstLease(),
+    'plan.status': failedStatus('checks failed', 2.5),
+  });
+  const ticks = [0, 3_600_000];
+  let index = 0;
+  await withPlanLease(TASK, async () => 'ok', deps(callHop, { now: () => ticks[Math.min(index++, ticks.length - 1)] }));
+  const marks = calls.filter((call) => call.request.tool === 'plan.mark_status');
+  assert.equal(marks.at(-1)?.request.arguments.actual_effort_hours, 3.5);
+});
+
+test('withPlanLease uses EV actuals when a reopened correction has them', async () => {
+  const { calls, callHop } = harness({
+    'plan.ev': () => ({ ok: true, result: { rows: [{ id: DELIVERABLE, ac: 2 }] } }),
+  });
+  const ticks = [0, 3_600_000];
+  let index = 0;
+  await withPlanLease(TASK, async () => 'ok', deps(callHop, { now: () => ticks[Math.min(index++, ticks.length - 1)] }));
+  assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 3);
+});
