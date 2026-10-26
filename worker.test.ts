@@ -2036,6 +2036,20 @@ test('isolation none leaves JUNIOR_PI_SOURCE_ROOT unset',async()=>{
  await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
  assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,undefined);
 });
+test('sandboxed Pi uses a run-local credential-lock directory without copying auth',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const agent=join(repo.dir,'read-only-agent'); mkdirSync(agent,{recursive:true});
+ writeFileSync(join(agent,'auth.json'),JSON.stringify({openrouter:{type:'api',key:'not-a-real-secret'}}));
+ let seen:any;
+ const r=await run(okTask(repo),false,{env:{...process.env,PI_CODING_AGENT_DIR:agent},spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ const overlay=seen.env.PI_CODING_AGENT_DIR;
+ assert.equal(overlay,join(r.artifactDir,'pi-agent'));
+ assert.notEqual(overlay,agent);
+ assert.equal(readFileSync(join(overlay,'auth.json'),'utf8'),readFileSync(join(agent,'auth.json'),'utf8'));
+ writeFileSync(join(overlay,'auth.json.lock'),'lock');
+ assert.ok(existsSync(join(overlay,'auth.json.lock')));
+ assert.equal(existsSync(join(agent,'auth.json.lock')),false);
+});
 
 test('Run captures before/after evidence artifact and run-change summary',async()=>{
  const repo=gitRepo();
