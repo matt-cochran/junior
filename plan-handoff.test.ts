@@ -326,19 +326,19 @@ test('a blocked run without segment or model fields never started', () => {
 
 // --- failed retry lifecycle -------------------------------------------------
 
-function failedStatus(reason: string, actual_effort_hours?: number) {
+function backportFailedStatus(reason: string, actual_effort_hours?: number) {
   return () => ({ ok: true, result: { deliverables: [[DELIVERABLE, { status: 'failed', reason, ...(actual_effort_hours === undefined ? {} : { actual_effort_hours }) }]], locks_held: [] } });
 }
 
-function acquireAfterFirstLease() {
+function backportAcquireAfterFirstLease() {
   let attempts = 0;
   return () => ({ ok: true, result: { deliverables: ++attempts === 1 ? ['other'] : [DELIVERABLE] } });
 }
 
 test('withPlanLease returns a failed deliverable to ready then retries it', async () => {
   const { calls, callHop } = harness({
-    'plan.acquire_cohort': acquireAfterFirstLease(),
-    'plan.status': failedStatus('checks failed'),
+    'plan.acquire_cohort': backportAcquireAfterFirstLease(),
+    'plan.status': backportFailedStatus('checks failed'),
   });
   const out = await withPlanLease(TASK, async () => 'ok', deps(callHop));
   assert.equal(out.plan.leased, true);
@@ -348,8 +348,8 @@ test('withPlanLease returns a failed deliverable to ready then retries it', asyn
 
 test('withPlanLease retains the failure reason in retry evidence', async () => {
   const { calls, callHop } = harness({
-    'plan.acquire_cohort': acquireAfterFirstLease(),
-    'plan.status': failedStatus('earlier checks failed'),
+    'plan.acquire_cohort': backportAcquireAfterFirstLease(),
+    'plan.status': backportFailedStatus('earlier checks failed'),
   });
   await withPlanLease(TASK, async () => 'ok', deps(callHop));
   const ready = calls.find((call) => call.request.tool === 'plan.mark_status');
@@ -367,8 +367,8 @@ test('withPlanLease refuses completed work until CPM reopens it', async () => {
 
 test('withPlanLease accumulates failed actuals with the new run', async () => {
   const { calls, callHop } = harness({
-    'plan.acquire_cohort': acquireAfterFirstLease(),
-    'plan.status': failedStatus('checks failed', 2.5),
+    'plan.acquire_cohort': backportAcquireAfterFirstLease(),
+    'plan.status': backportFailedStatus('checks failed', 2.5),
   });
   const ticks = [0, 3_600_000];
   let index = 0;
