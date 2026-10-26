@@ -216,9 +216,11 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
   const r=exec('pi',['--offline','--no-approve','--version'],execOptions);
   if (r.error) {
    note=`pi --version failed: ${r.error}`;
-   versionProbeBlocked=isBlockedProbeError(r.error);
-  } else if (r.status !== 0) note=`pi --version exited ${r.status}`;
-  else version=firstSemver(r.stdout || '');
+   versionProbeBlocked=isBlockedProbeError(r.error) || isBlockedProbeError(r.stderr);
+  } else if (r.status !== 0) {
+   note=`pi --version exited ${r.status}`;
+   versionProbeBlocked=isBlockedProbeError(r.stderr);
+  } else version=firstSemver(r.stdout || '');
  } catch (e) {
   const message=e instanceof Error ? e.message : String(e);
   note=`pi --version failed: ${message}`;

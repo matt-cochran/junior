@@ -68,6 +68,13 @@ test('doctor warns that the Pi version probe was blocked', () => {
  assert.match(doctor(epermFixture().deps).warnings.join(' '),/version probe was blocked.*EPERM/);
 });
 
+test('doctor reports a degraded verdict when the Pi version probe exits with EPERM on stderr', () => {
+ const {deps}=fixture({deps:{exec:(_cmd:string,args:string[])=>args.includes('--version')
+  ? {status:1,stdout:'',stderr:'spawnSync pi EPERM'}
+  : okExec(_cmd,args)}});
+ assert.equal(doctor(deps).verdict,'degraded');
+});
+
 test('doctor fails when Pi is missing', () => {
  const {cwd}=fixture();
  const deps=setupDeps(cwd,{env:{PATH:'',HOME:cwd,PI_CODING_AGENT_DIR:join(cwd,'agent')}});
