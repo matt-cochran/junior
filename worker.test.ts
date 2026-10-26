@@ -1396,6 +1396,17 @@ test('A run with no explicit model and no config records the builtin default and
  const r=await run(task(),true);
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:COMMODITY_MODEL,source:'builtin'});
 });
+test('A default routed profile retains the exact project pin and reports its source',async()=>{
+ const cwd=mkdtempSync(join(tmpdir(),'delivery-project-pin-'));
+ const pinned='deepseek/deepseek-v4.1-flash-1017';
+ writeFileSync(join(cwd,'delivery.config.json'),JSON.stringify({
+  provider:'openrouter',model:pinned,models:{routing:'auto',autoUpgrade:false},
+ }));
+ const r=await run(task(0,{cwd,jev:{mode:'shadow'}}),true,{classify:modelGate('general',0.9)});
+ assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:pinned,source:'project'});
+ assert.equal(r.modelRouting.applied,false);
+ assert.equal(r.modelRouting.profile,'general');
+});
 test('Auto routing applies a confident non-default model profile with a run approval',async()=>{
  const r=await run(task(0,{jev:{mode:'shadow'},approveModel:'long-horizon'}),true,{classify:modelGate('long-horizon',0.9)});
  assert.deepEqual(r.receipt.requested,{provider:'openrouter',model:ROUTED_MODEL,source:'routed'});
