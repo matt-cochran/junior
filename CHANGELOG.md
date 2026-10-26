@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-10-26
+
+### Fixed
+
+- Sandboxed Pi handoffs now keep credential locks and transient agent state in
+  the ignored run artifact directory while linking, rather than copying, the
+  configured credential file. This allows read-only home directories without
+  weakening credential-at-rest handling (#129).
+
 ## [0.12.2] - 2026-10-26
 
 ### Fixed
