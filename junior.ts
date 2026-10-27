@@ -69,7 +69,7 @@ interface CommandSpec {
 
 const COMMANDS: Record<string, CommandSpec> = {
  handoff: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--choose', '--correct', '--answers', '--approve-model'], min: 1, max: 1,
-  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--approve-model <key>] [--mock] [--full] [--quiet]' },
+  help: 'Usage: junior handoff <task.json> [--answers <answers.json>] [--choose <option>] [--correct <id>=<text> ...] [--approve-model <key>] [--mock] [--full] [--quiet]\nAnswers JSON: {"Q1":{"stance":"assent","answer":"Your answer here"}} (stance: assent|refute|amend)' },
  qa: { flags: ['--mock', '--full', '--quiet'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--approve-model'], min: 1, max: 1,
@@ -579,7 +579,9 @@ async function main(argv: string[]): Promise<void> {
   const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
   if (parsed.values['--answers'] !== undefined) {
    const answersPath = resolve(process.cwd(), parsed.values['--answers']);
-   const answers = JSON.parse(readFileSync(answersPath, 'utf8'));
+   let answers: unknown;
+   try { answers = JSON.parse(readFileSync(answersPath, 'utf8')); }
+   catch { const error: any = new Error('Invalid clarification answers: answers file must contain JSON.'); error.exitCode = 64; throw error; }
    const clarifyDeps = typeof task.hopFrom === 'string' && task.hopFrom.trim() ? { hopPath: resolve(taskCwd, task.hopFrom) } : {};
    const { applyAnswers } = await import('./clarify.ts');
    const outcome = await applyAnswers({ cwd: taskCwd, task, answers, deps: clarifyDeps });
@@ -635,5 +637,5 @@ function readRuntimeSnapshot(path:string):any {
 }
 
 if (isDirectEntry(import.meta.url)) {
- main(process.argv.slice(2)).catch((e) => { console.error(String(e)); process.exitCode = 1; });
+ main(process.argv.slice(2)).catch((e: any) => { console.error(String(e)); process.exitCode = e?.exitCode === 64 || String(e).startsWith('Error: Invalid clarification answer') ? 64 : 1; });
 }

@@ -132,7 +132,15 @@ recommendation when it is not applied.
 ### Clarification loop
 
 A clarify returns a `needs_answers` batch of numbered questions instead of a
-result. Answer them in a JSON file and re-run
+result. Answer them in a JSON file and re-run:
+
+```json
+{ "Q1": { "stance": "assent", "answer": "Your answer here" } }
+```
+
+Keys must name questions in `clarify.json`; every value has only `stance`
+(`assent`, `refute`, or `amend`) and a non-empty `answer`. Malformed or unknown
+answers fail with exit code 64 before state changes. Run
 `junior handoff <task.json> --answers <file>`; the readiness gate re-runs and
 either drafts a plan (`junior matrix plan-from-spec --spec <spec.json>`) or
 produces a prepare brief for `--choose`. An explicit-workflow contract whose
