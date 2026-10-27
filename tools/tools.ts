@@ -811,7 +811,9 @@ function assertCpmProjectDatabase(stderr: string, expected: string): void {
   const marker = "opening planner database db=";
   const line = stderr.split(/\r?\n/).find((entry) => entry.includes(marker));
   if (!line) return;
-  const opened = line.slice(line.indexOf(marker) + marker.length).trim();
+  const reported = line.slice(line.indexOf(marker) + marker.length);
+  const stateMode = reported.search(/\s+state_mode=/);
+  const opened = reported.slice(0, stateMode === -1 ? reported.length : stateMode).trim();
   if (path.resolve(opened) !== path.resolve(expected)) {
     throw new HopError(
       "UPSTREAM_ERROR",
