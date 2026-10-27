@@ -131,6 +131,13 @@ test("a cpm call accepts a planner that opened the project database", () => {
   assert.equal(out.ok, true);
 });
 
+test("a cpm call accepts the project database when CPM also reports state_mode", () => {
+  const dir = tmpdir();
+  const hop = cpmLoggingHop(dir, "process.env.CPM_PLANNER_DB + ' state_mode=Normal'");
+  const out = cliJson(runCli(["call", "--full", hop, "cpm", "plan.status"]));
+  assert.equal(out.ok, true);
+});
+
 test("init persists a stable project id across a later call", () => {
   const dir = tmpdir();
   const hop = initHop(dir);

@@ -80,6 +80,23 @@ export interface ClarifyAnswer {
   stance: ClarifyStance;
 }
 
+export const CLARIFY_ANSWERS_TEMPLATE = {
+  Q1: { stance: 'assent', answer: 'Your answer here' },
+} as const;
+
+export const CLARIFY_ANSWERS_SCHEMA = {
+  type: 'object',
+  additionalProperties: {
+    type: 'object',
+    required: ['stance', 'answer'],
+    additionalProperties: false,
+    properties: {
+      stance: { enum: ['assent', 'refute', 'amend'] },
+      answer: { type: 'string', minLength: 1 },
+    },
+  },
+} as const;
+
 export interface ClarifyQuestion {
   /** Stable `Q1`.. id used by the answers file and the artifacts. */
   id: string;
@@ -98,6 +115,10 @@ export interface ClarifyBatch {
   sessionId: string;
   round: number;
   questions: ClarifyQuestion[];
+  /** Machine-readable contract accepted by `junior handoff --answers`. */
+  answersSchema: typeof CLARIFY_ANSWERS_SCHEMA;
+  /** Copy-paste starter object; replace Q1 with a returned question id. */
+  answersTemplate: typeof CLARIFY_ANSWERS_TEMPLATE;
   blockers: string[];
   playbooks: string[];
   artifactDir: string | null;
@@ -497,6 +518,8 @@ export async function questionBatch(sessionId: string, deps: QuestionBatchDeps =
     sessionId,
     round: deps.round ?? 1,
     questions,
+    answersSchema: CLARIFY_ANSWERS_SCHEMA,
+    answersTemplate: CLARIFY_ANSWERS_TEMPLATE,
     blockers: deps.blockers ?? [],
     playbooks: deps.playbooks ?? [],
     artifactDir: deps.dir ?? null,
@@ -678,6 +701,26 @@ export interface ApplyAnswersOptions {
   batch?: ClarifyBatch;
 }
 
+/** Reject malformed manager input before it can append evidence or write an artifact. */
+export function validateClarifyAnswers(answers: unknown, batch: ClarifyBatch): asserts answers is Record<string, ClarifyAnswer> {
+  if (!isRecord(answers) || Object.keys(answers).length === 0) {
+    throw new Error('Invalid clarification answers: expected a non-empty JSON object keyed by question id.');
+  }
+  const known = new Set(batch.questions.map((question) => question.id));
+  for (const [id, value] of Object.entries(answers)) {
+    if (!known.has(id)) throw new Error(`Invalid clarification answers: unknown question id '${id}'.`);
+    if (!isRecord(value) || Object.keys(value).some((key) => key !== 'stance' && key !== 'answer')) {
+      throw new Error(`Invalid clarification answer for ${id}: expected only stance and answer.`);
+    }
+    if (value.stance !== 'assent' && value.stance !== 'refute' && value.stance !== 'amend') {
+      throw new Error(`Invalid clarification answer for ${id}: stance must be assent, refute, or amend.`);
+    }
+    if (typeof value.answer !== 'string' || value.answer.trim() === '') {
+      throw new Error(`Invalid clarification answer for ${id}: answer must be a non-empty string.`);
+    }
+  }
+}
+
 /**
  * Apply the manager's answers, re-assess readiness and either write the
  * clarified contract (an explicit workflow), hand the exported spec to the cpm
@@ -691,6 +734,7 @@ export async function applyAnswers(options: ApplyAnswersOptions): Promise<Clarif
     : readLatestClarify(cwd, text(task?.id));
   if (!found) throw new Error(`No clarification session found for ${text(task?.id)}; run the handoff first.`);
   const batch = found.batch;
+  validateClarifyAnswers(options.answers, batch);
   const sessionId = batch.sessionId;
 
   // The resolution order for the artifact dir and routing is: explicit deps,

@@ -297,8 +297,18 @@ at or above 0.6 on 94% of runs that came back clean (ADR 0009 amendment).
 Answer the batch in a JSON file and re-run:
 
 ```bash
+cat > answers.json <<'EOF'
+{
+  "Q1": { "stance": "assent", "answer": "Your answer here" }
+}
+EOF
 junior handoff task.json --answers answers.json
 ```
+
+Each key must be a question id from `clarify.json`. Every answer has exactly
+`stance` (`assent`, `refute`, or `amend`) and a non-empty text `answer`.
+Malformed or unknown answers fail with exit code 64 before Junior writes
+evidence or artifacts.
 
 For an explicit workflow, a ready round returns outcome `contract` and writes
 `clarified-contract.json`. That contract keeps the requested `workflow`, adds

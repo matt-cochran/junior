@@ -224,6 +224,8 @@ test('startClarification reports needs_answers', async () => {
   const { callHop } = fakeHop({ signals: [COVERAGE_GAP] });
   const batch = await startClarification(taskFixture(workdir()), { dir: workdir(), hopPath: 'hop.json', callHop: callHop as any });
   assert.equal(batch.outcome, 'needs_answers');
+  assert.deepEqual(batch.answersTemplate, { Q1: { stance: 'assent', answer: 'Your answer here' } });
+  assert.deepEqual(batch.answersSchema.additionalProperties.required, ['stance', 'answer']);
 });
 
 test('startClarification opens the session under clarify:<contract id>', async () => {
@@ -489,7 +491,7 @@ test('a ready session exports the spec through the hop', async () => {
 
 test('after three unready rounds the loop escalates with blockers', async () => {
   const dir = workdir();
-  const { callHop } = fakeHop({ ready: false, blockers: ['missing owner'] });
+  const { callHop } = fakeHop({ ready: false, blockers: ['missing owner'], signals: [COVERAGE_GAP] });
   const batch: any = { sessionId: 'clarify:clar', round: 1, playbooks: [], artifactDir: join(dir, '.delivery', 'clar', '1'), questions: [{ id: 'Q1', question: 'Q?', why: 's', suggestedAnswer: null, claimIds: ['clarify:clar/acceptance:0'] }] };
   const options = { cwd: dir, task: taskFixture(dir), answers: { Q1: { answer: 'x', stance: 'assent' } }, deps: { hopPath: 'hop.json', callHop: callHop as any } };
   await applyAnswers({ ...options, batch });
@@ -547,6 +549,19 @@ test('an assent to a question with no claim appends no evidence', async () => {
   const batch = { sessionId: 'clarify:clar', round: 1, playbooks: [], artifactDir: join(dir, '.delivery', 'clar', '1'), questions: [{ id: 'Q1', question: 'Q?', why: 'coverage gap', suggestedAnswer: null, claimIds: [], dimension: 'acceptance' }] };
   await applyAnswers({ cwd: dir, task: taskFixture(dir), answers: { Q1: { answer: 'yes', stance: 'assent' } }, batch: batch as any, deps: { hopPath: 'hop.json', callHop: callHop as any } });
   assert.equal(calls.filter((c) => c.name === 'append').length, 0);
+});
+
+test('malformed clarification answers fail before evidence or artifacts are written', async () => {
+  const dir = workdir();
+  const artifactDir = join(dir, '.delivery', 'clar', '1');
+  const { callHop, calls } = fakeHop({ ready: false });
+  const batch = { sessionId: 'clarify:clar', round: 1, playbooks: [], artifactDir, questions: [{ id: 'Q1', question: 'Q?', why: 'coverage gap', suggestedAnswer: null, claimIds: [] }] };
+  await assert.rejects(
+    applyAnswers({ cwd: dir, task: taskFixture(dir), answers: { Q2: { answer: 'yes', stance: 'assent' } } as any, batch: batch as any, deps: { hopPath: 'hop.json', callHop: callHop as any } }),
+    /unknown question id 'Q2'/,
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(existsSync(join(artifactDir, 'clarified-answers.json')), false);
 });
 
 test('an amendment to a coverage-gap question adds a claim in its dimension', async () => {

@@ -295,6 +295,15 @@ test('junior handoff --answers continues the clarification loop', () => {
   assert.equal(JSON.parse(res.stdout).outcome, 'needs_answers');
 });
 
+test('junior handoff rejects malformed clarification answers with usage exit code', () => {
+  const dir = workdir();
+  const taskPath = join(dir, 'task.json');
+  writeFileSync(taskPath, JSON.stringify({ id: 'missing-session', deliverable: 'x', cwd: dir, isolation: 'none', acceptance: ['ok'], checks: [] }));
+  writeFileSync(join(dir, 'answers.json'), '{');
+  const res = runJunior(['handoff', taskPath, '--answers', join(dir, 'answers.json')], dir);
+  assert.equal(res.status, 64);
+});
+
 // --- nested tools strict flag parsing --------------------------------------
 
 test('tools inspect rejects an unknown option', () => {
