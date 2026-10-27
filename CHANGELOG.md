@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-10-27
+
+### Fixed
+
+- Clarification answers now have a documented, copy-pasteable JSON schema and
+  malformed or unknown answers fail before artifacts or evidence are written
+  (#147).
+- CPM HOP startup now parses `state_mode` separately from the reported project
+  database path, preventing a false database-path rejection (#148).
+
+### Changed
+
+- Junior's tested Pi runtime pin is 1.4.0. Existing Pi 1.4.0 installations
+  are recognized without a version-mismatch warning.
+
 ## [0.12.3] - 2026-10-26
 
 ### Fixed
