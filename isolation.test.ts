@@ -11,10 +11,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureLocalExcludes, provisionIsolationSetup } from './isolation.ts';
+import { ensureLocalExcludes, provisionIsolationSetup, validateIsolationSetup } from './isolation.ts';
+import { parseCommandPolicy } from './command-policy.ts';
 
 const GENERATED = ['/.delivery/', '/delivery.config.json', '/tasks/example-task.json'];
 
@@ -145,6 +146,23 @@ test('ensureLocalExcludes names an unapplied pattern in its error', (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// isolationSetup validation names the expected entry shapes before any paid
+// call, so a malformed contract can be corrected without guessing.
+// ---------------------------------------------------------------------------
+
+test('a string links entry names the from and to fields', () => {
+  assert.throws(() => validateIsolationSetup({ links: ['node_modules'] }), /from.*to/);
+});
+
+test('a non-string copy entry names the expected relative path string', () => {
+  assert.throws(() => validateIsolationSetup({ copy: [{ path: 'deps' }] }), /copy entry.*string/);
+});
+
+test('a non-object commands entry names the command and args fields', () => {
+  assert.throws(() => validateIsolationSetup({ commands: ['npm ci'] }), /command.*args/);
+});
+
+// ---------------------------------------------------------------------------
 // Idempotent isolation setup provisioning (links and copies).
 //
 // The resume path reuses a prior worktree where isolationSetup already ran, so
@@ -227,4 +245,67 @@ test('a copied symlink destination pointing elsewhere fails', (t) => {
   symlinkSync(join(source, 'other'), join(worktree, 'deps'), 'dir');
   const result = provisionIsolationSetup({ copy: ['deps'] }, source, worktree, '', SETUP_OPTS);
   assert.equal(result.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// Command placement for isolationSetup.commands.
+//
+// A policy-refused setup command must never reach spawnSync; the probe script
+// writes a marker only when it actually runs. Without a policy the same setup
+// command runs exactly as before.
+// ---------------------------------------------------------------------------
+
+const setupCommandFixture = (t: any) => {
+  const { source, worktree } = setupFixture(t);
+  const marker = join(worktree, 'setup-marker.txt');
+  writeFileSync(
+    join(worktree, 'setup.js'),
+    "require('node:fs').writeFileSync(process.argv[2], 'ran')\n",
+  );
+  return { source, worktree, marker };
+};
+
+const refusedCommandPolicy = (worktree: string) => parseCommandPolicy({
+  enforce: true,
+  rules: [{
+    match: [process.execPath, 'setup.js'],
+    placement: 'remote',
+    wrapper: '/nonexistent/remote-wrapper.sh',
+  }],
+}, worktree)!;
+
+test('a commandPolicy-refused setup command is not spawned', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source,
+    worktree,
+    '',
+    { ...SETUP_OPTS, commandPolicy: refusedCommandPolicy(worktree) },
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test('a commandPolicy-refused setup command fails with E_COMMAND_PLACEMENT', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  const result = provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source,
+    worktree,
+    '',
+    { ...SETUP_OPTS, commandPolicy: refusedCommandPolicy(worktree) },
+  );
+  assert.match(result.error ?? '', /E_COMMAND_PLACEMENT/);
+});
+
+test('a setup command without a commandPolicy still runs', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source,
+    worktree,
+    '',
+    SETUP_OPTS,
+  );
+  assert.equal(existsSync(marker), true);
 });

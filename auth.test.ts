@@ -155,6 +155,13 @@ test('junior auth --help exits successfully', () => {
   assert.equal(runAuth(['--help'], workdir()).status, 0);
 });
 
+test('junior auth consent grant records consent for the named provider and project', () => {
+  const dir = workdir();
+  const project = workdir();
+  runAuth(['consent', 'grant', 'openrouter', '--project', project], dir);
+  assert.equal(readExternalContextConsent(project, 'openrouter').granted, true);
+});
+
 test('junior auth set stores a key read from piped stdin', () => {
   const dir = workdir();
   runAuth(['set', 'github'], dir, 'ghp_piped_key\n');
@@ -202,6 +209,15 @@ test('junior auth remove preserves an unrelated provider entry', () => {
 test('junior --help lists the auth command', () => {
   const result = spawnSync(NODE, [JUNIOR, '--help'], { encoding: 'utf8' });
   assert.match(result.stdout, /\bauth\b/);
+});
+
+test('junior --help documents auth consent grant, status and remove', () => {
+  const result = spawnSync(NODE, [JUNIOR, '--help'], { encoding: 'utf8' });
+  assert.match(result.stdout, /auth consent \[grant\|remove\|status\] <provider> \[--project <dir>\]/);
+});
+
+test('junior auth --help documents consent grant with an optional --project', () => {
+  assert.match(runAuth(['--help'], workdir()).stdout, /auth consent \[grant\] <provider> \[--project <dir>\]/);
 });
 
 test('junior --help stays at twelve lines or fewer', () => {

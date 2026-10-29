@@ -24,6 +24,7 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
+const seedSession=(dir:string,id:string='123e4567-e89b-12d3-a456-426614174000')=>{const d=join(dir,'pi-agent','sessions','--prior--');mkdirSync(d,{recursive:true});writeFileSync(join(d,`2026-01-01T00-00-00-000Z_${id}.jsonl`),JSON.stringify({type:'session',id})+'\n');};
 // Existing behavioral scenarios exercise non-consent behavior; inject the new
 // explicit external-context consent unless the scenario overrides it.
 const run=(t:any,mock?:boolean,deps?:any)=>runWorker('externalContextConsent' in (t ?? {}) ? t : {...t,externalContextConsent:true},mock,deps);
@@ -910,7 +911,7 @@ test('Analysis-to-implementation requires an explicit workflow',async()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
  const parentDir=join(cwd,'.delivery','prior','1');
  mkdirSync(parentDir,{recursive:true});
- writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd,{workflow:{selected:'fmeca'}})));
+ writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd,{workflow:{selected:'fmeca'}})));seedSession(parentDir);
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
  const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'auto',jev:{mode:'shadow'},resumeFrom:join(parentDir,'result.json')});
  const r=await run(t,true,{classify:classifier});
@@ -1174,7 +1175,7 @@ test('Resume mismatch blocks before the worker starts',async()=>{
  const parentDir=join(cwd,'.delivery','prior','1');
  mkdirSync(parentDir,{recursive:true});
  const prior=priorResult(cwd,{cwd:join(cwd,'elsewhere')});
- writeFileSync(join(parentDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(parentDir,'result.json'),JSON.stringify(prior));seedSession(parentDir);
  let spawned=false;
  const spawnPi=()=>{spawned=true;return {status:0,stdout:'',stderr:''};};
  const r=await run(task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,resumeFrom:join(parentDir,'result.json')}),false,{spawnPi});
@@ -1192,7 +1193,7 @@ test('Resume passes explicit --session, appends the contract and records the par
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
  const parentDir=join(cwd,'.delivery','prior','1');
  mkdirSync(parentDir,{recursive:true});
- writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));
+ writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));seedSession(parentDir);
  let captured:any;
  const spawnPi=(command:string,args:string[])=>{captured={command,args};return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
  const t=task(0,{cwd,provider:'openrouter',model:COMMODITY_MODEL,workflow:'checks_first',deliverable:'Continue work',resumeFrom:join(parentDir,'result.json')});
@@ -1216,7 +1217,7 @@ test('Resume from a prior recon run never auto-approves test_first',async()=>{
  const cwd=mkdtempSync(join(tmpdir(),'delivery-'));
  const parentDir=join(cwd,'.delivery','prior','1');
  mkdirSync(parentDir,{recursive:true});
- writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));
+ writeFileSync(join(parentDir,'result.json'),JSON.stringify(priorResult(cwd)));seedSession(parentDir);
  let spawned=false;
  const spawnPi=(_c:string,args:string[])=>{spawned=true;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
  const classifier:any=workflowClassifier({...JEVPASS, workflow:choice('test_first',0.95)});
@@ -2036,18 +2037,11 @@ test('isolation none leaves JUNIOR_PI_SOURCE_ROOT unset',async()=>{
  await run(okTask(repo),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
  assert.equal(seen.env.JUNIOR_PI_SOURCE_ROOT,undefined);
 });
-test('sandboxed Pi uses a run-local credential-lock directory without copying auth',async()=>{
+test('sandboxed Pi takes a lock in its run-local overlay, never in the source agent dir',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const agent=join(repo.dir,'read-only-agent'); mkdirSync(agent,{recursive:true});
  writeFileSync(join(agent,'auth.json'),JSON.stringify({openrouter:{type:'api',key:'not-a-real-secret'}}));
- let seen:any;
- const r=await run(okTask(repo),false,{env:{...process.env,PI_CODING_AGENT_DIR:agent},spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
- const overlay=seen.env.PI_CODING_AGENT_DIR;
- assert.equal(overlay,join(r.artifactDir,'pi-agent'));
- assert.notEqual(overlay,agent);
- assert.equal(readFileSync(join(overlay,'auth.json'),'utf8'),readFileSync(join(agent,'auth.json'),'utf8'));
- writeFileSync(join(overlay,'auth.json.lock'),'lock');
- assert.ok(existsSync(join(overlay,'auth.json.lock')));
+ await run(okTask(repo),false,{env:{...process.env,PI_CODING_AGENT_DIR:agent},spawnPi:(_c,_a,opts)=>{writeFileSync(join(opts.env.PI_CODING_AGENT_DIR,'auth.json.lock'),'lock');return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
  assert.equal(existsSync(join(agent,'auth.json.lock')),false);
 });
 
@@ -2115,7 +2109,7 @@ test('Resume rejects incompatible isolation before paid calls',async()=>{
  commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','1');mkdirSync(priorDir,{recursive:true});
  const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
- writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);
  let spawned=false;
  const r=await run(okTask(repo,{id:'resume',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(r.status,'needs_review');
@@ -2130,7 +2124,7 @@ test('Resume with worktree isolation reuses the prior execution checkout',async(
  assert.equal(createDetachedWorktree(repo.dir,wtPath).ok,true);
  const priorDir=join(repo.dir,'.delivery','prior','2');mkdirSync(priorDir,{recursive:true});
  const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:wtPath,isolation:{mode:'worktree'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
- writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);
  let spawnedCwd:string|undefined;
  const spawnPi=(command:string,args:string[],opts:any)=>{spawnedCwd=opts.cwd;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};};
  const r=await run(okTask(repo,{id:'resume-wt',provider:'openrouter',model:COMMODITY_MODEL,isolation:'worktree',resumeFrom:join(priorDir,'result.json')}),false,{spawnPi});
@@ -2172,7 +2166,7 @@ test('Blocked enforce preflight releases the checkout lock',async()=>{
  assert.ok(!existsSync(lockPath),'lock released on blocked preflight');
 });
 
-const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));return join(priorDir,'result.json');};
+const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);return join(priorDir,'result.json');};
 
 test('Held Pi session lock rejects a resume before paid calls and is not auto-deleted',async()=>{
  const repo=gitRepo();
@@ -2416,7 +2410,7 @@ test('Repair over budget is rejected before any paid call',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','budget');mkdirSync(priorDir,{recursive:true});
  const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:1,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
- writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);
  let spawned=false;
  const r=await run(okTask(repo,{id:'repair-rej',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:()=>{spawned=true;return {status:0,stdout:'',stderr:''};}});
  assert.equal(spawned,false,'rejected before the worker starts');
@@ -2430,7 +2424,7 @@ test('Repair within budget reuses the session and persists the lineage counter',
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','okrepair');mkdirSync(priorDir,{recursive:true});
  const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'prior',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
- writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);
  const from=join(priorDir,'result.json');
  const r=await run(okTask(repo,{id:'repair-ok',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:from}),false,{spawnPi:okSpawn()});
  assert.equal(r.status,'ready_for_review');
@@ -2452,7 +2446,7 @@ test('A repair run shares the affinity key of its root run',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const priorDir=join(repo.dir,'.delivery','prior','affinity');mkdirSync(priorDir,{recursive:true});
  const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},lineage:{rootId:'root-affinity',repairs:0,maxRepairs:1,deadlineAt:null},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};
- writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));
+ writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);
  let seen:any;
  await run(okTask(repo,{id:'repair-affinity',provider:'openrouter',model:COMMODITY_MODEL,repairFrom:join(priorDir,'result.json')}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:SESSION_A},assistant(),{type:'agent_settled'}),stderr:''};}});
  assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'root-affinity'));
@@ -3317,6 +3311,12 @@ test('a failing isolationSetup command ends the run as isolation_setup_failed',a
  const repo=gitRepo();
  const r=await run(okTask(repo,{isolation:'worktree',isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(3)']}]}}),true);
  assert.equal(r.status,'isolation_setup_failed');
+});
+
+test('a commandPolicy-refused isolationSetup command ends the run as isolation_setup_failed',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',commandPolicy:{enforce:true,rules:[{match:['git'],placement:'local'}]},isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(0)']}]}}),true);
+ assert.match(r.workerError,/isolationSetup failed: .*E_COMMAND_PLACEMENT|isolationSetup failed: .*refus/i);
 });
 
 test('Pi is not started when isolationSetup fails',async()=>{
