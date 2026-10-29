@@ -6,522 +6,80 @@
 // and quota discovery is normalized into the provider-neutral compute contract
 // after the observed provider/account identity matches the verified record.
 // ---------------------------------------------------------------------------
+// This file is a facade per ADR 0016; implementation lives in the split modules.
 
 import {
-  COMPUTE_OPERATIONS,
-  COMPUTE_SCHEMA_VERSION,
   acquireComputeLease,
+  COMPUTE_SCHEMA_VERSION,
   createComputeLeaseState,
   decideComputeFallback,
   evaluateComputeScaleIn,
   inspectComputeCapabilities,
-  inspectComputeProviderIdentity,
   reconcileComputeStatus,
   releaseComputeLease,
-  verifyComputeProviderIdentity,
-  type ComputeCapability,
-  type ComputeCapabilityStatus,
   type ComputeFallback,
-  type ComputeFallbackDecision,
   type ComputeIssue,
   type ComputeLease,
   type ComputeLeaseState,
   type ComputeLifecycleState,
-  type ComputeOperation,
   type ComputeOwnershipRecord,
   type ComputePolicy,
-  type ComputeProviderIdentity,
-  type ComputeProviderIdentityVerification,
   type ComputeReconciliation,
   type ComputeResource,
   type ComputeScaleInDecision,
   type ComputeStatus,
 } from './compute.ts';
+import {
+  HETZNER_ADAPTER_VERSION,
+  HETZNER_PROVIDER,
+  HETZNER_SCHEMA_VERSION,
+  HETZNER_UNKNOWN,
+  discoverHetznerCapabilities,
+  inspectHetznerProviderIdentity,
+  isRecord,
+  normalizeHetznerCapabilities,
+  normalizeHetznerQuota,
+  verifyHetznerProviderIdentity,
+  type HetznerCapabilityDiscovery,
+  type HetznerQuota,
+} from './compute-hetzner-capabilities.ts';
+import {
+  normalizeHetznerPlacement,
+  placementPoolId,
+  requestFingerprint,
+  requestIssue,
+  serialQueue,
+  stableValue,
+  type FakeHetznerDiscoveryOptions,
+  type FakeHetznerProviderRecorded,
+  type FakeHetznerResource,
+  type HetznerJobCompletionResult,
+  type HetznerJobRouteRequest,
+  type HetznerJobRouteResult,
+  type HetznerLocalFallbackResult,
+  type HetznerProvisionRequest,
+  type HetznerProvisionResult,
+  type HetznerReconcileRequest,
+  type HetznerScaleToZeroRequest,
+  type HetznerScaleToZeroResult,
+} from './compute-hetzner-placement.ts';
 
-export const HETZNER_SCHEMA_VERSION = 1;
-export const HETZNER_ADAPTER_VERSION = '1.0.0';
-export const HETZNER_PROVIDER = 'hetzner';
-export const HETZNER_UNKNOWN = 'unknown' as const;
-
-export type HetznerProviderIdentity = ComputeProviderIdentity & {
-  provider: typeof HETZNER_PROVIDER;
-};
-
-export type HetznerProviderIdentityInspection = {
-  valid: boolean;
-  verified: boolean;
-  issues: ComputeIssue[];
-  identity: HetznerProviderIdentity | null;
-};
-
-export type HetznerQuota = {
-  serverLimit: number | typeof HETZNER_UNKNOWN;
-  serversUsed: number | typeof HETZNER_UNKNOWN;
-  serversAvailable: number | typeof HETZNER_UNKNOWN;
-};
-
-export type HetznerCapabilityDiscoveryInput = {
-  /** The verified ownership/account record. */
-  expectedIdentity: unknown;
-  /** The account identity returned by the fake provider. */
-  identity?: unknown;
-  capabilities?: unknown;
-  quota?: unknown;
-  required?: readonly ComputeOperation[];
-};
-
-export type HetznerCapabilityDiscovery = {
-  schemaVersion: typeof HETZNER_SCHEMA_VERSION;
-  provider: typeof HETZNER_PROVIDER;
-  account: string | typeof HETZNER_UNKNOWN;
-  verified: boolean;
-  ready: boolean;
-  capabilities: ComputeCapability[];
-  quota: HetznerQuota;
-  issues: ComputeIssue[];
-};
-
-function providerIssue(
-  code: string,
-  path: string,
-  message: string,
-  severity: ComputeIssue['severity'] = 'invalid',
-): ComputeIssue {
-  return { code, severity, path, message };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Validate a Hetzner provider/account identity without calling the provider. */
-export function inspectHetznerProviderIdentity(input: unknown): HetznerProviderIdentityInspection {
-  const inspection = inspectComputeProviderIdentity(input);
-  if (!inspection.valid || inspection.identity === null) {
-    return {
-      valid: false,
-      verified: false,
-      issues: inspection.issues,
-      identity: null,
-    };
-  }
-  if (inspection.identity.provider !== HETZNER_PROVIDER) {
-    return {
-      valid: false,
-      verified: false,
-      issues: [
-        ...inspection.issues,
-        providerIssue(
-          'provider.identity-mismatch',
-          'provider',
-          `provider identity must name ${HETZNER_PROVIDER}`,
-          'unsafe',
-        ),
-      ],
-      identity: null,
-    };
-  }
-  return {
-    valid: true,
-    verified: inspection.verified,
-    issues: inspection.issues,
-    identity: inspection.identity as HetznerProviderIdentity,
-  };
-}
-
-/** Compare the verified Hetzner account with the account just observed. */
-export function verifyHetznerProviderIdentity(
-  expectedInput: unknown,
-  observedInput: unknown,
-): ComputeProviderIdentityVerification {
-  const expected = inspectHetznerProviderIdentity(expectedInput);
-  if (!expected.valid || expected.identity === null) {
-    return {
-      verified: false,
-      code: 'provider.invalid',
-      message: 'the recorded Hetzner provider identity is invalid',
-      issues: expected.issues,
-    };
-  }
-  const observed = inspectHetznerProviderIdentity(observedInput);
-  if (!observed.valid || observed.identity === null) {
-    return {
-      verified: false,
-      code: 'provider.invalid',
-      message: 'the observed Hetzner provider identity is invalid',
-      issues: observed.issues,
-    };
-  }
-  return verifyComputeProviderIdentity(expected.identity, observed.identity);
-}
-
-function capabilityStatus(value: unknown): ComputeCapabilityStatus | null {
-  if (value === 'supported' || value === 'unsupported' || value === 'unknown') return value;
-  if (value === true) return 'supported';
-  if (value === false) return 'unsupported';
-  return null;
-}
-
-function capabilityEntries(raw: Record<string, unknown>): { operation: string; status: unknown; reason?: unknown }[] {
-  if (typeof raw.operation === 'string') {
-    return [{ operation: raw.operation, status: raw.status, reason: raw.reason }];
-  }
-  return Object.entries(raw).map(([operation, value]) => {
-    if (isRecord(value)) {
-      return { operation, status: value.status, reason: value.reason };
-    }
-    return { operation, status: value };
-  });
-}
-
-/**
- * Normalize a recorded capability response to the provider-neutral vocabulary.
- * Missing operations are explicitly `unsupported`; malformed advertisements
- * are `unknown` and never silently treated as supported.
- */
-export function normalizeHetznerCapabilities(input: unknown): ComputeCapability[] {
-  const advertised = new Map<ComputeOperation, ComputeCapability>();
-  const entries: { operation: string; status: unknown; reason?: unknown }[] = [];
-
-  if (Array.isArray(input)) {
-    for (const value of input) {
-      if (isRecord(value)) entries.push(...capabilityEntries(value));
-    }
-  } else if (isRecord(input)) {
-    entries.push(...capabilityEntries(input));
-  }
-
-  for (const entry of entries) {
-    const operation = entry.operation as ComputeOperation;
-    if (!COMPUTE_OPERATIONS.includes(operation) || advertised.has(operation)) continue;
-    const status = capabilityStatus(entry.status);
-    if (status === null) {
-      advertised.set(operation, {
-        operation,
-        status: 'unknown',
-        reason: 'provider capability response was not recognized',
-      });
-      continue;
-    }
-    advertised.set(operation, {
-      operation,
-      status,
-      ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {}),
-    });
-  }
-
-  return COMPUTE_OPERATIONS.map((operation) => advertised.get(operation) ?? {
-    operation,
-    status: 'unsupported' as const,
-    reason: 'operation was not advertised by the provider',
-  });
-}
-
-function quotaNumber(...values: unknown[]): number | typeof HETZNER_UNKNOWN {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
-      return value;
-    }
-  }
-  return HETZNER_UNKNOWN;
-}
-
-/**
- * Normalize a recorded Hetzner quota response. An absent value stays explicit
- * `unknown`; it is never reported as zero capacity.
- */
-export function normalizeHetznerQuota(input: unknown): HetznerQuota {
-  const raw = isRecord(input) ? input : {};
-  const limits = isRecord(raw.limits) ? raw.limits : {};
-  const usage = isRecord(raw.usage) ? raw.usage : {};
-  const serverLimit = quotaNumber(
-    limits.servers,
-    raw.serverLimit,
-    raw.limit,
-    raw.serversLimit,
-    raw.servers,
-  );
-  const serversUsed = quotaNumber(
-    usage.servers,
-    raw.serversUsed,
-    raw.used,
-    raw.usage,
-  );
-  const serversAvailable = serverLimit === HETZNER_UNKNOWN || serversUsed === HETZNER_UNKNOWN
-    ? HETZNER_UNKNOWN
-    : Math.max(0, serverLimit - serversUsed);
-  return { serverLimit, serversUsed, serversAvailable };
-}
-
-function discoveryFailure(
-  account: string | typeof HETZNER_UNKNOWN,
-  quota: HetznerQuota,
-  issues: ComputeIssue[],
-): HetznerCapabilityDiscovery {
-  return {
-    schemaVersion: HETZNER_SCHEMA_VERSION,
-    provider: HETZNER_PROVIDER,
-    account,
-    verified: false,
-    ready: false,
-    capabilities: [],
-    quota,
-    issues,
-  };
-}
-
-/**
- * Discover capabilities and quota from a recorded/fake response. A missing,
- * unverified or mismatched provider/account identity fails closed: no provider
- * capabilities are exposed and no operation becomes ready.
- */
-export function discoverHetznerCapabilities(
-  input: HetznerCapabilityDiscoveryInput,
-): HetznerCapabilityDiscovery {
-  const observed = input.identity ?? input.expectedIdentity;
-  const identity = verifyHetznerProviderIdentity(input.expectedIdentity, observed);
-  if (!identity.verified) {
-    return discoveryFailure(HETZNER_UNKNOWN, normalizeHetznerQuota(input.quota), identity.issues);
-  }
-
-  const observedInspection = inspectHetznerProviderIdentity(observed);
-  const account = observedInspection.identity?.account ?? HETZNER_UNKNOWN;
-  const capabilities = normalizeHetznerCapabilities(input.capabilities);
-  const required = [...(input.required ?? COMPUTE_OPERATIONS)];
-  const inspection = inspectComputeCapabilities(capabilities, required);
-  return {
-    schemaVersion: HETZNER_SCHEMA_VERSION,
-    provider: HETZNER_PROVIDER,
-    account,
-    verified: true,
-    ready: inspection.ready,
-    capabilities,
-    quota: normalizeHetznerQuota(input.quota),
-    issues: [...identity.issues, ...inspection.issues],
-  };
-}
-
-export type FakeHetznerRecordedResource = {
-  id: string;
-  account?: string;
-  project?: string;
-  region?: string;
-  serverType?: string;
-  generation?: number;
-  tags?: Record<string, string>;
-  ownership?: ComputeOwnershipRecord;
-  /** Resource creation time; the scale-in lifetime guardrail uses it. */
-  createdAt?: string;
-  /** Recorded disk observation for scale-in guardrails. */
-  disk?: { usedPercent?: number; limitPercent?: number };
-};
-
-export type FakeHetznerProviderRecorded = {
-  identity: unknown;
-  capabilities?: unknown;
-  quota?: unknown;
-  /** Recorded placement catalogue; absent means quota-only provisioning. */
-  placement?: unknown;
-  /** Recorded inventory already present in the fake provider. */
-  resources?: readonly FakeHetznerRecordedResource[];
-};
-
-export type FakeHetznerDiscoveryOptions = {
-  expectedIdentity?: unknown;
-  required?: readonly ComputeOperation[];
-};
-
-/** One provider-neutral provisioning request. The request id is the idempotency key. */
-export type HetznerProvisionRequest = {
-  requestId: string;
-  owner: string;
-  project?: string;
-  region: string;
-  serverType: string;
-  poolId?: string;
-  tags?: Record<string, string>;
-  expectedIdentity?: unknown;
-  required?: readonly ComputeOperation[];
-  now?: string;
-};
-
-export type HetznerProvisionStatus = 'provisioned' | 'replayed' | 'rejected';
-
-export type HetznerProvisionResult = {
-  ok: boolean;
-  status: HetznerProvisionStatus;
-  requestId: string;
-  poolId: string;
-  resource: ComputeResource | null;
-  ownership: ComputeOwnershipRecord | null;
-  quota: HetznerQuota;
-  issues: ComputeIssue[];
-  /** True only when this call created a fake-provider resource. */
-  mutated: boolean;
-  /** Post-mutation reconciliation evidence; null when nothing was created. */
-  reconciliation: ComputeReconciliation | null;
-};
-
-/** One job routed to a managed resource under a fencing lease. */
-export type HetznerJobRouteRequest = {
-  requestId: string;
-  jobId: string;
-  holder: string;
-  region?: string;
-  serverType?: string;
-  now?: string;
-  leaseExpiresAt?: string;
-  tags?: Record<string, string>;
-};
-
-export type HetznerJobRouteStatus = 'routed' | 'replayed' | 'rejected';
-
-export type HetznerJobRouteResult = {
-  ok: boolean;
-  status: HetznerJobRouteStatus;
-  requestId: string;
-  jobId: string;
-  resourceId: string | null;
-  leaseId: string | null;
-  fencingToken: number | null;
-  expiresAt: string | null;
-  issues: ComputeIssue[];
-  /** True only when this call acquired a fake-provider lease. */
-  mutated: boolean;
-  /** Post-mutation reconciliation evidence; null when nothing was routed. */
-  reconciliation: ComputeReconciliation | null;
-};
-
-export type HetznerJobCompletionResult = {
-  ok: boolean;
-  jobId: string;
-  issues: ComputeIssue[];
-  /** True only when this call released a fake-provider lease. */
-  mutated: boolean;
-  /** Post-mutation reconciliation evidence; null when nothing was released. */
-  reconciliation: ComputeReconciliation | null;
-};
-
-/** Evidence supplied by the caller when asking to scale one resource to zero. */
-export type HetznerScaleToZeroRequest = {
-  resourceId: string;
-  now?: string;
-  idleSince?: string;
-  idleTimeoutMs: number;
-  busy?: boolean | number | 'unknown';
-  queuedWork?: number | 'unknown';
-  diskUsedPercent?: number | 'unknown';
-  diskLimitPercent?: number;
-  minimumLifetimeMs?: number;
-  minCapacity?: number;
-};
-
-export type HetznerScaleToZeroResult = {
-  ok: boolean;
-  action: 'retain' | 'scale-to-zero';
-  resourceId: string;
-  capacity: number;
-  decision: ComputeScaleInDecision;
-  issues: ComputeIssue[];
-  /** True only when this call removed a fake-provider resource. */
-  mutated: boolean;
-  /** Post-mutation reconciliation evidence; null when capacity was retained. */
-  reconciliation: ComputeReconciliation | null;
-};
-
-export type HetznerLocalFallbackResult = ComputeFallbackDecision & {
-  /** Local fallback is never a remote mutation. */
-  mutated: false;
-};
-
-export type HetznerReconcileRequest = {
-  resourceId: string;
-  now?: string;
-  /** Optional fallback record included in the reconciliation receipt. */
-  fallback?: ComputeFallback | null;
-};
-
-type HetznerPlacement = {
-  region: string;
-  serverType: string;
-  capacity: number;
-};
-
-type FakeHetznerResource = ComputeResource & {
-  account: string;
-  project?: string;
-  region: string;
-  serverType: string;
-  ownership: ComputeOwnershipRecord;
-  createdAt: string;
-  disk?: { usedPercent?: number; limitPercent?: number };
-};
-
-function placementPoolId(region: string, serverType: string): string {
-  return `${region}:${serverType}`;
-}
-
-/** Normalize an explicit recorded placement catalogue. No catalogue means the
- * fake provider is quota-only; a malformed entry never widens capacity. */
-export function normalizeHetznerPlacement(input: unknown): HetznerPlacement[] {
-  const raw = isRecord(input) && Array.isArray(input.placements)
-    ? input.placements
-    : isRecord(input) && Array.isArray(input.pools)
-      ? input.pools
-      : isRecord(input) && Array.isArray(input.allowed)
-        ? input.allowed
-        : Array.isArray(input)
-          ? input
-          : isRecord(input)
-            ? [input]
-            : [];
-  const result: HetznerPlacement[] = [];
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const region = typeof entry.region === 'string' ? entry.region.trim() : '';
-    const serverType = typeof entry.serverType === 'string' ? entry.serverType.trim() : '';
-    if (region === '' || serverType === '') continue;
-    const capacity = typeof entry.capacity === 'number' && Number.isInteger(entry.capacity) && entry.capacity >= 0
-      ? entry.capacity
-      : Number.POSITIVE_INFINITY;
-    result.push({ region, serverType, capacity });
-  }
-  return result;
-}
-
-function requestIssue(code: string, path: string, message: string): ComputeIssue {
-  return { code, severity: 'unsafe', path, message };
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
-  }
-  return value;
-}
-
-function requestFingerprint(request: HetznerProvisionRequest): string {
-  return JSON.stringify(stableValue({
-    owner: request.owner,
-    project: request.project,
-    region: request.region,
-    serverType: request.serverType,
-    poolId: request.poolId,
-    tags: request.tags,
-    required: request.required,
-    expectedIdentity: request.expectedIdentity,
-  }));
-}
-
-function serialQueue(): <T>(work: () => Promise<T> | T) => Promise<T> {
-  let tail: Promise<unknown> = Promise.resolve();
-  return <T>(work: () => Promise<T> | T): Promise<T> => {
-    const run = tail.then(work, work);
-    tail = run.then(() => undefined, () => undefined);
-    return run;
-  };
-}
+export {
+  HETZNER_ADAPTER_VERSION, HETZNER_PROVIDER, HETZNER_SCHEMA_VERSION, HETZNER_UNKNOWN,
+  discoverHetznerCapabilities, inspectHetznerProviderIdentity,
+  normalizeHetznerCapabilities, normalizeHetznerQuota, verifyHetznerProviderIdentity,
+} from './compute-hetzner-capabilities.ts';
+export type {
+  HetznerCapabilityDiscovery, HetznerCapabilityDiscoveryInput, HetznerProviderIdentity,
+  HetznerProviderIdentityInspection, HetznerQuota,
+} from './compute-hetzner-capabilities.ts';
+export { normalizeHetznerPlacement } from './compute-hetzner-placement.ts';
+export type {
+  FakeHetznerDiscoveryOptions, FakeHetznerProviderRecorded, FakeHetznerRecordedResource,
+  HetznerJobCompletionResult, HetznerJobRouteRequest, HetznerJobRouteResult, HetznerJobRouteStatus,
+  HetznerLocalFallbackResult, HetznerProvisionRequest, HetznerProvisionResult, HetznerProvisionStatus,
+  HetznerReconcileRequest, HetznerScaleToZeroRequest, HetznerScaleToZeroResult,
+} from './compute-hetzner-placement.ts';
 
 /**
  * A deterministic fake provider backed only by recorded responses. Mutating

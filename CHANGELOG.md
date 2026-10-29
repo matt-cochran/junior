@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-29
+
+### Changed
+
+- No source file is over 1,000 lines any more. `compute.ts`,
+  `tools/tools.ts`, `installer.ts`, `runtime.ts`, `compute-hetzner.ts`,
+  `setup.ts`, `compute-pi.ts` and `matrix.ts` are split into cohesive modules.
+  Each original file stays as a facade that re-exports its previous API, so
+  imports do not change, and `facade-exports.test.ts` pins every facade's
+  exports (ADR 0016). No behaviour changes.
+- `worker.test.ts`, `tools/tools.test.ts` and `dependencies.test.ts` are split
+  into feature test files with shared helper modules; every test moved
+  unchanged.
+- `npm test` now also runs the compute, compute-hetzner, compute-pi, gateway
+  and doctor-gateways tests.
+
 ## [0.13.0] - 2026-10-29
 
 ### Added
