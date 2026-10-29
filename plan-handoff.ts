@@ -28,8 +28,9 @@ export function isHoldOutcome(status: unknown): boolean {
 }
 
 /** A run refused before any worker started: blocked, with no segment and no
- * observed model. Such a run keeps its lease instead of being marked failed,
- * so the same contract can be re-run once the manager clears the blocker. */
+ * observed model. Such a run is handed back as ready instead of being marked
+ * failed, which releases its lease so the contract can be re-run once the
+ * manager clears the blocker. */
 export function runNeverStarted(result: any): boolean {
   if (!result || typeof result !== 'object') return false;
   if (result.runtime?.stopReason !== 'blocked') return false;
