@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { piAgentDir } from './model-updates.ts';
 import { parsePiCapabilities, type PiCapabilities } from './pi-isolation.ts';
+
+// The run-local overlay lives in pi-overlay.ts. Re-export both operations so
+// existing imports through worker-pi.ts (and worker.ts) keep working.
+export { preparePiAgentOverlay, cleanupPiAgentOverlay } from './pi-overlay.ts';
 
 /** Absolute path of the pi-guard extension beside the running module. Resolves
  * to `pi-guard.ts` when running from source and `pi-guard.js` from `dist/`, so
@@ -39,30 +41,6 @@ export function buildPiArgs(requested:{provider:string;model:string}, sessionId?
  if (guardPath) args.push('-e',guardPath);
  args.push(...isolationArgs);
  return args;
-}
-
-/**
- * Give Pi a writable, run-local agent directory without copying credentials
- * out of its configured store. Pi creates `auth.json.lock` beside auth.json;
- * that fails in sandboxed Codex runs when HOME is deliberately read-only.
- * A symlink keeps the credential at its original protected location while the
- * lock and any transient state stay below the ignored run artifact directory.
- */
-export function preparePiAgentOverlay(artifactDir:string, env:NodeJS.ProcessEnv = process.env):{dir?:string;error?:string} {
- const source=piAgentDir(env);
- const dir=join(artifactDir,'pi-agent');
- try {
-  mkdirSync(dir,{recursive:true,mode:0o700});
-  chmodSync(dir,0o700);
-  for (const name of ['auth.json','models.json','models-store.json']) {
-   const from=join(source,name), to=join(dir,name);
-   if (!existsSync(from) || existsSync(to)) continue;
-   symlinkSync(from,to);
-  }
-  return {dir};
- } catch (e:any) {
-  return {error:`cannot create workspace-local Pi credential state: ${e?.message ?? String(e)}`};
- }
 }
 
 /** Probe the installed Pi CLI for the long options it supports. The probe is

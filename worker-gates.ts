@@ -402,13 +402,19 @@ async function loadPiSdk():Promise<any> {
 }
 
 /** Resolve an OpenRouter API key without ever logging it. Prefers the
- * environment, then the installed Pi SDK's AuthStorage (`readStoredCredential`),
- * then a direct read of Pi's `auth.json`. The caller bounds this by the billing
+ * environment, then a direct read of Pi's `auth.json`, then the installed Pi
+ * SDK's AuthStorage (`readStoredCredential`). Reading the file first means a
+ * credential already on disk never triggers AuthStorage's `auth.json.lock`,
+ * which fails when the Pi agent directory is read-only. Any AuthStorage error
+ * falls back to the direct read. The caller bounds this by the billing
  * deadline, so a slow SDK import cannot outlive the run. The key value never
  * leaves this function except as the return value. */
 export async function resolveOpenRouterKey():Promise<string|null> {
  const fromEnv = resolveApiKeyFromEnvironment(process.env);
  if (fromEnv) return fromEnv;
+ const readDirect = () => readOpenRouterAuthFile(openRouterAuthPath(process.env));
+ const fromFile = readDirect();
+ if (fromFile) return fromFile;
  try {
   const sdk = await loadPiSdk();
   const cred:any = sdk?.readStoredCredential?.('openrouter');
@@ -417,7 +423,7 @@ export async function resolveOpenRouterKey():Promise<string|null> {
    if (cred.type === 'oauth' && typeof cred.access === 'string' && cred.access.trim()) return cred.access.trim();
   }
  } catch { /* fall back to reading the auth file directly */ }
- return readOpenRouterAuthFile(openRouterAuthPath(process.env));
+ return readDirect();
 }
 
 /** Build a live classifier backed by the installed Pi SDK. Uses

@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
-import { executeWorkerStreaming, spawnChildDetached, type WorkerStreamResult } from './runtime.ts';
-import { buildPiArgs, piGuardModulePath, piBashTimeoutSeconds, preparePiAgentOverlay } from './worker-pi.ts';
+import { executeWorkerStreaming, spawnChildDetached, effectiveBudget, type WorkerStreamResult } from './runtime.ts';
+import { buildPiArgs, piGuardModulePath, piBashTimeoutSeconds, preparePiAgentOverlay, cleanupPiAgentOverlay } from './worker-pi.ts';
+import { classifyPiFailure, type PiFailure } from './pi-failure.ts';
 import { buildContinuationCheckpoint, CONTINUATION_PROMPT_LEAD, OUTPUT_LIMIT_CONTINUATION_LINE } from './worker-gates.ts';
 import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from './worker-receipt.ts';
 import type { Receipt } from './worker-contract.ts';
@@ -21,6 +22,7 @@ export async function launch(state:RunState):Promise<RunState|any> {
  let stdout='', stderr='', legacyError:string|undefined;
  let workerStatus=0;
  let streamResult:WorkerStreamResult|undefined;
+ let workerFailure:PiFailure|null|undefined;
  type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; outputLimited:boolean; checkpointPath:string|null};
  const segments:SegmentRecord[]=[];
  const segmentReceipts:Receipt[]=[];
@@ -45,6 +47,7 @@ export async function launch(state:RunState):Promise<RunState|any> {
  else delete piBashEnv.JUNIOR_PI_AFFINITY_KEY;
  if (openrouterRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(openrouterRouting);
  else delete piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING;
+ try {
  if (mock) {
   stdout='Simulation only; no implementation performed.';
   writeFileSync(eventsPath,stdout);
@@ -73,23 +76,39 @@ export async function launch(state:RunState):Promise<RunState|any> {
   const maxSegmentOutputBytes = deps.maxOutputBytes ?? settings.maxOutputBytes;
   let segmentPrompt = prompt;
   let continuationIndex = 0;
+  let retriedFailure = false;
   for (;;) {
    // Continuation segments are new sessions (no --session) so a capped model
    // gets a fresh context with the checkpoint instead of a truncated history.
    const segEventsPath = continuationIndex === 0 ? eventsPath : join(dir, `events-${continuationIndex}.jsonl`);
    const segLogPath = continuationIndex === 0 ? logPath : join(dir, `worker-${continuationIndex}.log`);
    const sessionId = continuationIndex === 0 ? (resume?.parentSessionId ?? null) : null;
-   const segResult = await executeWorkerStreaming({
-    spawnChild, command:'pi',
-    args:[...buildPiArgs(requested, sessionId, t.thinking ?? 'low', piGuardModulePath(), isolationArgs),segmentPrompt],
-    cwd:executionCwd, env:piBashEnv, eventsPath:segEventsPath, logPath:segLogPath, runtimePath, settings, deadlineAt:workerDeadlineAt(state),
-    phase:'worker', signal, heartbeat, maxOutputBytes: maxSegmentOutputBytes,
-   });
-   stdout=segResult.stdout; stderr=segResult.stderr;
-   workerStatus=segResult.exitCode ?? 1;
-   legacyError=segResult.error;
-   streamResult=segResult;
-   const segReceipt=parseReceipt(segResult.stdout ?? '', {...requested,source:requestedSource}, {outputTruncated: !!segResult.outputTruncated});
+   let segResult:WorkerStreamResult;
+   let segReceipt:Receipt;
+   let segmentRetried = false;
+   for (;;) {
+    segResult = await executeWorkerStreaming({
+     spawnChild, command:'pi',
+     args:[...buildPiArgs(requested, sessionId, t.thinking ?? 'low', piGuardModulePath(), isolationArgs),segmentPrompt],
+     cwd:executionCwd, env:piBashEnv, eventsPath:segEventsPath, logPath:segLogPath, runtimePath, settings, deadlineAt:workerDeadlineAt(state),
+     phase:'worker', signal, heartbeat, maxOutputBytes: maxSegmentOutputBytes,
+     budget:effectiveBudget(state.decision.selected, t.budget), readScope:t.readScope,
+    });
+    stdout=segResult.stdout; stderr=segResult.stderr;
+    workerStatus=segResult.exitCode ?? 1;
+    legacyError=segResult.error;
+    streamResult=segResult;
+    segReceipt=parseReceipt(segResult.stdout ?? '', {...requested,source:requestedSource}, {outputTruncated: !!segResult.outputTruncated});
+    // A transport failure that produced no assistant message is the only
+    // failure safe to retry, and only once for the whole run.
+    const failure=classifyPiFailure({exitCode:segResult.exitCode, stderr:segResult.stderr, assistantMessages:segReceipt.assistantMessages});
+    workerFailure=failure;
+    if (!failure?.retryable || segReceipt.assistantMessages !== 0 || retriedFailure) break;
+    retriedFailure=true;
+    segmentRetried=true;
+    await new Promise((resolve)=>setTimeout(resolve,2000));
+   }
+   if (segmentRetried && workerFailure) workerFailure={...workerFailure, retried:true} as PiFailure;
    segmentReceipts.push(segReceipt);
    segments.push({index:continuationIndex,eventsPath:segEventsPath,stopReason:segResult.stopReason,outputTruncated:!!segResult.outputTruncated,outputLimited:segReceipt.outputLimited,checkpointPath:null});
    // Continue when the segment hit the accumulation cap or the model's
@@ -109,6 +128,11 @@ export async function launch(state:RunState):Promise<RunState|any> {
    // runtime.json reflects only the segment that actually ends the run.
    heartbeat.setState('running', { outputTruncated: false, stopReason: null } as any);
   }
+ }
+ } finally {
+  // Pi has finished on every path; copied credentials and lock files never
+  // outlive the process that needed them. Session files stay for resume.
+  cleanupPiAgentOverlay(piOverlay.dir);
  }
  // The receipt reflects the final segment so readiness/validity is judged on
  // what the last segment actually completed; token usage and cost sum every
@@ -137,6 +161,7 @@ export async function launch(state:RunState):Promise<RunState|any> {
 
  state.stdout=stdout; state.stderr=stderr; state.legacyError=legacyError;
  state.workerStatus=workerStatus; state.streamResult=streamResult;
+ state.workerFailure=workerFailure;
  state.segments=segments; state.segmentReceipts=segmentReceipts;
  state.receipt=receipt; state.receiptOk=receiptOk;
  return state;

@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { loadHopContext } from './hop-context.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
@@ -10,7 +10,8 @@ import { collectGitEvidence } from './evidence.ts';
 import { clarityGateApplies, resolveDiscoverReport, startClarification } from './clarify.ts';
 import { buildIsolationArgs, type IsolationVerdict } from './pi-isolation.ts';
 import { loadPrepareHistory, shouldCheckBack, briefMdPath } from './prepare.ts';
-import { sessionLockKey, loadResume, resumeExecutionCwd, REVIEW_CONTEXT_FILENAME, loadReview, type ResumeInfo } from './worker-resume.ts';
+import { sessionLockKey, loadResume, resumeExecutionCwd, REVIEW_CONTEXT_FILENAME, REVIEW_PROMPT_MAX_CHARS, loadReview, type ResumeInfo } from './worker-resume.ts';
+import { importResumeSession } from './pi-overlay.ts';
 import { buildPrompt } from './worker-prompt.ts';
 import { probePiCapabilities } from './worker-pi.ts';
 import { DEFAULT_JEV, buildModelApprovalRequest, decideModelRoute, jevMode, readStickyRoute, resolveExplicitApproval, stickyApprovalHolds, writeStickyRoute } from './worker-approval.ts';
@@ -242,6 +243,38 @@ export async function preflight(state:RunState):Promise<RunState|any> {
   }
   resume=loaded.info;
   prior=loaded.prior;
+  // Pi sessions are run-local. Import exactly the parent session into this
+  // run's overlay before any classifier or worker starts. A missing session is
+  // fatal for implementation workflows; report-only workflows fall back to a
+  // fresh session seeded with the prior report.
+  {
+   const priorArtifactDir=resume.parentResult.artifactDir;
+   const imported=priorArtifactDir
+    ? importResumeSession(priorArtifactDir, resume.parentSessionId, join(state.dir,'pi-agent'))
+    : { error:{ code:'resume_session_unavailable' as const, missing:join(state.dir,'pi-agent'), message:'resume prior result has no artifactDir' } };
+   if (imported.error) {
+    const reportOnly=explicitWorkflow==='evaluate' || explicitWorkflow==='qa' || explicitWorkflow==='recon' || explicitWorkflow==='investigate';
+    if (!reportOnly) {
+     return blockedResult(state, `resume session unavailable: ${imported.error.message}`, {
+      status:'resume_session_unavailable',
+      resume:{ error:'resume_session_unavailable', from:resume.from, sessionId:resume.parentSessionId } });
+    }
+    let priorReport:string|null=null;
+    if (priorArtifactDir) {
+     const priorReportPath=join(priorArtifactDir,'analysis-report.md');
+     if (existsSync(priorReportPath)) {
+      try {
+       const text=readFileSync(priorReportPath,'utf8');
+       priorReport=text.length > REVIEW_PROMPT_MAX_CHARS ? `${text.slice(0,REVIEW_PROMPT_MAX_CHARS)}\n... (truncated)` : text;
+      } catch { priorReport=null; }
+     }
+    }
+    reviewContext=priorReport;
+    state.reviewContext=priorReport;
+    state.resumeFallback={ reason:imported.error.message, priorResult:resume.from, sessionId:`${resume.parentSessionId.slice(0,8)}…` };
+    resume=undefined;
+   }
+  }
   if (isRepair) {
    const priorLineage = prior && typeof prior.lineage==='object' && prior.lineage ? prior.lineage : null;
    const repairs=(typeof priorLineage?.repairs==='number'?priorLineage.repairs:0)+1;
