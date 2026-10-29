@@ -151,7 +151,7 @@ export function validateIsolationSetup(setup: unknown): void {
  if (s.links !== undefined) {
   if (!Array.isArray(s.links)) throw Error('Invalid isolationSetup.links (expected an array)');
   for (const l of s.links) {
-   if (!l || typeof l !== 'object' || Array.isArray(l)) throw Error('Invalid isolationSetup.links entry (expected an object)');
+   if (!l || typeof l !== 'object' || Array.isArray(l)) throw Error('Invalid isolationSetup.links entry (expected an object with "from" and "to" paths)');
    for (const k of Object.keys(l)) if (!(LINK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.links field: ${k}`);
    if (!relativeSetupPath((l as any).from)) throw Error('Invalid isolationSetup.links.from (expected a relative path)');
    if (!relativeSetupPath((l as any).to)) throw Error('Invalid isolationSetup.links.to (expected a relative path)');
@@ -159,12 +159,12 @@ export function validateIsolationSetup(setup: unknown): void {
  }
  if (s.copy !== undefined) {
   if (!Array.isArray(s.copy)) throw Error('Invalid isolationSetup.copy (expected an array)');
-  for (const p of s.copy) if (!relativeSetupPath(p)) throw Error('Invalid isolationSetup.copy entry (expected a relative path)');
+  for (const p of s.copy) if (!relativeSetupPath(p)) throw Error('Invalid isolationSetup.copy entry (expected a relative path string)');
  }
  if (s.commands !== undefined) {
   if (!Array.isArray(s.commands)) throw Error('Invalid isolationSetup.commands (expected an array)');
   for (const c of s.commands) {
-   if (!c || typeof c !== 'object' || Array.isArray(c)) throw Error('Invalid isolationSetup.commands entry (expected an object)');
+   if (!c || typeof c !== 'object' || Array.isArray(c)) throw Error('Invalid isolationSetup.commands entry (expected an object with "command" and optional "args")');
    for (const k of Object.keys(c)) if (!(COMMAND_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.commands field: ${k}`);
    if (typeof (c as any).command !== 'string' || !(c as any).command.trim()) throw Error('Invalid isolationSetup.commands.command (expected a non-empty string)');
    if ((c as any).args !== undefined && (!Array.isArray((c as any).args) || (c as any).args.some((a: any) => typeof a !== 'string'))) throw Error('Invalid isolationSetup.commands.args (expected an array of strings)');

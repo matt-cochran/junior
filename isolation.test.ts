@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureLocalExcludes, provisionIsolationSetup } from './isolation.ts';
+import { ensureLocalExcludes, provisionIsolationSetup, validateIsolationSetup } from './isolation.ts';
 
 const GENERATED = ['/.delivery/', '/delivery.config.json', '/tasks/example-task.json'];
 
@@ -142,6 +142,23 @@ test('ensureLocalExcludes omits an unapplied pattern from added', (t) => {
 test('ensureLocalExcludes names an unapplied pattern in its error', (t) => {
   const repo = repoIn(arena(t));
   assert.match(ensureLocalExcludes(repo, ['!keep']).error ?? '', /!keep/);
+});
+
+// ---------------------------------------------------------------------------
+// isolationSetup validation names the expected entry shapes before any paid
+// call, so a malformed contract can be corrected without guessing.
+// ---------------------------------------------------------------------------
+
+test('a string links entry names the from and to fields', () => {
+  assert.throws(() => validateIsolationSetup({ links: ['node_modules'] }), /from.*to/);
+});
+
+test('a non-string copy entry names the expected relative path string', () => {
+  assert.throws(() => validateIsolationSetup({ copy: [{ path: 'deps' }] }), /copy entry.*string/);
+});
+
+test('a non-object commands entry names the command and args fields', () => {
+  assert.throws(() => validateIsolationSetup({ commands: ['npm ci'] }), /command.*args/);
 });
 
 // ---------------------------------------------------------------------------
