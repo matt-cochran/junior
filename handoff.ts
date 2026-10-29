@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
+import { redactSecrets } from './pi-failure.ts';
 import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 import type { ScopeResult } from './scope-check.ts';
 import type { BudgetAccounting, PhaseAccounting } from './runtime.ts';
@@ -148,11 +149,89 @@ function artifactPaths(dir: string | null, report: string | null = null): Handof
  };
 }
 
-/** Deduplicate event stop reasons into a short, stable summary. */
-export function stopReasonSummary(receipt: any): string[] {
+const REPORT_WORKFLOWS = new Set(['evaluate','qa','recon','investigate']);
+
+function reportWorkflowName(result: any): string | null {
+ const workflow = result?.analysis?.workflow
+  ?? (typeof result?.workflow === 'string' ? result.workflow : result?.workflow?.selected)
+  ?? (typeof result?.review?.from === 'string' ? result.review.from : null);
+ return typeof workflow === 'string' && REPORT_WORKFLOWS.has(workflow) ? workflow : null;
+}
+
+/** The project path from either a bare path or an already-rendered consent
+ * command, so a preflight that records the command does not duplicate it. */
+function consentProject(value: unknown, fallback: unknown): string | null {
+ if (typeof value === 'string' && value.trim()) {
+  const match = value.match(/--project\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? value.trim();
+ }
+ return typeof fallback === 'string' && fallback.trim() ? fallback : null;
+}
+
+/** Deduplicate event stop reasons into a short, stable summary, then add the
+ * actionable causes recorded on the result (consent, check timeout, budget,
+ * resume and typed Pi failures). */
+export function stopReasonSummary(input: any): string[] {
+ const result = input && typeof input === 'object' ? input : null;
+ const receipt = input?.receipt && typeof input.receipt === 'object' ? input.receipt : input;
  const raw = Array.isArray(receipt?.stopReasons) ? receipt.stopReasons : [];
  const seen: string[] = [];
- for (const r of raw) { const s = String(r); if (!seen.includes(s)) seen.push(s); }
+ const add = (value: unknown) => { const s = String(value); if (!seen.includes(s)) seen.push(s); };
+ for (const r of raw) add(r);
+
+ if (!result) return seen;
+
+ const external = result.externalContext;
+ const authorization = external?.authorization ?? external?.preflight?.authorization;
+ if (result.status === 'needs_external_context_consent' || (authorization?.required !== false && authorization?.granted === false) || result.externalContextConsent?.approve) {
+  const consent = result.externalContextConsent;
+  const provider = consent?.provider ?? external?.preflight?.provider ?? external?.provider ?? 'provider';
+  const project = consentProject(consent?.approve?.project ?? authorization?.approve?.project, result.sourceCwd ?? result.executionCwd ?? result.execution?.cwd);
+  add(`consent_required: run "junior auth consent grant ${provider} --project ${project ?? '<cwd>'}" or set externalContextConsent`);
+ }
+
+ const checks = Array.isArray(result.checks) ? result.checks : [];
+ const timeoutMs = result.runtime?.checkTimeoutMs ?? result.execution?.checkTimeoutMs ?? result.settings?.checkTimeoutMs ?? result.checkTimeoutMs;
+ checks.forEach((check: any, index: number) => {
+  if (check?.timedOut) add(`check_timeout: check ${index + 1} killed after ${check.timeoutMs ?? timeoutMs ?? 'unknown'} ms (raise execution.checkTimeoutMs)`);
+ });
+
+ const budget = result.budget ?? result.outputBreakdown?.budget;
+ const stopReason = result.runtime?.stopReason ?? result.stopReason ?? result.status;
+ if (budget?.exceeded || budget?.stopReason === 'budget_exceeded' || stopReason === 'budget_exceeded' || raw.includes('budget_exceeded')) {
+  const field = budget?.exceededField;
+  const workflow = reportWorkflowName(result);
+  const reportState = workflow
+   ? (result.analysis?.reportPresent === true || result.reportPresent === true ? 'partial' : 'missing')
+   : null;
+  add(`budget_exceeded${field ? ` (${field})` : ''}${reportState ? `; report: ${reportState}` : ''}`);
+ }
+
+ const failure = result.workerFailure;
+ const resumeError = typeof result.resume?.error === 'string' ? result.resume.error : '';
+ const resumeUnavailable = failure?.category === 'resume_session_unavailable'
+  || result.status === 'resume_session_unavailable'
+  || /resume_session_unavailable/.test(resumeError);
+ if (resumeUnavailable) {
+  const sessionId = result.resume?.sessionId ?? result.resume?.parentSessionId ?? result.sessionId ?? receipt?.sessionId
+   ?? result.resumeFallback?.sessionId ?? failure?.sessionId;
+  // The compact receipt names the session by its first 8 characters only;
+  // the full id stays in the local result for diagnostics.
+  add(`resume_session_unavailable${sessionId ? `: session ${redactSecrets(String(sessionId)).slice(0, 8)}…` : ''}`);
+ }
+
+ if (failure && typeof failure === 'object') {
+  if (typeof failure.summary === 'string' && failure.summary.trim()) {
+   add(`worker_failure${failure.category ? ` ${failure.category}` : ''}: ${failure.summary}`);
+  } else if (typeof failure.category === 'string' && failure.category.trim()) {
+   add(`worker_failure: ${failure.category}`);
+  }
+ }
+
+ if (result.analysis && result.analysis.reportPresent === false) {
+  add(`analysis_report_missing: ${result.analysis.report ?? 'unknown path'}`);
+ }
+
  return seen;
 }
 
@@ -351,7 +430,7 @@ export function compactHandoff(result: any): CompactHandoff {
    interrupted: !!r.runtime?.interrupted,
    timedOut: !!r.runtime?.timedOut,
    deadlineExceeded: !!r.runtime?.deadlineExceeded,
-   stopReasonSummary: stopReasonSummary(r.receipt),
+   stopReasonSummary: stopReasonSummary(r),
   },
   analysis,
   review,
