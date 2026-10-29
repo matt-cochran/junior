@@ -10,6 +10,14 @@ test('guardBashInput prefixes a bash command so stdin is /dev/null', () => {
   assert.equal(input.command, 'exec </dev/null\ncat file');
 });
 
+test('guardBashInput replaces a command refused by JUNIOR_COMMAND_POLICY with an E_COMMAND_PLACEMENT refusal', () => {
+  const wrapper = '/opt/wrappers/npm-safe.sh';
+  const policy = { enforce: true, rules: [{ match: ['node --test'], placement: 'remote', wrapper }] };
+  const input: any = { command: 'node --test x.test.ts' };
+  guardBashInput(input, { JUNIOR_COMMAND_POLICY: JSON.stringify(policy) });
+  assert.match(input.command, /^printf '%s\\n' '.*"error":"E_COMMAND_PLACEMENT".*"argv":"node --test x\.test\.ts".*"wrapper":"\/opt\/wrappers\/npm-safe\.sh".*' >&2; exit 126$/);
+});
+
 test('guardBashInput caps a larger model timeout at the environment value', () => {
   const input: any = { command: 'sleep 1', timeout: 120 };
   guardBashInput(input, env('30'));
@@ -133,4 +141,10 @@ test('applyProviderRouting merges the configured provider routing into the paylo
 test('applyProviderRouting ignores invalid JSON', () => {
  const payload = { model: 'm' };
  assert.deepEqual(applyProviderRouting(payload, { JUNIOR_PI_OPENROUTER_ROUTING: '{not json' }), payload);
+});
+
+test('a set but malformed JUNIOR_COMMAND_POLICY refuses the bash command', () => {
+ const input = { command: 'git status' };
+ guardBashInput(input, { JUNIOR_COMMAND_POLICY: '{not json' });
+ assert.match(input.command, /E_COMMAND_PLACEMENT/);
 });

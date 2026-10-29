@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import { resolve, relative, isAbsolute, delimiter } from 'node:path';
+import { COMMAND_PLACEMENT_ERROR, decideCommand, parseCommandPolicy } from './command-policy.ts';
 
 /** Everything `guardBashInput` may read from the environment. */
 export type GuardEnv = Record<string, string | undefined>;
@@ -75,7 +76,33 @@ export function parseBashTimeoutSeconds(env: GuardEnv | undefined): number | nul
  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : null;
 }
 
-/** Rewrite a bash tool input in place: stdin comes from /dev/null, and when
+/** Parse the already-validated contract policy carried in the environment.
+ * The worker merges any manifest rules before setting the value, so the guard
+ * never reads a manifest. An absent value means no policy; a value that is set
+ * but cannot be parsed fails closed, so every command is refused. */
+function commandPolicy(env:GuardEnv|undefined):ReturnType<typeof parseCommandPolicy> | 'invalid' {
+ const raw=env?.JUNIOR_COMMAND_POLICY;
+ if (typeof raw!=='string' || !raw.trim()) return null;
+ try { return parseCommandPolicy(raw, process.cwd()); } catch { return 'invalid'; }
+}
+
+/** A shell command that prints the typed refusal and never runs the model's
+ * original command. The JSON is single-quoted for `printf`, so any quote in
+ * the payload is escaped as the usual shell `'\''` sequence. */
+function commandPlacementRefusal(command:string, decision:ReturnType<typeof decideCommand>):string {
+ const payload:Record<string, unknown>={
+  error:COMMAND_PLACEMENT_ERROR,
+  argv:command,
+  ...(decision.rule ? { rule:decision.rule } : {}),
+  ...(decision.wrapper ? { wrapper:decision.wrapper } : {}),
+ };
+ const quoted=JSON.stringify(payload).replace(/'/g, `'\\''`);
+ return `printf '%s\\n' '${quoted}' >&2; exit 126`;
+}
+
+/** Rewrite a bash tool input in place: a command refused by the contract
+ * command policy is replaced by a typed E_COMMAND_PLACEMENT refusal that exits
+ * non-zero. Otherwise stdin comes from /dev/null, and when
  * `JUNIOR_PI_BASH_TIMEOUT_S` is a positive integer the timeout becomes the
  * smaller of the model's timeout and that bound. Non-bash input (no string
  * `command`) is returned untouched. */
@@ -83,6 +110,18 @@ export function guardBashInput<T>(input: T, env: GuardEnv | undefined = process.
  if (!input || typeof input !== 'object') return input;
  const target = input as Record<string, any>;
  if (typeof target.command !== 'string') return input;
+ const policy=commandPolicy(env);
+ if (policy === 'invalid') {
+  target.command=commandPlacementRefusal(target.command, { decision:'refuse', placement:'unknown' } as ReturnType<typeof decideCommand>);
+  return input;
+ }
+ if (policy) {
+  const decision=decideCommand(policy, target.command);
+  if (decision.decision === 'refuse') {
+   target.command=commandPlacementRefusal(target.command, decision);
+   return input;
+  }
+ }
  target.command = `exec </dev/null\n${target.command}`;
  const bound = parseBashTimeoutSeconds(env);
  if (bound !== null) {

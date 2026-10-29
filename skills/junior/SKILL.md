@@ -85,8 +85,8 @@ A cached 24-hour update check may print one stderr line on `init`, `doctor`,
 `junior update`, which updates Junior itself first, then every managed tool,
 companion and unmodified skill.
 
-After a compaction or resume, run `junior compact` and read the block before
-continuing. It rebuilds the active plan, pending decisions with the file to
+After a compaction or resume, run `junior compact` (`--hop <hop.json>` to read
+a specific HOP) and read the block before continuing. It rebuilds the active plan, pending decisions with the file to
 read, open notes, FMECA state, open hypotheses, recent unresolved runs, open
 PRs and capture proposals from the live stores, with no model call. Work
 Pending decisions first. For each Capture proposal, either `junior note promote
@@ -293,7 +293,40 @@ output-limit stop as incomplete work, regardless of passing checks. Inspect
   `checkTimeoutMs`. Setup output goes to `isolation-setup.log`; a failure ends
   the run as `isolation_setup_failed` before Pi starts, and linked or copied
   paths are excluded from change evidence. `isolationSetup` is ignored when
-  isolation is `none`.
+  isolation is `none`. For example:
+
+  ```json
+  "isolationSetup": {
+    "links": [{"from": "node_modules", "to": "node_modules"}],
+    "copy": [".env.local"],
+    "commands": [{"command": "npm", "args": ["run", "build"], "cwd": "."}]
+  }
+  ```
+- Each check runs for at most `execution.checkTimeoutMs` (default 120000 ms,
+  120 s), capped by the tool watchdog and the remaining deadline. A killed
+  check is reported as `check_timeout` with the limit it hit, so raise
+  `checkTimeoutMs` for a slow suite.
+- `commandPolicy` makes command placement binding: `{"enforce": true,
+  "manifest": "<path>", "rules": [{"match": ["npm test"], "placement":
+  "remote", "wrapper": "<path>"}]}`. The Pi bash guard, the check runner and
+  `isolationSetup.commands` refuse an unmatched, opaque or unwrapped remote
+  command with `E_COMMAND_PLACEMENT` before it runs; a refused check fails.
+  See `docs/contracts.md`.
+- Report workflows (`evaluate`, `qa`, `recon`, `investigate`) default to a
+  budget of 25 tool calls and 400,000 tokens (cache reads count); a contract
+  `budget` overrides it field by field. Hitting it stops with
+  `budget_exceeded` and keeps the partial report.
+- Pi gets a run-local agent directory with copied credentials (0600), which are
+  deleted when Pi exits. A resume imports the parent session into it; if the
+  session is gone, code workflows stop with `resume_session_unavailable` at no
+  cost, while report workflows start fresh from the prior report
+  (`resumeFallback`). Pi failures are typed in `workerFailure`, and one
+  transport failure with no output is retried.
+- External context (classifier and companion calls that send repository text
+  to a provider) needs consent. A `consent_required` stop names the command:
+  `junior auth consent grant <provider> --project <dir>`; check it with
+  `junior auth consent status <provider>` and withdraw it with
+  `junior auth consent remove <provider>`.
 - A run is bounded by a total wall deadline and a tool watchdog; the `quiet`
   setting only reports a no-output interval and is **not** a hard deadline. The
   process group is cancelled on interrupt and execution/session locks are

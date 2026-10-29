@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSyn
 import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandPolicy } from './command-policy.ts';
 
 export type IsolationMode = 'none' | 'worktree';
 
@@ -151,7 +152,7 @@ export function validateIsolationSetup(setup: unknown): void {
  if (s.links !== undefined) {
   if (!Array.isArray(s.links)) throw Error('Invalid isolationSetup.links (expected an array)');
   for (const l of s.links) {
-   if (!l || typeof l !== 'object' || Array.isArray(l)) throw Error('Invalid isolationSetup.links entry (expected an object)');
+   if (!l || typeof l !== 'object' || Array.isArray(l)) throw Error('Invalid isolationSetup.links entry (expected an object with "from" and "to" paths)');
    for (const k of Object.keys(l)) if (!(LINK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.links field: ${k}`);
    if (!relativeSetupPath((l as any).from)) throw Error('Invalid isolationSetup.links.from (expected a relative path)');
    if (!relativeSetupPath((l as any).to)) throw Error('Invalid isolationSetup.links.to (expected a relative path)');
@@ -159,12 +160,12 @@ export function validateIsolationSetup(setup: unknown): void {
  }
  if (s.copy !== undefined) {
   if (!Array.isArray(s.copy)) throw Error('Invalid isolationSetup.copy (expected an array)');
-  for (const p of s.copy) if (!relativeSetupPath(p)) throw Error('Invalid isolationSetup.copy entry (expected a relative path)');
+  for (const p of s.copy) if (!relativeSetupPath(p)) throw Error('Invalid isolationSetup.copy entry (expected a relative path string)');
  }
  if (s.commands !== undefined) {
   if (!Array.isArray(s.commands)) throw Error('Invalid isolationSetup.commands (expected an array)');
   for (const c of s.commands) {
-   if (!c || typeof c !== 'object' || Array.isArray(c)) throw Error('Invalid isolationSetup.commands entry (expected an object)');
+   if (!c || typeof c !== 'object' || Array.isArray(c)) throw Error('Invalid isolationSetup.commands entry (expected an object with "command" and optional "args")');
    for (const k of Object.keys(c)) if (!(COMMAND_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown isolationSetup.commands field: ${k}`);
    if (typeof (c as any).command !== 'string' || !(c as any).command.trim()) throw Error('Invalid isolationSetup.commands.command (expected a non-empty string)');
    if ((c as any).args !== undefined && (!Array.isArray((c as any).args) || (c as any).args.some((a: any) => typeof a !== 'string'))) throw Error('Invalid isolationSetup.commands.args (expected an array of strings)');
@@ -235,7 +236,7 @@ export function provisionIsolationSetup(
  sourceCwd: string,
  worktreeCwd: string,
  artifactDir: string,
- opts: { deadlineAt: number; checkTimeoutMs: number },
+ opts: { deadlineAt: number; checkTimeoutMs: number; commandPolicy?: CommandPolicy | null },
 ): IsolationSetupResult {
  const steps: IsolationSetupStep[] = [];
  const lines: string[] = [];
@@ -291,6 +292,16 @@ export function provisionIsolationSetup(
  }
 
  for (const cmd of setup.commands ?? []) {
+  const decision = decideCommand(opts.commandPolicy ?? null, [cmd.command, ...(cmd.args ?? [])]);
+  if (decision.decision === 'refuse') {
+   const parts = [decision.reason ?? COMMAND_PLACEMENT_ERROR];
+   if (decision.rule) parts.push(`rule: ${decision.rule.match.join(' ')}`);
+   if (decision.wrapper) parts.push(`wrapper: ${decision.wrapper}`);
+   const message = parts.join('; ');
+   steps.push({ kind: 'command', target: cmd.command, ok: false, error: message });
+   lines.push(`command ${cmd.command} REFUSED: ${message}`);
+   return finish(`command ${cmd.command}: ${message}`);
+  }
   const cwd = join(worktreeCwd, cmd.cwd ?? '.');
   const remaining = opts.deadlineAt - Date.now();
   if (remaining <= 0) {

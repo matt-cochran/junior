@@ -277,6 +277,33 @@ Earlier worker runs inherited ambient resources: all 114 recorded runs had
 received 18 unrelated ambient skills. Isolation makes the contract, not the
 machine, the source of run inputs.
 
+#### Pi agent directory and failures
+Each run gives Pi its own agent directory, `<artifactDir>/pi-agent`
+(`PI_CODING_AGENT_DIR`). Junior copies `auth.json`, `models.json` and
+`models-store.json` into it with mode 0600, so Pi's `auth.json.lock` is created
+there and a read-only `$HOME` no longer breaks a sandboxed run. When Pi exits,
+on every path, the copied credentials and any `*.lock` files are deleted.
+Session files stay, so a later `resumeFrom` can import them (see **Session
+continuation** in [contracts](contracts.md)).
+
+Every Pi failure is classified into `result.workerFailure`
+`{category, summary, retryable}`. The categories are `transport_dns`,
+`transport_tls`, `transport_http`, `transport_fetch`, `credential_lock`,
+`auth_missing`, `resume_session_unavailable`, `zero_messages` (Pi exited 0
+with no assistant message) and `unknown`. Secrets are redacted
+from the summary, which replaces the generic `Pi failed` wording. A retryable
+transport failure that produced no assistant message is retried once per run,
+and the failure is then marked `retried: true`.
+
+#### Workflow budgets
+A contract `budget` (`maxToolCalls`, `maxTotalTokens`, `mode`) bounds the
+worker. Cache reads count towards `maxTotalTokens`. The report workflows
+`evaluate`, `qa`, `recon` and `investigate` have an enforced default of 25 tool
+calls and 400,000 tokens. Contract fields override the default field by field.
+Other workflows are unbounded unless the contract sets `budget`. A run that
+hits a limit stops with `stopReason: budget_exceeded`. Report workflows update
+their report after each criterion, so a stopped run keeps a partial report.
+
 
 ### Change evidence
 Each run captures a **before** and **after** snapshot of the execution checkout
@@ -491,6 +518,18 @@ reason. Pi's catalog estimate is never labelled as provider billing
 (`source` is `pi_reported`), and the legacy cost fields remain for
 compatibility. Repeated per-event stop reasons are deduplicated into
 `runtime.stopReasonSummary`.
+Typed stop reasons add one line each to the summary:
+
+- `consent_required`: the `junior auth consent grant <provider> --project <cwd>`
+  command to run, or set `externalContextConsent`;
+- `check_timeout`: which check was killed and after how many ms (raise
+  `execution.checkTimeoutMs`);
+- `budget_exceeded`: the limit that was hit;
+- `resume_session_unavailable`: the session id, shortened to eight characters;
+- `worker_failure`: the `workerFailure` summary.
+
+The result also carries `checkTimeoutMs`, `workerFailure` and `resumeFallback`
+when they apply.
 The full receipt, events, evidence and runtime heartbeat stay in the artifact
 files (`events.jsonl`, `worker.log`, `runtime.json`, `evidence.json`,
 `result.json`) and are available through `status --full`.

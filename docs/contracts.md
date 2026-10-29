@@ -148,6 +148,55 @@ After the run, the result carries `scope` with `checked`, `inScope`,
 each out-of-scope path adds an unresolved line `out of scope: <paths>`. Scope is
 reported for review; it does not change the run status.
 
+#### Command placement (`commandPolicy`)
+`commandPolicy` says where a command may run. It is enforced where processes
+start, not only in the prompt: the Pi bash guard, the contract check runner and
+`isolationSetup.commands`.
+
+```json
+"commandPolicy": {
+  "enforce": true,
+  "manifest": "scripts/devbox/command-placement.json",
+  "rules": [
+    { "match": ["node --test", "npm test", "npm run test", "npx vitest", "cargo test"], "placement": "remote", "wrapper": "~/.cache/x/npm-safe.sh" },
+    { "match": ["git", "rg", "cat", "ls"], "placement": "local" }
+  ]
+}
+```
+
+- `enforce` (boolean) is required. `rules` and `manifest` are optional, but a
+  policy needs at least one rule. Contract rules are checked before manifest
+  rules.
+- A rule matches when the command, after stripping `env VAR=x`, assignments
+  and `command`/`exec`/`timeout`/`nice` prefixes, starts with one of its
+  `match` prefixes.
+- A `remote` rule needs a `wrapper`. The command is allowed only when it is
+  run through that wrapper. A relative wrapper must stay inside the contract
+  cwd; `~` and absolute paths are accepted as written.
+- Indirection is resolved before matching: `sh`/`bash`/`zsh -c` (recursively),
+  `npm`/`pnpm`/`yarn` scripts through the nearest `package.json` (depth
+  capped), `npx <bin>` as `<bin>`, and `&&`, `;` and `|` chains, where every
+  segment must be allowed.
+- With `enforce: true`, a command no rule matches is refused, and so is anything
+  Junior cannot see through: `eval`, command substitution, `xargs`,
+  `find -exec` and unknown prefix options. With `enforce: false`, nothing is
+  refused.
+- `manifest` is a path relative to the cwd (no absolute paths or `..`) to a
+  file of the form `{"version": 1, "rules": [...]}`. A missing or malformed
+  manifest fails validation; it is never silently ignored.
+
+A refused command never runs and is never counted as a passed check. The error
+code is `E_COMMAND_PLACEMENT`:
+
+- A refused Pi bash call exits 126 with the JSON diagnostic on stderr. An
+  invalid policy reaching the guard refuses every call.
+- A refused check is not spawned. It records `checks[i].placement` and
+  `checks[i].refused: "E_COMMAND_PLACEMENT"`, and fails.
+- A refused `isolationSetup` command ends the run as `isolation_setup_failed`
+  before Pi starts.
+
+Contracts without `commandPolicy` behave exactly as before.
+
 
 ### Micro-deliverable stages
 This prototype was built as small, inspectable stages:
@@ -266,6 +315,18 @@ to write code. Resuming a `recon` run with `auto` and a test-first
 recommendation is downgraded to `checks_first` until a new contract selects a
 code workflow explicitly. The result records `resume` (parent result, parent
 session and resumed session).
+
+Every run has its own Pi agent directory, so before any paid call Junior copies
+exactly the parent's session file (`<prior artifactDir>/pi-agent/sessions/...`)
+into the new run's directory. When that file is missing, empty or malformed:
+
+- implementation workflows stop with status `resume_session_unavailable`
+  before Pi starts and with no spend. The result names the prior result path and
+  the session id, and the compact receipt shows the first eight characters of
+  the id;
+- the report-only workflows `evaluate`, `qa`, `recon` and `investigate` start
+  a fresh session instead, seeded with the prior run's `analysis-report.md`.
+  The result records `resumeFallback` `{reason, priorResult, sessionId}`.
 
 The example below is the documented recon-then-code sequence. It performs **no
 nested paid runs**: each step is a separate, explicitly authorized invocation.

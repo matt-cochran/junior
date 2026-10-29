@@ -330,6 +330,35 @@ export type BudgetLimits = {
  mode?: 'warn' | 'enforce';
 };
 
+/** Default enforced budget for report-only workflows: enough room to inspect
+ * broadly, but bounded so a runaway report run still stops. */
+export const REPORT_WORKFLOW_BUDGET: BudgetLimits = { maxToolCalls: 25, maxTotalTokens: 400000, mode: 'enforce' };
+
+const REPORT_WORKFLOWS = new Set(['evaluate', 'qa', 'recon', 'investigate']);
+
+/** Return a copy of the report-workflow default for report workflows, or null
+ * for every other workflow so an unconstrained contract keeps its behavior. */
+export function defaultWorkflowBudget(workflow: string): BudgetLimits | null {
+ if (!REPORT_WORKFLOWS.has(workflow)) return null;
+ return { ...REPORT_WORKFLOW_BUDGET };
+}
+
+/** Merge a contract budget over the workflow default field by field. Contract
+ * fields win; workflow defaults fill the gaps; non-report workflows use only
+ * the contract budget. */
+export function effectiveBudget(workflow: string, contractBudget?: BudgetLimits): BudgetLimits | null {
+ const base = defaultWorkflowBudget(workflow);
+ if (!base) return contractBudget ? { ...contractBudget } : null;
+ const merged: BudgetLimits = { ...base };
+ if (contractBudget) {
+  for (const key of Object.keys(contractBudget) as (keyof BudgetLimits)[]) {
+   const value = contractBudget[key];
+   if (value !== undefined) (merged as any)[key] = value;
+  }
+ }
+ return merged;
+}
+
 /** Optional read boundary for the worker's read-like tool calls. */
 export type ReadScopeLimit = {
  mode?: 'context-only' | 'context-plus-dependencies' | string;
