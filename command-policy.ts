@@ -641,7 +641,250 @@ function allow(
   };
 }
 
-function decideSegment(policy: CommandPolicy, tokens: string[], enforce: boolean): CommandDecision {
+function decideAgainstRules(
+  policy: CommandPolicy,
+  candidates: string[][],
+  invoked: WrapperMatch | undefined,
+  enforce: boolean,
+  cwd: string,
+): CommandDecision {
+  for (const command of candidates) {
+    const rule = firstMatchingRule(policy, command);
+    if (!rule) continue;
+
+    if (rule.placement === 'local') {
+      if (invoked) {
+        if (enforce) {
+          return refusal('local', `wrapper ${invoked.configured} is only valid for a remote command`, rule);
+        }
+        continue;
+      }
+      return allow('local', rule);
+    }
+
+    const expected = canonicalPath(rule.wrapper as string, cwd);
+    if (invoked && invoked.canonical === expected) {
+      return allow('remote', rule, rule.wrapper);
+    }
+
+    if (enforce) {
+      const configured = rule.wrapper as string;
+      const expanded = canonicalPath(configured, cwd);
+      const label = expanded === configured ? configured : `${configured} (${expanded})`;
+      return refusal(
+        'remote',
+        `remote command "${command.join(' ')}" must run through ${label}`,
+        rule,
+        configured,
+      );
+    }
+    return allow('remote', rule, rule.wrapper);
+  }
+
+  const first = candidates[0] ?? [];
+  if (enforce) {
+    return refusal('unknown', `no rule matches "${first.join(' ')}" under enforce`);
+  }
+  return allow('unknown');
+}
+
+const MAX_INDIRECTION_DEPTH = 8;
+
+interface ShellScript {
+  script?: string;
+  opaque?: string;
+}
+
+/** Parse sh/bash/zsh option clusters. Only `-c` scripts are transparent;
+ * interactive or file-based shells cannot be proven and are refused. */
+function shellScript(tokens: string[]): ShellScript | null {
+  const program = basename(tokens[0]);
+  if (!['sh', 'bash', 'zsh', 'dash', 'ksh'].includes(program)) return null;
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--') continue;
+    if (!token.startsWith('-')) {
+      return { opaque: `shell script file "${token}"` };
+    }
+    if (token === '-o' || token === '+o' || token === '-O' || token === '+O') {
+      index += 1;
+      continue;
+    }
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token)) {
+      const script = tokens[index + 1];
+      if (script === undefined) return { opaque: 'shell -c without a script' };
+      return { script };
+    }
+    if (!/^[-+][A-Za-z]+$/.test(token)) return { opaque: `shell option "${token}"` };
+  }
+  return { opaque: 'interactive shell cannot be parsed' };
+}
+
+function isDynamicEval(command: string[]): boolean {
+  const program = basename(command[0]);
+  const evalFlags = ['-e', '--eval', '-p', '--print'];
+  if (program === 'node' || program === 'nodejs') {
+    return command.slice(1).some((token) =>
+      evalFlags.includes(token) || token.startsWith('--eval=') || token.startsWith('--print='),
+    );
+  }
+  if (['python', 'python3', 'perl', 'ruby', 'bun'].includes(program)) {
+    return command.slice(1).some((token) => token === '-c' || token === '-e' || token === '-E');
+  }
+  if (program === 'deno') {
+    return command[1] === 'eval';
+  }
+  return false;
+}
+
+function isOpaqueExecutor(command: string[]): boolean {
+  const program = basename(command[0]);
+  if (['xargs', 'parallel'].includes(program)) return true;
+  if (program === 'find') {
+    return command.slice(1).some((token) =>
+      ['-exec', '-execdir', '-ok', '-okdir'].includes(token),
+    );
+  }
+  return false;
+}
+
+function nearestPackageJson(cwd: string): string | null {
+  let current = resolve(cwd);
+  for (;;) {
+    const candidate = join(current, 'package.json');
+    try {
+      readFileSync(candidate, 'utf8');
+      return candidate;
+    } catch {
+      // Keep walking toward the filesystem root.
+    }
+    const parent = resolve(current, '..');
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function firstScriptToken(tokens: string[]): string | undefined {
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index] === '--') return tokens[index + 1];
+    if (!tokens[index].startsWith('-')) return tokens[index];
+  }
+  return undefined;
+}
+
+function packageScriptName(command: string[]): string | undefined {
+  const program = basename(command[0]);
+  if (program === 'npm') {
+    if (command[1] === 'test') return 'test';
+    if (command[1] === 'run' || command[1] === 'run-script') {
+      return firstScriptToken(command.slice(2));
+    }
+    return undefined;
+  }
+  if (program === 'pnpm' || program === 'yarn') {
+    if (command[1] === 'run' || command[1] === 'run-script') {
+      return firstScriptToken(command.slice(2));
+    }
+    if (command[1] && !command[1].startsWith('-')) return command[1];
+  }
+  return undefined;
+}
+
+interface PackageResolution {
+  decision?: CommandDecision;
+  script?: string;
+}
+
+function resolvePackageScript(
+  policy: CommandPolicy,
+  command: string[],
+  cwd: string,
+  depth: number,
+  seen: Set<string>,
+): PackageResolution {
+  const scriptName = packageScriptName(command);
+  if (!scriptName) return {};
+
+  const manifestPath = nearestPackageJson(cwd);
+  if (!manifestPath) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { decision: refusal('unknown', `cannot read nearest package.json: ${message}`) };
+  }
+
+  const scripts = isPlainObject(parsed) && isPlainObject(parsed.scripts) ? parsed.scripts : null;
+  const script = scripts && typeof scripts[scriptName] === 'string' ? scripts[scriptName] : undefined;
+  if (!script) return {};
+
+  const key = `${manifestPath}#${scriptName}`;
+  if (depth >= MAX_INDIRECTION_DEPTH || seen.has(key)) {
+    return {
+      decision: refusal(
+        'unknown',
+        `package script ${scriptName} exceeded the indirection depth cap or contains a cycle`,
+      ),
+    };
+  }
+
+  const nextSeen = new Set(seen);
+  nextSeen.add(key);
+  return {
+    script,
+    decision: decideCommandInternal(policy, script, depth + 1, nextSeen),
+  };
+}
+
+interface NpxResolution {
+  original: string[];
+  resolved: string[];
+}
+
+function resolveNpx(command: string[]): NpxResolution | null {
+  if (basename(command[0]) !== 'npx') return null;
+
+  const valueFlags = new Set([
+    '--package',
+    '-p',
+    '--cache',
+    '--registry',
+    '--call',
+    '-c',
+    '--shell',
+  ]);
+  let index = 1;
+  while (index < command.length) {
+    const token = command[index];
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (!token.startsWith('-')) break;
+    index += valueFlags.has(token) ? 2 : 1;
+  }
+
+  const bin = command[index];
+  if (!bin) return null;
+  const versionAt = bin.lastIndexOf('@');
+  const unversioned = versionAt > 0 ? bin.slice(0, versionAt) : bin;
+  const rest = command.slice(index + 1);
+  return {
+    original: ['npx', unversioned, ...rest],
+    resolved: [unversioned, ...rest],
+  };
+}
+
+function decideSegment(
+  policy: CommandPolicy,
+  tokens: string[],
+  enforce: boolean,
+  depth: number,
+  seen: Set<string>,
+): CommandDecision {
   const normalized = stripPrefixes(tokens);
   if (normalized.opaque) {
     if (enforce) return refusal('unknown', `cannot prove placement for ${normalized.opaque}`);
@@ -662,51 +905,45 @@ function decideSegment(policy: CommandPolicy, tokens: string[], enforce: boolean
     return allow('unknown');
   }
 
-  const rule = firstMatchingRule(policy, command);
-  if (!rule) {
-    if (enforce) {
-      return refusal('unknown', `no rule matches "${command.join(' ')}" under enforce`);
+  if (!invoked) {
+    if (isDynamicEval(command)) {
+      if (enforce) return refusal('unknown', 'dynamic evaluation is opaque');
+      return allow('unknown');
     }
-    return allow('unknown');
-  }
+    if (isOpaqueExecutor(command)) {
+      if (enforce) return refusal('unknown', `opaque executor ${basename(command[0])} cannot be proven`);
+      return allow('unknown');
+    }
 
-  if (rule.placement === 'local') {
-    if (invoked) {
-      if (enforce) {
-        return refusal('local', `wrapper ${invoked.configured} is only valid for a remote command`, rule);
+    const shell = shellScript(command);
+    if (shell) {
+      if (shell.script === undefined) {
+        if (enforce) return refusal('unknown', `cannot prove placement for ${shell.opaque}`);
+        return allow('unknown');
       }
-      return allow('local', rule);
+      if (depth >= MAX_INDIRECTION_DEPTH) {
+        return refusal('unknown', 'shell indirection exceeded the depth cap');
+      }
+      return decideCommandInternal(policy, shell.script, depth + 1, seen);
     }
-    return allow('local', rule);
+
+    const packageResolution = resolvePackageScript(policy, command, cwd, depth, seen);
+    if (packageResolution.decision) return packageResolution.decision;
+
+    const npx = resolveNpx(command);
+    if (npx) {
+      return decideAgainstRules(policy, [npx.original, npx.resolved], invoked, enforce, cwd);
+    }
   }
 
-  const expected = canonicalPath(rule.wrapper as string, cwd);
-  if (invoked && invoked.canonical === expected) {
-    return allow('remote', rule, rule.wrapper);
-  }
-
-  if (enforce) {
-    const configured = rule.wrapper as string;
-    const expanded = canonicalPath(configured, cwd);
-    const label = expanded === configured ? configured : `${configured} (${expanded})`;
-    return refusal(
-      'remote',
-      `remote command "${command.join(' ')}" must run through ${label}`,
-      rule,
-      configured,
-    );
-  }
-  return allow('remote', rule, rule.wrapper);
+  return decideAgainstRules(policy, [command], invoked, enforce, cwd);
 }
 
-/**
- * Decide a direct argv (or a shell-like command string). Without a policy
- * every command is allowed with placement `unknown`. Under `enforce: true`,
- * unmatched commands and opaque constructs are refused.
- */
-export function decideCommand(
+function decideCommandInternal(
   policy: CommandPolicy | null,
   argv: string[] | string,
+  depth: number,
+  seen: Set<string>,
 ): CommandDecision {
   if (!policy) return allow('unknown');
 
@@ -732,7 +969,7 @@ export function decideCommand(
     return allow('unknown');
   }
 
-  const results = segments.map((segment) => decideSegment(policy, segment, enforce));
+  const results = segments.map((segment) => decideSegment(policy, segment, enforce, depth, seen));
   const refusals = results.filter((result) => result.decision === 'refuse');
 
   if (refusals.length > 0) {
@@ -748,4 +985,16 @@ export function decideCommand(
   if (local) return allow('local', local.rule);
 
   return allow('unknown');
+}
+
+/**
+ * Decide a direct argv (or a shell-like command string). Without a policy
+ * every command is allowed with placement `unknown`. Under `enforce: true`,
+ * unmatched commands and opaque constructs are refused.
+ */
+export function decideCommand(
+  policy: CommandPolicy | null,
+  argv: string[] | string,
+): CommandDecision {
+  return decideCommandInternal(policy, argv, 0, new Set());
 }

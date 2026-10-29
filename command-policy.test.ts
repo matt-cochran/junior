@@ -419,3 +419,117 @@ test('a remote refusal carries the placement error code', (t) => {
   const result = decideCommand(policy, 'npm test');
   assert.match(result.reason ?? '', new RegExp(COMMAND_PLACEMENT_ERROR));
 });
+
+// ---------------------------------------------------------------------------
+// Indirection resolution (CMD1b)
+// ---------------------------------------------------------------------------
+
+test('bash -c recursion refuses an unwrapped remote command', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, "bash -c 'npm test'").decision, 'refuse');
+});
+
+test('sh -lc recursion reports the remote placement of its inner command', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, "sh -lc 'node --test'").placement, 'remote');
+});
+
+test('bash -c allows an inner local command', (t) => {
+  const policy = parseCommandPolicy(
+    { enforce: true, rules: [{ match: ['git'], placement: 'local' }] },
+    tempDir(t),
+  );
+  assert.equal(decideCommand(policy, "bash -c 'git status'").decision, 'allow');
+});
+
+test('bash -c allows an inner local rg command', (t) => {
+  const policy = parseCommandPolicy(
+    { enforce: true, rules: [{ match: ['rg'], placement: 'local' }] },
+    tempDir(t),
+  );
+  assert.equal(decideCommand(policy, "bash -c 'rg foo src'").decision, 'allow');
+});
+
+test('bash -c allows the configured wrapper for an inner remote command', (t) => {
+  const dir = tempDir(t);
+  const wrapper = wrapperFile(dir);
+  const policy = remotePolicy(dir, wrapper);
+  assert.equal(decideCommand(policy, `bash -c '${wrapper} npm test'`).decision, 'allow');
+});
+
+test('bash -c refuses a command substitution it cannot parse', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, `bash -c "$(printf 'npm test')"`).decision, 'refuse');
+});
+
+test('a file-based shell invocation is refused as opaque', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, 'bash scripts/test.sh').decision, 'refuse');
+});
+
+test('npx resolves an unwrapped binary to a remote refusal', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, 'npx vitest run').decision, 'refuse');
+});
+
+test('npx options do not hide the remote binary', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, 'npx --yes --no-install vitest').decision, 'refuse');
+});
+
+test('an npx remote refusal reports remote placement', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, 'npx vitest run').placement, 'remote');
+});
+
+test('npm run resolves the nearest package script', (t) => {
+  const dir = tempDir(t);
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ scripts: { 'test:unit': 'node --test' } }),
+  );
+  const policy = remotePolicy(dir);
+  assert.equal(decideCommand(policy, 'npm run test:unit').decision, 'refuse');
+});
+
+test('npm run resolves a package script to its local placement', (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { lint: 'git status' } }));
+  const policy = parseCommandPolicy(
+    { enforce: true, rules: [{ match: ['git'], placement: 'local' }] },
+    dir,
+  );
+  assert.equal(decideCommand(policy, 'npm run lint').placement, 'local');
+});
+
+test('npm test resolves the package test script', (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  const policy = remotePolicy(dir);
+  assert.equal(decideCommand(policy, 'npm test').placement, 'remote');
+});
+
+test('a package script cycle is refused at the depth cap', (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'npm test' } }));
+  const policy = remotePolicy(dir);
+  assert.equal(decideCommand(policy, 'npm test').decision, 'refuse');
+});
+
+test('node --import with eval is refused as dynamic evaluation', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(
+    decideCommand(policy, `node --import tsx -e "execSync('npm test')"`).placement,
+    'unknown',
+  );
+});
+
+test('xargs is refused as an opaque executor', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, 'xargs npm test').decision, 'refuse');
+});
+
+test('find -exec is refused as an opaque executor', (t) => {
+  const policy = remotePolicy(tempDir(t));
+  assert.equal(decideCommand(policy, `find . -name '*.test.ts' -exec node --test {} +`).decision, 'refuse');
+});
