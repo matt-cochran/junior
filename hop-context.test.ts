@@ -81,6 +81,10 @@ test('An ambiguous Hop selection gives an actionable --hop command',t=>{
  const root=project(t);nestedHop(root,'beta');nestedHop(root,'alpha');const selected=resolveHop(root);
  assert.match(selected.status==='ambiguous'?selected.candidates[0].selectCommand:'',/^junior compact --hop \".*\.delivery\/alpha\/hop\.json\"$/);
 });
+test('An ambiguous Hop remediation names the working compact command',t=>{
+ const root=project(t);nestedHop(root,'beta');nestedHop(root,'alpha');const selected=resolveHop(root);
+ assert.match(selected.status==='ambiguous'?selected.message:'',/junior compact --hop/);
+});
 test('resolveHop uses a configured tools.hop selection before discovery',t=>{
  const root=project(t);nestedHop(root,'alpha');const selected=nestedHop(root,'beta');
  writeFileSync(join(root,'delivery.config.json'),JSON.stringify({tools:{hop:'.delivery/beta/hop.json'}}));

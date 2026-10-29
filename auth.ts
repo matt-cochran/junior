@@ -19,7 +19,7 @@ import { checkCredentialsOnline, type SetupDeps } from './setup.ts';
 export const AUTH_USAGE = [
   'Usage: junior auth set <provider> [--verify]',
   '       junior auth remove <provider>',
-  '       junior auth consent <provider> [--project <dir>]',
+  '       junior auth consent [grant] <provider> [--project <dir>]',
   '       junior auth consent remove <provider> [--project <dir>]',
   '       junior auth consent status [provider] [--project <dir>]',
 ].join('\n');

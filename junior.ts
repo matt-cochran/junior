@@ -31,8 +31,8 @@ function usage(): string {
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
   '  apply   <id|result.json> [--dry-run] [--force] | validate <task.json> | status <result.json> [--full]   apply a reviewed handoff, validate a contract or print a receipt',
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
-  '  auth    set <provider> [--verify] | remove <provider>; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
-  '  compact [--json] [--max-chars N] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
+  '  auth    set <provider> [--verify] | remove <provider>; auth consent [grant|remove|status] <provider> [--project <dir>]; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
+  '  compact [--json] [--max-chars N] [--hop <hop.json>] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
   '  note    add <text...> [--kind <kind>] | list [--json] | done|promote|dismiss <id>   manage local session notes; fmeca propose-verified <result.json|run id>   print verified-mitigation proposals',
   '  prune   [--older-than 24h] [--keep-last N] [--dry-run]   remove inactive clean retained worktrees; setup [--harness H] [--hop F] [--yes] [--dry-run] [--context-hooks [--scope local|project] [--remove]]',
   '  init    [--no-install] [--no-companions] [--target ...]   project setup; installs Pi, tools, companions, skills',
@@ -82,8 +82,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
- compact: { flags: ['--json', '--capture', '--cursor'], valueFlags: ['--max-chars'], min: 0, max: 0,
-  help: 'Usage: junior compact [--json] [--max-chars N] [--capture] [--cursor]' },
+ compact: { flags: ['--json', '--capture', '--cursor'], valueFlags: ['--max-chars', '--hop'], min: 0, max: 0,
+  help: 'Usage: junior compact [--json] [--max-chars N] [--hop <hop.json>] [--capture] [--cursor]' },
  note: { flags: ['--json'], valueFlags: ['--kind'], min: 1, max: Number.MAX_SAFE_INTEGER,
   help: [
    'Usage: junior note add <text...> [--kind note|decision|question|risk|hypothesis|todo] [--json]',
@@ -403,8 +403,15 @@ async function main(argv: string[]): Promise<void> {
     throw Error(`Invalid --max-chars value: ${raw} (expected a positive integer)`);
    }
   }
+  const rawHop = parsed.values['--hop'];
+  let hopPath: string | undefined;
+  if (rawHop !== undefined) {
+   const { loadHop } = await import('./tools/tools.ts');
+   hopPath = resolve(process.cwd(), rawHop);
+   loadHop(hopPath);
+  }
   const { buildCompactBlock } = await import('./compact.ts');
-  const block = await buildCompactBlock({ cwd: process.cwd(), ...(maxChars !== undefined ? { maxChars } : {}) });
+  const block = await buildCompactBlock({ cwd: process.cwd(), ...(hopPath !== undefined ? { hopPath } : {}), ...(maxChars !== undefined ? { maxChars } : {}) });
   if (parsed.flags.has('--cursor')) {
    console.log(JSON.stringify({ additional_context: block.markdown }));
    return;

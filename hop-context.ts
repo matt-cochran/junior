@@ -123,7 +123,7 @@ export function resolveHop(cwd:string,options:{explicit?:string}={}):HopResoluti
  }
  if (candidates.length===1) return {status:'selected',source:'discovered',path:candidates[0].path,candidates};
  return {status:'ambiguous',candidates,command:'junior compact --hop <path>',
-  message:`Multiple nested Hops were found: ${candidates.map(hop=>hop.path).join(', ')}. Select one explicitly with --hop.`};
+  message:`Multiple nested Hops were found: ${candidates.map(hop=>hop.path).join(', ')}. Select one explicitly with: junior compact --hop <path>.`};
 }
 
 /** Persist an explicit project-level Hop selection in `.delivery/active-hop.json`.

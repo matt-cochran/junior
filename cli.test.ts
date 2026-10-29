@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { initHop } from './tools/tools.ts';
+import { initHop, loadHop, saveHop } from './tools/tools.ts';
 import { checkPi, doctor } from './setup.ts';
 import { runComputeCommand } from './cli.ts';
 import { COMPUTE_OPERATIONS, DEFAULT_COMPUTE_POLICY } from './compute.ts';
@@ -34,6 +34,19 @@ function runTools(args: string[], cwd: string) {
 
 function workdir(): string {
   return mkdtempSync(join(tmpdir(), 'junior-cli-'));
+}
+
+function nestedHop(dir: string, name: string, revision: number): string {
+  const path = join(dir, '.delivery', name, 'hop.json');
+  const tools = Object.fromEntries(['fmeca', 'cpm', 'crossmatrix', 'scientific-process'].map((tool) => [
+    tool,
+    { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: 'echo' }, sourceVersion: 'test' },
+  ]));
+  initHop(path, { projectId: name, probeVersion: () => 'test', tools });
+  const manifest = loadHop(path);
+  manifest.revision = revision;
+  saveHop(path, manifest);
+  return path;
 }
 
 const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact', 'note'];
@@ -550,12 +563,43 @@ test('junior compact --json prints the whole compact block', () => {
   assert.equal(typeof JSON.parse(runJunior(['compact', '--json'], workdir()).stdout).markdown, 'string');
 });
 
+test('junior compact --help lists --hop', () => {
+  assert.match(runJunior(['compact', '--help'], workdir()).stdout, /--hop/);
+});
+
+test('junior compact --hop selects the named Hop among nested candidates', () => {
+  const dir = workdir();
+  nestedHop(dir, 'alpha', 7);
+  const chosen = nestedHop(dir, 'beta', 42);
+  const block = JSON.parse(runJunior(['compact', '--hop', chosen, '--json'], dir).stdout);
+  assert.match(block.markdown, /^- hop revision: 42$/m);
+});
+
+test('junior compact --hop exits non-zero for a missing Hop path', () => {
+  const dir = workdir();
+  assert.notEqual(runJunior(['compact', '--hop', join(dir, 'missing-hop.json'), '--json'], dir).status, 0);
+});
+
+test('junior compact --hop names a missing Hop path in its error', () => {
+  const dir = workdir();
+  const missing = join(dir, 'missing-hop.json');
+  assert.ok(runJunior(['compact', '--hop', missing, '--json'], dir).stderr.includes(missing));
+});
+
 test('junior compact rejects an invalid --max-chars value', () => {
   assert.match(runJunior(['compact', '--max-chars=abc'], workdir()).stderr, /--max-chars/);
 });
 
 test('junior compact rejects a zero --max-chars value', () => {
   assert.notEqual(runJunior(['compact', '--max-chars=0'], workdir()).status, 0);
+});
+
+test('junior compact --hop names a malformed Hop manifest in its error', () => {
+  const dir = workdir();
+  const malformed = join(dir, '.delivery', 'broken', 'hop.json');
+  mkdirSync(join(dir, '.delivery', 'broken'), { recursive: true });
+  writeFileSync(malformed, '{ not json');
+  assert.ok(runJunior(['compact', '--hop', malformed, '--json'], dir).stderr.includes(malformed));
 });
 
 test('junior setup --context-hooks prints the settings path', () => {
