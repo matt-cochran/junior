@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { executeWorkerStreaming, executeCheck, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES } from './runtime.ts';
+import { executeWorkerStreaming, executeCheck, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
 
@@ -299,6 +299,29 @@ test('outputBreakdown.largestToolResults lists a tool call once when it also arr
   fake.end(0);
   const res: any = await promise;
   assert.deepEqual(res.outputBreakdown.largestToolResults.map((r: any) => r.toolCallId), ['c1']);
+});
+
+// --- #161 workflow budgets ---
+
+test('defaultWorkflowBudget returns the enforced report defaults for evaluate', () => {
+  assert.deepEqual(defaultWorkflowBudget('evaluate'), REPORT_WORKFLOW_BUDGET);
+});
+
+test('defaultWorkflowBudget returns null for a non-report workflow', () => {
+  assert.equal(defaultWorkflowBudget('test_first'), null);
+});
+
+test('effectiveBudget keeps the workflow token default while a contract tool-call limit wins', () => {
+  assert.deepEqual(effectiveBudget('evaluate', { maxToolCalls: 5 }), { maxToolCalls: 5, maxTotalTokens: 400000, mode: 'enforce' });
+});
+
+test('A stream run exceeding maxTotalTokens from cache reads stops with budget_exceeded', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-budget-cache-read-'));
+  const { fake, promise } = runStream(dir, { budget: { maxTotalTokens: 10, mode: 'enforce' } });
+  fake.emit({ type: 'message_end', message: { role: 'assistant', provider: 'openrouter', model: 'm', stopReason: 'stop', usage: { input: 1, output: 1, cacheRead: 9 } } });
+  fake.end(0);
+  const res = await promise;
+  assert.equal(res.stopReason, 'budget_exceeded');
 });
 
 // --- #125 bounded-context enforcement ---

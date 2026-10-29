@@ -52,8 +52,8 @@ export interface PlanLeaseTask {
   id: string;
   plan: { id: string; deliverable: string; callerId?: string };
   /** The Hop revision the contract was written against. The lease call itself
-   * advances the Hop, so it is refreshed to the acquisition revision before the
-   * run starts. A mutation before the lease is rejected as stale. */
+   * advances the Hop, so it is refreshed after every Junior-owned call before
+   * the run starts. A revision jump Junior did not produce is rejected. */
   hopRevision?: number;
   /** The integrity-checked context a contract may carry instead of hopRevision. */
   hopContext?: { revision?: number | null };
@@ -82,7 +82,7 @@ export interface PlanLeaseOutcome<R> {
     id: string;
     deliverable: string;
     leased: boolean;
-    marked: 'in_progress' | 'failed' | null;
+    marked: 'in_progress' | 'failed' | 'ready' | null;
     reentered?: boolean;
     /** A failed deliverable was returned to ready through the supported cpm
      * lifecycle before this lease. */
@@ -210,11 +210,26 @@ export async function withPlanLease<R>(
   };
 
   const contextRevision = task.hopContext?.revision;
-  const expectedRevision = typeof task.hopRevision === 'number' && Number.isInteger(task.hopRevision) && task.hopRevision >= 0
+  const baselineRevision = typeof task.hopRevision === 'number' && Number.isInteger(task.hopRevision) && task.hopRevision >= 0
     ? task.hopRevision
     : typeof contextRevision === 'number' && Number.isInteger(contextRevision) && contextRevision >= 0
       ? contextRevision
       : undefined;
+  // Junior owns the revisions its own calls produce. The acquire is not sent an
+  // expectedRevision (cpm 0.4.3 rejects the unknown field), so any call that
+  // advances the HOP by more than the single step we asked for is an external
+  // mutation and fails the handoff closed.
+  let ownRevision = baselineRevision;
+  const noteRevision = (response: PlanHopResult, tool: string): string | undefined => {
+    if (typeof response.revision !== 'number') return undefined;
+    if (ownRevision !== undefined && response.revision !== ownRevision + 1) {
+      return `HOP revision changed outside this handoff: ${tool} returned revision ${response.revision}; expected ${ownRevision + 1}`;
+    }
+    ownRevision = response.revision;
+    task.hopRevision = response.revision;
+    if (task.hopContext) task.hopContext.revision = response.revision;
+    return undefined;
+  };
   const ttlSeconds = Math.ceil(deps.deadlineMs / 1000) + 3600;
   let priorActualHours = 0;
   let acquired: PlanHopResult;
@@ -227,7 +242,6 @@ export async function withPlanLease<R>(
         ids: [plan.deliverable],
         max_count: 1,
         ttl_seconds: ttlSeconds,
-        ...(expectedRevision !== undefined ? { expectedRevision } : {}),
       },
     });
   } catch (error) {
@@ -238,10 +252,9 @@ export async function withPlanLease<R>(
     plan.error = `plan.acquire_cohort failed: ${acquired.error?.message ?? 'unknown error'}`;
     return { plan };
   }
-  // The lease is one Hop mutation. Accept exactly that step and fail closed on
-  // any larger change, so a mutation that raced the lease is never absorbed.
-  if (expectedRevision !== undefined && typeof acquired.revision === 'number' && acquired.revision !== expectedRevision + 1) {
-    plan.error = `plan.acquire_cohort advanced the HOP to revision ${acquired.revision}; expected ${expectedRevision + 1}`;
+  const acquiredRevisionError = noteRevision(acquired, 'plan.acquire_cohort');
+  if (acquiredRevisionError) {
+    plan.error = acquiredRevisionError;
     return { plan };
   }
   let leasedIds: string[];
@@ -261,6 +274,11 @@ export async function withPlanLease<R>(
     } catch {
       status = { ok: false };
     }
+    const statusRevisionError = noteRevision(status, 'plan.status');
+    if (statusRevisionError) {
+      plan.error = statusRevisionError;
+      return { plan };
+    }
     let held: { deliverableId: string; callerId: string } | undefined;
     try {
       held = status.ok
@@ -275,10 +293,6 @@ export async function withPlanLease<R>(
       return { plan };
     }
     if (held) {
-      if (typeof acquired.revision === 'number' && typeof status.revision === 'number' && status.revision !== acquired.revision + 1) {
-        plan.error = `plan.status advanced the HOP to revision ${status.revision}; expected ${acquired.revision + 1}`;
-        return { plan };
-      }
       if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
       plan.reentered = true;
     } else {
@@ -327,15 +341,11 @@ export async function withPlanLease<R>(
         plan.error = `plan.mark_status failed: ${ready.error?.message ?? 'unknown error'}`;
         return { plan };
       }
-      if (typeof status.revision === 'number' && typeof ready.revision === 'number' && ready.revision !== status.revision + 1) {
-        plan.error = `plan.mark_status advanced the HOP to revision ${ready.revision}; expected ${status.revision + 1}`;
+      const readyRevisionError = noteRevision(ready, 'plan.mark_status');
+      if (readyRevisionError) {
+        plan.error = readyRevisionError;
         return { plan };
       }
-      const retryRevision = typeof ready.revision === 'number'
-        ? ready.revision
-        : typeof status.revision === 'number'
-          ? status.revision
-          : expectedRevision;
       let retried: PlanHopResult;
       try {
         retried = await deps.callHop('cpm', {
@@ -346,7 +356,6 @@ export async function withPlanLease<R>(
             ids: [plan.deliverable],
             max_count: 1,
             ttl_seconds: ttlSeconds,
-            ...(retryRevision !== undefined ? { expectedRevision: retryRevision } : {}),
           },
         });
       } catch (error) {
@@ -357,8 +366,9 @@ export async function withPlanLease<R>(
         plan.error = `plan.acquire_cohort failed: ${retried.error?.message ?? 'unknown error'}`;
         return { plan };
       }
-      if (retryRevision !== undefined && typeof retried.revision === 'number' && retried.revision !== retryRevision + 1) {
-        plan.error = `plan.acquire_cohort advanced the HOP to revision ${retried.revision}; expected ${retryRevision + 1}`;
+      const retriedRevisionError = noteRevision(retried, 'plan.acquire_cohort');
+      if (retriedRevisionError) {
+        plan.error = retriedRevisionError;
         return { plan };
       }
       let retriedIds: string[];
@@ -379,12 +389,27 @@ export async function withPlanLease<R>(
   }
   // The run is checked against the revision the lease left behind, not the
   // pre-lease revision that the lease itself invalidated.
-  if (typeof acquired.revision === 'number') {
-    plan.revision = acquired.revision;
-    task.hopRevision = acquired.revision;
-    if (task.hopContext) task.hopContext.revision = acquired.revision;
-  }
+  if (typeof acquired.revision === 'number') plan.revision = acquired.revision;
   plan.leased = true;
+  // A refusal after the lease and before the run hands the deliverable back to
+  // Ready, so a pre-worker stop never leaves a stray lease behind.
+  const releaseLease = async (reason: string): Promise<void> => {
+    try {
+      await deps.callHop('cpm', {
+        tool: 'plan.mark_status',
+        arguments: {
+          caller_id: callerId,
+          plan_id: plan.id,
+          deliverable_id: plan.deliverable,
+          status: { status: 'ready' },
+          evidence: `handoff ${task.id} stopped before its run: ${reason}`.slice(0, 2048),
+        },
+      });
+      plan.marked = 'ready';
+    } catch {
+      // The original refusal is already recorded in plan.error.
+    }
+  };
 
   // A correction mark reports total effort, not just this run: CPM keeps the
   // original actuals through a retry or an explicit revise/reopen. Read them
@@ -393,6 +418,14 @@ export async function withPlanLease<R>(
   // read is not fatal; the status row may still carry the prior actuals.
   try {
     const ev = await deps.callHop('cpm', { tool: 'plan.ev', arguments: { plan_id: plan.id } });
+    // A failed plan.ev can still advance the Hop, so its revision is noted on
+    // every response. A foreign jump here returns the lease before refusing.
+    const evRevisionError = noteRevision(ev, 'plan.ev');
+    if (evRevisionError) {
+      plan.error = evRevisionError;
+      await releaseLease(evRevisionError);
+      return { plan };
+    }
     if (ev.ok) {
       const previous = deliverableActualHours(ev.result, plan.deliverable);
       if (previous !== undefined) priorActualHours = Math.max(priorActualHours, previous);
@@ -423,7 +456,36 @@ export async function withPlanLease<R>(
           evidence: evidenceLine(summary),
         },
       });
-      if (!response.ok) plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
+      if (!response.ok) {
+        plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
+      } else {
+        const revisionError = noteRevision(response, 'plan.mark_status');
+        if (revisionError) plan.error = revisionError;
+      }
+    } catch (error) {
+      plan.error = `plan.mark_status failed: ${messageOf(error)}`;
+    }
+  };
+  const markReady = async (result: R): Promise<void> => {
+    plan.marked = 'ready';
+    const text = `run ${task.id} never started: ${String((result as any)?.status ?? 'unknown')}`.slice(0, 2048);
+    try {
+      const response = await deps.callHop('cpm', {
+        tool: 'plan.mark_status',
+        arguments: {
+          caller_id: callerId,
+          plan_id: plan.id,
+          deliverable_id: plan.deliverable,
+          status: { status: 'ready' },
+          evidence: text,
+        },
+      });
+      if (!response.ok) {
+        plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
+      } else {
+        const revisionError = noteRevision(response, 'plan.mark_status');
+        if (revisionError) plan.error = revisionError;
+      }
     } catch (error) {
       plan.error = `plan.mark_status failed: ${messageOf(error)}`;
     }
@@ -437,6 +499,10 @@ export async function withPlanLease<R>(
     throw error;
   }
 
+  if (runNeverStarted(result)) {
+    await markReady(result);
+    return { result, plan };
+  }
   const summary = deps.summarize(result);
   if (summary.hold) return { result, plan };
   if (summary.success) {
