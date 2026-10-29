@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve, join, relative, isAbsolute, sep } from 'node:path';
 import { validateIsolationSetup } from './isolation.ts';
+import { parseCommandPolicy, type CommandPolicy } from './command-policy.ts';
 import { validatePricing } from './worker-receipt.ts';
 import { validateExecutionSettings } from './runtime.ts';
 import { validateBilling } from './billing.ts';
@@ -27,11 +28,18 @@ export const TASK_FIELDS = [
  'externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext',
  'readScope','budget','scopeExpansion',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
+ 'commandPolicy',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
  * to the execution checkout. */
 export const CHECK_FIELDS = ['command','args','cwd'] as const;
+
+/** Resolve the contract's command placement policy for a consumer. A contract
+ * without `commandPolicy` returns null, which keeps the prior behavior. */
+export function resolveCommandPolicy(t:any, cwd:string):CommandPolicy|null {
+ return parseCommandPolicy(t?.commandPolicy, cwd);
+}
 
 /** Every field a `plan` object may carry. The plan links a contract to the cpm
  * plan deliverable it executes; `callerId` is the optional cpm caller identity. */
@@ -556,6 +564,7 @@ export function validate(t: any) {
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','prepare','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, discover, investigate, prepare, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
+ if (t.commandPolicy !== undefined) parseCommandPolicy(t.commandPolicy, t.cwd);
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
  if (t.repairFrom !== undefined && (typeof t.repairFrom !== 'string' || !t.repairFrom.trim())) throw Error('Invalid repairFrom (expected path to a prior result.json)');
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');

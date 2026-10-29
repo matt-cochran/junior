@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSyn
 import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandPolicy } from './command-policy.ts';
 
 export type IsolationMode = 'none' | 'worktree';
 
@@ -235,7 +236,7 @@ export function provisionIsolationSetup(
  sourceCwd: string,
  worktreeCwd: string,
  artifactDir: string,
- opts: { deadlineAt: number; checkTimeoutMs: number },
+ opts: { deadlineAt: number; checkTimeoutMs: number; commandPolicy?: CommandPolicy | null },
 ): IsolationSetupResult {
  const steps: IsolationSetupStep[] = [];
  const lines: string[] = [];
@@ -291,6 +292,16 @@ export function provisionIsolationSetup(
  }
 
  for (const cmd of setup.commands ?? []) {
+  const decision = decideCommand(opts.commandPolicy ?? null, [cmd.command, ...(cmd.args ?? [])]);
+  if (decision.decision === 'refuse') {
+   const parts = [decision.reason ?? COMMAND_PLACEMENT_ERROR];
+   if (decision.rule) parts.push(`rule: ${decision.rule.match.join(' ')}`);
+   if (decision.wrapper) parts.push(`wrapper: ${decision.wrapper}`);
+   const message = parts.join('; ');
+   steps.push({ kind: 'command', target: cmd.command, ok: false, error: message });
+   lines.push(`command ${cmd.command} REFUSED: ${message}`);
+   return finish(`command ${cmd.command}: ${message}`);
+  }
   const cwd = join(worktreeCwd, cmd.cwd ?? '.');
   const remaining = opts.deadlineAt - Date.now();
   if (remaining <= 0) {

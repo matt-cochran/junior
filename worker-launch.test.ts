@@ -208,3 +208,24 @@ test('Jev key resolution creates no file in a read-only Pi agent directory', asy
   assert.deepEqual(readdirSync(agent), ['auth.json']);
 });
 
+
+test('launch hands the contract commandPolicy to the Pi guard environment', async (t) => {
+  let seen: any;
+  const state = launchState({
+    task: { commandPolicy: { enforce: true, rules: [{ match: ['git'], placement: 'local' }] } },
+    deps: { spawnPi: (_c: string, _a: string[], options: any) => { seen = options.env.JUNIOR_COMMAND_POLICY; return { status: 0, stdout: '', stderr: '' }; } },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(JSON.parse(seen), { enforce: true, rules: [{ match: ['git'], placement: 'local' }] });
+});
+
+test('launch sets no command policy for a contract without commandPolicy', async (t) => {
+  let seen: any = 'unset';
+  const state = launchState({
+    deps: { env: { ...process.env, JUNIOR_COMMAND_POLICY: '{"enforce":true}' }, spawnPi: (_c: string, _a: string[], options: any) => { seen = options.env.JUNIOR_COMMAND_POLICY; return { status: 0, stdout: '', stderr: '' }; } },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(seen, undefined);
+});

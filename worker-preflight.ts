@@ -18,7 +18,7 @@ import { DEFAULT_JEV, buildModelApprovalRequest, decideModelRoute, jevMode, read
 import type { ModelApprovalRequest, ModelPolicyRecord, ModelRoute } from './worker-approval.ts';
 import { CLASSIFIER_TIMEOUT_MS, assessPreflight, createJevClassifier, readProjectJevProvider, raceSignal, raceAbort, affinityKeyFor } from './worker-gates.ts';
 import type { GateClassifier, GateDeps, JevGateRecord } from './worker-gates.ts';
-import { buildExternalContextPreflight, externalContextRequired, resolveContext } from './worker-contract.ts';
+import { buildExternalContextPreflight, externalContextRequired, resolveCommandPolicy, resolveContext } from './worker-contract.ts';
 import type { ReceiptModelSource } from './worker-contract.ts';
 import { analysisReportPath, decideWorkflow, isReportWorkflow, taskWorkflow, WORKFLOW_TEMPLATE_IDS } from './worker-workflows.ts';
 import { estimateCost, mockReceipt } from './worker-receipt.ts';
@@ -346,7 +346,10 @@ export async function preflight(state:RunState):Promise<RunState|any> {
    };
    try { validateIsolationSetup(rawSetup); }
    catch(e) { return isolationSetupFailed(`Invalid isolationSetup: ${msg(e)}`); }
-   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, executionCwd, dir, { deadlineAt, checkTimeoutMs:settings.checkTimeoutMs });
+   let commandPolicy;
+   try { commandPolicy=resolveCommandPolicy(t, sourceCwd); }
+   catch(e) { return isolationSetupFailed(`Invalid commandPolicy: ${msg(e)}`); }
+   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, executionCwd, dir, { deadlineAt, checkTimeoutMs:settings.checkTimeoutMs, commandPolicy });
    if (!provisioned.ok) return isolationSetupFailed(`isolationSetup failed: ${provisioned.error}`);
    if (provisioned.excludePatterns.length) ensureLocalExcludes(executionCwd, provisioned.excludePatterns);
   }

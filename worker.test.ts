@@ -3313,6 +3313,12 @@ test('a failing isolationSetup command ends the run as isolation_setup_failed',a
  assert.equal(r.status,'isolation_setup_failed');
 });
 
+test('a commandPolicy-refused isolationSetup command ends the run as isolation_setup_failed',async()=>{
+ const repo=gitRepo();
+ const r=await run(okTask(repo,{isolation:'worktree',commandPolicy:{enforce:true,rules:[{match:['git'],placement:'local'}]},isolationSetup:{commands:[{command:process.execPath,args:['-e','process.exit(0)']}]}}),true);
+ assert.match(r.workerError,/isolationSetup failed: .*E_COMMAND_PLACEMENT|isolationSetup failed: .*refus/i);
+});
+
 test('Pi is not started when isolationSetup fails',async()=>{
  const repo=gitRepo();
  let spawned=false;

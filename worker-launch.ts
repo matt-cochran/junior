@@ -5,7 +5,7 @@ import { buildPiArgs, piGuardModulePath, piBashTimeoutSeconds, preparePiAgentOve
 import { classifyPiFailure, type PiFailure } from './pi-failure.ts';
 import { buildContinuationCheckpoint, CONTINUATION_PROMPT_LEAD, OUTPUT_LIMIT_CONTINUATION_LINE } from './worker-gates.ts';
 import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from './worker-receipt.ts';
-import type { Receipt } from './worker-contract.ts';
+import { resolveCommandPolicy, type Receipt } from './worker-contract.ts';
 import { blockedResult, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
 
 /** Launch: Pi overlay/guard env, spawn or stream the worker, continuations and the receipt. */
@@ -47,6 +47,12 @@ export async function launch(state:RunState):Promise<RunState|any> {
  else delete piBashEnv.JUNIOR_PI_AFFINITY_KEY;
  if (openrouterRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(openrouterRouting);
  else delete piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING;
+ // The guard enforces the contract's command placement on every bash call. The
+ // policy is passed with manifest rules already merged, so the guard never
+ // reads the manifest; an unset value means no policy.
+ const commandPolicy=resolveCommandPolicy(t, sourceCwd);
+ if (commandPolicy) piBashEnv.JUNIOR_COMMAND_POLICY = JSON.stringify(commandPolicy);
+ else delete piBashEnv.JUNIOR_COMMAND_POLICY;
  try {
  if (mock) {
   stdout='Simulation only; no implementation performed.';
