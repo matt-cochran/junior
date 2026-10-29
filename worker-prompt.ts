@@ -10,6 +10,7 @@ export function qaReportBlock(reportPath:string):string {
  return [
   `QA report requirement: write the complete review report to this exact artifact path: ${reportPath}`,
   'Save the report there before finishing. The handback is needs_review until that file exists; a missing report is never reported as completion.',
+  `Update ${reportPath} after each acceptance criterion is addressed, not only at the end, so an interrupted or budget-stopped run keeps a partial report.`,
   'The report must list every finding with severity, the concrete file reference, the affected acceptance ID, the evidence and the recommended check; separate confirmed findings from uncertainties; and state that review completion is not deliverable acceptance.',
   'This is an instruction to the worker, not a sandbox guarantee.',
  ].join('\n');
@@ -23,6 +24,7 @@ export function analysisReportBlock(reportPath:string):string {
  return [
   `Analysis report requirement: write the complete analysis report to this exact artifact path: ${reportPath}`,
   'Save the report there before finishing. The handback is needs_review until that file exists; a missing report is never reported as completion.',
+  `Update ${reportPath} after each acceptance criterion is addressed, not only at the end, so an interrupted or budget-stopped run keeps a partial report.`,
   'The report must, for every risk, state the domain, failure mode, cause, effect, qualitative Severity and Probability, mitigation and its justification, production observability, and residual Severity and Probability; before labelling a claim tested/proven-here, open the cited file and quote the cited span (a few lines, with path:line) in the report, and label a claim whose span was not opened and quoted as inferred, not proven-here; label each claim tested/proven-here, adapted or speculation; separate existing verified controls from proposed mitigation; state residual risk as conditional; and never declare a risk eliminated merely by proposing a fix. The report is a set of leads for the manager to verify, not findings.',
   'This is an instruction to the worker, not a sandbox guarantee.',
  ].join('\n');

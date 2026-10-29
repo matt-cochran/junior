@@ -35,6 +35,13 @@ export async function finish(state:RunState):Promise<any> {
  if (!workerError && workerStatus !== 0) workerError=String(stderr).includes('No API key found for openrouter') ? 'OpenRouter authentication missing. Start pi and use /login to configure OpenRouter, then retry.' : 'Pi failed; inspect worker.log.';
  if (!workerError && receipt.outputLimited) workerError=OUTPUT_LIMIT_ERROR;
  if (!workerError && !receiptOk) workerError = receipt.malformed ? 'Pi event stream contained malformed JSONL; inspect events.jsonl.' : receipt.errored || receipt.aborted ? 'Pi assistant message did not complete cleanly.' : receipt.assistantMessages === 0 ? 'Pi settled with no assistant messages.' : 'Pi never reported agent_settled; inspect events.jsonl.';
+ // A typed Pi failure is more actionable than the generic exit/no-message
+ // wording, so its summary is the worker error whenever the generic text was
+ // what we would otherwise report.
+ const workerFailure=state.workerFailure;
+ if (workerFailure?.summary && (!workerError
+   || workerError === 'Pi failed; inspect worker.log.'
+   || workerError === 'Pi settled with no assistant messages.')) workerError=workerFailure.summary;
 
  // Capture post-run evidence and the run-only delta even after a timeout,
  // deadline breach or interruption, and persist the complete evidence pair.
@@ -167,6 +174,8 @@ export async function finish(state:RunState):Promise<any> {
 
  const runtime=heartbeat.snapshot();
  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null};
+ result.checkTimeoutMs=settings.checkTimeoutMs;
+ if (workerFailure) result.workerFailure=workerFailure;
  result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
  // Verify against Pi's own system message that the applied isolation took
  // effect, so a Pi upgrade that ignores a flag is reported, not assumed.
@@ -204,6 +213,7 @@ export async function finish(state:RunState):Promise<any> {
   note:'Pi session/prompt cache reuse is best effort and never guaranteed. Observed cacheRead counters and requested/observed model stay in the receipt; no actual billing is claimed.' };
  if (resume) result.resume={ from:resume.from, parentResult:resume.parentResult, parentSessionId:resume.parentSessionId,
   parentWorkflow:resume.parentWorkflow, sessionId:receipt.sessionId || resume.parentSessionId, requested };
+ if (state.resumeFallback) result.resumeFallback=state.resumeFallback;
  if (isRepair) result.repair={ from:resume?.from, parentSessionId:resume?.parentSessionId, rootId:lineage.rootId, repairs:lineage.repairs, maxRepairs:lineage.maxRepairs };
  if (t.hopContext) result.handoff={from:t.hopContext.from,projectId:t.hopContext.projectId,revision:t.hopContext.revision,managerAcceptance:t.hopContext.managerAcceptance};
  if (review) result.review={ from:review.from, priorResult:review.priorResult, context:join(dir,REVIEW_CONTEXT_FILENAME) };
