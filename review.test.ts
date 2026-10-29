@@ -26,6 +26,33 @@ test('A failed check is an actionable unresolved issue in the manager receipt',(
  assert.equal(receipt.unresolved[0],'check failed: check');
 });
 
+test('A consent-blocked run summarizes the exact grant command',()=>{
+ const receipt=compactHandoff({status:'needs_external_context_consent',sourceCwd:'/work/project',externalContext:{preflight:{provider:'openrouter',authorization:{granted:false}},authorization:{granted:false}},externalContextConsent:{approve:{project:'junior auth consent openrouter --project /work/project'}}});
+ assert.ok(receipt.runtime.stopReasonSummary.includes('consent_required: run "junior auth consent grant openrouter --project /work/project" or set externalContextConsent'));
+});
+
+test('A timed-out check summarizes the configured timeout in milliseconds',()=>{
+ const receipt=compactHandoff({checks:[{command:'slow',exitCode:null,timedOut:true}],runtime:{checkTimeoutMs:120000}});
+ assert.ok(receipt.runtime.stopReasonSummary.includes('check_timeout: check 1 killed after 120000 ms (raise execution.checkTimeoutMs)'));
+});
+
+test('A budget-stopped report workflow names the limit and missing report',()=>{
+ const receipt=compactHandoff({status:'budget_exceeded',budget:{exceeded:true,exceededField:'maxToolCalls',stopReason:'budget_exceeded'},analysis:{workflow:'evaluate',report:'/artifacts/analysis-report.md',reportPresent:false}});
+ assert.ok(receipt.runtime.stopReasonSummary.includes('budget_exceeded (maxToolCalls); report: missing'));
+});
+
+test('An unavailable resume summary shows only the session id prefix',()=>{
+ const receipt=compactHandoff({status:'resume_session_unavailable',resume:{error:'resume_session_unavailable',sessionId:'01a17f60-9184-76ab-b50c-119022f63dab'}});
+ assert.ok(receipt.runtime.stopReasonSummary.includes('resume_session_unavailable: session 01a17f60…'));
+});
+
+test('A transport failure is summarized separately from a missing analysis report',()=>{
+ const receipt=compactHandoff({status:'worker_failed',workerFailure:{category:'transport_dns',summary:'Pi could not resolve the provider host; check DNS and network access, then retry.'},analysis:{workflow:'evaluate',report:'/artifacts/analysis-report.md',reportPresent:false}});
+ const transport=receipt.runtime.stopReasonSummary.find(line=>line.includes('transport_dns'));
+ const missing=receipt.runtime.stopReasonSummary.find(line=>line.includes('analysis_report_missing'));
+ assert.ok(transport && missing && transport !== missing);
+});
+
 test('An untracked file edit is detectable after the prompt content budget is exhausted',t=>{
  const cwd=temp(t);
  function git(args:string[]) { const r=spawnSync('git',args,{cwd,encoding:'utf8'}); if(r.status!==0) throw Error(r.stderr); }

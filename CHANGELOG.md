@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-29
+
+### Added
+
+- `commandPolicy` makes repository command placement binding. The Pi bash
+  guard, the contract check runner and `isolationSetup.commands` refuse an
+  unmatched, opaque or unwrapped remote command with `E_COMMAND_PLACEMENT`
+  before it runs. They see through `sh -c`, package scripts, `npx` and
+  command chains. A refused check is never spawned and fails. Rules can come
+  from a `command-placement.json` manifest (#164).
+- Report workflows (`evaluate`, `qa`, `recon`, `investigate`) have an
+  enforced default budget of 25 tool calls and 400,000 tokens, with cache reads
+  counted. A contract `budget` overrides it field by field, and report
+  workflows keep a partial report when stopped (#161).
+- `junior compact --hop <hop.json>` selects one HOP when several nested HOPs
+  exist, and the remediation text names it (#163).
+- The compact receipt gives a typed line for `consent_required` (with the
+  `junior auth consent grant` command), `check_timeout` (the check and its
+  limit), `budget_exceeded`, `resume_session_unavailable` and Pi failures.
+  Results carry `checkTimeoutMs`, and each check records its `timeoutMs`
+  (#158, #162).
+
+### Fixed
+
+- Pi now runs with a run-local agent directory whose credentials are copied
+  at mode 0600 and deleted when Pi exits, so a read-only source `auth.json`
+  no longer fails a sandboxed run. The Jev classifier reads the key file
+  without taking `auth.json.lock` (#155, #165, #167).
+- Pi failures are classified (DNS, TLS, HTTP, fetch, credential lock, missing
+  auth, missing session, no messages) into `workerFailure` with redacted
+  detail, instead of an empty receipt. A transport failure with no assistant
+  message is retried once (#153, #155, #167).
+- `resumeFrom` imports the parent session into the new run's overlay. A
+  missing or expired session stops code workflows with
+  `resume_session_unavailable` before any paid call. Report workflows start a
+  fresh session seeded with the prior report and record `resumeFallback`
+  (#156, #160, #166).
+- Plan-backed handoffs no longer send `expectedRevision`, no longer refuse
+  their own HOP revision after `plan.ev`, and release the lease when the run
+  never started or the plan call fails (#154, #157).
+- `isolationSetup` errors name the expected fields, and the docs show the
+  `links` `{from, to}` shape (#159).
+- `auth consent` is listed in `--help` with its `grant`, `remove` and `status`
+  forms (#158).
+
+### Changed
+
+- `worker.ts` is split into contract, receipt, workflow, resume, prompt, Pi,
+  approval, gate, preflight, launch, checks and outcome modules. `worker.ts`
+  is now a 145-line orchestrator that re-exports the previous API.
+
 ## [0.12.4] - 2026-10-27
 
 ### Fixed
