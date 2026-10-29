@@ -229,3 +229,42 @@ test('launch sets no command policy for a contract without commandPolicy', async
   await launch(state);
   assert.equal(seen, undefined);
 });
+
+test('a budget stop does not start a continuation segment', async (t) => {
+  let spawns = 0;
+  const state = launchState({
+    task: { budget: { maxToolCalls: 1, mode: 'enforce' }, execution: { continuations: 1 } },
+    deps: {
+      spawnChild: () => {
+        spawns++;
+        const fake = fakeChild();
+        setImmediate(() => {
+          fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'true' } });
+          fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'bash', args: { command: 'true' } });
+          fake.end(0);
+        });
+        return fake.child;
+      },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(spawns, 1);
+});
+
+test('a budget stop is not reported as a Pi failure', async (t) => {
+  const fake = fakeChild();
+  const state = launchState({
+    task: { budget: { maxToolCalls: 1, mode: 'enforce' }, execution: { continuations: 0 } },
+    deps: { spawnChild: () => fake.child },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  // Pi traps SIGTERM and exits 143, as the real CLI does when Junior stops it.
+  fake.child.kill = () => { fake.end(143); return true; };
+  const running = launch(state);
+  fake.stderr.write('Warning: Model "m" not found for provider "openrouter". Using custom model id.\n');
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'true' } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'bash', args: { command: 'true' } });
+  await running;
+  assert.equal(state.workerFailure ?? null, null);
+});

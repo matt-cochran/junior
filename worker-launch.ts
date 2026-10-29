@@ -106,8 +106,11 @@ export async function launch(state:RunState):Promise<RunState|any> {
     streamResult=segResult;
     segReceipt=parseReceipt(segResult.stdout ?? '', {...requested,source:requestedSource}, {outputTruncated: !!segResult.outputTruncated});
     // A transport failure that produced no assistant message is the only
-    // failure safe to retry, and only once for the whole run.
-    const failure=classifyPiFailure({exitCode:segResult.exitCode, stderr:segResult.stderr, assistantMessages:segReceipt.assistantMessages});
+    // failure safe to retry, and only once for the whole run. A stop Junior
+    // made itself (budget, scope, watchdog, deadline, interrupt, output cap)
+    // is not a Pi failure, so only Pi's own exits are classified.
+    const piExited=segResult.stopReason === 'completed' || segResult.stopReason === 'failed';
+    const failure=piExited ? classifyPiFailure({exitCode:segResult.exitCode, stderr:segResult.stderr, assistantMessages:segReceipt.assistantMessages}) : null;
     workerFailure=failure;
     if (!failure?.retryable || segReceipt.assistantMessages !== 0 || retriedFailure) break;
     retriedFailure=true;
@@ -120,6 +123,9 @@ export async function launch(state:RunState):Promise<RunState|any> {
    // Continue when the segment hit the accumulation cap or the model's
    // per-message output limit; both leave the deliverable unfinished.
    if (!segResult.outputTruncated && !segReceipt.outputLimited) break;
+   // A budget or scope stop also marks the output truncated, but continuing
+   // would spend past the limit that stopped it.
+   if (segResult.budgetExceeded || segResult.scopeExceeded) break;
    if (continuationIndex >= settings.continuations) break;
    if (workerRemainingMs(state) < 60000) break;
    const nextIndex = continuationIndex + 1;
