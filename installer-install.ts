@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   DEFAULT_INSTALL_TIMEOUT_MS,
   DEFAULT_MAX_ASSET_BYTES,
+  DEFAULT_INSTALL_ROOT,
   DEFAULT_PROBE_TIMEOUT_MS,
   InstallerError,
   SUPPORTED_MATRIX,
