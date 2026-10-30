@@ -729,3 +729,12 @@ test('A TRIZ archive whose package.json version contradicts the release is refus
   const report = await installTools({ tools: ['fmeca'], withTriz: true }, deps);
   assert.equal(report.triz?.status, 'failed');
 });
+test('An install without an explicit install root falls back to the default root', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const { installRoot: _root, ...deps } = baseDeps(server);
+  await assert.doesNotReject(installTools({ tools: [] }, deps));
+});
