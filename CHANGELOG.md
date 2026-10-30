@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-10-30
+
+### Fixed
+
+- `junior update` (and any install without an explicit install root) no longer
+  fails with `ReferenceError: DEFAULT_INSTALL_ROOT is not defined`; the 0.13.1
+  installer split dropped the import (#178).
+
 ## [0.13.1] - 2026-10-29
 
 ### Changed
