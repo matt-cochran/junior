@@ -21,11 +21,10 @@ import type { MatrixDimension } from './matrix-adapters.ts';
 import { syncDimensions, type SyncDimensionsResult } from './matrix-sync.ts';
 import {
   defaultSources,
+  projectRoot,
   resolveMatrixHop,
   resolveMatrixModel,
   resolveMatrixPlan,
-  type DefaultSource,
-  type PlanResolution,
 } from './matrix-defaults.ts';
 import { callHop, loadHop } from './tools/tools.ts';
 
@@ -47,14 +46,6 @@ export interface RefreshDeps extends StepDeps {
   confirmProposals?: typeof confirmProposals;
   autolink?: typeof autolink;
   codemapStale?: typeof codemapStale;
-  /** Aliases kept small and explicit so callers can inject a single step. */
-  resolveHop?: typeof resolveMatrixHop;
-  resolveModel?: typeof resolveMatrixModel;
-  resolvePlan?: typeof resolveMatrixPlan;
-  sync?: typeof syncDimensions;
-  confirm?: typeof confirmProposals;
-  link?: typeof autolink;
-  stale?: typeof codemapStale;
 }
 
 export interface SourceDimensionOptions {
@@ -68,11 +59,8 @@ export interface SourceDimensionOptions {
 export interface RefreshOptions {
   dir?: string;
   hop?: string;
-  hopPath?: string;
   model?: string;
-  modelId?: string;
   plan?: string;
-  planId?: string;
   planFile?: string;
   sources?: string[];
   deps?: RefreshDeps;
@@ -90,46 +78,6 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function pathOf(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof (value as { path?: unknown }).path === 'string') {
-    return (value as { path: string }).path;
-  }
-  return undefined;
-}
-
-function sourceOf(value: unknown): DefaultSource | undefined {
-  if (value && typeof value === 'object' && typeof (value as { source?: unknown }).source === 'string') {
-    return (value as { source: DefaultSource }).source;
-  }
-  return undefined;
-}
-
-function modelOf(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object') {
-    const entry = value as { id?: unknown; modelId?: unknown };
-    if (typeof entry.id === 'string') return entry.id;
-    if (typeof entry.modelId === 'string') return entry.modelId;
-  }
-  return undefined;
-}
-
-function planOf(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof (value as { planId?: unknown }).planId === 'string') {
-    return (value as { planId: string }).planId;
-  }
-  return undefined;
-}
-
-function candidatesOf(value: unknown): string[] | undefined {
-  if (value && typeof value === 'object' && Array.isArray((value as PlanResolution).candidates)) {
-    return (value as PlanResolution).candidates;
-  }
-  return undefined;
-}
-
 /**
  * Keep the feature-to-code map current in one idempotent pass. Defaults are
  * resolved from the project exactly as the other `matrix` subcommands do;
@@ -137,7 +85,7 @@ function candidatesOf(value: unknown): string[] | undefined {
  */
 export async function refresh(options: RefreshOptions = {}): Promise<RefreshResult> {
   const deps = options.deps ?? {};
-  const root = path.resolve(options.dir ?? process.cwd());
+  const root = projectRoot(options.dir ?? process.cwd());
   const notes: string[] = [];
   const stepDeps: StepDeps = {
     ...(deps.callHop === undefined ? {} : { callHop: deps.callHop }),
@@ -146,74 +94,45 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
     ...(deps.planGraph === undefined ? {} : { planGraph: deps.planGraph }),
   };
 
-  const resolveHop = deps.resolveMatrixHop ?? deps.resolveHop ?? resolveMatrixHop;
-  const resolveModel = deps.resolveMatrixModel ?? deps.resolveModel ?? resolveMatrixModel;
-  const resolvePlan = deps.resolveMatrixPlan ?? deps.resolvePlan ?? resolveMatrixPlan;
-  const sourceList = deps.defaultSources ?? defaultSources;
+  const hop = (deps.resolveMatrixHop ?? resolveMatrixHop)(root, options.hop);
+  const hopPath = hop.path;
+  if (hop.source !== 'explicit') notes.push(`hop ${hopPath} (${hop.source})`);
+  const model = (deps.resolveMatrixModel ?? resolveMatrixModel)(root, options.model);
+  const modelId = model.id;
+  if (model.source !== 'explicit') notes.push(`model ${modelId} (${model.source})`);
 
-  const hopResolution = resolveHop(root, options.hop ?? options.hopPath);
-  const hopPath = pathOf(hopResolution) ?? options.hop ?? options.hopPath ?? path.join(root, '.delivery', 'setup', 'hop.json');
-  if (sourceOf(hopResolution) && sourceOf(hopResolution) !== 'explicit') {
-    notes.push(`hop ${hopPath} (${sourceOf(hopResolution)})`);
-  }
-
-  const modelResolution = resolveModel(root, options.model ?? options.modelId);
-  const modelId = modelOf(modelResolution) ?? options.model ?? options.modelId ?? 'project';
-  if (sourceOf(modelResolution) && sourceOf(modelResolution) !== 'explicit') {
-    notes.push(`model ${modelId} (${sourceOf(modelResolution)})`);
-  }
-
-  const explicitPlan = options.plan ?? options.planId;
-  let plan = explicitPlan;
+  let plan = options.plan;
   let planCandidates: string[] | undefined;
-  if (!plan) {
+  if (!plan && options.planFile === undefined) {
     try {
-      const resolved = await resolvePlan(root, hopPath, undefined, deps.callHop ?? callHop);
-      plan = planOf(resolved);
-      planCandidates = candidatesOf(resolved);
-      if (plan && sourceOf(resolved) && sourceOf(resolved) !== 'explicit') {
-        notes.push(`plan ${plan} (${sourceOf(resolved)})`);
-      }
+      const resolved = await (deps.resolveMatrixPlan ?? resolveMatrixPlan)(root, hopPath, undefined, deps.callHop ?? callHop);
+      plan = resolved.planId;
+      planCandidates = resolved.candidates;
+      if (plan) notes.push(`plan ${plan} (${resolved.source})`);
     } catch (error) {
       notes.push(`plan not resolved: ${message(error)}`);
     }
   }
 
-  const sources = options.sources && options.sources.length > 0 ? options.sources : sourceList(root, plan !== undefined);
-  const customSync = deps.syncDimensions ?? deps.sync;
-  const customDimensions = deps.dimensionsForSource;
+  const sources = options.sources && options.sources.length > 0
+    ? options.sources
+    : (deps.defaultSources ?? defaultSources)(root, plan !== undefined || options.planFile !== undefined);
+  const build = deps.dimensionsForSource
+    ?? (async (name: string, sourceOptions: SourceDimensionOptions) =>
+      (await import('./matrix-cli.ts')).dimensionsForSource({ sources: [], ...sourceOptions }, name));
+  const dimensions: MatrixDimension[] = [];
+  for (const source of sources) {
+    try {
+      dimensions.push(...(await build(source, { dir: root, hop: hopPath, plan, planFile: options.planFile })));
+    } catch (error) {
+      notes.push(`sync ${source} failed: ${message(error)}`);
+    }
+  }
   let synced: SyncDimensionsResult['synced'] = [];
-
-  if (!customSync || customDimensions) {
-    const dimensions: MatrixDimension[] = [];
-    for (const source of sources) {
-      try {
-        const build = customDimensions
-          ?? (async (name: string, sourceOptions: SourceDimensionOptions) =>
-            (await import('./matrix-cli.ts')).dimensionsForSource(sourceOptions as any, name));
-        dimensions.push(...(await build(source, {
-          dir: root,
-          hop: hopPath,
-          plan,
-          planFile: options.planFile,
-        })));
-      } catch (error) {
-        notes.push(`sync ${source} failed: ${message(error)}`);
-      }
-    }
-    try {
-      const result = await (customSync ?? syncDimensions)({ hopPath, modelId, dimensions, deps: stepDeps });
-      synced = result.synced;
-    } catch (error) {
-      notes.push(`sync failed: ${message(error)}`);
-    }
-  } else {
-    try {
-      const result = await customSync({ hopPath, modelId, dimensions: [], deps: stepDeps });
-      synced = result.synced;
-    } catch (error) {
-      notes.push(`sync failed: ${message(error)}`);
-    }
+  try {
+    synced = (await (deps.syncDimensions ?? syncDimensions)({ hopPath, modelId, dimensions, deps: stepDeps })).synced;
+  } catch (error) {
+    notes.push(`sync failed: ${message(error)}`);
   }
 
   const proposalsPath = path.join(root, '.delivery', 'matrix', 'proposals.json');
@@ -231,7 +150,7 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
 
   let confirmed: string[] = [];
   try {
-    const result = await (deps.confirmProposals ?? deps.confirm ?? confirmProposals)({
+    const result = await (deps.confirmProposals ?? confirmProposals)({
       hopPath,
       modelId,
       proposalsPath,
@@ -251,7 +170,7 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
     notes.push(`autolink skipped: ${suffix}`);
   } else {
     try {
-      const result = await (deps.autolink ?? deps.link ?? autolink)({
+      const result = await (deps.autolink ?? autolink)({
         hopPath,
         modelId,
         planId: plan,
@@ -266,7 +185,7 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
 
   let stale: CodemapStaleResult = { changed: [], affectedCells: [] };
   try {
-    stale = await (deps.codemapStale ?? deps.stale ?? codemapStale)({
+    stale = await (deps.codemapStale ?? codemapStale)({
       hopPath,
       modelId,
       dir: root,

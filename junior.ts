@@ -29,7 +29,7 @@ function usage(): string {
   '  handoff <task.json> [--mock] [--full]   run a task and print the compact handoff (default isolation=worktree; qa defaults to none)',
   '  qa      <task.json> [--mock] [--full]   run the report-only QA review workflow in place (fresh reviewer session)',
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
-  '  apply   <id|result.json> [--dry-run] [--force] | validate <task.json> | status <result.json> [--full]   apply a reviewed handoff, validate a contract or print a receipt',
+  '  apply   <id|result.json> [--dry-run] [--force] [--no-link] | validate <task.json> | status <result.json> [--full]   apply a reviewed handoff, validate a contract or print a receipt',
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>; auth consent [grant|remove|status] <provider> [--project <dir>]; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
   '  compact [--json] [--max-chars N] [--hop <hop.json>] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
@@ -74,7 +74,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior qa <task.json> [--mock] [--full] [--quiet]' },
  run: { flags: ['--mock', '--full', '--quiet'], valueFlags: ['--approve-model'], min: 1, max: 1,
   help: 'Usage: junior run <task.json> [--approve-model <key>] [--mock] [--full] [--quiet]' },
- apply: { flags: ['--dry-run', '--force'], valueFlags: [], min: 1, max: 1,
+ apply: { flags: ['--dry-run', '--force', '--no-link'], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior apply <id|result.json> [--dry-run] [--force]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
@@ -569,7 +569,7 @@ async function main(argv: string[]): Promise<void> {
  }
  if (command === 'apply') {
   const { applyHandoff } = await import('./apply.ts');
-  const result = applyHandoff(parsed.files[0], { cwd: process.cwd(), dryRun: parsed.flags.has('--dry-run'), force: parsed.flags.has('--force') });
+  const result = applyHandoff(parsed.files[0], { cwd: process.cwd(), dryRun: parsed.flags.has('--dry-run'), force: parsed.flags.has('--force'), noLink: parsed.flags.has('--no-link') });
   console.log(JSON.stringify(result, null, 2));
   if (result.error) process.exitCode = 1;
   return;
