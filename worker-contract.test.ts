@@ -18,7 +18,7 @@ import { validate,run as runWorker,parseReceipt,mockReceipt,receiptValid,emptyUs
  isWorktreeOf,acquireLock,lockPathFor,
  resolveExecutionSettings,validateExecutionSettings,executeWorkerStreaming,spawnChildDetached,
  ToolWatchdog,EXECUTION_DEFAULTS,RuntimeHeartbeat,decideModelRoute,affinityKeyFor,
- validateReadScope,validateBudget,validateScopeExpansion,scopeExpansionPaths,resolveContext,readScopePathMatches,doctor as workerDoctor } from './worker.ts';
+ validateReadScope,validateBudget,validateScopeExpansion,scopeExpansionPaths,resolveContext,readScopePathMatches,contractWarnings,doctor as workerDoctor } from './worker.ts';
 import { doctor,init,setupCompanions,installSkill,inspectSkill,parseInitOptions,discoverInstalledPi,loadDefaults,checkCredentialsOnline,detectSlowMount,SUPPORTED_NODE_MIN,DEFAULT_PROVIDER,DEFAULT_MODEL,PI_PACKAGE,INSTALL_TIMEOUT_MS,PACKAGED_SKILL_PATH,TESTED_PI_VERSION } from './setup.ts';
 import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
@@ -203,6 +203,9 @@ test('validate rejects a fractional budget maxInputTokens',()=>{
 });
 test('validate rejects an unknown budget field',()=>{
  assert.throws(()=>validate(bounded({budget:{maxSpend:1}})),/Unknown budget field/);
+});
+test('contract warnings explain that maxToolOutputBytes is a cumulative per-run cap',()=>{
+ assert.match(contractWarnings(bounded({budget:{maxToolOutputBytes:1000}})).join(' '),/maxToolOutputBytes.*cumulative per-run.*at least 200000/i);
 });
 test('validate rejects a scope expansion without a reason',()=>{
  assert.throws(()=>validate(bounded({scopeExpansion:{paths:['src/b.ts']}})),/Invalid scopeExpansion\.reason/);

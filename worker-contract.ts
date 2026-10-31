@@ -266,6 +266,10 @@ export const BUDGET_FIELDS = [
 
 export const SCOPE_EXPANSION_FIELDS = ['paths','reason'] as const;
 
+/** `maxToolOutputBytes` is cumulative over a run, so a per-call-sized value
+ * would stop normal runs early. */
+export const MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES = 200000;
+
 /** One relative, workspace-contained path or glob used by a read scope or an
  * explicit scope expansion. Absolute paths and dot-dot escapes are rejected. */
 function validateScopedPath(value:unknown, cwd:string, label:string):void {
@@ -630,6 +634,10 @@ export function contractWarnings(t:any):string[] {
  if (distinctPaths.size > SPLIT_WARNING_CONTEXT_PATHS) warnings.push(`Contract names ${distinctPaths.size} distinct context paths; consider splitting it into chained contracts so each stays focused.`);
  const acceptance = Array.isArray(t?.acceptance) ? t.acceptance : [];
  if (acceptance.length > SPLIT_WARNING_ACCEPTANCE) warnings.push(`Contract has ${acceptance.length} acceptance criteria; consider splitting it into chained contracts so each stays focused.`);
+ const maxToolOutputBytes = t?.budget?.maxToolOutputBytes;
+ if (typeof maxToolOutputBytes === 'number' && maxToolOutputBytes < MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES) {
+  warnings.push(`budget.maxToolOutputBytes is ${maxToolOutputBytes}; it is a cumulative per-run cap, not a per-call cap. Consider at least ${MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES}.`);
+ }
  return warnings;
 }
 

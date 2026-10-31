@@ -95,6 +95,12 @@ test('the draft environment reports the tool version from the inserted --version
   assert.match(buildDraft({ tool: 'cpm', title: 'Broken' }, deps(exec)).body, /3\.4\.5/);
 });
 
+test('reporting junior itself lists the junior environment line exactly once', () => {
+  const { exec } = world();
+  const body = buildDraft({ tool: 'junior', title: 'Broken' }, deps(exec)).body;
+  assert.equal((body.match(/^- junior:/gm) ?? []).length, 1);
+});
+
 test('a description read from --body-file is redacted in the draft', () => {
   const dir = workdir();
   const bodyFile = join(dir, 'body.md');
