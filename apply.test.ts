@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyHandoff } from './apply.ts';
+import { initHop } from './tools/tools.ts';
 
 const git = (cwd: string, args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' });
 
@@ -51,6 +52,34 @@ const makeRun = (source: string, id: string, stamp: string, mutate: (wt: string)
   mutate(wt);
   writeFileSync(join(art, 'result.json'), JSON.stringify({ id, status, isolation: { mode: 'worktree', worktree: wt }, ...extra }));
   return { art, wt, resultPath: join(art, 'result.json') };
+};
+
+/** A Crossmatrix 0.3+ hop inside the source checkout's default location. */
+const matrixHop = (source: string, log: string): string => {
+  const hop = join(source, '.delivery', 'setup', 'hop.json');
+  mkdirSync(join(source, '.delivery', 'setup'), { recursive: true });
+  initHop(hop, {
+    managedStatePath: join(source, 'no-managed-tools.json'),
+    tools: {
+      crossmatrix: {
+        command: process.execPath,
+        args: [join(import.meta.dirname, 'tools', 'test-fixtures', 'fake-mcp.mjs')],
+        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log },
+        sourceVersion: '0.3.0',
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  return hop;
+};
+
+/** The Crossmatrix write log, one JSON request per line. */
+const operations = (log: string): any[] => {
+  if (!existsSync(log)) return [];
+  return readFileSync(log, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 };
 
 /** A primary checkout at commit A with a linked worktree on descendant B. */
@@ -224,4 +253,59 @@ test('applyHandoff dry run writes no applied record', (t) => {
   const { art, resultPath } = makeRun(source, 'handoff-dry-record', '1000', (work) => writeFileSync(join(work, 'base.txt'), 'worktree\n'));
   applyHandoff(resultPath, { cwd: source, dryRun: true });
   assert.equal(existsSync(join(art, 'applied.json')), false);
+});
+
+// --- feature-to-code link ----------------------------------------------------
+
+test('applyHandoff links the applied files to the run plan feature', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  const log = join(root, 'writes.log');
+  matrixHop(source, log);
+  mkdirSync(join(source, '.crossmatrix'), { recursive: true });
+  const { resultPath } = makeRun(source, 'handoff-link', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', {
+    plan: { deliverable: 'd-1' },
+    evidence: { runChangedFiles: ['base.txt'] },
+  });
+  applyHandoff(resultPath, { cwd: source });
+  const targets = operations(log).filter((request) => request.op.kind === 'observe').map((request) => request.op.to);
+  assert.deepEqual(targets, ['loc:base.txt']);
+});
+
+test('applyHandoff leaves the apply successful when the matrix link fails', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  mkdirSync(join(source, '.crossmatrix'), { recursive: true });
+  const { resultPath } = makeRun(source, 'handoff-link-fail', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', {
+    plan: { deliverable: 'd-1' },
+    evidence: { runChangedFiles: ['base.txt'] },
+  });
+  const result = applyHandoff(resultPath, { cwd: source });
+  assert.equal(result.applied, true);
+});
+
+test('applyHandoff reports a failed matrix link as a warning', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  mkdirSync(join(source, '.crossmatrix'), { recursive: true });
+  const { resultPath } = makeRun(source, 'handoff-link-warning', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', {
+    plan: { deliverable: 'd-1' },
+    evidence: { runChangedFiles: ['base.txt'] },
+  });
+  const result = applyHandoff(resultPath, { cwd: source });
+  assert.ok(result.matrixLink?.error);
+});
+
+test('applyHandoff does not link when no-link is requested', (t) => {
+  const root = arena(t);
+  const source = sourceRepo(root);
+  const log = join(root, 'writes.log');
+  matrixHop(source, log);
+  mkdirSync(join(source, '.crossmatrix'), { recursive: true });
+  const { resultPath } = makeRun(source, 'handoff-no-link', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', {
+    plan: { deliverable: 'd-1' },
+    evidence: { runChangedFiles: ['base.txt'] },
+  });
+  applyHandoff(resultPath, { cwd: source, noLink: true });
+  assert.equal(operations(log).length, 0);
 });

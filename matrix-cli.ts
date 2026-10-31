@@ -124,6 +124,7 @@ export const MATRIX_USAGE = [
   '       (feature defaults to the result\'s plan deliverable)',
   'Usage: junior matrix files <feature>',
   'Usage: junior matrix context <feature> [--max N]',
+  'Usage: junior matrix refresh [--hop <hop.json>] [--model <id>] [--plan <plan_id>] [--dir <project>]',
   'Usage: junior matrix stale [--dir <project>]',
   'Usage: junior matrix bootstrap [--dir <project>] [--out proposals.json] [--plan-file <plan.json>]',
   'Usage: junior matrix confirm --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
@@ -276,7 +277,7 @@ function readJevitateFiles(dir: string): MatrixFile[] {
   return files;
 }
 
-async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
+export async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
   if (source === 'playbooks') return playbookDimensions();
   if (source === 'code') return [codeLocations(gitTrackedFiles(options.dir))];
   if (source === 'tests') return [tests(gitTrackedFiles(options.dir))];
@@ -357,6 +358,25 @@ export async function main(argv: string[]): Promise<number> {
       for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
       const { syncDimensions } = await import('./matrix-sync.ts');
       const result = await syncDimensions({ hopPath: options.hop, modelId: options.model, dimensions });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  if (argv[0] === 'refresh') {
+    try {
+      const options = parseMatrixArgs(argv.slice(1));
+      const { refresh } = await import('./matrix-refresh.ts');
+      const result = await refresh({
+        dir: options.dir,
+        hop: options.hop,
+        model: options.model,
+        plan: options.plan,
+        planFile: options.planFile,
+      });
+      writeNotes(result.notes);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;
     } catch (err) {

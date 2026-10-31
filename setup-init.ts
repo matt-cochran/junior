@@ -105,8 +105,25 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   created.push('tasks/example-task.json');
  }
 
- const skill=installSkill(deps, opts);
- const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(skill, created)).added;
+ // `update` also refreshes existing user-scope copies (doctor reports them),
+ // but never creates a new user-level install. A plain `init` stays project-only.
+ const isUpdate=opts.command === 'update' || opts.update === true;
+ let skill:SkillResult;
+ let projectSkill:SkillResult;
+ if (isUpdate) {
+  const primary=installSkill(deps,{ ...opts, recognizeUnrecorded:true, createMissing:opts.scope !== 'user' });
+  projectSkill=primary;
+  if (opts.scope === 'user') skill=primary;
+  else {
+   const user=installSkill(deps,{ ...opts, skillRoot:undefined, scope:'user', recognizeUnrecorded:true, createMissing:false });
+   const actions=[...primary.actions, ...user.actions];
+   skill={ ...primary, actions, ok:actions.every((a)=>a.status !== 'outdated' && a.status !== 'customized') };
+  }
+ } else {
+  skill=installSkill(deps, opts);
+  projectSkill=skill;
+ }
+ const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(projectSkill, created)).added;
  let readiness=doctor(deps);
  let install:InitResult['install'];
  if (opts.install && installationDisabled(deps.env)) {
