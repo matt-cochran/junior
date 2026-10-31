@@ -8,13 +8,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { callHop, initHop } from './tools/tools.ts';
 import {
   codemapContext,
+  codemapFeatures,
   codemapFiles,
   codemapInit,
   codemapLink,
@@ -47,6 +47,30 @@ function writeHop(dir: string, sourceVersion: string, log: string, extraEnv: Rec
     },
   });
   return hop;
+}
+
+/** A hop whose crossmatrix command logs its pid before delegating to FAKE. */
+function writePidLoggingHop(dir: string, sourceVersion: string, log: string, pids: string, extraEnv: Record<string, string> = {}): string {
+  const script = join(dir, 'pid-server.mjs');
+  writeFileSync(script, `import fs from "node:fs";\nfs.appendFileSync(${JSON.stringify(pids)}, String(process.pid) + "\\n");\nawait import(${JSON.stringify(FAKE)});\n`);
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      crossmatrix: {
+        command: NODE,
+        args: [script],
+        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log, ...extraEnv },
+        sourceVersion,
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  return hop;
+}
+
+function readPids(log: string): number[] {
+  return readFileSync(log, 'utf8').split('\n').filter(Boolean).map(Number);
 }
 
 type StrictOp = Record<string, unknown>;
@@ -127,6 +151,54 @@ function gitRepoWithConfig(contents: Record<string, string>): string {
   const dir = gitRepo(contents);
   spawnSync('git', ['add', '.'], { cwd: dir });
   return dir;
+}
+
+function gitOutput(dir: string, args: string[]): string {
+  const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+/** A committed temp repository, so links can carry real git anchors. */
+function committedRepo(contents: Record<string, string>): string {
+  const dir = gitRepoWithConfig(contents);
+  gitOutput(dir, ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-q', '-m', 'initial']);
+  return dir;
+}
+
+function commitAll(dir: string, message: string): void {
+  gitOutput(dir, ['add', '-A']);
+  gitOutput(dir, ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-q', '-m', message]);
+}
+
+function gitLinkResponses(dir: string, path: string, commit: string, blob: string): string {
+  return queryResponses(dir, {
+    describe: { describe: { relations: [{ id: 'codemap-cpm' }] } },
+    slice: {
+      cells: [
+        {
+          from: 'cpm:d1',
+          to: `loc:${path}`,
+          relationId: 'codemap-cpm',
+          // The shape crossmatrix-mcp returns: evidence lives on each observation.
+          observations: [
+            {
+              observation: 'implements',
+              provenanceClass: 'observed',
+              evidence: [
+                {
+                  sourceRef: { system: 'git', sourceType: 'blob', sourceRef: path, locator: commit },
+                  locator: blob,
+                  excerpt: 'git anchor',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      nextCursor: null,
+    },
+  });
 }
 
 function operations(log: string): any[] {
@@ -408,6 +480,38 @@ test('codemap link sends evidence in the Crossmatrix sourceRef/locator/excerpt s
   assert.deepEqual(Object.keys(observe.op.evidence[0]).sort(), ['excerpt', 'locator', 'sourceRef']);
 });
 
+test('codemapLink records the git commit and blob anchor as a third evidence item', async () => {
+  const dir = committedRepo({ 'src/a.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log);
+  const result = resultFile(dir, ['src/a.ts']);
+  await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:d1', dir });
+  const anchor = observes(log)[0].op.evidence.find((item: any) => item.sourceRef.system === 'git');
+  assert.deepEqual(anchor, {
+    sourceRef: {
+      system: 'git',
+      sourceType: 'blob',
+      sourceRef: 'src/a.ts',
+      locator: gitOutput(dir, ['rev-parse', 'HEAD']),
+    },
+    locator: gitOutput(dir, ['rev-parse', 'HEAD:src/a.ts']),
+    excerpt: 'git anchor',
+  });
+});
+
+test('codemapLink keeps the request id stable when only the git anchor changes', async () => {
+  const dir = committedRepo({ 'src/a.ts': 'hello' });
+  const log = join(dir, 'writes.log');
+  const hop = writeHop(dir, '0.3.0', log);
+  const result = resultFile(dir, ['src/a.ts']);
+  await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:d1', dir });
+  const first = observes(log)[0].requestId;
+  writeFileSync(join(dir, 'src/a.ts'), 'hello again');
+  commitAll(dir, 'edit');
+  await codemapLink({ hopPath: hop, modelId: 'm1', resultPath: result, feature: 'cpm:d1', dir });
+  assert.equal(observes(log)[1].requestId, first);
+});
+
 test('codemap link adds the dimension prefix to a bare feature member id', async () => {
   const dir = workdir();
   const log = join(dir, 'writes.jsonl');
@@ -449,6 +553,21 @@ test('codemapFiles follows nextCursor across two pages', async () => {
   const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
   const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
   assert.deepEqual(files.map((entry) => entry.path), ['src/a.ts', 'src/b.ts']);
+});
+
+test('a multi-page codemapFiles run spawns a single server process', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const pids = join(dir, 'pids.log');
+  const responses = queryResponses(dir, {
+    trace: [
+      { hops: [hop({ member: 'loc:src/b.ts' })], nextCursor: '1' },
+      { hops: [hop({ member: 'loc:src/a.ts' })], nextCursor: null },
+    ],
+  });
+  const hopPath = writePidLoggingHop(dir, '0.3.0', log, pids, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.equal(new Set(readPids(pids)).size, 1);
 });
 
 test('codemapFiles ignores non-codemap relations and non-location members', async () => {
@@ -528,71 +647,35 @@ test('isCodeRosterPath accepts a default-excluded path when project excludes rep
   assert.equal(isCodeRosterPath('.changeset/x.md', excludes), true);
 });
 
-test('codemapStale omits an excluded previously synced path from the code roster', async () => {
-  const dir = gitRepo({ '.changeset/x.md': 'release note', 'src/app.ts': 'hello' });
-  const log = join(dir, 'writes.log');
-  const hopPath = writeHop(dir, '0.3.0', log);
-  const requests: any[] = [];
-  const deps = {
-    callHop: async (_hopPath: string, _tool: string, request: any) => {
-      requests.push(request);
-      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
-    },
-  };
-  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
-  assert.equal('.changeset/x.md' in requests[0].arguments.request.query.hashes, false);
-});
-
-test('codemapStale sends no delete or remove operation for an excluded path', async () => {
-  const dir = gitRepo({ '.changeset/x.md': 'release note', 'src/app.ts': 'hello' });
-  const log = join(dir, 'writes.log');
-  const hopPath = writeHop(dir, '0.3.0', log);
-  const requests: any[] = [];
-  const deps = {
-    callHop: async (_hopPath: string, _tool: string, request: any) => {
-      requests.push(request);
-      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
-    },
-  };
-  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
-  const kinds = requests.map((request) => request.arguments?.request?.query?.kind ?? '');
-  assert.equal(kinds.some((kind) => kind === 'delete' || kind === 'remove'), false);
-});
-
 // --- codemapStale ----------------------------------------------------------
 
-test('codemapStale keys recomputed hashes by each member source reference', async () => {
-  const dir = gitRepo({ 'src/a.ts': 'hello' });
+test('codemapStale classifies a link changed when its git blob differs from HEAD', async () => {
+  const dir = committedRepo({ 'src/a.ts': 'hello' });
+  const path = 'src/a.ts';
+  const commit = gitOutput(dir, ['rev-parse', 'HEAD']);
+  const blob = gitOutput(dir, ['rev-parse', `HEAD:${path}`]);
+  writeFileSync(join(dir, path), 'hello again');
+  commitAll(dir, 'edit');
   const log = join(dir, 'writes.log');
-  const hopPath = writeHop(dir, '0.3.0', log);
-  const requests: any[] = [];
-  const deps = {
-    callHop: async (_hopPath: string, _tool: string, request: any) => {
-      requests.push(request);
-      return { ok: true, tool: 'crossmatrix', toolName: 'crossmatrix.query', revision: 1, kind: 'read', isError: false, unsupported: false, note: null, result: { changed: [], affectedCells: [], nextCursor: null } };
-    },
-  };
-  await codemapStale({ hopPath, modelId: 'm1', dir, deps: deps as any });
-  const hashes = requests[0].arguments.request.query.hashes;
-  const expected = 'sha256:' + createHash('sha256').update('hello').digest('hex');
-  assert.equal(hashes['src/a.ts'], expected);
+  const responses = gitLinkResponses(dir, path, commit, blob);
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const result = await codemapStale({ hopPath, modelId: 'm1', dir });
+  assert.deepEqual(result.changed.map((entry) => entry.path), [path]);
 });
 
-test('codemapStale returns the server changed members', async () => {
-  const dir = gitRepo({ 'src/a.ts': 'hello' });
+test('codemapStale reports a stored link without git evidence as unanchored', async () => {
+  const dir = committedRepo({ 'src/a.ts': 'hello' });
   const log = join(dir, 'writes.log');
   const responses = queryResponses(dir, {
-    stale: {
-      changed: [{ member: 'loc:src/a.ts' }],
-      affectedCells: [],
-      counts: { changed: 1, checked: 1, unchecked: 0 },
+    describe: { describe: { relations: [{ id: 'codemap-cpm' }] } },
+    slice: {
+      cells: [{ from: 'cpm:d1', to: 'loc:src/a.ts', observations: ['implements'] }],
       nextCursor: null,
-      cellsTruncated: false,
     },
   });
   const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
   const result = await codemapStale({ hopPath, modelId: 'm1', dir });
-  assert.deepEqual(result.changed, [{ member: 'loc:src/a.ts' }]);
+  assert.deepEqual(result.unanchored.map((entry) => entry.path), ['src/a.ts']);
 });
 
 test('codemapFiles refuses a hop older than Crossmatrix 0.3.0', async () => {
@@ -667,21 +750,90 @@ test('junior matrix context caps printed paths at max', () => {
   assert.equal(JSON.parse(cli.stdout).length, 1);
 });
 
-test('junior matrix stale prints the changed members', () => {
-  const dir = gitRepo({ 'src/a.ts': 'hello' });
+test('junior matrix stale prints the changed links', () => {
+  const dir = committedRepo({ 'src/a.ts': 'hello' });
+  const commit = gitOutput(dir, ['rev-parse', 'HEAD']);
+  const blob = gitOutput(dir, ['rev-parse', 'HEAD:src/a.ts']);
+  writeFileSync(join(dir, 'src/a.ts'), 'hello again');
+  commitAll(dir, 'edit');
   const log = join(dir, 'writes.log');
-  const responses = queryResponses(dir, {
-    stale: {
-      changed: [{ member: 'loc:src/a.ts' }],
-      affectedCells: [],
-      counts: { changed: 1, checked: 1, unchecked: 0 },
-      nextCursor: null,
-      cellsTruncated: false,
-    },
-  });
+  const responses = gitLinkResponses(dir, 'src/a.ts', commit, blob);
   const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
   const cli = spawnSync(NODE, [JUNIOR, 'matrix', 'stale', '--hop', hopPath, '--model', 'm1', '--dir', dir], {
     encoding: 'utf8',
   });
-  assert.deepEqual(JSON.parse(cli.stdout).changed, [{ member: 'loc:src/a.ts' }]);
+  assert.deepEqual(JSON.parse(cli.stdout).changed.map((entry: any) => entry.path), ['src/a.ts']);
+});
+
+// --- codemapFeatures (reverse lookup) --------------------------------------
+
+test('codemapFeatures lists the features linked to a file', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' }),
+        hop({ member: 'job:j1', direction: 'in', observations: ['tests'], relation: 'codemap-jevitate-jobs' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src/a.ts' });
+  assert.deepEqual(features.map((entry) => entry.feature), ['cpm:d1', 'jevitate-jobs:j1']);
+});
+
+test('codemapFeatures keeps the strongest observation for a feature', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['touches'], relation: 'codemap-cpm' }),
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src/a.ts' });
+  assert.deepEqual(features, [{ feature: 'cpm:d1', observation: 'implements' }]);
+});
+
+test('codemapFeatures aggregates every linked file under a directory', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    describe: { describe: { relations: [{ id: 'codemap-cpm' }] } },
+    slice: {
+      cells: [
+        { from: 'cpm:d1', to: 'loc:src/a.ts', observations: ['implements'] },
+        { from: 'cpm:d2', to: 'loc:src/nested/b.ts', observations: ['tests'] },
+        { from: 'cpm:d3', to: 'loc:other/c.ts', observations: ['implements'] },
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src' });
+  assert.deepEqual(features.map((entry) => entry.feature), ['cpm:d1', 'cpm:d2']);
+});
+
+test('junior matrix features prints the reverse lookup for a path', () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' })],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'features', 'src/a.ts', '--dir', dir, '--hop', hopPath, '--model', 'm1'],
+    { encoding: 'utf8' },
+  );
+  assert.deepEqual(JSON.parse(result.stdout), [{ feature: 'cpm:d1', observation: 'implements' }]);
 });

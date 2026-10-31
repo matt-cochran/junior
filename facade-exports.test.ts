@@ -74,10 +74,11 @@ test('tools/tools.ts keeps its runtime exports', async () => {
     'main',
     'mcpCallSequence',
     'mcpCallTool',
+    'openHopSession',
     'probeToolVersion',
     'recordManagerAcceptance',
     'saveHop',
-    'validateManifest'
+    'validateManifest',
   ]);
 });
 
@@ -169,6 +170,7 @@ test('compute-hetzner.ts keeps its runtime exports', async () => {
 
 test('setup.ts keeps its runtime exports', async () => {
   assert.deepEqual(await exportsOf('./setup.ts'), [
+    'CLAUDE_STORE_DENY_RULES',
     'DEFAULT_MODEL',
     'DEFAULT_PROVIDER',
     'DOCTOR_TIMEOUT_MS',
@@ -193,14 +195,17 @@ test('setup.ts keeps its runtime exports', async () => {
     'inspectGateways',
     'inspectLitellm',
     'inspectSkill',
+    'inspectStoreDenyRules',
     'installSkill',
+    'installStoreDenyRules',
     'loadDefaults',
     'loadTestedPi',
+    'mergeStoreDenyRules',
     'parseInitOptions',
     'resolveJuniorCliPath',
     'setupCompanions',
     'summarizeInstall',
-    'whichOnPath'
+    'whichOnPath',
   ]);
 });
 

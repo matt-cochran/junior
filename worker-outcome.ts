@@ -9,6 +9,7 @@ import type { ReportEvidence } from './worker-workflows.ts';
 import { assessPostflight, raceSignal, resolveOpenRouterKey, OUTPUT_LIMIT_ERROR } from './worker-gates.ts';
 import { captureBilling, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture } from './billing.ts';
 import { estimateCost } from './worker-receipt.ts';
+import { findUnwiredExports, type UnwiredSymbol } from './wiring-check.ts';
 import { verifyIsolation, DEFAULT_PI_TOOLS } from './pi-isolation.ts';
 import { timedOutToolLine } from './worker-pi.ts';
 import { REVIEW_CONTEXT_FILENAME } from './worker-resume.ts';
@@ -47,6 +48,10 @@ export async function finish(state:RunState):Promise<any> {
  // deadline breach or interruption, and persist the complete evidence pair.
  const after=collectGitEvidence(executionCwd, { timeoutMs: Math.max(1, remainingMs(state)) });
  const evidence=evidenceDelta(before, after);
+ // Advisory wiring check: new exports with no production reference. It reads
+ // only the post-run evidence and never contributes to the terminal status.
+ let unwired:UnwiredSymbol[]=[];
+ try { unwired=findUnwiredExports(executionCwd, evidence.runChangedFiles, { diff: after.diff }); } catch {}
  let scopeResult:ScopeResult|undefined;
  if (t.scope) {
   let projectConfig:any={};
@@ -173,7 +178,7 @@ export async function finish(state:RunState):Promise<any> {
  }
 
  const runtime=heartbeat.snapshot();
- const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null};
+ const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null,unwired};
  result.checkTimeoutMs=settings.checkTimeoutMs;
  if (workerFailure) result.workerFailure=workerFailure;
  result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
@@ -189,6 +194,7 @@ export async function finish(state:RunState):Promise<any> {
  }
  if (piIsolation) result.piIsolation=piIsolation;
  if (externalContext) result.externalContext=externalContext;
+ if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];

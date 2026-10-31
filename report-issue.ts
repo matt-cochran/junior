@@ -195,7 +195,7 @@ export function buildDraft(input: DraftInput, deps: ReportIssueDeps = {}): Draft
     '## Environment',
     '',
     `- junior: ${juniorVersion}`,
-    `- ${input.tool}: ${toolVersion}`,
+    ...(input.tool === 'junior' ? [] : [`- ${input.tool}: ${toolVersion}`]),
     `- os: ${process.platform}/${process.arch}`,
     `- node: ${process.version}`,
   ];

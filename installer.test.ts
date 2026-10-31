@@ -684,6 +684,36 @@ test('Private release redirects never forward the GitHub token to an asset host'
  }});
  assert.equal(authorization,undefined);
 });
+test('GitHub API requests fall back to the gh auth token when no token is in the environment', async () => {
+ let authorization;
+ const exec = (command: string, args: string[]) => args[0] === 'auth' ? { status: 0, stdout: 'gh-fixture-token\n' } : { status: 1 };
+ await resolveLatestRelease('matt-cochran/triz',{env:{},exec,fetch:async(_url,init)=>{
+  authorization=init?.headers?.Authorization;
+  return response(200,JSON.stringify({tag_name:'v0.1.0',assets:[]}));
+ }});
+ assert.equal(authorization,'Bearer gh-fixture-token');
+});
+test('A GitHub rate-limit 403 is reported as a skipped update rather than a failure', async () => {
+ await assert.rejects(
+  resolveLatestRelease('matt-cochran/triz',{env:{},exec:()=>({status:1}),fetch:async()=>response(403,'rate limit exceeded',{'x-ratelimit-remaining':'0'})}),
+  /skipped: GitHub rate limited, retry later/,
+ );
+});
+test('update check reports a GitHub rate limit as a skipped tool rather than a failure', async () => {
+  const report = await checkToolUpdates({
+    ...managedStateWith({ fmeca: '0.0.2' }),
+    env: {},
+    exec: () => ({ status: 1 }),
+    fetch: async () => response(403, 'rate limit exceeded', { 'x-ratelimit-remaining': '0' }),
+  });
+  assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.error, 'skipped: GitHub rate limited, retry later');
+});
+test('An update rate limited by GitHub reports the tool skipped and stays ok', async () => {
+  const server = releaseServer({ repo: TOOL_REPOS.fmeca.repo, assetName: fmecaAsset, entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }] });
+  const deps = { ...baseDeps(server), env: {}, exec: () => ({ status: 1 }), fetch: async () => response(403, 'rate limit exceeded', { 'x-ratelimit-remaining': '0' }) };
+  const report = await installTools({ tools: ['fmeca'] }, deps);
+  assert.deepEqual([report.ok, report.outcomes[0]?.status], [true, 'skipped']);
+});
 test('update check flags a managed tool behind its latest GitHub release', async () => {
   const report = await checkToolUpdates({ ...managedStateWith({ fmeca: '0.0.2' }), resolveRelease: releaseAt('0.2.0') });
   assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.outdated, true);

@@ -8,6 +8,7 @@ import { ensureLocalExcludes } from './isolation.ts';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, INSTALL_TIMEOUT_MS, PI_PACKAGE, SKILL_MANIFEST_FILENAME, TESTED_PI_VERSION, MATRIX_COMMIT, MATRIX_REMINDER, MATRIX_UPDATE_SKIP, asSpawn, exists, readText, type SetupDeps } from './setup-env.ts';
 import { installSkill, type InitOptions, type SkillResult, type SkillTargetSelection, type SkillScope } from './setup-skill.ts';
 import { doctor, summarizeInstall } from './setup-doctor.ts';
+import { installStoreDenyRules } from './harness.ts';
 
 export type MatrixOutcome = {
  /** True only when this run created `.crossmatrix/` through `crossmatrix-mcp init`. */
@@ -19,6 +20,7 @@ export type MatrixOutcome = {
 };
 
 export type InitResult = {
+ storeLockdown?: { path: string; changed: boolean };
  command:'init'|'update';
  cwd:string;
  created:string[];
@@ -105,8 +107,30 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   created.push('tasks/example-task.json');
  }
 
- const skill=installSkill(deps, opts);
- const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(skill, created)).added;
+ // `update` also refreshes existing user-scope copies (doctor reports them),
+ // but never creates a new user-level install. A plain `init` stays project-only.
+ const isUpdate=opts.command === 'update' || opts.update === true;
+ let skill:SkillResult;
+ let projectSkill:SkillResult;
+ if (isUpdate) {
+  const primary=installSkill(deps,{ ...opts, recognizeUnrecorded:true, createMissing:opts.scope !== 'user' });
+  projectSkill=primary;
+  if (opts.scope === 'user') skill=primary;
+  else {
+   const user=installSkill(deps,{ ...opts, skillRoot:undefined, scope:'user', recognizeUnrecorded:true, createMissing:false });
+   const actions=[...primary.actions, ...user.actions];
+   skill={ ...primary, actions, ok:actions.every((a)=>a.status !== 'outdated' && a.status !== 'customized') };
+  }
+ } else {
+  skill=installSkill(deps, opts);
+  projectSkill=skill;
+ }
+ const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(projectSkill, created)).added;
+ // Lock an existing .crossmatrix/ store to the CLI/MCP before doctor reads the
+ // rules (#194); a store created below is locked right after creation.
+ let storeLockdown:{path:string; changed:boolean}|undefined;
+ const lockStore=()=>{ try { const r=installStoreDenyRules({ projectDir:cwd }); if (r.changed) storeLockdown=r; } catch { /* doctor reports it */ } };
+ lockStore();
  let readiness=doctor(deps);
  let install:InitResult['install'];
  if (opts.install && installationDisabled(deps.env)) {
@@ -139,6 +163,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   try {
    const createdNow=(deps.matrixInit ?? ((dir:string)=>defaultMatrixInit(deps,dir)))(cwd).created ?? [];
    matrix={ created: createdNow.includes('.crossmatrix') };
+   if (matrix.created) lockStore();
   } catch (e) {
    matrix={ created:false, skipped: e instanceof Error ? e.message : String(e) };
   }
@@ -154,7 +179,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  } else if (!exists(deps, storePath) && !(command === 'update' && opts.matrix !== true)) {
   instructions.push(MATRIX_REMINDER);
  }
- return { command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, matrix, install,
+ return { ...(storeLockdown ? { storeLockdown } : {}), command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, matrix, install,
   installSummary:summarizeInstall(install,null), instructions };
 }
 

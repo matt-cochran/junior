@@ -24,6 +24,61 @@ import {
   type MatrixFile,
 } from './matrix-adapters.ts';
 import { buildDimensionSet, writeDimensionSet } from './matrix-dimensions.ts';
+import {
+  defaultSources,
+  featureFromResult,
+  newestResult,
+  normalizeFeature,
+  projectRoot,
+  resolveMatrixHop,
+  resolveMatrixModel,
+  resolveMatrixPlan,
+} from './matrix-defaults.ts';
+
+/** Resolve hop + model for a matrix command and note the choices on stderr. */
+function resolveCore(explicit: { hop?: string; model?: string; dir?: string }, notes: string[]): { hop: string; model: string; root: string } {
+  const root = projectRoot(explicit.dir ?? process.cwd());
+  const hop = resolveMatrixHop(root, explicit.hop);
+  const model = resolveMatrixModel(root, explicit.model);
+  if (hop.source !== 'explicit') notes.push(`hop ${hop.path} (${hop.source})`);
+  if (model.source !== 'explicit') notes.push(`model ${model.id} (${model.source})`);
+  return { hop: hop.path, model: model.id, root };
+}
+
+function pick(core: { hop: string; model: string }): { hop: string; model: string } {
+  return { hop: core.hop, model: core.model };
+}
+
+function planError(command: string, candidates: string[] | undefined): string {
+  return candidates && candidates.length > 0
+    ? `${command}: several unfinished plans (${candidates.join(', ')}); pass --plan <plan_id> or set matrix.plan in delivery.config.json`
+    : `${command}: no unfinished plan found; pass --plan <plan_id> or set matrix.plan in delivery.config.json`;
+}
+
+/** Fill `--source` and, when cpm/state needs it, `--plan` from the project. */
+async function defaultSyncSources(options: MatrixOptions, root: string, notes: string[]): Promise<void> {
+  const defaulted = options.sources.length === 0;
+  const needsPlan = defaulted || options.sources.includes('cpm') || options.sources.includes('state');
+  if (needsPlan && options.plan === undefined && options.planFile === undefined) {
+    const plan = await resolveMatrixPlan(root, options.hop!);
+    if (plan.planId) {
+      options.plan = plan.planId;
+      notes.push(`plan ${plan.planId} (${plan.source})`);
+    } else if (!defaulted && options.sources.includes('cpm')) {
+      throw new Error(planError('matrix sync --source cpm', plan.candidates));
+    } else if (plan.candidates) {
+      notes.push(`cpm skipped: several unfinished plans (${plan.candidates.join(', ')})`);
+    }
+  }
+  if (defaulted) {
+    options.sources = defaultSources(root, options.plan !== undefined || options.planFile !== undefined);
+    notes.push(`sources ${options.sources.join(',')}`);
+  }
+}
+
+function writeNotes(notes: string[]): void {
+  if (notes.length > 0) process.stderr.write(`matrix defaults: ${notes.join('; ')}\n`);
+}
 
 // ---------------------------------------------------------------------------
 // CLI: `junior matrix export`
@@ -52,24 +107,30 @@ const VALUE_FLAGS = [
 ];
 
 export const MATRIX_USAGE = [
-  'Usage: junior matrix export --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
-  '       [--dir <project>] [--out <crossmatrix dir, default <project>/.crossmatrix>]',
-  '       [--set <dimensionSetId, default project-<source>>]',
+  'Every flag is an override. Defaults: --hop = the active/configured/sole Hop (.delivery/setup/hop.json);',
+  '  --model = matrix.model in delivery.config.json, the sole .crossmatrix/state/<id>.json, else the project name;',
+  '  --source = matrix.sources, else code,tests (+jevitate when .jevitate/ exists, +cpm when one plan is unfinished);',
+  '  --plan = matrix.plan, else the sole unfinished plan; <feature> = <deliverable id> | <dimensionId>:<memberId>.',
+  'Usage: junior matrix export [--source code|tests|jevitate|cpm|fmeca|playbooks ...] [--dir <project>]',
+  '       [--out <crossmatrix dir, default <project>/.crossmatrix>] [--set <dimensionSetId, default project-<source>>]',
   '       [--hop <hop.json> --plan <plan_id> | --plan-file <path>] [--hop <hop.json> --session <fmeca session_id>]',
   'Usage: junior matrix init [--dir <project>]',
-  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source code|tests|jevitate|cpm|fmeca|playbooks [--source ...]',
+  'Usage: junior matrix sync [--source code|tests|jevitate|cpm|fmeca|playbooks ...] [--hop <hop.json>] [--model <id>]',
   '       [--dir <project>] [--plan <plan_id> | --plan-file <path>] [--session <fmeca session_id>]',
-  'Usage: junior matrix sync --hop <hop.json> --model <modelId> --source state',
-  '       [--plan <plan_id>] [--fmeca-session <id>] [--elicitation-session <id>]',
+  'Usage: junior matrix sync --source state [--plan <plan_id>] [--fmeca-session <id>] [--elicitation-session <id>]',
   '       [--sp-session <id>] [--jevitate-results <dir|file>] [--dir <project>]',
-  'Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]',
-  'Usage: junior matrix link --hop <hop.json> --model <modelId> --result <result.json> --feature <dimensionId>:<memberId> [--observation implements|tests|touches]',
-  'Usage: junior matrix files --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId>',
-  'Usage: junior matrix context --hop <hop.json> --model <modelId> --feature <dimensionId>:<memberId> [--max N]',
-  'Usage: junior matrix stale --hop <hop.json> --model <modelId> [--dir <project>]',
-  'Usage: junior matrix bootstrap --hop <hop.json> --model <modelId> --dir <project> [--out proposals.json] [--plan-file <plan.json>]',
-  'Usage: junior matrix confirm --hop <hop.json> --model <modelId> --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
-  'Usage: junior matrix autolink --hop <hop.json> --model <modelId> --plan <plan_id>',
+  'Usage: junior matrix codemap init [--feature-dimension <id> ...]',
+  'Usage: junior matrix link [<feature>] [--result <result.json, default newest .delivery run>] [--observation implements|tests|touches]',
+  '       (feature defaults to the result\'s plan deliverable)',
+  'Usage: junior matrix files <feature>',
+  'Usage: junior matrix features <path> | --path <path>',
+  'Usage: junior matrix context <feature> [--max N]',
+  'Usage: junior matrix refresh [--hop <hop.json>] [--model <id>] [--plan <plan_id>] [--dir <project>]',
+  'Usage: junior matrix stale [--dir <project>]',
+  'Usage: junior matrix bootstrap [--dir <project>] [--out proposals.json] [--plan-file <plan.json>]',
+  'Usage: junior matrix confirm --proposals <proposals.json> [--min high|medium|low] [--only <id,...>] [--exclude <id,...>]',
+  'Usage: junior matrix autolink [--plan <plan_id>]',
+  '(--hop <hop.json> and --model <id> override the defaults on every command.)',
 ].join('\n');
 
 export function parseMatrixArgs(argv: string[]): MatrixOptions {
@@ -86,7 +147,6 @@ export function parseMatrixArgs(argv: string[]): MatrixOptions {
     if (name === '--source') sources.push(value);
     else values[name] = value;
   }
-  if (sources.length === 0) throw new Error(MATRIX_USAGE);
   for (const source of sources) if (!SOURCES.includes(source)) throw new Error(`Unknown source: ${source}`);
   if (values['--plan'] !== undefined && values['--plan-file'] !== undefined) {
     throw new Error('--plan and --plan-file are mutually exclusive');
@@ -113,6 +173,7 @@ interface CodemapOptions {
   model?: string;
   result?: string;
   feature?: string;
+  path?: string;
   observation?: string;
   featureDimensions: string[];
   max?: number;
@@ -126,7 +187,7 @@ interface CodemapOptions {
   planFile?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan', '--plan-file'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--path', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan', '--plan-file'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
 const CODEMAP_CONFIDENCES = ['high', 'medium', 'low'];
 const CODEMAP_LIST_FLAGS = ['--only', '--exclude']; // comma-separated id lists
@@ -139,6 +200,10 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     const arg = argv[i];
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
+    if (!arg.startsWith('-') && values['--feature'] === undefined) {
+      values['--feature'] = arg; // positional feature: `junior matrix context d-1`
+      continue;
+    }
     if (!CODEMAP_VALUE_FLAGS.includes(name)) throw new Error(`Unknown option for matrix codemap: ${arg}`);
     let value = eq === -1 ? undefined : arg.slice(eq + 1);
     if (value === undefined) value = argv[++i];
@@ -158,6 +223,7 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     model: values['--model'],
     result: values['--result'],
     feature: values['--feature'],
+    path: values['--path'],
     observation: values['--observation'],
     featureDimensions,
     max: parseMax(values['--max']),
@@ -214,7 +280,7 @@ function readJevitateFiles(dir: string): MatrixFile[] {
   return files;
 }
 
-async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
+export async function dimensionsForSource(options: MatrixOptions, source: string): Promise<MatrixDimension[]> {
   if (source === 'playbooks') return playbookDimensions();
   if (source === 'code') return [codeLocations(gitTrackedFiles(options.dir))];
   if (source === 'tests') return [tests(gitTrackedFiles(options.dir))];
@@ -269,8 +335,12 @@ export async function main(argv: string[]): Promise<number> {
   if (argv[0] === 'sync') {
     try {
       const options = parseMatrixArgs(argv.slice(1));
-      if (!options.hop) throw new Error('matrix sync requires --hop <hop.json>');
-      if (!options.model) throw new Error('matrix sync requires --model <modelId>');
+      const notes: string[] = [];
+      const core = resolveCore(options, notes);
+      options.hop = core.hop;
+      options.model = core.model;
+      await defaultSyncSources(options, core.root, notes);
+      writeNotes(notes);
       if (options.sources.includes('state')) {
         const { syncState } = await import('./state-sync.ts');
         const result = await syncState({
@@ -298,12 +368,32 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
+  if (argv[0] === 'refresh') {
+    try {
+      const options = parseMatrixArgs(argv.slice(1));
+      const { refresh } = await import('./matrix-refresh.ts');
+      const result = await refresh({
+        dir: options.dir,
+        hop: options.hop,
+        model: options.model,
+        plan: options.plan,
+        planFile: options.planFile,
+      });
+      writeNotes(result.notes);
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
   if (argv[0] === 'codemap') {
     try {
-      if (argv[1] !== 'init') throw new Error('Usage: junior matrix codemap init --hop <hop.json> --model <modelId> [--feature-dimension <id> ...]');
+      if (argv[1] !== 'init') throw new Error('Usage: junior matrix codemap init [--feature-dimension <id> ...]');
       const options = parseCodemapArgs(argv.slice(2));
-      if (!options.hop) throw new Error('matrix codemap init requires --hop <hop.json>');
-      if (!options.model) throw new Error('matrix codemap init requires --model <modelId>');
+      const notes: string[] = [];
+      Object.assign(options, pick(resolveCore(options, notes)));
+      writeNotes(notes);
       const { codemapInit } = await import('./codemap.ts');
       const result = await codemapInit({
         hopPath: options.hop,
@@ -320,16 +410,28 @@ export async function main(argv: string[]): Promise<number> {
   if (argv[0] === 'link') {
     try {
       const options = parseCodemapArgs(argv.slice(1));
-      if (!options.hop) throw new Error('matrix link requires --hop <hop.json>');
-      if (!options.model) throw new Error('matrix link requires --model <modelId>');
-      if (!options.result) throw new Error('matrix link requires --result <result.json>');
-      if (!options.feature) throw new Error('matrix link requires --feature <dimensionId>:<memberId>');
+      const notes: string[] = [];
+      const core = resolveCore(options, notes);
+      Object.assign(options, pick(core));
+      if (!options.result) {
+        options.result = newestResult(core.root);
+        if (!options.result) throw new Error('matrix link found no .delivery/<id>/<stamp>/result.json; pass --result <result.json>');
+        notes.push(`result ${options.result} (newest)`);
+      }
+      if (!options.feature) {
+        options.feature = featureFromResult(options.result);
+        if (!options.feature) throw new Error('matrix link: the result names no plan deliverable; pass --feature <dimensionId>:<memberId> or <deliverable id>');
+        notes.push(`feature ${options.feature} (result plan)`);
+      }
+      options.feature = normalizeFeature(options.feature);
+      writeNotes(notes);
       const { codemapLink } = await import('./codemap.ts');
       const result = await codemapLink({
         hopPath: options.hop,
         modelId: options.model,
         resultPath: options.result,
         feature: options.feature,
+        dir: core.root,
         observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -343,8 +445,16 @@ export async function main(argv: string[]): Promise<number> {
     const subcommand = argv[0];
     try {
       const options = parseCodemapArgs(argv.slice(1));
-      if (!options.hop) throw new Error(`matrix ${subcommand} requires --hop <hop.json>`);
-      if (!options.model) throw new Error(`matrix ${subcommand} requires --model <modelId>`);
+      const notes: string[] = [];
+      const core = resolveCore(options, notes);
+      Object.assign(options, pick(core));
+      if (subcommand === 'autolink' && !options.plan) {
+        const plan = await resolveMatrixPlan(core.root, core.hop);
+        if (!plan.planId) throw new Error(planError('matrix autolink', plan.candidates));
+        options.plan = plan.planId;
+        notes.push(`plan ${plan.planId} (${plan.source})`);
+      }
+      writeNotes(notes);
       const autopilot = await import('./matrix-autopilot.ts');
       if (subcommand === 'bootstrap') {
         const dir = options.dir ?? process.cwd();
@@ -375,7 +485,6 @@ export async function main(argv: string[]): Promise<number> {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
         return 0;
       }
-      if (!options.plan) throw new Error('matrix autolink requires --plan <plan_id>');
       const result = await autopilot.autolink({
         hopPath: options.hop,
         modelId: options.model,
@@ -389,13 +498,29 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
-  if (argv[0] === 'files' || argv[0] === 'context' || argv[0] === 'stale') {
+  if (argv[0] === 'files' || argv[0] === 'features' || argv[0] === 'context' || argv[0] === 'stale') {
     const subcommand = argv[0];
     try {
       const options = parseCodemapArgs(argv.slice(1));
-      if (!options.hop) throw new Error(`matrix ${subcommand} requires --hop <hop.json>`);
-      if (!options.model) throw new Error(`matrix ${subcommand} requires --model <modelId>`);
+      const notes: string[] = [];
+      const core = resolveCore(options, notes);
+      Object.assign(options, pick(core));
+      writeNotes(notes);
       const codemap = await import('./codemap.ts');
+      if (subcommand === 'features') {
+        const requested = options.path ?? options.feature;
+        if (!requested) throw new Error('matrix features requires a path: <path> or --path <path>');
+        const absolute = path.resolve(process.cwd(), requested);
+        const relative = path.relative(core.root, absolute).split(path.sep).join('/');
+        const isDirectory = fs.existsSync(absolute) && fs.statSync(absolute).isDirectory();
+        const result = await codemap.codemapFeatures({
+          hopPath: options.hop,
+          modelId: options.model,
+          path: isDirectory && !relative.endsWith('/') ? `${relative}/` : relative,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
       if (subcommand === 'stale') {
         const result = await codemap.codemapStale({
           hopPath: options.hop,
@@ -405,7 +530,8 @@ export async function main(argv: string[]): Promise<number> {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
         return 0;
       }
-      if (!options.feature) throw new Error(`matrix ${subcommand} requires --feature <dimensionId>:<memberId>`);
+      if (!options.feature) throw new Error(`matrix ${subcommand} requires a feature: <deliverable id> or --feature <dimensionId>:<memberId>`);
+      options.feature = normalizeFeature(options.feature);
       if (subcommand === 'files') {
         const result = await codemap.codemapFiles({
           hopPath: options.hop,
@@ -458,6 +584,9 @@ export async function main(argv: string[]): Promise<number> {
   }
   try {
     const options = parseMatrixArgs(argv.slice(1));
+    if (options.sources.length === 0) {
+      options.sources = defaultSources(projectRoot(options.dir), options.planFile !== undefined || (options.hop !== undefined && options.plan !== undefined));
+    }
     const written: string[] = [];
     const unchanged: string[] = [];
     for (const source of options.sources) {

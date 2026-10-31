@@ -180,3 +180,24 @@ test('Install summary reports no attempt for a Pi-only setup without installing'
  const summary = summarizeInstall(undefined, null);
  assert.equal(summary.attempted, false);
 });
+
+import { inspectStoreDenyRules } from './harness.ts';
+
+test('Doctor warns when a .crossmatrix store exists without Claude deny rules', () => {
+ const cwd = tmp('junior-doctor-store-');
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-tools-') } as any);
+ assert.match(d.warnings.join(' '), /\.crossmatrix/);
+});
+
+test('Doctor reports the setup command as store-lockdown remediation', () => {
+ const cwd = tmp('junior-doctor-store-fix-');
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-fix-tools-') } as any);
+ assert.match(d.remediation.join(' '), /junior init/);
+});
+
+test('Store lockdown inspection reports missing rules only when the store exists', () => {
+ const cwd = tmp('junior-store-inspect-');
+ assert.equal(inspectStoreDenyRules(cwd).storeExists, false);
+});

@@ -10,7 +10,8 @@ import { PACKAGED_SKILL_PATH, SKILL_FILENAME, SKILL_MANIFEST_FILENAME, SKILL_NAM
 // this module) into the Codex project root `.agents/skills/junior` and the
 // Claude Code project root `.claude/skills/junior`. User-wide installs require
 // the explicit `scope: "user"` option and write under `HOME` (or an explicit
-// skill root), never implicitly. A small `.junior-manifest.json` beside each
+// skill root), never implicitly; `update` only refreshes copies already there.
+// A small `.junior-manifest.json` beside each
 // installed skill records the last hash this command wrote, so an outdated but
 // unmodified copy can be upgraded explicitly while a customization is only
 // ever replaced with an explicit `force`.
@@ -28,7 +29,13 @@ export type SkillReadiness = {
  source:string;
  targets:Array<{ manager:SkillManager; path:string; status:'current'|'outdated'|'customized'|'missing' }>;
 };
-export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string; roots?:string[] };
+export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillScope; upgrade?:boolean; force?:boolean; skillRoot?:string; roots?:string[];
+ /** Treat a copy with Junior frontmatter but no manifest as outdated instead
+  * of customized. `update` enables this; plain `init` keeps the old rule. */
+ recognizeUnrecorded?:boolean;
+ /** When false, an absent copy is left alone instead of created. `update`
+  * uses this for user-scope roots so it only refreshes existing copies. */
+ createMissing?:boolean };
 export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean; matrix?:boolean; command?:'init'|'update' };
 
 function sha256(text:string):string {
@@ -75,10 +82,46 @@ function readSkillSource(deps:SetupDeps):{ path:string; text:string } {
  return { path, text:readText(deps,path) };
 }
 
+/** A SKILL.md whose YAML frontmatter names `junior` was written by Junior even
+ * when its manifest was lost, so `update` may safely replace it after a backup. */
+function hasJuniorFrontmatter(text:string):boolean {
+ const frontmatter=text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+ return !!frontmatter && /^name:\s*['"]?junior['"]?\s*$/m.test(frontmatter[1]);
+}
+
+type SkillCopyStatus = SkillReadiness['targets'][number]['status'];
+type SkillClassification = { status:SkillCopyStatus; recorded:string|null };
+
+/** Classify one installed copy against the packaged source hash. An exact
+ * match is current; a copy that still matches its recorded manifest, or a
+ * Junior-authored copy whose manifest was lost, is outdated; anything else was
+ * customized. `inspectSkill` always recognises the unrecorded Junior copy so
+ * doctor and `update` agree. */
+function classifySkillCopy(deps:SetupDeps, sourceHash:string, root:string, path:string, opts:{ recognizeUnrecorded?:boolean } = {}):SkillClassification {
+ if (!exists(deps,path)) return { status:'missing', recorded:null };
+ const text=readText(deps,path);
+ const currentHash=sha256(text);
+ const recorded=readManifestHash(deps,join(root,SKILL_MANIFEST_FILENAME));
+ if (currentHash === sourceHash) return { status:'current', recorded };
+ if (recorded && currentHash === recorded) return { status:'outdated', recorded };
+ if (!recorded && opts.recognizeUnrecorded && hasJuniorFrontmatter(text)) return { status:'outdated', recorded };
+ return { status:'customized', recorded };
+}
+
+/** Copy the current SKILL.md beside itself before an unrecorded replacement so
+ * a user who edited a manifest-less copy can recover their text. */
+function backupSkillCopy(deps:SetupDeps, path:string):string {
+ const backup=`${path}.bak-${Date.now()}`;
+ const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
+ write(backup, readText(deps,path));
+ return backup;
+}
+
 /** Install the packaged skill for the selected managers. Missing copies are
  * created; identical copies are left alone; an unmodified but outdated copy is
  * refreshed by default (pass `upgrade:false` to leave it); a customized copy is
- * preserved unless `force`. */
+ * preserved unless `force`. With `recognizeUnrecorded`, a manifest-less Junior
+ * copy is refreshed too, after a backup beside it. */
 export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {}):SkillResult {
  const target=opts.target ?? 'both';
  const scope=opts.scope ?? 'project';
@@ -92,22 +135,25 @@ export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
   const dir=join(root,SKILL_NAME);
   const path=join(dir,SKILL_FILENAME);
   const manifestPath=join(root,SKILL_MANIFEST_FILENAME);
-  if (!exists(deps,path)) {
+  const classification=classifySkillCopy(deps,sourceHash,root,path,{ recognizeUnrecorded:opts.recognizeUnrecorded });
+  if (classification.status === 'missing') {
+   if (opts.createMissing === false) continue;
    mkdir(dir); write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
    actions.push({manager,path,status:'created',message:`installed the ${manager} skill at ${path}`});
    continue;
   }
-  const currentHash=sha256(readText(deps,path));
-  if (currentHash === sourceHash) {
-   if (readManifestHash(deps,manifestPath) !== sourceHash) writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
+  if (classification.status === 'current') {
+   if (classification.recorded !== sourceHash) writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
    actions.push({manager,path,status:'identical',message:`the ${manager} skill is already current`});
    continue;
   }
-  const recorded=readManifestHash(deps,manifestPath);
-  if (recorded && currentHash === recorded) {
+  if (classification.status === 'outdated') {
    if (opts.upgrade !== false) {
+    const backup=classification.recorded ? null : backupSkillCopy(deps,path);
     write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
-    actions.push({manager,path,status:'upgraded',message:`upgraded the ${manager} skill from its recorded version`});
+    actions.push({manager,path,status:'upgraded',message:backup
+     ? `upgraded the ${manager} skill from an unrecorded copy; previous content backed up to ${backup}`
+     : `upgraded the ${manager} skill from its recorded version`});
    } else {
     actions.push({manager,path,status:'outdated',message:`the ${manager} skill is outdated; re-run \`junior init\` to replace the unmodified installed copy`});
    }
@@ -124,15 +170,10 @@ export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
  return { target, scope, source:sourcePath, actions, ok };
 }
 
-/** Classify one installed skill copy against the packaged source hash: an
- * exact match is current, a copy that still matches its recorded manifest is
- * outdated, and anything else was customized. */
+/** Readiness classification shared with `update`, so doctor's "outdated"
+ * advice names exactly the copies `update` will refresh. */
 function skillStatusAt(deps:SetupDeps, sourceHash:string, root:string, path:string):SkillReadiness['targets'][number]['status'] {
- if (!exists(deps,path)) return 'missing';
- const currentHash=sha256(readText(deps,path));
- if (currentHash === sourceHash) return 'current';
- if (readManifestHash(deps,join(root,SKILL_MANIFEST_FILENAME)) === currentHash) return 'outdated';
- return 'customized';
+ return classifySkillCopy(deps,sourceHash,root,path,{ recognizeUnrecorded:true }).status;
 }
 
 /** Read-only skill readiness for the selected managers. Never writes. When

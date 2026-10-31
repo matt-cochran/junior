@@ -73,8 +73,8 @@ export type { McpCallSpec, McpSequenceOptions, McpSequenceResult } from "./tools
 export { buildToolEnv, companionKeyEnv, cpmModelEnv, cpmReviewStatus, crossmatrixUsesStore } from "./tools-env.ts";
 export type { CallRequest, CallOutcome } from "./tools-env.ts";
 
-export { callHop, inspectHop, recordManagerAcceptance } from "./tools-call.ts";
-export type { InspectSnapshot, InspectReport } from "./tools-call.ts";
+export { callHop, inspectHop, openHopSession, recordManagerAcceptance } from "./tools-call.ts";
+export type { HopSession, InspectSnapshot, InspectReport } from "./tools-call.ts";
 
 export { main } from "./tools-cli.ts";
 

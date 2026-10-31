@@ -42,6 +42,7 @@ export type CompactHandoff = {
  /** External-context egress preflight and its recorded authorization, or null
   * when the result predates the check. */
  externalContext: any | null;
+ unwired: { symbol: string; file: string }[];
  /** Scope classification when the contract named an owned list, else null. */
  scope: ScopeResult | null;
  /** Pi isolation flags applied for the run, or null when it did not probe. */
@@ -379,6 +380,8 @@ export function compactHandoff(result: any): CompactHandoff {
    outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
   } : null,
   externalContext: r.externalContext && typeof r.externalContext === 'object' ? r.externalContext : null,
+  // Advisory (#186): new exports with no production reference; review call sites before apply.
+  unwired: Array.isArray(r.unwired) ? r.unwired : [],
   piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {
    applied: Array.isArray(r.piIsolation.applied) ? r.piIsolation.applied : [],
    missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],

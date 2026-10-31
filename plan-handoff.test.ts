@@ -627,3 +627,72 @@ test('withPlanLease sends no lockless ready mark for completed work', async () =
   await withPlanLease(TASK, async () => 'ok', deps(callHop));
   assert.equal(calls.filter((call) => call.request.tool === 'plan.mark_status').length, 0);
 });
+
+// --- concurrent siblings on one plan ----------------------------------------
+
+/** A shared fake cpm backend with one monotonic HOP revision and per-deliverable
+ * locks, so two handoffs on disjoint deliverables of one plan interleave exactly
+ * as real siblings would (each cpm call advances the shared revision by one). */
+function cpmBackend(initialRevision = 5) {
+  let revision = initialRevision;
+  const locks = new Map();
+  const external = {
+    /** Simulate a non-Junior cpm mutation that reassigns one deliverable's lock. */
+    reassign(deliverableId, callerId) {
+      locks.set(deliverableId, callerId);
+      revision += 1;
+    },
+  };
+  const callHop = async (_tool, request) => {
+    revision += 1;
+    if (request.tool === 'plan.acquire_cohort') {
+      const ids = request.arguments.ids ?? [];
+      for (const id of ids) locks.set(id, request.arguments.caller_id);
+      return { ok: true, result: { deliverables: ids }, revision };
+    }
+    if (request.tool === 'plan.status') {
+      const locks_held = [...locks].map(([deliverable_id, caller_id]) => ({ deliverable_id, caller_id }));
+      return { ok: true, result: { locks_held }, revision };
+    }
+    // Like cpm, a terminal or hand-back mark releases the deliverable's lease.
+    if (request.tool === 'plan.mark_status' && ['failed', 'ready', 'complete'].includes(request.arguments.status?.status)) {
+      locks.delete(request.arguments.deliverable_id);
+    }
+    return { ok: true, result: {}, revision };
+  };
+  return { callHop, external };
+}
+
+test('interleaved handoffs on disjoint deliverables each lease and mark in progress without error', async () => {
+  const backend = cpmBackend();
+  const taskFor = (id, deliverable, callerId) => ({ id, plan: { id: 'plan_1', deliverable, callerId }, hopRevision: 5 });
+  let b;
+  const a = await withPlanLease(taskFor('a', 'd1', 'agent-a'), async () => {
+    b = await withPlanLease(taskFor('b', 'd2', 'agent-b'), async () => 'ok-b', deps(backend.callHop));
+    return 'ok-a';
+  }, deps(backend.callHop));
+  assert.deepEqual(
+    [a.plan.leased, a.plan.marked, a.plan.error, b.plan.leased, b.plan.marked, b.plan.error],
+    [true, 'in_progress', undefined, true, 'in_progress', undefined],
+  );
+});
+
+test('a failed handoff marks failed without a revision error after a sibling advanced the hop', async () => {
+  const backend = cpmBackend();
+  const taskFor = (id, deliverable, callerId) => ({ id, plan: { id: 'plan_1', deliverable, callerId }, hopRevision: 5 });
+  const a = await withPlanLease(taskFor('a', 'd1', 'agent-a'), async () => {
+    await withPlanLease(taskFor('b', 'd2', 'agent-b'), async () => 'ok-b', deps(backend.callHop));
+    return 'failed-a';
+  }, deps(backend.callHop, { summarize: () => ({ success: false, reason: 'checks failed' }) }));
+  assert.deepEqual([a.plan.marked, a.plan.error], ['failed', undefined]);
+});
+
+test('an external reassignment of the leased deliverable is still reported stale', async () => {
+  const backend = cpmBackend();
+  const out = await withPlanLease(
+    { id: 'a', plan: { id: 'plan_1', deliverable: 'd1', callerId: 'agent-a' }, hopRevision: 5 },
+    async () => { backend.external.reassign('d1', 'manager'); return 'ok'; },
+    deps(backend.callHop),
+  );
+  assert.match(out.plan.error ?? '', /HOP revision changed outside this handoff/);
+});
