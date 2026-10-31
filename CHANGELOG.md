@@ -15,6 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the newest run and its plan deliverable), pinnable in a `matrix` block of
   `delivery.config.json`. A bare deliverable id is accepted as a feature (#188).
 
+### Added
+
+- `junior matrix refresh`: sync, bootstrap, confirm high-confidence proposals,
+  autolink and a stale summary in one idempotent pass; `junior apply` links the
+  applied files to the run's feature (`--no-link` to skip) (#189).
+- `junior matrix features <path>`: reverse lookup of the jobs, journeys, outcomes
+  and deliverables a file or directory serves; a contract naming `feature` or
+  `plan.deliverable` gets that feature's code-map files as context, recorded as
+  `matrixContext` (`matrixContextMax` caps it) (#190).
+- Git-anchored staleness: links record the commit and blob they were confirmed
+  against; `matrix stale` reports changed, moved, deleted, entity-changed and
+  unanchored links from git metadata alone, and `junior compact` shows the count
+  (#191).
+- An advisory `unwired` list on the result and compact receipt: newly exported
+  symbols with no production reference (#186).
+
+### Fixed
+
+- Concurrent plan-leased handoffs on one plan no longer fail with "HOP revision
+  changed outside this handoff"; a dead same-host holder's `hop.json.lock` is
+  reaped (#184).
+- `junior update` refreshes existing user-scope Junior skills (a manifest-less
+  copy is backed up first), matching `doctor` (#185).
+- `update` authenticates GitHub API calls (`GH_TOKEN`, `GITHUB_TOKEN`, `gh auth
+  token`) and reports a rate-limited tool as skipped; `maxToolOutputBytes` is
+  documented as a cumulative per-run budget with a validator warning;
+  `report-issue` lists junior once (#187).
+
 ## [0.13.2] - 2026-10-30
 
 ### Fixed
