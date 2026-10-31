@@ -446,7 +446,9 @@ for a criterion that was only judged (tier `judged`).
 ## Crossmatrix state graph
 
 Crossmatrix (0.3.0+) ties the other tools together in a committed
-`.crossmatrix/` store. Use it when work spans features, jobs, journeys, tests,
+`.crossmatrix/` store. Never read `.crossmatrix/` files directly; use
+`junior matrix context|files|features|stale|refresh` or the Crossmatrix MCP
+(`junior tools call <hop> crossmatrix`) so the store stays the only interface. Use it when work spans features, jobs, journeys, tests,
 risks, ADRs and code, so the next session reads the relationships instead of
 rediscovering them. Every write is an observation (a scale token plus evidence),
 never a number you invent.

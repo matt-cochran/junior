@@ -214,3 +214,39 @@ test('unknown MCP config is the deduplicated union of every harness', () => {
     { path: join('/home/u', '.codex', 'config.toml'), key: 'mcp_servers' },
   ]);
 });
+
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { mergeStoreDenyRules, installStoreDenyRules } from './harness.ts';
+
+test('mergeStoreDenyRules adds every Claude deny rule once', () => {
+ const settings = {};
+ mergeStoreDenyRules(settings);
+ const deny = (mergeStoreDenyRules(settings).settings.permissions as any).deny;
+ assert.equal(deny.length, 6);
+});
+
+test('installStoreDenyRules writes the Claude deny rules when a store exists', () => {
+ const cwd = join(tmpdir(), `junior-store-${process.pid}-${Date.now()}`);
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ installStoreDenyRules({ projectDir: cwd });
+ const settings = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.json'), 'utf8'));
+ assert.equal(settings.permissions.deny.includes('Read(./.crossmatrix/**)'), true);
+});
+
+test('installStoreDenyRules does not duplicate rules on a second run', () => {
+ const cwd = join(tmpdir(), `junior-store-${process.pid}-${Date.now()}-twice`);
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ writeFileSync(join(cwd, '.claude-settings-seed'), '');
+ mkdirSync(join(cwd, '.claude'), { recursive: true });
+ writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Read(./.crossmatrix/**)'] } }));
+ installStoreDenyRules({ projectDir: cwd });
+ const settings = JSON.parse(readFileSync(join(cwd, '.claude', 'settings.json'), 'utf8'));
+ assert.equal(settings.permissions.deny.filter((rule: string) => rule === 'Read(./.crossmatrix/**)').length, 1);
+});
+
+test('installStoreDenyRules leaves settings untouched when no store exists', () => {
+ const cwd = join(tmpdir(), `junior-store-${process.pid}-${Date.now()}-none`);
+ const result = installStoreDenyRules({ projectDir: cwd });
+ assert.equal(result.changed, false);
+});
