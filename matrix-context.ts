@@ -37,7 +37,7 @@ function message(err: unknown): string {
 }
 
 /** The contract feature, preferring an explicit `feature` over the plan's deliverable. */
-function contractFeature(t: any): string | undefined {
+export function contractFeature(t: any): string | undefined {
   if (typeof t?.feature === 'string' && t.feature.trim()) return t.feature.trim();
   if (typeof t?.plan?.deliverable === 'string' && t.plan.deliverable.trim()) return t.plan.deliverable.trim();
   return undefined;

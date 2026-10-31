@@ -19,7 +19,7 @@ import type { ModelApprovalRequest, ModelPolicyRecord, ModelRoute } from './work
 import { CLASSIFIER_TIMEOUT_MS, assessPreflight, createJevClassifier, readProjectJevProvider, raceSignal, raceAbort, affinityKeyFor } from './worker-gates.ts';
 import type { GateClassifier, GateDeps, JevGateRecord } from './worker-gates.ts';
 import { buildExternalContextPreflight, externalContextRequired, resolveCommandPolicy, resolveContext } from './worker-contract.ts';
-import { matrixContextFor } from './matrix-context.ts';
+import { contractFeature, matrixContextFor, type MatrixContext } from './matrix-context.ts';
 import type { ReceiptModelSource } from './worker-contract.ts';
 import { analysisReportPath, decideWorkflow, isReportWorkflow, taskWorkflow, WORKFLOW_TEMPLATE_IDS } from './worker-workflows.ts';
 import { estimateCost, mockReceipt } from './worker-receipt.ts';
@@ -415,7 +415,8 @@ export async function preflight(state:RunState):Promise<RunState|any> {
  // Add the contract feature's code-map files before resolving context. Explicit
  // contract entries stay first; matrix entries are deduplicated by path and are
  // advisory, so a missing store or query failure never blocks the run.
- const matrixContext = await matrixContextFor(t);
+ // Only a contract naming a feature pays for the lookup (and its await).
+ const matrixContext = contractFeature(t) === undefined ? { entries: [] } as MatrixContext : await matrixContextFor(t);
  if (matrixContext.entries.length > 0) {
   const explicit = Array.isArray(t.context) ? t.context : [];
   const seen = new Set(explicit.map((entry:any)=>entry?.path).filter((path:any)=>typeof path === 'string'));
