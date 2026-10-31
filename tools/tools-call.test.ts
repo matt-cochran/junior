@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ROOT, TOOLS, FAKE, NODE, tmpdir, toolEntry, writeConfig, writeJson, runCli, cliJson, initHop, defaultHop, nestedProjectHop, legacyHop, STORED_MODEL, crossmatrixHop, storeHop, commandRequest, readWrites, scientificHop, readScientificCalls, crossmatrixManifest, buildToolEnv, initHopManifest, crossmatrixUsesStore, callHop } from "./tools-helpers.test.ts";
+import { openHopSession } from "./tools.ts";
 
 // --- call ergonomics ----------------------------------------------------------
 //
@@ -540,5 +541,101 @@ test("an explicit scientific-process session.open is forwarded exactly once", as
   const hop = scientificHop(dir, log);
   await callHop(hop, "scientific-process", { tool: "session.open", arguments: { session_id: "s1" } });
   assert.equal(readScientificCalls(log).length, 1);
+});
+
+// --- per-command crossmatrix session ------------------------------------------
+//
+// `openHopSession` spawns one Crossmatrix server and reuses its stdio for every
+// call in a single `junior matrix` command. The fake below logs its pid once at
+// startup (so the test counts spawns) and can exit mid-session (so the test can
+// exercise the dead-session failure).
+
+const SESSION_FAKE = String.raw`
+import fs from "node:fs";
+const pidLog = process.env.FAKE_PID_LOG;
+if (pidLog) { try { fs.appendFileSync(pidLog, String(process.pid) + "\n"); } catch {} }
+const exitOn = process.env.FAKE_EXIT_ON ? Number(process.env.FAKE_EXIT_ON) : Infinity;
+let calls = 0;
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf("\n")) !== -1) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.method === "initialize") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "session-fake", version: "0.0.1" } } });
+      continue;
+    }
+    if (msg.method === "notifications/initialized") continue;
+    if (msg.method === "tools/call") {
+      calls += 1;
+      if (calls >= exitOn) { process.exit(1); return; }
+      send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify({ ok: true, name: msg.params?.name }) }], structuredContent: { ok: true, name: msg.params?.name }, isError: false } });
+      continue;
+    }
+    if (msg.id !== undefined) send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
+  }
+});
+function send(obj) { process.stdout.write(JSON.stringify(obj) + "\n"); }
+`;
+
+function sessionHop(dir, env = {}) {
+  const script = path.join(dir, "session-fake.mjs");
+  fs.writeFileSync(script, SESSION_FAKE);
+  return initHop(dir, {
+    tools: {
+      fmeca: toolEntry("echo"),
+      cpm: toolEntry("echo"),
+      crossmatrix: toolEntry("crossmatrix", { command: NODE, args: [script], env }),
+    },
+  });
+}
+
+function pids(log) {
+  return fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map(Number);
+}
+
+test("openHopSession reuses one server process across successive calls", async () => {
+  const dir = tmpdir();
+  const log = path.join(dir, "pids.log");
+  const hop = sessionHop(dir, { FAKE_PID_LOG: log });
+  const session = await openHopSession(hop, "crossmatrix");
+  await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "validate" } } } });
+  await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "describe" } } } });
+  await session.close();
+  assert.equal(new Set(pids(log)).size, 1);
+});
+
+test("openHopSession returns the same result as a per-call callHop", async () => {
+  const dir = tmpdir();
+  const hop = sessionHop(dir);
+  const session = await openHopSession(hop, "crossmatrix");
+  const via = await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "validate" } } } });
+  await session.close();
+  const direct = await callHop(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "validate" } } } });
+  assert.deepEqual(via.result, direct.result);
+});
+
+test("openHopSession fails the next call after a mid-session server exit like a per-call callHop", async () => {
+  const dir = tmpdir();
+  const hop = sessionHop(dir, { FAKE_EXIT_ON: "2" });
+  const session = await openHopSession(hop, "crossmatrix");
+  await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "validate" } } } });
+  const outcome = await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "describe" } } } });
+  assert.equal(outcome.error?.code, "SPAWN_ERROR");
+});
+
+test("openHopSession close does not throw after a mid-session server exit", async () => {
+  const dir = tmpdir();
+  const hop = sessionHop(dir, { FAKE_EXIT_ON: "2" });
+  const session = await openHopSession(hop, "crossmatrix");
+  await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "validate" } } } });
+  await session.call(hop, "crossmatrix", { tool: "crossmatrix.query", arguments: { request: { query: { kind: "describe" } } } });
+  await session.close();
 });
 

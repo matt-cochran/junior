@@ -23,6 +23,42 @@ export const APPROVED_HOSTS: ReadonlySet<string> = new Set([
   "release-assets.githubusercontent.com",
 ]);
 
+/** `gh auth token` is only a fallback, so it never delays an install for long. */
+const GH_AUTH_TOKEN_TIMEOUT_MS = 5_000;
+
+/**
+ * Resolve a GitHub token for API requests, in order: the explicit dependency,
+ * `GH_TOKEN`, `GITHUB_TOKEN`, then `gh auth token`. The fallback runs as argv
+ * with no shell and its failure is ignored, so public installs still work when
+ * `gh` is missing or logged out. The token is only ever placed in the request
+ * header; it is never logged or written to state.
+ */
+function githubToken(deps: InstallerDeps): string | undefined {
+  const env = deps.env ?? process.env;
+  const configured = deps.githubToken || env.GH_TOKEN || env.GITHUB_TOKEN;
+  if (configured) return configured;
+  try {
+    const exec = deps.exec ?? defaultExec;
+    const result = exec("gh", ["auth", "token"], { timeout: GH_AUTH_TOKEN_TIMEOUT_MS, env });
+    const token = result.status === 0 ? String(result.stdout ?? "").trim() : "";
+    if (token) return token;
+  } catch {
+    /* the fallback is optional: no token is a valid public-API request */
+  }
+  return undefined;
+}
+
+/** A 403 is a rate limit when GitHub says so in the header or the body. */
+async function isRateLimited(res: FetchResponseLike): Promise<boolean> {
+  if (res.status !== 403) return false;
+  if (res.headers.get("x-ratelimit-remaining") === "0") return true;
+  try {
+    return /rate limit/i.test(await res.text());
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Bounded HTTPS fetch with approved-host redirect validation
 // ---------------------------------------------------------------------------
@@ -132,13 +168,13 @@ export async function boundedFetch(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let res: FetchResponseLike;
+      const token = new URL(current).host === "api.github.com" ? githubToken(deps) : undefined;
       try {
         res = await fetchImpl(current, {
           headers: {
             Accept: current.includes("/releases/assets/") ? "application/octet-stream" : opts.accept,
             "User-Agent": "junior-prebuilt-installer",
-            ...(new URL(current).host === "api.github.com" && (deps.githubToken || (deps.env ?? process.env).GH_TOKEN || (deps.env ?? process.env).GITHUB_TOKEN)
-              ? {Authorization: `Bearer ${deps.githubToken || (deps.env ?? process.env).GH_TOKEN || (deps.env ?? process.env).GITHUB_TOKEN}`} : {}),
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           redirect: "manual",
           signal: controller.signal,
@@ -153,6 +189,9 @@ export async function boundedFetch(
         if (!location) throw new InstallerError("BAD_REDIRECT", `redirect without Location from ${current}`);
         current = new URL(location, current).toString();
         continue;
+      }
+      if (await isRateLimited(res)) {
+        throw new InstallerError("GITHUB_RATE_LIMITED", "skipped: GitHub rate limited, retry later");
       }
       if (!res.ok) {
         throw new InstallerError("HTTP_ERROR", `GET ${current} failed with HTTP ${res.status}`);

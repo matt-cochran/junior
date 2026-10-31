@@ -49,6 +49,12 @@ a skill: map each named method to `junior tools call <tool> <method>`, which
 spawns the managed binary and returns the bare result. No MCP registration is
 required for the manager loop.
 
+The committed `.crossmatrix/` store is read only through the CLI or MCP. Never
+read its files directly; use `junior matrix context|files|features|stale|refresh`
+or the Crossmatrix MCP through `junior tools call <hop> crossmatrix`. The Pi
+guard blocks worker tool calls that touch the store, and `junior setup --yes`
+adds Claude Code deny rules while `junior doctor` warns when they are missing.
+
 `scientific-process` keeps its session in process memory and the wrapper spawns
 a fresh server per call, so a `scientific-process` call that is not itself
 `session.open` opens the session automatically in the same process before

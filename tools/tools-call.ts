@@ -25,11 +25,12 @@ import type {
   CallKind,
   HopManifest,
   SnapshotRef,
+  ToolConfig,
   ToolName,
   UnresolvedEntry,
 } from "./tools-manifest.ts";
-import { mcpCallSequence } from "./tools-mcp.ts";
-import type { McpCallSpec } from "./tools-mcp.ts";
+import { mcpCallSequence, openMcpSession } from "./tools-mcp.ts";
+import type { McpCallSpec, McpSequenceResult } from "./tools-mcp.ts";
 import {
   assertCpmProjectDatabase,
   buildToolEnv,
@@ -212,19 +213,23 @@ function prepareCalls(
 }
 
 /**
- * Execute exactly one MCP tool call for a manifest, persist the outcome, and
- * return a structured envelope. Read results are exported as immutable
- * snapshots; unsupported/deferred notes become unresolved entries. This never
- * touches `managerAcceptance`.
+ * Run one tool call's per-call bookkeeping — manifest lock, revision bump,
+ * snapshots, evidence, unresolved entries and error mapping — around a supplied
+ * MCP executor. `callHop` supplies a fresh-server executor; `openHopSession`
+ * supplies one that reuses a single long-lived server.
  */
-export async function callHop(
+async function processCall(
   hopPath: string,
   tool: ToolName,
   request: CallRequest,
+  run: (ctx: {
+    hop: HopManifest;
+    cfg: ToolConfig;
+    env: Record<string, string>;
+    timeoutMs: number;
+    toolName: string;
+  }) => Promise<McpSequenceResult>,
 ): Promise<CallOutcome> {
-  if (!TOOL_NAMES.includes(tool)) {
-    throw new HopError("UNKNOWN_TOOL", `unknown tool '${String(tool)}'`);
-  }
   const toolName = typeof request.tool === "string" ? request.tool : "";
   if (!toolName) throw new HopError("BAD_REQUEST", "request.tool is required");
 
@@ -254,18 +259,7 @@ export async function callHop(
 
     let outcome: CallOutcome;
     try {
-      const calls = prepareCalls(
-        hopPath,
-        hop,
-        tool,
-        toolName,
-        request.arguments,
-        request.prependModelOpen !== false,
-      );
-      const mcp = await mcpCallSequence(
-        { command: cfg.command, args: cfg.args, env, timeoutMs },
-        calls,
-      );
+      const mcp = await run({ hop, cfg, env, timeoutMs, toolName });
       if (tool === "cpm" && env.CPM_PLANNER_DB) {
         assertCpmProjectDatabase(mcp.stderr, env.CPM_PLANNER_DB);
       }
@@ -358,6 +352,179 @@ export async function callHop(
     saveHop(hopPath, hop);
     return outcome;
   });
+}
+
+/**
+ * Execute exactly one MCP tool call for a manifest, persist the outcome, and
+ * return a structured envelope. Read results are exported as immutable
+ * snapshots; unsupported/deferred notes become unresolved entries. This never
+ * touches `managerAcceptance`.
+ */
+export function callHop(
+  hopPath: string,
+  tool: ToolName,
+  request: CallRequest,
+): Promise<CallOutcome> {
+  if (!TOOL_NAMES.includes(tool)) {
+    throw new HopError("UNKNOWN_TOOL", `unknown tool '${String(tool)}'`);
+  }
+  return processCall(hopPath, tool, request, ({ hop, cfg, env, timeoutMs, toolName }) => {
+    const calls = prepareCalls(
+      hopPath,
+      hop,
+      tool,
+      toolName,
+      request.arguments,
+      request.prependModelOpen !== false,
+    );
+    return mcpCallSequence({ command: cfg.command, args: cfg.args, env, timeoutMs }, calls);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// per-command session
+// ---------------------------------------------------------------------------
+
+/** One long-lived tool server plus the per-command open/prelude state. */
+export interface HopSession {
+  call(hopPath: string, tool: ToolName, request: CallRequest): Promise<CallOutcome>;
+  close(): Promise<void>;
+}
+
+interface CrossmatrixSessionState {
+  openedModels: Set<string>;
+  replayedImport: boolean;
+}
+
+/** The model id a crossmatrix command/query names, or null when it names none. */
+function referencedModelId(toolName: string, args: unknown): string | null {
+  if (toolName !== "crossmatrix.command" && toolName !== "crossmatrix.query") return null;
+  if (!isRecord(args)) return null;
+  const request = args.request;
+  if (!isRecord(request)) return null;
+  const modelId = request.modelId;
+  return typeof modelId === "string" && modelId.length > 0 ? modelId : null;
+}
+
+/** True when the call is itself a store-backed `model.open` command. */
+function isModelOpenCommand(toolName: string, args: unknown): boolean {
+  if (toolName !== "crossmatrix.command") return false;
+  if (!isRecord(args)) return false;
+  const request = args.request;
+  return isRecord(request) && isRecord(request.op) && request.op.kind === "model.open";
+}
+
+/**
+ * The tools/call sequence for one Crossmatrix request inside a session. Store
+ * mode opens each model once per session; legacy in-memory mode replays the
+ * stored import once instead of on every call.
+ */
+function crossmatrixSessionCalls(
+  hopPath: string,
+  hop: HopManifest,
+  toolName: string,
+  args: unknown,
+  prependModelOpen: boolean,
+  actual: McpCallSpec,
+  state: CrossmatrixSessionState,
+): McpCallSpec[] {
+  if (!crossmatrixUsesStore(hop)) {
+    const isImport = toolName === "crossmatrix.command" && extractCrossmatrixModel(args) !== null;
+    if (isImport) {
+      // The import itself puts the model in the persistent server's memory.
+      state.replayedImport = true;
+      return [actual];
+    }
+    const native = hop.native.crossmatrix;
+    const modelPath = nativeAbsPath(hopPath, "crossmatrix", hop);
+    if (!state.replayedImport && native.modelSha256 && fs.existsSync(modelPath)) {
+      state.replayedImport = true;
+      let model: unknown;
+      try {
+        model = JSON.parse(fs.readFileSync(modelPath, "utf8"));
+      } catch (err) {
+        throw new HopError("IO_ERROR", `cannot reload stored crossmatrix model ${modelPath}`, err);
+      }
+      const replay: McpCallSpec = {
+        name: "crossmatrix.command",
+        arguments: {
+          request: {
+            requestId: `replay-${native.modelId ?? "model"}-${native.modelSha256.slice(0, 12)}`,
+            modelId: native.modelId ?? undefined,
+            model,
+          },
+        },
+      };
+      return [replay, actual];
+    }
+    return [actual];
+  }
+
+  if (prependModelOpen) {
+    const open = storeOpenCall(toolName, args);
+    const modelId = referencedModelId(toolName, args);
+    if (open !== null && modelId !== null && !state.openedModels.has(modelId)) {
+      state.openedModels.add(modelId);
+      return [open, actual];
+    }
+  }
+  // A model.open command itself opens the model; record it so later calls
+  // skip the prelude.
+  const modelId = referencedModelId(toolName, args);
+  if (modelId !== null && isModelOpenCommand(toolName, args)) {
+    state.openedModels.add(modelId);
+  }
+  return [actual];
+}
+
+/**
+ * Open one Crossmatrix server process for a whole `junior matrix` command and
+ * reuse it for every call in that command instead of respawning per call. The
+ * manifest lock, revision bump, snapshot and error mapping stay identical to
+ * `callHop` (which `call` delegates to for tools other than the sessioned one).
+ */
+export async function openHopSession(
+  hopPath: string,
+  tool: ToolName,
+): Promise<HopSession> {
+  if (!TOOL_NAMES.includes(tool)) {
+    throw new HopError("UNKNOWN_TOOL", `unknown tool '${String(tool)}'`);
+  }
+  const hop = loadHop(hopPath);
+  const cfg = hop.tools[tool];
+  if (!cfg) {
+    throw new HopError(
+      "MALFORMED_MANIFEST",
+      `hop manifest has no configuration for '${tool}'; run \`junior init --install\` to refresh it`,
+    );
+  }
+  const env = { ...companionKeyEnv(cfg.env), ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
+  if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
+  const mcp = await openMcpSession({ command: cfg.command, args: cfg.args, env, timeoutMs: hop.timeoutMs });
+
+  const state: CrossmatrixSessionState = { openedModels: new Set<string>(), replayedImport: false };
+
+  return {
+    call(h, t, request) {
+      if (t !== tool) return callHop(h, t, request);
+      return processCall(hopPath, tool, request, ({ hop: manifest, toolName, timeoutMs }) => {
+        const actual: McpCallSpec = { name: toolName, arguments: request.arguments ?? {} };
+        const calls = crossmatrixSessionCalls(
+          hopPath,
+          manifest,
+          toolName,
+          request.arguments,
+          request.prependModelOpen !== false,
+          actual,
+          state,
+        );
+        return mcp.call(calls, timeoutMs);
+      });
+    },
+    close() {
+      return mcp.close();
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

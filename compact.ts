@@ -20,6 +20,9 @@ import { resolveHop } from './hop-context.ts';
 import { planStatusRows, spHypotheses } from './companion-shapes.ts';
 import { listOpen, type Note } from './notes.ts';
 import { openPullRequests, prLines, type PrSection } from './compact-prs.ts';
+import { codemapStaleLinks } from './codemap.ts';
+import { resolveMatrixModel } from './matrix-defaults.ts';
+import { gitStaleness as defaultGitStaleness, type GitStalenessResult } from './matrix-staleness.ts';
 
 /** Availability of one compact-context section. */
 export type CompactSectionStatus = 'ok' | 'none' | 'unavailable';
@@ -42,6 +45,10 @@ export type CompactDeps = {
   listNotes?: () => { notes: Note[]; proposals: Note[] };
   /** Open pull requests; defaults to `openPullRequests({ cwd })`. */
   openPrs?: () => Promise<PrSection>;
+  /** Read stored feature-to-code links; defaults to `codemapStaleLinks`. */
+  codemapStaleLinks?: typeof codemapStaleLinks;
+  /** Classify links against git; defaults to `gitStaleness`. */
+  gitStaleness?: typeof defaultGitStaleness;
 };
 
 /** Rendered block plus per-section availability and truncation state. */
@@ -63,6 +70,7 @@ const HYPOTHESES_HEADING = 'Open hypotheses';
 const RUNS_HEADING = 'In-flight runs';
 const PRS_HEADING = 'Open PRs';
 const PROPOSALS_HEADING = 'Capture proposals';
+const MATRIX_HEADING = 'Matrix';
 const PENDING_DECISION_FILES: Record<string, string> = {
   needs_answers: 'clarify.md',
   needs_choice: 'brief.md',
@@ -73,7 +81,7 @@ const ANSWERED_DECISION_FILES = ['clarified-answers.json', 'clarified-contract.j
 type JsonObject = Record<string, any>;
 
 type Block = {
-  key: 'plan' | 'decisions' | 'notes' | 'risk' | 'hypotheses' | 'runs' | 'prs' | 'proposals';
+  key: 'plan' | 'decisions' | 'notes' | 'risk' | 'hypotheses' | 'runs' | 'prs' | 'proposals' | 'matrix';
   heading: string;
   status: CompactSectionStatus;
   lines: string[];
@@ -593,6 +601,41 @@ async function prsBlock(outcome: Promise<{ section?: PrSection; error?: unknown 
   }
 }
 
+async function matrixBlock(
+  cwd: string,
+  hopPath: string,
+  hopExists: boolean,
+  callHop: typeof defaultCallHop,
+  deps: CompactDeps,
+): Promise<Block> {
+  const block: Block = { key: 'matrix', heading: MATRIX_HEADING, status: 'none', lines: [], removable: true };
+  if (!existsSync(join(cwd, '.crossmatrix')) || !hopExists) return block;
+  try {
+    const modelId = resolveMatrixModel(cwd).id;
+    const links = await (deps.codemapStaleLinks ?? codemapStaleLinks)({
+      hopPath,
+      modelId,
+      dir: cwd,
+      deps: { callHop },
+    });
+    const stale: GitStalenessResult = await (deps.gitStaleness ?? defaultGitStaleness)({ dir: cwd, links });
+    const changed = stale.changed.length;
+    const moved = stale.moved.length;
+    const deleted = stale.deleted.length;
+    const entity = stale.entityChanged.length;
+    const total = changed + moved + deleted + entity;
+    return {
+      ...block,
+      status: 'ok',
+      lines: [
+        `matrix: ${total} stale links (changed ${changed}, moved ${moved}, deleted ${deleted}, entity ${entity}) — run junior matrix refresh`,
+      ],
+    };
+  } catch {
+    return block;
+  }
+}
+
 function runsBlock(
   cwd: string,
   readDir: (p: string) => string[],
@@ -623,7 +666,7 @@ function render(header: string[], blocks: Block[], dropped: Record<string, numbe
 }
 
 function nextDroppable(blocks: Block[]): Block | null {
-  const order: Block['key'][] = ['proposals', 'prs', 'runs', 'hypotheses', 'risk', 'notes', 'decisions'];
+  const order: Block['key'][] = ['proposals', 'prs', 'runs', 'hypotheses', 'risk', 'notes', 'decisions', 'matrix'];
   for (const key of order) {
     const block = blocks.find((candidate) => candidate.key === key);
     if (block && block.removable && block.lines.length > 0) return block;
@@ -715,6 +758,7 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     notesAndProposals[0],
     await riskBlock(hopPath, hopExists, callHop),
     await hypothesesBlock(hopPath, hopExists, callHop, readDir, readFile, exists),
+    await matrixBlock(deps.cwd, hopPath, hopExists, callHop, deps),
     runsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
     await prsBlock(prsOutcome),
     notesAndProposals[1],
@@ -729,6 +773,7 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     runs: 0,
     prs: 0,
     proposals: 0,
+    matrix: 0,
   };
   let markdown = render(header, blocks, dropped);
   while (markdown.length > maxChars) {

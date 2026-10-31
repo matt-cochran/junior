@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import guardBash, { guardBashInput, guardPathAccess, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
+import guardBash, { guardBashInput, guardPathAccess, CROSSMATRIX_STORE_REASON, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
 
 const env = (value?: string) => (value === undefined ? {} : { JUNIOR_PI_BASH_TIMEOUT_S: value });
 
@@ -147,4 +147,31 @@ test('a set but malformed JUNIOR_COMMAND_POLICY refuses the bash command', () =>
  const input = { command: 'git status' };
  guardBashInput(input, { JUNIOR_COMMAND_POLICY: '{not json' });
  assert.match(input.command, /E_COMMAND_PLACEMENT/);
+});
+
+const CROSSMATRIX_REASON = 'Junior: the .crossmatrix/ store is read only through `junior matrix context|files|features|stale` (or the crossmatrix MCP); do not read its files.';
+
+test('guardPathAccess blocks reading a .crossmatrix file through the read tool', () => {
+ assert.deepEqual(guardPathAccess('read', { path: '.crossmatrix/state/x.json' }, {}, '/exec'), { block:true, reason:CROSSMATRIX_REASON });
+});
+
+test('guardPathAccess blocks a bash command that cats a .crossmatrix file', () => {
+ assert.deepEqual(guardPathAccess('bash', { command: 'cat .crossmatrix/state/x.json' }, {}, '/exec'), { block:true, reason:CROSSMATRIX_REASON });
+});
+
+test('guardPathAccess blocks a recursive grep whose path ends at .crossmatrix', () => {
+ assert.deepEqual(guardPathAccess('bash', { command: 'grep -r foo .crossmatrix' }, {}, '/exec'), { block:true, reason:CROSSMATRIX_REASON });
+});
+
+test('guardPathAccess allows the junior matrix CLI to read the store', () => {
+ assert.equal(guardPathAccess('bash', { command: 'junior matrix stale' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess allows reading a source file outside .crossmatrix', () => {
+ assert.equal(guardPathAccess('read', { path: 'src/a.ts' }, {}, '/exec'), null);
+});
+
+test('a sanctioned matrix command chained with a store read is blocked', () => {
+  const blocked = guardPathAccess('bash', { command: 'junior matrix stale; cat .crossmatrix/state/x.json' }, {}, '/work');
+  assert.equal(blocked?.reason, CROSSMATRIX_STORE_REASON);
 });

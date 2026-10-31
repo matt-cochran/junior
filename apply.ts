@@ -15,6 +15,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync 
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { featureFromResult } from './matrix-defaults.ts';
 
 export type ApplyHandoffResult = {
  applied: boolean;
@@ -71,6 +72,38 @@ function conflictsFrom(output: string): string[] {
 const fail = (dryRun: boolean, artifactDir: string, files: string[], error: string, conflicts?: string[]): ApplyHandoffResult =>
  ({ applied: false, dryRun, files, artifactDir, ...(conflicts && conflicts.length ? { conflicts } : {}), error });
 
+/** Entry point of the sibling CLI; the checkout runs TypeScript directly while
+ * the published package runs the emitted `dist/junior.js`. */
+function cliEntry(): string {
+ const ts = join(import.meta.dirname, 'junior.ts');
+ return existsSync(ts) ? ts : join(import.meta.dirname, 'junior.js');
+}
+
+/** Link the applied result's changed files to its plan feature. The link is a
+ * convenience after a successful apply, so every failure is reported as a
+ * warning rather than changing the apply outcome. */
+function linkApplied(resultPath: string, cwd: string): { requestIds?: string[]; error?: string } | undefined {
+ const feature = featureFromResult(resultPath);
+ if (!feature) return undefined;
+ if (!existsSync(join(cwd, '.crossmatrix'))) return undefined;
+ const child = spawnSync(
+  process.execPath,
+  [cliEntry(), 'matrix', 'link', '--result', resultPath, '--feature', feature, '--dir', cwd],
+  { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+ );
+ const stdout = (child.stdout ?? '').trim();
+ let parsed: { requestIds?: string[]; error?: string } | undefined;
+ try { parsed = stdout ? JSON.parse(stdout) : undefined; } catch { /* non-JSON diagnostic */ }
+ if (child.error) return { ...(parsed ?? {}), error: child.error.message };
+ if (child.status !== 0) {
+  return {
+   ...(parsed ?? {}),
+   error: (child.stderr ?? '').trim() || parsed?.error || `matrix link exited ${child.status ?? 'unknown'}`,
+  };
+ }
+ return parsed ?? {};
+}
+
 export type WorktreePatch = { patch?: string; files?: string[]; sha256?: string; error?: string };
 
 /** Build the full change set of a worktree (tracked edits plus untracked files
@@ -119,7 +152,7 @@ function resolveSourceCwd(result: any, fallback: string): { dir?: string; error?
  * ancestor of that source HEAD. `dryRun` only checks the patch. A failed
  * three-way merge restores every touched file and reports the conflicts;
  * nothing is committed or pushed. */
-export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boolean; force?: boolean }): ApplyHandoffResult {
+export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boolean; force?: boolean; noLink?: boolean }): ApplyHandoffResult {
  const callerCwd = resolve(opts.cwd);
  const dryRun = opts.dryRun === true;
  const resolved = resolveArtifactDir(target, callerCwd);
@@ -187,5 +220,6 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
  try {
   writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString(), patchSha256: sha256, target: cwd, sourceCwd: cwd }, null, 2) + '\n');
  } catch { /* the applied record is best effort */ }
- return { applied: true, dryRun: false, files, artifactDir, target: cwd };
+ const matrixLink = opts.noLink === true ? undefined : linkApplied(join(artifactDir, 'result.json'), cwd);
+ return { applied: true, dryRun: false, files, artifactDir, target: cwd, ...(matrixLink === undefined ? {} : { matrixLink }) };
 }

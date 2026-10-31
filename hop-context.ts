@@ -20,7 +20,7 @@ function canonical(path:string):string {
  try { return realpathSync(path); } catch { return resolve(path); }
 }
 
-function projectRoot(start:string):string {
+export function projectRoot(start:string):string {
  const origin=resolve(start);
  let dir=origin;
  while (true) {

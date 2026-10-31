@@ -26,7 +26,7 @@ export const TASK_FIELDS = [
  'plan',
  'hopFrom','hopRevision','hopContext','piContext','clarifiedFrom','scope',
  'externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext',
- 'readScope','budget','scopeExpansion',
+ 'readScope','budget','scopeExpansion','feature','matrixContextMax',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
  'commandPolicy',
 ] as const;
@@ -265,6 +265,10 @@ export const BUDGET_FIELDS = [
 ] as const;
 
 export const SCOPE_EXPANSION_FIELDS = ['paths','reason'] as const;
+
+/** `maxToolOutputBytes` is cumulative over a run, so a per-call-sized value
+ * would stop normal runs early. */
+export const MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES = 200000;
 
 /** One relative, workspace-contained path or glob used by a read scope or an
  * explicit scope expansion. Absolute paths and dot-dot escapes are rejected. */
@@ -576,6 +580,8 @@ export function validate(t: any) {
   if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
  }
  if (t.modelProfile !== undefined && (typeof t.modelProfile !== 'string' || !t.modelProfile.trim())) throw Error('Invalid modelProfile (expected a roster profile id)');
+ if (t.feature !== undefined && (typeof t.feature !== 'string' || !t.feature.trim())) throw Error('Invalid feature (expected a non-empty string)');
+ if (t.matrixContextMax !== undefined && (typeof t.matrixContextMax !== 'number' || !Number.isInteger(t.matrixContextMax) || t.matrixContextMax < 1)) throw Error('Invalid matrixContextMax (expected a positive integer)');
  if (t.plan !== undefined) {
   validatePlan(t.plan);
   if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');
@@ -630,6 +636,10 @@ export function contractWarnings(t:any):string[] {
  if (distinctPaths.size > SPLIT_WARNING_CONTEXT_PATHS) warnings.push(`Contract names ${distinctPaths.size} distinct context paths; consider splitting it into chained contracts so each stays focused.`);
  const acceptance = Array.isArray(t?.acceptance) ? t.acceptance : [];
  if (acceptance.length > SPLIT_WARNING_ACCEPTANCE) warnings.push(`Contract has ${acceptance.length} acceptance criteria; consider splitting it into chained contracts so each stays focused.`);
+ const maxToolOutputBytes = t?.budget?.maxToolOutputBytes;
+ if (typeof maxToolOutputBytes === 'number' && maxToolOutputBytes < MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES) {
+  warnings.push(`budget.maxToolOutputBytes is ${maxToolOutputBytes}; it is a cumulative per-run cap, not a per-call cap. Consider at least ${MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES}.`);
+ }
  return warnings;
 }
 
