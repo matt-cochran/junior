@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-31
+
 ### Changed
 
 - `junior matrix` flags are overrides: `--hop`, `--model`, `--source`, `--plan`,
