@@ -49,6 +49,30 @@ function writeHop(dir: string, sourceVersion: string, log: string, extraEnv: Rec
   return hop;
 }
 
+/** A hop whose crossmatrix command logs its pid before delegating to FAKE. */
+function writePidLoggingHop(dir: string, sourceVersion: string, log: string, pids: string, extraEnv: Record<string, string> = {}): string {
+  const script = join(dir, 'pid-server.mjs');
+  writeFileSync(script, `import fs from "node:fs";\nfs.appendFileSync(${JSON.stringify(pids)}, String(process.pid) + "\\n");\nawait import(${JSON.stringify(FAKE)});\n`);
+  const hop = join(dir, 'hop.json');
+  initHop(hop, {
+    managedStatePath: join(dir, 'no-managed-tools.json'),
+    tools: {
+      crossmatrix: {
+        command: NODE,
+        args: [script],
+        env: { FAKE_MCP_MODE: 'crossmatrix', FAKE_CROSSMATRIX_WRITES: log, ...extraEnv },
+        sourceVersion,
+        sourceSha: '0'.repeat(64),
+      },
+    },
+  });
+  return hop;
+}
+
+function readPids(log: string): number[] {
+  return readFileSync(log, 'utf8').split('\n').filter(Boolean).map(Number);
+}
+
 type StrictOp = Record<string, unknown>;
 
 async function strictCommand(hopPath: string, modelId: string, requestId: string, op: StrictOp): Promise<void> {
@@ -529,6 +553,21 @@ test('codemapFiles follows nextCursor across two pages', async () => {
   const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
   const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
   assert.deepEqual(files.map((entry) => entry.path), ['src/a.ts', 'src/b.ts']);
+});
+
+test('a multi-page codemapFiles run spawns a single server process', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const pids = join(dir, 'pids.log');
+  const responses = queryResponses(dir, {
+    trace: [
+      { hops: [hop({ member: 'loc:src/b.ts' })], nextCursor: '1' },
+      { hops: [hop({ member: 'loc:src/a.ts' })], nextCursor: null },
+    ],
+  });
+  const hopPath = writePidLoggingHop(dir, '0.3.0', log, pids, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const files = await codemapFiles({ hopPath, modelId: 'm1', feature: 'cpm:d1' });
+  assert.equal(new Set(readPids(pids)).size, 1);
 });
 
 test('codemapFiles ignores non-codemap relations and non-location members', async () => {

@@ -26,7 +26,7 @@ import {
   resolveMatrixModel,
   resolveMatrixPlan,
 } from './matrix-defaults.ts';
-import { callHop, loadHop } from './tools/tools.ts';
+import { callHop, loadHop, openHopSession, type HopSession } from './tools/tools.ts';
 
 type StepDeps = {
   callHop?: typeof callHop;
@@ -94,8 +94,20 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
   const deps = options.deps ?? {};
   const root = projectRoot(options.dir ?? process.cwd());
   const notes: string[] = [];
+
+  // Open one Crossmatrix server lazily for the whole command and reuse it for
+  // every crossmatrix step instead of respawning per call. A tool other than
+  // crossmatrix (e.g. cpm plan reads) still goes through per-call `callHop`.
+  // A caller-injected `deps.callHop` keeps its own transport, so no session is
+  // opened at all. The session is closed in `finally`, including on error.
+  let session: HopSession | null = null;
+  const effectiveCallHop: typeof callHop = deps.callHop ?? (async (hopPathArg, toolArg, request) => {
+    if (toolArg !== 'crossmatrix') return callHop(hopPathArg, toolArg, request);
+    if (session === null) session = await openHopSession(hopPathArg, 'crossmatrix');
+    return session.call(hopPathArg, toolArg, request);
+  });
   const stepDeps: StepDeps = {
-    ...(deps.callHop === undefined ? {} : { callHop: deps.callHop }),
+    callHop: effectiveCallHop,
     ...(deps.loadHop === undefined ? {} : { loadHop: deps.loadHop }),
     ...(deps.files === undefined ? {} : { files: deps.files }),
     ...(deps.planGraph === undefined ? {} : { planGraph: deps.planGraph }),
@@ -103,6 +115,8 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
 
   const hop = (deps.resolveMatrixHop ?? resolveMatrixHop)(root, options.hop);
   const hopPath = hop.path;
+
+  try {
   if (hop.source !== 'explicit') notes.push(`hop ${hopPath} (${hop.source})`);
   const model = (deps.resolveMatrixModel ?? resolveMatrixModel)(root, options.model);
   const modelId = model.id;
@@ -112,7 +126,7 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
   let planCandidates: string[] | undefined;
   if (!plan && options.planFile === undefined) {
     try {
-      const resolved = await (deps.resolveMatrixPlan ?? resolveMatrixPlan)(root, hopPath, undefined, deps.callHop ?? callHop);
+      const resolved = await (deps.resolveMatrixPlan ?? resolveMatrixPlan)(root, hopPath, undefined, effectiveCallHop);
       plan = resolved.planId;
       planCandidates = resolved.candidates;
       if (plan) notes.push(`plan ${plan} (${resolved.source})`);
@@ -223,4 +237,7 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
     },
     notes,
   };
+  } finally {
+    if (session) await session.close();
+  }
 }
