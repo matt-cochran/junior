@@ -57,7 +57,7 @@ export interface InstallOptions {
   /** Also install the optional portable TRIZ CLI (separate, no model calls). */
   withTriz?: boolean;
 }
-export type ToolInstallStatus = "installed" | "current" | "update-available" | "unavailable" | "failed";
+export type ToolInstallStatus = "installed" | "current" | "update-available" | "unavailable" | "failed" | "skipped";
 export interface ToolInstallOutcome {
   tool: ToolName;
   status: ToolInstallStatus;
@@ -237,7 +237,7 @@ async function installOne(
   try {
     release = await resolveLatestRelease(repo, deps);
   } catch (err) {
-    if (UNAVAILABLE_TOOLS.has(tool)) {
+    if (UNAVAILABLE_TOOLS.has(tool) && !(err instanceof InstallerError && err.code === "GITHUB_RATE_LIMITED")) {
       const message = err instanceof Error ? err.message : String(err);
       return { tool, status: "unavailable", changed: false, error: `release unavailable for ${repo}: ${message}` };
     }
@@ -393,7 +393,9 @@ export async function installTools(
         outcomes.push(await installOne(tool, target, state, statePath, installRoot, opts, runDeps));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        outcomes.push({ tool, status: "failed", changed: false, error: message });
+        // A GitHub rate limit is transient: report the tool skipped, not failed (#187).
+        const skipped = err instanceof InstallerError && err.code === "GITHUB_RATE_LIMITED";
+        outcomes.push({ tool, status: skipped ? "skipped" : "failed", changed: false, error: message });
       }
     }
     if (opts.withTriz || (opts.update && state.optional?.triz)) {

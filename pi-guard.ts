@@ -30,16 +30,49 @@ function writeRoots(env:GuardEnv|undefined):string[] {
  return raw.split(delimiter).map((p)=>p.trim()).filter(Boolean);
 }
 
+export const CROSSMATRIX_STORE_REASON='Junior: the .crossmatrix/ store is read only through `junior matrix context|files|features|stale` (or the crossmatrix MCP); do not read its files.';
+
+/** Read-type tools that may name a file or directory directly. */
+const PATH_READ_TOOLS=new Set(['read','grep','find','ls']);
+
+/** True when `target` resolves inside a `.crossmatrix` store under an allowed
+ * root (the execution checkout or, when configured, the source root). */
+function insideStore(target:string, roots:string[]):boolean {
+ for (const root of roots) if (within(resolve(root,'.crossmatrix'), target)) return true;
+ return false;
+}
+
+/** True when a bash command text mentions the `.crossmatrix` store as a path. */
+function mentionsStore(command:string):boolean {
+ return /(?:^|[\\/\s'"`=])\.crossmatrix(?:[\\/]|(?=$|[\s'";&|)]))/.test(command);
+}
+
+/** A command that is itself the sanctioned store interface, not a file read.
+ * `guardBashInput` may already have prefixed the stdin redirect. */
+function isStoreCli(command:string):boolean {
+ const trimmed=command.trim().replace(/^exec\s*<\/dev\/null\s*\n/,'').trim();
+ // One sanctioned invocation only: chaining, pipes or substitution could read the store.
+ if (/[;&|`\n]|\$\(/.test(trimmed)) return false;
+ return /^(?:junior\s+matrix\b|crossmatrix-mcp\b)/.test(trimmed);
+}
+
 /** Enforce worktree isolation at the tool boundary. Returns a blocking
- * instruction for a write/edit outside the configured write roots, or for a
- * bash command that reaches into the source checkout outside `.delivery`.
- * Everything else (including any tool when its guard variable is unset) is
- * allowed via null. */
+ * instruction for a write/edit outside the configured write roots, for a bash
+ * command that reaches into the source checkout outside `.delivery`, or for a
+ * tool call that touches the read-only `.crossmatrix/` store. Everything else
+ * (including any tool when its guard variable is unset) is allowed via null. */
 export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:string):{block:true; reason:string}|null {
+ const storeRoots=[cwd, ...(typeof env?.JUNIOR_PI_SOURCE_ROOT==='string' && env.JUNIOR_PI_SOURCE_ROOT.trim() ? [env.JUNIOR_PI_SOURCE_ROOT] : [])];
+ if (PATH_READ_TOOLS.has(toolName)) {
+  const path=input && typeof input === 'object' ? input.path : undefined;
+  if (typeof path === 'string' && path.trim() && insideStore(resolve(cwd,path),storeRoots)) return { block:true, reason:CROSSMATRIX_STORE_REASON };
+  return null;
+ }
  if (toolName === 'write' || toolName === 'edit') {
+  const path=input && typeof input === 'object' ? input.path : undefined;
+  if (typeof path === 'string' && path.trim() && insideStore(resolve(cwd,path),storeRoots)) return { block:true, reason:CROSSMATRIX_STORE_REASON };
   const roots=writeRoots(env);
   if (!roots.length) return null;
-  const path=input && typeof input === 'object' ? input.path : undefined;
   if (typeof path !== 'string' || !path.trim()) return null;
   const resolved=resolve(cwd, path);
   if (!roots.some((root)=>within(root, resolved))) {
@@ -48,10 +81,11 @@ export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:st
   return null;
  }
  if (toolName === 'bash') {
-  const source=env?.JUNIOR_PI_SOURCE_ROOT;
-  if (typeof source !== 'string' || !source.trim()) return null;
   const command=input && typeof input === 'object' ? input.command : undefined;
   if (typeof command !== 'string') return null;
+  if (!isStoreCli(command) && mentionsStore(command)) return { block:true, reason:CROSSMATRIX_STORE_REASON };
+  const source=env?.JUNIOR_PI_SOURCE_ROOT;
+  if (typeof source !== 'string' || !source.trim()) return null;
   const root=resolve(source);
   const reason='Junior isolation: the source checkout is off limits; run commands inside the execution checkout.';
   for (let at=command.indexOf(root); at !== -1; at=command.indexOf(root, at+root.length)) {

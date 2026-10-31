@@ -17,6 +17,8 @@
 // original setup.ts API so importers and tests need no changes.
 // ---------------------------------------------------------------------------
 
+export { CLAUDE_STORE_DENY_RULES, inspectStoreDenyRules, installStoreDenyRules, mergeStoreDenyRules } from './harness.ts';
+
 export { DEFAULT_MODEL, DEFAULT_PROVIDER, DOCTOR_TIMEOUT_MS, INSTALL_TIMEOUT_MS, PACKAGED_SKILL_PATH, PI_PACKAGE, SKILL_FILENAME, SKILL_MANIFEST_FILENAME, SKILL_NAME, SUPPORTED_NODE_MIN, TESTED_PI_VERSION, checkPi, compareSemver, discoverInstalledPi, loadDefaults, resolveJuniorCliPath, whichOnPath } from './setup-env.ts';
 export type { ExecResult, SetupDeps, PiVersionStatus, PiProbeStatus, PiCheck, Defaults } from './setup-env.ts';
 

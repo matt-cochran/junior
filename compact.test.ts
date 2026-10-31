@@ -107,6 +107,43 @@ function selectedNestedHop(dir: string): string {
   return path;
 }
 
+test('compact reports stale git-anchored links when .crossmatrix exists', async (t) => {
+  const dir = workspace(t);
+  mkdirSync(join(dir, '.crossmatrix'), { recursive: true });
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    codemapStaleLinks: async () => [],
+    gitStaleness: () => ({
+      current: [],
+      changed: [{ feature: 'cpm:d1', path: 'src/a.ts' }],
+      moved: [{ feature: 'cpm:d1', path: 'src/a.ts', to: 'src/b.ts' }],
+      deleted: [{ feature: 'cpm:d1', path: 'src/c.ts' }],
+      entityChanged: [{ feature: 'cpm:d1', path: 'src/d.ts' }],
+      unanchored: [{ feature: 'cpm:d1', path: 'src/e.ts' }],
+    }),
+  });
+  assert.ok(
+    block.markdown.includes(
+      'matrix: 4 stale links (changed 1, moved 1, deleted 1, entity 1) — run junior matrix refresh',
+    ),
+  );
+});
+
+test('compact omits the matrix line when git staleness fails', async (t) => {
+  const dir = workspace(t);
+  mkdirSync(join(dir, '.crossmatrix'), { recursive: true });
+  const block = await buildCompactBlock({
+    cwd: dir,
+    hopPath: hopAt(dir),
+    codemapStaleLinks: async () => [],
+    gitStaleness: () => {
+      throw new Error('git exploded');
+    },
+  });
+  assert.equal(block.markdown.includes('matrix:'), false);
+});
+
 test('compact prints the canonical selected Hop path', async (t) => {
   const dir = workspace(t);
   const hop = selectedNestedHop(dir);

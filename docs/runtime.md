@@ -304,6 +304,12 @@ Other workflows are unbounded unless the contract sets `budget`. A run that
 hits a limit stops with `stopReason: budget_exceeded`. Report workflows update
 their report after each criterion, so a stopped run keeps a partial report.
 
+`budget.maxToolOutputBytes` is **cumulative over all tool results in a run**,
+not a per-call cap (see `runtime-stream.ts`). The recommended minimum is
+`200000` bytes; a lower value can stop a normal run after only a few tool
+results. Contract validation emits a warning, not an error, when it is below
+that minimum.
+
 
 ### Change evidence
 Each run captures a **before** and **after** snapshot of the execution checkout

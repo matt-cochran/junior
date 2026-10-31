@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withManifestLock } from "./tools-manifest.ts";
 import { ROOT, TOOLS, FAKE, NODE, tmpdir, toolEntry, writeConfig, writeJson, runCli, cliJson, initHop, cpmLoggingHop, managedState, initHopManifest, probeToolVersion, isReadTool, TOOL_NAMES } from "./tools-helpers.test.ts";
 
 // --- init / manifest contract -------------------------------------------------
@@ -250,4 +252,55 @@ test("probeToolVersion reads the semver a command prints for --version", { skip:
   const script = path.join(dir, "fake-tool.mjs");
   fs.writeFileSync(script, "#!/usr/bin/env node\nconsole.log('fake-tool 1.4.2');\n", { mode: 0o755 });
   assert.equal(probeToolVersion(script), "1.4.2");
+});
+
+// --- manifest lock reaping ---------------------------------------------------
+
+/** A pid that is guaranteed gone: a short-lived child that has been waited on. */
+function deadPid() {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  return child.pid;
+}
+
+function writeLock(hop, extra) {
+  fs.writeFileSync(hop + ".lock", JSON.stringify({ pid: process.pid, hostname: os.hostname(), at: new Date().toISOString(), ...extra }));
+}
+
+test("a same-host dead-pid lock is reaped so acquisition proceeds", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  writeLock(hop, { pid: deadPid() });
+  let ran = false;
+  await withManifestLock(hop, 5000, async () => { ran = true; });
+  assert.equal(ran, true);
+});
+
+test("a live-pid lock is never reaped and yields LOCKED", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  writeLock(hop, { pid: process.pid });
+  await assert.rejects(
+    () => withManifestLock(hop, 100, async () => {}),
+    (err) => err.code === "LOCKED",
+  );
+});
+
+test("a foreign-host lock is never reaped and yields LOCKED", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  writeLock(hop, { pid: deadPid(), hostname: "other-host.invalid" });
+  await assert.rejects(
+    () => withManifestLock(hop, 100, async () => {}),
+    (err) => err.code === "LOCKED",
+  );
+});
+
+test("an unparseable lock is never reaped and yields LOCKED", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  fs.writeFileSync(hop + ".lock", "{not json");
+  await assert.rejects(
+    () => withManifestLock(hop, 100, async () => {}),
+    (err) => err.code === "LOCKED",
+  );
 });

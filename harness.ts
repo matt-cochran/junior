@@ -13,6 +13,7 @@
 // testable and side-effect free.
 // ---------------------------------------------------------------------------
 
+import * as fs from 'node:fs';
 import { join } from 'node:path';
 
 export type Harness = 'claude' | 'cursor' | 'codex' | 'unknown';
@@ -134,4 +135,110 @@ export function harnessMcpConfig(harness: Harness, ctx: HarnessContext): Harness
     }
   }
   return { cli: null, locations };
+}
+
+// ---------------------------------------------------------------------------
+// Crossmatrix store lockdown.
+//
+// The `.crossmatrix/` store is read only through the CLI/MCP. Claude Code can
+// enforce that boundary with project deny rules; the helpers below merge those
+// rules idempotently into `.claude/settings.json` and inspect them for doctor.
+// Codex and Cursor have no equivalent project deny list, so `junior setup`
+// leaves their files alone.
+// ---------------------------------------------------------------------------
+
+/** Claude Code project deny rules that close the raw store to file tools. */
+export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Write(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
+  'Bash(grep * .crossmatrix:*)',
+  'Bash(jq * .crossmatrix:*)',
+];
+
+type JsonObject = Record<string, any>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function cloneJson(value: unknown): JsonObject {
+  if (value === undefined || value === null) return {};
+  if (!isJsonObject(value)) throw new TypeError('settings must be a JSON object');
+  return JSON.parse(JSON.stringify(value)) as JsonObject;
+}
+
+/** Add the store deny rules to Claude settings, preserving every existing rule.
+ * The input object is never mutated and a second merge adds nothing. */
+export function mergeStoreDenyRules(settings: unknown): { settings: JsonObject; changed: boolean } {
+  const merged = cloneJson(settings);
+  const permissions = merged.permissions === undefined ? {} : merged.permissions;
+  if (!isJsonObject(permissions)) throw new TypeError('settings.permissions must be a JSON object');
+  const deny = permissions.deny === undefined ? [] : permissions.deny;
+  if (!Array.isArray(deny)) throw new TypeError('settings.permissions.deny must be an array');
+  const missing = CLAUDE_STORE_DENY_RULES.filter((rule) => !deny.includes(rule));
+  if (missing.length === 0) return { settings: merged, changed: false };
+  merged.permissions = { ...permissions, deny: [...deny, ...missing] };
+  return { settings: merged, changed: true };
+}
+
+export type StoreDenyFileSystem = {
+  existsSync?: (path: string) => boolean;
+  readFileSync?: (path: string, encoding: 'utf8') => string;
+  writeFileSync?: (path: string, data: string) => void;
+  mkdirSync?: (path: string, options: { recursive: true }) => void;
+};
+
+/** Read-only view of the store and its Claude deny rules. A store only counts
+ * when `.crossmatrix` exists; the rules only count when all are present. */
+export function inspectStoreDenyRules(
+  projectDir: string,
+  deps: StoreDenyFileSystem = {},
+): { storeExists: boolean; present: boolean; path: string } {
+  const exists = deps.existsSync ?? fs.existsSync;
+  const read = deps.readFileSync ?? ((path: string, encoding: 'utf8') => fs.readFileSync(path, encoding));
+  const path = join(projectDir, '.claude', 'settings.json');
+  const storeExists = exists(join(projectDir, '.crossmatrix'));
+  if (!storeExists || !exists(path)) return { storeExists, present: false, path };
+  try {
+    const parsed = JSON.parse(read(path, 'utf8'));
+    const deny = parsed?.permissions?.deny;
+    const present = Array.isArray(deny) && CLAUDE_STORE_DENY_RULES.every((rule) => deny.includes(rule));
+    return { storeExists, present, path };
+  } catch {
+    return { storeExists, present: false, path };
+  }
+}
+
+/** Install the Claude deny rules in the project settings when a store exists.
+ * A missing settings file is created; an existing one is preserved. */
+export function installStoreDenyRules(options: { projectDir: string; fs?: StoreDenyFileSystem }): {
+  path: string;
+  changed: boolean;
+} {
+  if (!isJsonObject(options) || typeof options.projectDir !== 'string' || !options.projectDir.trim()) {
+    throw new TypeError('projectDir must be a non-empty string');
+  }
+  const files: Required<StoreDenyFileSystem> = {
+    existsSync: options.fs?.existsSync ?? fs.existsSync,
+    readFileSync: options.fs?.readFileSync ?? ((path, encoding) => fs.readFileSync(path, encoding)),
+    writeFileSync: options.fs?.writeFileSync ?? ((path, data) => fs.writeFileSync(path, data)),
+    mkdirSync: options.fs?.mkdirSync ?? ((path, opts) => fs.mkdirSync(path, opts)),
+  };
+  const path = join(options.projectDir, '.claude', 'settings.json');
+  if (!files.existsSync(join(options.projectDir, '.crossmatrix'))) return { path, changed: false };
+  let parsed: unknown = {};
+  if (files.existsSync(path)) {
+    try {
+      parsed = JSON.parse(files.readFileSync(path, 'utf8'));
+    } catch {
+      throw new Error(`${path}: settings file is not valid JSON`);
+    }
+  }
+  const result = mergeStoreDenyRules(parsed);
+  if (!result.changed) return { path, changed: false };
+  files.mkdirSync(join(options.projectDir, '.claude'), { recursive: true });
+  files.writeFileSync(path, JSON.stringify(result.settings, null, 2) + '\n');
+  return { path, changed: true };
 }
