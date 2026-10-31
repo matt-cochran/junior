@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#191).
 - An advisory `unwired` list on the result and compact receipt: newly exported
   symbols with no production reference (#186).
+- The `.crossmatrix/` store is read only through `junior matrix` / the
+  crossmatrix MCP: the Pi guard refuses worker reads and shell commands that
+  touch it, `init`/`update` add Claude Code deny rules when a store exists, and
+  `doctor` warns when they are missing (#194).
+
+### Performance
+
+- Each `junior matrix` command (`files`, `context`, `features`, `stale`,
+  `refresh`) and handoff matrix context uses one crossmatrix server session
+  instead of starting a server per call (#193).
 
 ### Fixed
 
