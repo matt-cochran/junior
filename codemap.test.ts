@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { callHop, initHop } from './tools/tools.ts';
 import {
   codemapContext,
+  codemapFeatures,
   codemapFiles,
   codemapInit,
   codemapLink,
@@ -684,4 +685,77 @@ test('junior matrix stale prints the changed members', () => {
     encoding: 'utf8',
   });
   assert.deepEqual(JSON.parse(cli.stdout).changed, [{ member: 'loc:src/a.ts' }]);
+});
+
+// --- codemapFeatures (reverse lookup) --------------------------------------
+
+test('codemapFeatures lists the features linked to a file', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' }),
+        hop({ member: 'job:j1', direction: 'in', observations: ['tests'], relation: 'codemap-jevitate-jobs' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src/a.ts' });
+  assert.deepEqual(features.map((entry) => entry.feature), ['cpm:d1', 'jevitate-jobs:j1']);
+});
+
+test('codemapFeatures keeps the strongest observation for a feature', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['touches'], relation: 'codemap-cpm' }),
+        hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' }),
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src/a.ts' });
+  assert.deepEqual(features, [{ feature: 'cpm:d1', observation: 'implements' }]);
+});
+
+test('codemapFeatures aggregates every linked file under a directory', async () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    describe: { describe: { relations: [{ id: 'codemap-cpm' }] } },
+    slice: {
+      cells: [
+        { from: 'cpm:d1', to: 'loc:src/a.ts', observations: ['implements'] },
+        { from: 'cpm:d2', to: 'loc:src/nested/b.ts', observations: ['tests'] },
+        { from: 'cpm:d3', to: 'loc:other/c.ts', observations: ['implements'] },
+      ],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const features = await codemapFeatures({ hopPath, modelId: 'm1', path: 'src' });
+  assert.deepEqual(features.map((entry) => entry.feature), ['cpm:d1', 'cpm:d2']);
+});
+
+test('junior matrix features prints the reverse lookup for a path', () => {
+  const dir = workdir();
+  const log = join(dir, 'writes.log');
+  const responses = queryResponses(dir, {
+    trace: {
+      hops: [hop({ member: 'cpm:d1', direction: 'in', observations: ['implements'], relation: 'codemap-cpm' })],
+      nextCursor: null,
+    },
+  });
+  const hopPath = writeHop(dir, '0.3.0', log, { FAKE_CROSSMATRIX_QUERY_RESPONSES: responses });
+  const result = spawnSync(
+    NODE,
+    [JUNIOR, 'matrix', 'features', 'src/a.ts', '--dir', dir, '--hop', hopPath, '--model', 'm1'],
+    { encoding: 'utf8' },
+  );
+  assert.deepEqual(JSON.parse(result.stdout), [{ feature: 'cpm:d1', observation: 'implements' }]);
 });

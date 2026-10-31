@@ -489,7 +489,10 @@ never a number you invent.
    `matrix graph --impact --result <result.json>` reverse-walks changed files
    into focused test and jevitate checks. `matrix context` prints one feature's
    contract context, `matrix files` lists its linked files and relation
-   (implements, tests, touches), and `matrix stale` lists links to re-confirm.
+   (implements, tests, touches), `matrix features <path>` reverse-looks up the
+   jobs, journeys, outcomes and cpm deliverables a file or directory serves,
+   and `matrix stale` lists links to re-confirm. `junior handoff` adds matrix
+   context automatically for a contract's `feature` or `plan.deliverable`.
 6. Audit quality with `matrix qc`: it scopes links (optionally `--seed`, capped
    by `--max-links`) and reports stale links, contradictions, coverage gaps and
    Jev-implausible/uncertain links to a review queue (`--no-jev`, `--md`,

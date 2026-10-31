@@ -123,6 +123,7 @@ export const MATRIX_USAGE = [
   'Usage: junior matrix link [<feature>] [--result <result.json, default newest .delivery run>] [--observation implements|tests|touches]',
   '       (feature defaults to the result\'s plan deliverable)',
   'Usage: junior matrix files <feature>',
+  'Usage: junior matrix features <path> | --path <path>',
   'Usage: junior matrix context <feature> [--max N]',
   'Usage: junior matrix refresh [--hop <hop.json>] [--model <id>] [--plan <plan_id>] [--dir <project>]',
   'Usage: junior matrix stale [--dir <project>]',
@@ -172,6 +173,7 @@ interface CodemapOptions {
   model?: string;
   result?: string;
   feature?: string;
+  path?: string;
   observation?: string;
   featureDimensions: string[];
   max?: number;
@@ -185,7 +187,7 @@ interface CodemapOptions {
   planFile?: string;
 }
 
-const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan', '--plan-file'];
+const CODEMAP_VALUE_FLAGS = ['--hop', '--model', '--result', '--feature', '--path', '--observation', '--feature-dimension', '--max', '--dir', '--out', '--proposals', '--min', '--only', '--exclude', '--plan', '--plan-file'];
 const CODEMAP_OBSERVATIONS = ['implements', 'tests', 'touches'];
 const CODEMAP_CONFIDENCES = ['high', 'medium', 'low'];
 const CODEMAP_LIST_FLAGS = ['--only', '--exclude']; // comma-separated id lists
@@ -221,6 +223,7 @@ function parseCodemapArgs(argv: string[]): CodemapOptions {
     model: values['--model'],
     result: values['--result'],
     feature: values['--feature'],
+    path: values['--path'],
     observation: values['--observation'],
     featureDimensions,
     max: parseMax(values['--max']),
@@ -494,14 +497,29 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
   }
-  if (argv[0] === 'files' || argv[0] === 'context' || argv[0] === 'stale') {
+  if (argv[0] === 'files' || argv[0] === 'features' || argv[0] === 'context' || argv[0] === 'stale') {
     const subcommand = argv[0];
     try {
       const options = parseCodemapArgs(argv.slice(1));
       const notes: string[] = [];
-      Object.assign(options, pick(resolveCore(options, notes)));
+      const core = resolveCore(options, notes);
+      Object.assign(options, pick(core));
       writeNotes(notes);
       const codemap = await import('./codemap.ts');
+      if (subcommand === 'features') {
+        const requested = options.path ?? options.feature;
+        if (!requested) throw new Error('matrix features requires a path: <path> or --path <path>');
+        const absolute = path.resolve(process.cwd(), requested);
+        const relative = path.relative(core.root, absolute).split(path.sep).join('/');
+        const isDirectory = fs.existsSync(absolute) && fs.statSync(absolute).isDirectory();
+        const result = await codemap.codemapFeatures({
+          hopPath: options.hop,
+          modelId: options.model,
+          path: isDirectory && !relative.endsWith('/') ? `${relative}/` : relative,
+        });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 0;
+      }
       if (subcommand === 'stale') {
         const result = await codemap.codemapStale({
           hopPath: options.hop,

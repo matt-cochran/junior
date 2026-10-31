@@ -285,3 +285,17 @@ test('doctor separates runtime readiness from external-context authorization', (
  assert.equal(d.externalContextAuthorization.readyForDelegation,false);
 });
 
+
+// --- automatic matrix context contract fields ------------------------------
+
+test('validate accepts a non-empty feature and positive matrixContextMax', () => {
+  assert.doesNotThrow(() => validate({ ...task(), feature: 'cpm:d-1', matrixContextMax: 5 }));
+});
+
+test('validate rejects a blank feature', () => {
+  assert.throws(() => validate({ ...task(), feature: '   ' }), /Invalid feature/);
+});
+
+test('validate rejects a non-positive matrixContextMax', () => {
+  assert.throws(() => validate({ ...task(), matrixContextMax: 0 }), /Invalid matrixContextMax/);
+});

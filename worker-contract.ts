@@ -26,7 +26,7 @@ export const TASK_FIELDS = [
  'plan',
  'hopFrom','hopRevision','hopContext','piContext','clarifiedFrom','scope',
  'externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext',
- 'readScope','budget','scopeExpansion',
+ 'readScope','budget','scopeExpansion','feature','matrixContextMax',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
  'commandPolicy',
 ] as const;
@@ -580,6 +580,8 @@ export function validate(t: any) {
   if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
  }
  if (t.modelProfile !== undefined && (typeof t.modelProfile !== 'string' || !t.modelProfile.trim())) throw Error('Invalid modelProfile (expected a roster profile id)');
+ if (t.feature !== undefined && (typeof t.feature !== 'string' || !t.feature.trim())) throw Error('Invalid feature (expected a non-empty string)');
+ if (t.matrixContextMax !== undefined && (typeof t.matrixContextMax !== 'number' || !Number.isInteger(t.matrixContextMax) || t.matrixContextMax < 1)) throw Error('Invalid matrixContextMax (expected a positive integer)');
  if (t.plan !== undefined) {
   validatePlan(t.plan);
   if (typeof t.hopFrom !== 'string' || !t.hopFrom.trim()) throw Error('Invalid plan (requires a non-blank hopFrom)');

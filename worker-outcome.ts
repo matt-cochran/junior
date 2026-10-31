@@ -194,6 +194,7 @@ export async function finish(state:RunState):Promise<any> {
  }
  if (piIsolation) result.piIsolation=piIsolation;
  if (externalContext) result.externalContext=externalContext;
+ if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
