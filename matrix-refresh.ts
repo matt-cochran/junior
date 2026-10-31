@@ -70,7 +70,14 @@ export interface RefreshResult {
   synced: SyncDimensionsResult['synced'];
   confirmed: string[];
   autolinked: string[];
-  stale: { changed: number; affectedCells: number };
+  stale: {
+    changed: number;
+    moved: number;
+    deleted: number;
+    entityChanged: number;
+    unanchored: number;
+    affectedCells: number;
+  };
   notes: string[];
 }
 
@@ -183,7 +190,14 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
     }
   }
 
-  let stale: CodemapStaleResult = { changed: [], affectedCells: [] };
+  let stale: CodemapStaleResult = {
+    changed: [],
+    moved: [],
+    deleted: [],
+    entityChanged: [],
+    unanchored: [],
+    affectedCells: [],
+  };
   try {
     stale = await (deps.codemapStale ?? codemapStale)({
       hopPath,
@@ -201,6 +215,10 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
     autolinked,
     stale: {
       changed: Array.isArray(stale.changed) ? stale.changed.length : 0,
+      moved: Array.isArray(stale.moved) ? stale.moved.length : 0,
+      deleted: Array.isArray(stale.deleted) ? stale.deleted.length : 0,
+      entityChanged: Array.isArray(stale.entityChanged) ? stale.entityChanged.length : 0,
+      unanchored: Array.isArray(stale.unanchored) ? stale.unanchored.length : 0,
       affectedCells: Array.isArray(stale.affectedCells) ? stale.affectedCells.length : 0,
     },
     notes,

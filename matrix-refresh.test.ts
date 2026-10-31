@@ -44,7 +44,14 @@ const fakeDeps = (overrides: Record<string, unknown> = {}) => {
     },
     codemapStale: async () => {
       calls.push('stale');
-      return { changed: ['a'], affectedCells: ['b', 'c'] };
+      return {
+        changed: ['a'],
+        moved: ['b'],
+        deleted: ['c'],
+        entityChanged: ['d'],
+        unanchored: ['e'],
+        affectedCells: ['b', 'c'],
+      };
     },
     ...overrides,
   };
@@ -81,10 +88,17 @@ test('refresh notes why autolink was skipped when no single plan resolves', asyn
   assert.ok(result.notes.some((note) => /autolink skipped/.test(note)));
 });
 
-test('refresh reports the stale changed and affected-cell counts', async () => {
+test('refresh reports the count of every stale link class', async () => {
   const { deps } = fakeDeps();
   const result = await refresh({ dir: '/project', deps });
-  assert.deepEqual(result.stale, { changed: 1, affectedCells: 2 });
+  assert.deepEqual(result.stale, {
+    changed: 1,
+    moved: 1,
+    deleted: 1,
+    entityChanged: 1,
+    unanchored: 1,
+    affectedCells: 2,
+  });
 });
 
 test('refresh returns the confirmed and autolinked request ids', async () => {

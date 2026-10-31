@@ -491,8 +491,13 @@ never a number you invent.
    contract context, `matrix files` lists its linked files and relation
    (implements, tests, touches), `matrix features <path>` reverse-looks up the
    jobs, journeys, outcomes and cpm deliverables a file or directory serves,
-   and `matrix stale` lists links to re-confirm. `junior handoff` adds matrix
-   context automatically for a contract's `feature` or `plan.deliverable`.
+   and `matrix stale` classifies links against their recorded git anchors:
+   `changed` (blob differs), `moved` (rename-aware git move), `deleted`,
+   `entity-changed` (the feature member's source file changed) or `unanchored`
+   (recorded before git anchors). `matrix refresh` re-anchors links, including
+   links re-confirmed for the same feature and path by a newer handoff.
+   `junior handoff` adds matrix context automatically for a contract's
+   `feature` or `plan.deliverable`.
 6. Audit quality with `matrix qc`: it scopes links (optionally `--seed`, capped
    by `--max-links`) and reports stale links, contradictions, coverage gaps and
    Jev-implausible/uncertain links to a review queue (`--no-jev`, `--md`,

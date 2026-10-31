@@ -431,6 +431,7 @@ export async function main(argv: string[]): Promise<number> {
         modelId: options.model,
         resultPath: options.result,
         feature: options.feature,
+        dir: core.root,
         observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
       });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

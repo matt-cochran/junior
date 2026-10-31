@@ -17,8 +17,9 @@
 
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { codeLocations, tests as testArtifacts, type MatrixFile } from './matrix.ts';
+import { dirname, join } from 'node:path';
+import { tests as testArtifacts } from './matrix.ts';
+import { gitAnchor, gitStaleness, type GitLink, type GitStalenessResult } from './matrix-staleness.ts';
 import {
   CROSSMATRIX_WRITE_SCHEMA_VERSION,
   requestIdFor,
@@ -63,6 +64,8 @@ export interface CodemapLinkOptions {
   /** `<dimensionId>:<memberId>` whose members the changed files implement. */
   feature: string;
   observation?: CodemapObservation;
+  /** Project directory used to anchor each link to git; derived from the result path. */
+  dir?: string;
   deps?: CodemapDeps;
 }
 
@@ -296,6 +299,8 @@ export interface CodemapObserveOptions {
   feature: string;
   /** Code location path (without the `loc:` prefix). */
   path: string;
+  /** Project directory used to anchor the link to git; defaults to cwd. */
+  dir?: string;
   observation: CodemapObservation;
   confidence: 'high' | 'medium' | 'low';
   evidence: CodemapEvidence[];
@@ -324,6 +329,17 @@ export async function codemapObserve(options: CodemapObserveOptions): Promise<Co
   const to = `loc:${options.path}`;
   const version = `${relationId}|${memberId}|${to}|${options.observation}|${options.contentVersion ?? options.confidence}`;
   const requestId = requestIdFor(options.modelId, 'observe', relationId, version);
+  const anchor = gitAnchor({ dir: options.dir ?? process.cwd(), path: options.path });
+  const evidence = anchor
+    ? [
+        ...options.evidence,
+        {
+          sourceRef: { system: 'git', sourceType: 'blob', sourceRef: options.path, locator: anchor.commit },
+          locator: anchor.blob,
+          excerpt: 'git anchor',
+        },
+      ]
+    : options.evidence;
   return send(
     call,
     options.hopPath,
@@ -337,7 +353,7 @@ export async function codemapObserve(options: CodemapObserveOptions): Promise<Co
         observation: options.observation,
         provenanceClass: 'observed',
         confidence: options.confidence,
-        evidence: options.evidence,
+        evidence,
         rationale: options.rationale,
       },
       requestId,
@@ -354,6 +370,9 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
   const record = isRecord(result) ? result : {};
   const resultId = String(record.id ?? '');
   const files = changedFiles(result);
+  const startDir = dirname(options.resultPath);
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: startDir, encoding: 'utf8' });
+  const dir = options.dir ?? (top.status === 0 ? top.stdout.trim() : startDir);
 
   const sent: CodemapSent[] = [];
   for (const path of files) {
@@ -368,6 +387,7 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
         modelId: options.modelId,
         feature: options.feature,
         path,
+        dir,
         observation,
         confidence: 'high',
         contentVersion: resultId,
@@ -399,9 +419,9 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
 // `codemapFiles` walks the feature member's outgoing `codemap-*` links to `loc:`
 // code members, following the server's `nextCursor` until exhausted.
 // `codemapContext` turns that list into a Junior contract `context` array, and
-// `codemapStale` recomputes the checkout's content hashes and asks the server
-// which synced members changed. Every query goes through the wrapper's
-// `crossmatrix.query`, which prepends the store-session `model.open` itself.
+// `codemapStale` reads the stored git anchors and classifies them against HEAD.
+// Every query goes through the wrapper's `crossmatrix.query`, which prepends
+// the store-session `model.open` itself.
 // ---------------------------------------------------------------------------
 
 /** One feature-to-code link as returned by `codemapFiles`. */
@@ -426,14 +446,18 @@ export interface CodemapContextOptions extends CodemapFilesOptions {
 export interface CodemapStaleOptions {
   hopPath: string;
   modelId: string;
-  /** Project directory whose `git ls-files` roster is hashed. */
+  /** Project directory whose git HEAD anchors are compared. */
   dir: string;
   deps?: CodemapDeps;
 }
 
 export interface CodemapStaleResult {
-  changed: unknown[];
-  affectedCells: unknown[];
+  changed: GitStalenessResult['changed'];
+  moved: GitStalenessResult['moved'];
+  deleted: GitStalenessResult['deleted'];
+  entityChanged: GitStalenessResult['entityChanged'];
+  unanchored: GitStalenessResult['unanchored'];
+  affectedCells: Array<{ feature: string; path: string }>;
 }
 
 /** Rank order the context array follows: implements > tests > touches. */
@@ -705,57 +729,125 @@ export function loadCodeExcludes(dir: string): readonly string[] {
   return config.codemap.exclude.map(String);
 }
 
-/** Tracked files under `dir` with their bytes, as `matrix.ts`'s adapters expect. */
-function trackedFiles(dir: string): MatrixFile[] {
-  const listing = spawnSync('git', ['ls-files'], { cwd: dir, encoding: 'utf8' });
-  if (listing.status !== 0) {
-    throw new Error(`git ls-files failed in ${dir}: ${listing.stderr?.trim() ?? 'unknown error'}`);
+/** A cell endpoint as a member id, tolerating string and object shapes. */
+function memberIdOf(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (!isRecord(value)) return null;
+  const id = value.id ?? value.member ?? value.memberId ?? value.member_id;
+  return typeof id === 'string' ? id : null;
+}
+
+/** The git anchor evidence recorded on a cell or hop, if present. */
+function anchorOf(record: Record<string, any>): Pick<GitLink, 'commit' | 'blob'> | null {
+  // Crossmatrix stores evidence per observation (`cell.observations[].evidence`);
+  // a flattened `evidence` is accepted too. The latest anchor wins.
+  const observations = Array.isArray(record.observations) ? record.observations : [];
+  const evidence = [
+    ...(Array.isArray(record.evidence) ? record.evidence : []),
+    ...observations.flatMap((o: any) => (isRecord(o) && Array.isArray(o.evidence) ? o.evidence : [])),
+  ];
+  let found: Pick<GitLink, 'commit' | 'blob'> | null = null;
+  for (const item of evidence) {
+    if (!isRecord(item) || !isRecord(item.sourceRef)) continue;
+    const sourceRef = item.sourceRef;
+    if (sourceRef.system !== 'git' || sourceRef.sourceType !== 'blob') continue;
+    const commit = typeof sourceRef.locator === 'string' ? sourceRef.locator : undefined;
+    const blob = typeof item.locator === 'string' ? item.locator : undefined;
+    if (commit && blob) found = { commit, blob };
   }
-  const excludes = loadCodeExcludes(dir);
-  const files: MatrixFile[] = [];
-  for (const line of listing.stdout.split('\n')) {
-    const p = line.trim();
-    if (!p) continue;
-    if (!isCodeRosterPath(p, excludes)) continue;
-    files.push({ path: p, content: fs.readFileSync(join(dir, p)) });
+  return found;
+}
+
+/** A feature member's source file, when the store query exposes it. */
+function entityPathOf(record: Record<string, any>): string | undefined {
+  const candidates = [
+    isRecord(record.from) ? record.from : undefined,
+    isRecord(record.fromMember) ? record.fromMember : undefined,
+    isRecord(record.source) ? record.source : undefined,
+    record,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const sourceRef = isRecord(candidate.sourceRef) ? candidate.sourceRef : undefined;
+    if (!sourceRef) continue;
+    // Jevitate and CPM members keep the file path in `locator`; code members
+    // use `sourceRef`. Accept either, but never the `jevitate:<id>` identity.
+    for (const path of [sourceRef.locator, sourceRef.sourceRef, sourceRef.uri]) {
+      if (typeof path === 'string' && path && !path.startsWith(LOC_PREFIX)) return posixPath(path);
+    }
   }
-  return files;
+  return undefined;
 }
 
 /**
- * Report synced members whose content hash no longer matches the checkout.
- * `readFiles` is never sent: Junior members carry `git` sourceRefs, not
- * `file://` URIs, so only the explicit `hashes` map is meaningful.
+ * Read the feature-to-code links and their git anchors from the store. The
+ * `describe`/`slice` path mirrors `codemapFeatures`; evidence is the only place
+ * the anchor is stored, so a cell without git evidence is an unanchored link.
  */
-export async function codemapStale(options: CodemapStaleOptions): Promise<CodemapStaleResult> {
+export async function codemapStaleLinks(options: CodemapStaleOptions): Promise<GitLink[]> {
   const call = options.deps?.callHop ?? callHop;
   const load = options.deps?.loadHop ?? loadHop;
   assertWriteCapable(load, options.hopPath);
 
-  const files = trackedFiles(options.dir);
-  const hashes: Record<string, string> = {};
-  for (const dimension of [codeLocations(files), testArtifacts(files)]) {
-    for (const member of dimension.members) {
-      // Crossmatrix keys `stale` hashes by the member's source reference (its
-      // uri, else sourceRef.sourceRef = the file path), not by member id.
-      const key = member.sourceRef?.sourceRef;
-      if (key && member.sourceRef?.contentHash) hashes[key] = member.sourceRef.contentHash;
-    }
+  const links = new Map<string, GitLink>();
+  const described = await query(call, options.hopPath, options.modelId, { kind: 'describe' });
+  const doc = isRecord(described) && isRecord(described.describe) ? described.describe : {};
+  const relations = Array.isArray(doc.relations) ? doc.relations : [];
+  for (const relation of relations) {
+    if (!isRecord(relation) || typeof relation.id !== 'string' || !relation.id.startsWith('codemap-')) continue;
+    let cursor: string | undefined;
+    do {
+      const q: CrossmatrixQuery = { kind: 'slice', relationId: relation.id };
+      if (cursor !== undefined) q.cursor = cursor;
+      const page = await query(call, options.hopPath, options.modelId, q);
+      const cells = isRecord(page) && Array.isArray(page.cells) ? page.cells : [];
+      for (const cell of cells) {
+        if (!isRecord(cell)) continue;
+        const from = memberIdOf(cell.from);
+        const to = memberIdOf(cell.to);
+        if (!from || !to || from.startsWith(LOC_PREFIX) || !to.startsWith(LOC_PREFIX)) continue;
+        const anchor = anchorOf(cell);
+        const link: GitLink = {
+          feature: from,
+          path: posixPath(to.slice(LOC_PREFIX.length)),
+          ...(anchor ?? {}),
+        };
+        const entityPath = entityPathOf(cell);
+        if (entityPath) link.entityPath = entityPath;
+        const key = `${link.feature}\u0000${link.path}`;
+        const previous = links.get(key);
+        // A later anchored observation supersedes an older unanchored one.
+        if (!previous || anchor || !previous.commit) links.set(key, link);
+      }
+      cursor = nextCursorOf(page);
+    } while (cursor !== undefined);
   }
+  return [...links.values()];
+}
 
-  const changed: unknown[] = [];
-  const affectedCells: unknown[] = [];
-  let cursor: string | undefined;
-  do {
-    const q: CrossmatrixQuery = { kind: 'stale', hashes };
-    if (cursor !== undefined) q.cursor = cursor;
-    const page = await query(call, options.hopPath, options.modelId, q);
-    if (isRecord(page)) {
-      if (Array.isArray(page.changed)) changed.push(...page.changed);
-      if (Array.isArray(page.affectedCells)) affectedCells.push(...page.affectedCells);
-    }
-    cursor = nextCursorOf(page);
-  } while (cursor !== undefined);
-
-  return { changed, affectedCells };
+/**
+ * Classify stored feature-to-code links against HEAD using their git anchors.
+ * No tracked file is read or hashed: git supplies the current blob ids. Entity
+ * staleness is limited to links whose store query exposes the feature member's
+ * source path; otherwise it cannot be compared without re-reading that file.
+ */
+export async function codemapStale(options: CodemapStaleOptions): Promise<CodemapStaleResult> {
+  const links = await codemapStaleLinks(options);
+  const stale = gitStaleness({ dir: options.dir, links });
+  const affectedCells: Array<{ feature: string; path: string }> = [];
+  const affectedKeys = new Set<string>();
+  for (const entry of [...stale.changed, ...stale.moved, ...stale.deleted, ...stale.entityChanged]) {
+    const key = `${entry.feature}\u0000${entry.path}`;
+    if (affectedKeys.has(key)) continue;
+    affectedKeys.add(key);
+    affectedCells.push({ feature: entry.feature, path: entry.path });
+  }
+  return {
+    changed: stale.changed,
+    moved: stale.moved,
+    deleted: stale.deleted,
+    entityChanged: stale.entityChanged,
+    unanchored: stale.unanchored,
+    affectedCells,
+  };
 }
