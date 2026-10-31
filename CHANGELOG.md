@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `junior matrix` flags are overrides: `--hop`, `--model`, `--source`, `--plan`,
+  `--result` and `--feature` default from the project (active/sole Hop, the
+  Crossmatrix store or project name, detected sources, the sole unfinished plan,
+  the newest run and its plan deliverable), pinnable in a `matrix` block of
+  `delivery.config.json`. A bare deliverable id is accepted as a feature (#188).
+
 ## [0.13.2] - 2026-10-30
 
 ### Fixed

@@ -454,9 +454,16 @@ never a number you invent.
 1. Once per project: `node <cli> matrix init` creates `.crossmatrix/`; commit it.
    `matrix export --source code|tests|jevitate|cpm|fmeca|playbooks` writes the
    same dimensions as files under `.crossmatrix/` without a hop.
-2. Federate the entities: `node <cli> matrix sync --hop <hop.json> --model <id>
-   --source code --source tests [--source jevitate] [--source playbooks]
-   [--source cpm --plan <plan_id>] [--source fmeca --session <id>]`.
+   Every matrix flag is an override: `--hop` defaults to the active, configured
+   or sole Hop; `--model` to `matrix.model` in `delivery.config.json`, the sole
+   `.crossmatrix/state/<id>.json`, else the project name; `--plan` to
+   `matrix.plan`, else the sole unfinished plan. A feature is a deliverable id
+   (`d-1`) or `<dimensionId>:<memberId>`. Defaults chosen are printed on stderr;
+   ambiguity fails with the candidates instead of guessing.
+2. Federate the entities: `node <cli> matrix sync` syncs code, tests, jevitate
+   (when `.jevitate/` exists) and cpm (when one plan is unfinished); override with
+   `--source code|tests|jevitate|playbooks|cpm|fmeca` (`matrix.sources` in config),
+   `--plan <plan_id>` and `--source fmeca --session <id>`.
    The cpm roster carries each deliverable's status and the fmeca roster each
    failure mode's criticality and standing. `--source state --plan <plan_id>
    --fmeca-session <id>` links failure modes to the deliverables and files their
@@ -468,13 +475,13 @@ never a number you invent.
    Re-run after changes; an unchanged roster is a no-op.
 3. Map features to code: `matrix codemap init` declares the code-map relations
    for the feature dimensions the model has (a missing default is a note), then
-   `matrix link --result <result.json> --feature <dimensionId>:<memberId>` after
-   each accepted handoff.
+   `matrix link` after each accepted handoff (defaults: the newest result and its
+   plan deliverable; override with `--result` and a feature).
 4. Autopilot the links once artifacts exist: `matrix bootstrap` proposes
    feature/journey/job/test -> code links with evidence and confidence,
    `matrix confirm --proposals <proposals.json>` records a reviewed selection
-   (`--min high|medium|low`, `--only`, `--exclude`), and `matrix autolink --plan
-   <plan_id>` links completed cpm deliverables' results, found by evidence path,
+   (`--min high|medium|low`, `--only`, `--exclude`), and `matrix autolink [--plan
+   <plan_id>]` links completed cpm deliverables' results, found by evidence path,
    run id or the latest `.delivery/<id>/<stamp>/result.json`, and lists the
    ones it skipped. All three are content-addressed and replay identically.
 5. Query the graph: `matrix graph --seed <dimensionId>:<memberId>` walks to a
