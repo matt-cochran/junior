@@ -8,14 +8,35 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   COMMAND_PLACEMENT_ERROR,
   decideCommand,
+  parseCommandManifest,
   parseCommandPolicy,
 } from './command-policy.ts';
+
+const DEVBOX_FIXTURE = 'tools/test-fixtures/command-policy/command-placement.v1.json';
+const DEVBOX_WRAPPER = 'scripts/devbox/run-safe.sh';
+const LOCAL_CONTROL_PLANE = 'scripts/devbox/fleet-controller.ts';
+const REMOTE_HEAVY = 'scripts/devbox/heavy-suite.ts';
+
+function devboxFixture(): Record<string, unknown> {
+  return JSON.parse(readFileSync(DEVBOX_FIXTURE, 'utf8')) as Record<string, unknown>;
+}
+
+function devboxPolicy(remoteWrapper: string | undefined = DEVBOX_WRAPPER) {
+  return parseCommandPolicy(
+    {
+      enforce: true,
+      manifest: DEVBOX_FIXTURE,
+      ...(remoteWrapper === undefined ? {} : { remoteWrapper }),
+    },
+    process.cwd(),
+  );
+}
 
 const REMOTE_MATCH = [
   'node --test',
@@ -532,4 +553,224 @@ test('xargs is refused as an opaque executor', (t) => {
 test('find -exec is refused as an opaque executor', (t) => {
   const policy = remotePolicy(tempDir(t));
   assert.equal(decideCommand(policy, `find . -name '*.test.ts' -exec node --test {} +`).decision, 'refuse');
+});
+
+// ---------------------------------------------------------------------------
+// Devbox placement manifest schema (schemaVersion 1)
+// ---------------------------------------------------------------------------
+
+test('parseCommandManifest accepts a Junior version 1 rules manifest', () => {
+  const rules = parseCommandManifest(
+    { version: 1, rules: [{ match: ['git'], placement: 'local' }] },
+    'junior manifest',
+  );
+  assert.deepEqual(rules, [{ match: ['git'], placement: 'local' }]);
+});
+
+test('parseCommandManifest accepts the repository devbox placement fixture', () => {
+  const rules = parseCommandManifest(
+    devboxFixture(),
+    'devbox fixture',
+    process.cwd(),
+    DEVBOX_WRAPPER,
+  );
+  assert.equal(rules.length, 2);
+});
+
+test('a devbox local-control-plane entry allows a direct run', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, ['node', LOCAL_CONTROL_PLANE, 'status']).decision,
+    'allow',
+  );
+});
+
+test('a devbox local-control-plane entry reports local placement', () => {
+  const policy = devboxPolicy();
+  assert.equal(decideCommand(policy, ['node', LOCAL_CONTROL_PLANE]).placement, 'local');
+});
+
+test('a dot-slash devbox path token matches', () => {
+  const policy = devboxPolicy();
+  assert.equal(decideCommand(policy, ['node', `./${LOCAL_CONTROL_PLANE}`]).decision, 'allow');
+});
+
+test('a nested devbox path token matches by suffix', () => {
+  const policy = devboxPolicy();
+  assert.equal(decideCommand(policy, ['node', `a/b/${LOCAL_CONTROL_PLANE}`]).decision, 'allow');
+});
+
+test('a backslash devbox path token matches after normalization', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, ['node', LOCAL_CONTROL_PLANE.replaceAll('/', '\\')]).decision,
+    'allow',
+  );
+});
+
+test('a devbox local-control-plane entry is refused through the configured wrapper', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, [DEVBOX_WRAPPER, 'node', LOCAL_CONTROL_PLANE]).decision,
+    'refuse',
+  );
+});
+
+test('a devbox local-control-plane entry is refused through an unconfigured safe wrapper', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, ['tools/local-safe.sh', 'node', LOCAL_CONTROL_PLANE]).decision,
+    'refuse',
+  );
+});
+
+test('a devbox local-control-plane refusal names the path and local command', () => {
+  const policy = devboxPolicy();
+  const result = decideCommand(policy, [DEVBOX_WRAPPER, 'node', LOCAL_CONTROL_PLANE]);
+  assert.match(
+    result.reason ?? '',
+    new RegExp(`${escapeRegExp(LOCAL_CONTROL_PLANE)} is a local SSH control-plane command; run locally: node ${escapeRegExp(LOCAL_CONTROL_PLANE)}`),
+  );
+});
+
+test('a devbox remote-heavy entry is allowed through the contract remote wrapper', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, [DEVBOX_WRAPPER, 'node', REMOTE_HEAVY]).decision,
+    'allow',
+  );
+});
+
+test('a devbox remote-heavy entry reports remote placement through the contract wrapper', () => {
+  const policy = devboxPolicy();
+  assert.equal(
+    decideCommand(policy, [DEVBOX_WRAPPER, 'node', REMOTE_HEAVY]).placement,
+    'remote',
+  );
+});
+
+test('a devbox remote-heavy entry is refused without the contract wrapper', () => {
+  const policy = devboxPolicy();
+  assert.equal(decideCommand(policy, ['node', REMOTE_HEAVY]).decision, 'refuse');
+});
+
+test('a devbox remote-heavy entry without contract remoteWrapper is rejected', () => {
+  assert.throws(
+    () => parseCommandPolicy({ enforce: true, manifest: DEVBOX_FIXTURE }, process.cwd()),
+    new RegExp(`${escapeRegExp(REMOTE_HEAVY)}.*remoteWrapper|remoteWrapper.*${escapeRegExp(REMOTE_HEAVY)}`, 'i'),
+  );
+});
+
+test('parseCommandManifest rejects a devbox schemaVersion other than 1 with supported versions', () => {
+  assert.throws(
+    () => parseCommandManifest({ schemaVersion: 2, commands: [] }, 'devbox manifest'),
+    /schemaVersion.*supported/i,
+  );
+});
+
+test('parseCommandManifest rejects a manifest with both rules and commands', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      { schemaVersion: 1, rules: [{ match: ['git'], placement: 'local' }], commands: [] },
+      'mixed manifest',
+    ),
+    /rules.*commands.*supported|commands.*rules.*supported/i,
+  );
+});
+
+test('parseCommandManifest rejects an unknown devbox entry field', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      {
+        schemaVersion: 1,
+        commands: [{
+          path: LOCAL_CONTROL_PLANE,
+          placement: 'local-control-plane',
+          reason: 'local',
+          remoteWrapperPolicy: 'refuse',
+          localCommand: `node ${LOCAL_CONTROL_PLANE}`,
+          note: 'typo',
+        }],
+      },
+      'devbox manifest',
+    ),
+    /unknown field "note"/i,
+  );
+});
+
+test('an unknown devbox entry field reports the supported schema versions', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      {
+        schemaVersion: 1,
+        commands: [{
+          path: LOCAL_CONTROL_PLANE,
+          placement: 'local-control-plane',
+          reason: 'local',
+          remoteWrapperPolicy: 'refuse',
+          localCommand: `node ${LOCAL_CONTROL_PLANE}`,
+          note: 'typo',
+        }],
+      },
+      'devbox manifest',
+    ),
+    /supported schema versions/i,
+  );
+});
+
+test('parseCommandManifest rejects a devbox path with unsafe characters', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      {
+        schemaVersion: 1,
+        commands: [{
+          path: 'scripts/devbox/bad name.ts',
+          placement: 'local-control-plane',
+          reason: 'local',
+          remoteWrapperPolicy: 'refuse',
+          localCommand: 'node bad',
+        }],
+      },
+      'devbox manifest',
+    ),
+    /path.*unsafe/i,
+  );
+});
+
+test('an unsafe devbox path reports the supported schema versions', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      {
+        schemaVersion: 1,
+        commands: [{
+          path: 'scripts/devbox/bad path.ts',
+          placement: 'local-control-plane',
+          reason: 'local',
+          remoteWrapperPolicy: 'refuse',
+          localCommand: 'node bad',
+        }],
+      },
+      'devbox manifest',
+    ),
+    /supported schema versions/i,
+  );
+});
+
+test('parseCommandManifest rejects a devbox path without a slash', () => {
+  assert.throws(
+    () => parseCommandManifest(
+      {
+        schemaVersion: 1,
+        commands: [{
+          path: 'fleet-controller.ts',
+          placement: 'local-control-plane',
+          reason: 'local',
+          remoteWrapperPolicy: 'refuse',
+          localCommand: 'node fleet-controller.ts',
+        }],
+      },
+      'devbox manifest',
+    ),
+    /path.*contain/i,
+  );
 });
