@@ -34,6 +34,14 @@ function git(cwd: string, args: string[], timeoutMs = 60000, seam: GitRunSeam = 
  return runSync('git', args, { cwd, timeout: typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : undefined, maxBuffer: 8 * 1024 * 1024, ...seam });
 }
 
+/** Remediation appended to a worktree failure caused by a read-only `.git`
+ * (a Codex workspace-write sandbox keeps `.git` read-only, so `git worktree add`
+ * cannot record the worktree). Empty when the error is something else. */
+export function worktreeWriteRemediation(error: string): string {
+ if (!/Read-only file system|EROFS|Operation not permitted|EPERM|Permission denied|EACCES/i.test(error)) return '';
+ return '; the checkout\'s .git directory is not writable here (a Codex workspace-write sandbox keeps .git read-only): use isolation "none", or run the handoff where .git is writable';
+}
+
 /** Bounded Git subprocess runner shared by the retention/quarantine helpers. */
 export function runGit(cwd: string, args: string[], timeoutMs = 60000, seam: GitRunSeam = {}) {
  return git(cwd, args, timeoutMs, seam);

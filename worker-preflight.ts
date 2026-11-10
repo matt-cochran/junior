@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { loadHopContext } from './hop-context.ts';
-import { resolveIsolation, sourceDirty, createDetachedWorktree, isWorktreeOf, acquireLock, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
+import { resolveIsolation, sourceDirty, createDetachedWorktree, worktreeWriteRemediation, isWorktreeOf, acquireLock, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
 import { resolveExecutionSettings, RuntimeHeartbeat, type ExecutionSettings } from './runtime.ts';
 import { loadModelConfig, rosterChoiceCriteria, findProfile } from './roster.ts';
 import type { ModelConfig } from './roster.ts';
@@ -321,7 +321,7 @@ export async function preflight(state:RunState):Promise<RunState|any> {
    if (dirty.dirty) return blockedResult(state, `isolation=worktree requires a clean source checkout; commit or stash these changes (or use isolation=none):\n${dirty.status}`);
    worktreePath=join(dir,'worktree');
    const made=createDetachedWorktree(sourceCwd, worktreePath, Math.max(1, remainingMs(state)));
-   if (!made.ok) return blockedResult(state, `isolation=worktree could not create a detached worktree at ${worktreePath}: ${made.error}`);
+   if (!made.ok) return blockedResult(state, `isolation=worktree could not create a detached worktree at ${worktreePath}: ${made.error}${worktreeWriteRemediation(String(made.error ?? ''))}`);
    executionCwd=worktreePath;
   }
  } else if (resume) {
