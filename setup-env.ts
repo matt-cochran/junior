@@ -1,7 +1,7 @@
 import { spawnSpec } from './cli-entry.ts';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname, delimiter } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { fileURLToPath } from 'node:url';
 import { ISOLATION_FLAGS, parsePiCapabilities } from './pi-isolation.ts';
 
@@ -10,7 +10,7 @@ export const SUPPORTED_NODE_MIN = '22.19.0';
 export const DEFAULT_PROVIDER = 'openrouter';
 export const DEFAULT_MODEL = 'deepseek/deepseek-v4.1-flash';
 export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
-export const TESTED_PI_VERSION = '1.4.0';
+export const TESTED_PI_VERSION = '1.5.2';
 export const DOCTOR_TIMEOUT_MS = 10000;
 export const INSTALL_TIMEOUT_MS = 300000;
 
@@ -150,8 +150,12 @@ export type PiCheck = {
 /** Classify an installed Pi version against the tested pin without blocking any
  * command: an equal version matches, a newer patch is informational, and a
  * major/minor difference or an older install is a (nonblocking) warning. */
-function isBlockedProbeError(error:string|undefined):boolean {
- return /\bEPERM\b/i.test(String(error ?? ''));
+/** A host refusal: the spawn itself failed with EPERM/EACCES (no exit status),
+ * or Pi exited non-zero reporting EPERM/EACCES on stderr. A spurious EPERM that
+ * accompanies a zero exit status is a sandbox artefact, not a block. */
+function isBlockedProbeError(error:string|undefined, status:number|null|undefined):boolean {
+ if (status === 0) return false;
+ return /\b(?:EPERM|EACCES)\b/i.test(String(error ?? ''));
 }
 
 function classifyPiVersion(installed:string|null, tested:string):{status:PiVersionStatus; match:boolean; warning:boolean; note?:string} {
@@ -185,22 +189,22 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
  let versionProbeBlocked=false;
  try {
   const r=exec('pi',['--offline','--no-approve','--version'],execOptions);
-  if (r.error) {
+  if (r.error && r.status == null) {
    note=`pi --version failed: ${r.error}`;
-   versionProbeBlocked=isBlockedProbeError(r.error) || isBlockedProbeError(r.stderr);
+   versionProbeBlocked=isBlockedProbeError(r.error,r.status) || isBlockedProbeError(r.stderr,r.status);
   } else if (r.status !== 0) {
    note=`pi --version exited ${r.status}`;
-   versionProbeBlocked=isBlockedProbeError(r.stderr);
+   versionProbeBlocked=isBlockedProbeError(r.stderr,r.status);
   } else version=firstSemver(r.stdout || '');
  } catch (e) {
   const message=e instanceof Error ? e.message : String(e);
   note=`pi --version failed: ${message}`;
-  versionProbeBlocked=isBlockedProbeError(message);
+  versionProbeBlocked=isBlockedProbeError(message,null);
  }
  let capabilities:{ flags:ReadonlySet<string> }|null=null;
  try {
   const r=exec('pi',['--offline','--no-approve','--help'],execOptions);
-  if (r.error) note=note ?? `pi --help failed: ${r.error}`;
+  if (r.error && r.status == null) note=note ?? `pi --help failed: ${r.error}`;
   else if (r.status !== 0) note=note ?? `pi --help exited ${r.status}`;
   else capabilities=parsePiCapabilities(r.stdout || '');
  } catch (e) {
@@ -222,9 +226,10 @@ export function checkPi(deps:SetupDeps = {}, testedVersion:string = TESTED_PI_VE
 
 export function asSpawn(command:string, args:string[], options:any):ExecResult {
  // Kept behind the injectable seam; only `doctor`/`init --install` reach it.
+ // runSync captures through temp files and drops a sandbox's spurious EPERM.
  const spec=spawnSpec(command,args);
- const r=spawnSync(spec.command,spec.args,{encoding:'utf8', ...options, shell:spec.shell});
- return { status:r.status, stdout:r.stdout || '', stderr:r.stderr || '', error:r.error?.message };
+ const r=runSync(spec.command,spec.args,{...options, shell:spec.shell});
+ return { status:r.status, stdout:r.stdout || '', stderr:r.stderr || '', ...(r.error?{error:r.error.message}:{}) };
 }
 export type Defaults = { provider:string; model:string; source:'builtin'|'project'; path:string|null };
 
