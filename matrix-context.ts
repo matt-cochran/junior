@@ -57,6 +57,12 @@ export async function matrixContextFor(
   try {
     const hop = resolveMatrixHop(root, typeof t?.hopFrom === 'string' && t.hopFrom ? t.hopFrom : undefined);
     const model = resolveMatrixModel(root);
+    // Opening a model the store does not hold creates it (config, dimensions,
+    // state, audit) in the source checkout, which then makes every following
+    // worktree handoff refuse a dirty checkout. Context is read-only: skip.
+    if (model.source === 'project' || !existsSync(join(root, '.crossmatrix', 'state', `${model.id}.json`))) {
+      return { feature, entries: [], note: `no matrix model ${model.id} in ${join(root, '.crossmatrix')}; run \`junior matrix refresh\` to build one` };
+    }
     const entries = await codemapContext({
       hopPath: hop.path,
       modelId: model.id,
