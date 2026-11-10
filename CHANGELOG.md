@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignores an `EPERM` that comes with an exit status. The streaming Pi worker and
   contract checks write to file descriptors that Junior tails. Worktree
   preflight, Pi capability probes, `doctor` and handoffs run in the sandbox, and
-  isolation flags are applied there (#201, #203).
+  isolation flags are applied there (#201, #203). The sandbox keeps `.git`
+  read-only, so `isolation: "worktree"` cannot create its worktree there; the
+  refusal now says so and points at `isolation: "none"` (#201).
 - Pi credential-store failures are typed: an `EROFS`/`EACCES`/`EPERM` on
   `auth.json.lock`, or `Credential store read failed`, in Pi's stderr or in its
   event errors is `credential_lock`, naming the path and the remedy. A
