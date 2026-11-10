@@ -98,7 +98,7 @@ installed Pi supports: `--no-extensions`, `--no-skills`,
 Unless the contract says otherwise, it also passes
 `--tools read,bash,edit,write`. This keeps the worker from inheriting unrelated
 project skills, extensions, context files, prompt templates, trust and MCP
-servers. The tested Pi release is 1.4.0.
+servers. The tested Pi release is 1.5.2.
 
 `piContext` changes that baseline:
 
@@ -182,8 +182,20 @@ start, not only in the prompt: the Pi bash guard, the contract check runner and
   `find -exec` and unknown prefix options. With `enforce: false`, nothing is
   refused.
 - `manifest` is a path relative to the cwd (no absolute paths or `..`) to a
-  file of the form `{"version": 1, "rules": [...]}`. A missing or malformed
-  manifest fails validation; it is never silently ignored.
+  file in one of two schema-version-1 forms. A missing or malformed manifest
+  fails validation; it is never silently ignored.
+  - Junior's form: `{"version": 1, "rules": [...]}`.
+  - The devbox placement form: `{"schemaVersion": 1, "commands": [{"path",
+    "placement", "reason", "remoteWrapperPolicy", "localCommand"}]}`. An entry
+    matches when any argv token is `path` or ends in `/path` (backslashes and a
+    leading `./` are normalised). A `local-control-plane` entry with
+    `remoteWrapperPolicy: "refuse"` runs only directly: sent through a remote
+    wrapper (a configured wrapper or a `*-safe.sh`), it is refused with the
+    entry's `localCommand`. A `remote-heavy` entry with `"allow"` needs
+    `remoteWrapper` (below) and then runs only through it.
+- `remoteWrapper` (optional) is the wrapper path for `remote-heavy` devbox
+  entries, which name no wrapper themselves. Without it such an entry fails
+  validation.
 
 A refused command never runs and is never counted as a passed check. The error
 code is `E_COMMAND_PLACEMENT`:
