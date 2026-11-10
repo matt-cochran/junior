@@ -7,8 +7,20 @@
 // When the block is too large, low-priority detail is dropped first while the
 // active-plan section is never cut.
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   buildToolEnv,
   callHop as defaultCallHop,
@@ -289,6 +301,78 @@ function planIds(result: unknown): string[] {
   };
   visit(result);
   return [...ids];
+}
+
+type PlannerSnapshot = {
+  hopPath: string;
+  line?: string;
+  failure?: string;
+  blocked: boolean;
+  cleanup: () => void;
+};
+
+function noPlannerSnapshot(hopPath: string): PlannerSnapshot {
+  return { hopPath, blocked: false, cleanup: () => {} };
+}
+
+/**
+ * When the active plan's SQLite database is readable but not writable, compact
+ * reads it through a private copy instead of asking cpm to open the original.
+ * The returned Hop points every cpm call at the copy; `cleanup` removes it.
+ */
+function snapshotPlannerDatabase(hopPath: string): PlannerSnapshot {
+  let manifest: HopManifest;
+  try {
+    manifest = loadHop(hopPath);
+  } catch {
+    return noPlannerSnapshot(hopPath);
+  }
+  const cpm = manifest.tools.cpm;
+  const configured = cpm?.env?.CPM_PLANNER_DB;
+  if (!cpm || typeof configured !== 'string' || configured.trim().length === 0) {
+    return noPlannerSnapshot(hopPath);
+  }
+  const dbPath = resolve(dirname(hopPath), configured);
+  if (!existsSync(dbPath)) return noPlannerSnapshot(hopPath);
+  try {
+    accessSync(dbPath, constants.W_OK);
+    accessSync(dirname(dbPath), constants.W_OK);
+    return noPlannerSnapshot(hopPath);
+  } catch {
+    /* read-only database or directory: snapshot it below */
+  }
+
+  let tempDir = '';
+  const cleanup = (): void => {
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  };
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), 'junior-compact-cpm-'));
+    chmodSync(tempDir, 0o700);
+    const snapshotDb = join(tempDir, basename(dbPath));
+    copyFileSync(dbPath, snapshotDb);
+    for (const suffix of ['-wal', '-shm']) {
+      const sibling = `${dbPath}${suffix}`;
+      if (existsSync(sibling)) copyFileSync(sibling, `${snapshotDb}${suffix}`);
+    }
+    cpm.env = { ...(cpm.env ?? {}), CPM_PLANNER_DB: snapshotDb };
+    const snapshotHop = join(tempDir, 'hop.json');
+    writeFileSync(snapshotHop, JSON.stringify(manifest, null, 2) + '\n');
+    return {
+      hopPath: snapshotHop,
+      line: `read from a snapshot of ${dbPath} (database not writable)`,
+      blocked: false,
+      cleanup,
+    };
+  } catch (error) {
+    cleanup();
+    return {
+      hopPath,
+      failure: `unavailable: planner database ${dbPath} is not writable and could not be snapshotted: ${errorMessage(error)}; run compact where the database is writable or grant write access`,
+      blocked: true,
+      cleanup: () => {},
+    };
+  }
 }
 
 async function defaultCompletedDeliverables(
@@ -729,62 +813,76 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     header.push('- hop: none');
   }
 
-  let completed = new Set<string>();
+  const planner = hopExists ? snapshotPlannerDatabase(hopPath) : noPlannerSnapshot(hopPath);
   try {
-    completed = deps.completedDeliverables
-      ? await deps.completedDeliverables()
-      : await defaultCompletedDeliverables(hopPath, hopExists, callHop);
-  } catch {
-    completed = new Set();
+    let completed = new Set<string>();
+    try {
+      completed = deps.completedDeliverables
+        ? await deps.completedDeliverables()
+        : planner.blocked
+          ? new Set()
+          : await defaultCompletedDeliverables(planner.hopPath, hopExists, callHop);
+    } catch {
+      completed = new Set();
+    }
+
+    const listNotes = deps.listNotes ?? (() => listOpen(deps.cwd));
+    const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd }));
+    let prsOutcome: Promise<{ section?: PrSection; error?: unknown }>;
+    try {
+      prsOutcome = Promise.resolve(openPrs()).then(
+        (section) => ({ section }),
+        (error) => ({ error }),
+      );
+    } catch (error) {
+      prsOutcome = Promise.resolve({ error });
+    }
+
+    const cutoffMs = generated.getTime() - maxAgeHours * 3_600_000;
+    const notesAndProposals = notesBlocks(listNotes);
+    const plan = await planBlock(planner.hopPath, hopExists && !planner.blocked, callHop);
+    if (planner.failure !== undefined) {
+      plan.status = 'unavailable';
+      plan.lines = [planner.failure];
+    } else if (planner.line !== undefined) {
+      plan.lines.push(planner.line);
+    }
+    const blocks = [
+      plan,
+      await decisionsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
+      notesAndProposals[0],
+      await riskBlock(hopPath, hopExists, callHop),
+      await hypothesesBlock(hopPath, hopExists, callHop, readDir, readFile, exists),
+      await matrixBlock(deps.cwd, hopPath, hopExists, callHop, deps),
+      runsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
+      await prsBlock(prsOutcome),
+      notesAndProposals[1],
+    ];
+
+    const dropped: Record<string, number> = {
+      plan: 0,
+      decisions: 0,
+      notes: 0,
+      risk: 0,
+      hypotheses: 0,
+      runs: 0,
+      prs: 0,
+      proposals: 0,
+      matrix: 0,
+    };
+    let markdown = render(header, blocks, dropped);
+    while (markdown.length > maxChars) {
+      const block = nextDroppable(blocks);
+      if (block === null) break;
+      block.lines.pop();
+      dropped[block.key] = (dropped[block.key] ?? 0) + 1;
+      markdown = render(header, blocks, dropped);
+    }
+
+    const sections: Record<string, CompactSectionStatus> = {};
+    for (const block of blocks) sections[block.key] = block.status;
+    return { markdown, truncated: Object.values(dropped).some((count) => count > 0), sections };
+  } finally {
+    planner.cleanup();
   }
-
-  const listNotes = deps.listNotes ?? (() => listOpen(deps.cwd));
-  const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd }));
-  let prsOutcome: Promise<{ section?: PrSection; error?: unknown }>;
-  try {
-    prsOutcome = Promise.resolve(openPrs()).then(
-      (section) => ({ section }),
-      (error) => ({ error }),
-    );
-  } catch (error) {
-    prsOutcome = Promise.resolve({ error });
-  }
-
-  const cutoffMs = generated.getTime() - maxAgeHours * 3_600_000;
-  const notesAndProposals = notesBlocks(listNotes);
-  const blocks = [
-    await planBlock(hopPath, hopExists, callHop),
-    await decisionsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
-    notesAndProposals[0],
-    await riskBlock(hopPath, hopExists, callHop),
-    await hypothesesBlock(hopPath, hopExists, callHop, readDir, readFile, exists),
-    await matrixBlock(deps.cwd, hopPath, hopExists, callHop, deps),
-    runsBlock(deps.cwd, readDir, readFile, exists, cutoffMs, completed),
-    await prsBlock(prsOutcome),
-    notesAndProposals[1],
-  ];
-
-  const dropped: Record<string, number> = {
-    plan: 0,
-    decisions: 0,
-    notes: 0,
-    risk: 0,
-    hypotheses: 0,
-    runs: 0,
-    prs: 0,
-    proposals: 0,
-    matrix: 0,
-  };
-  let markdown = render(header, blocks, dropped);
-  while (markdown.length > maxChars) {
-    const block = nextDroppable(blocks);
-    if (block === null) break;
-    block.lines.pop();
-    dropped[block.key] = (dropped[block.key] ?? 0) + 1;
-    markdown = render(header, blocks, dropped);
-  }
-
-  const sections: Record<string, CompactSectionStatus> = {};
-  for (const block of blocks) sections[block.key] = block.status;
-  return { markdown, truncated: Object.values(dropped).some((count) => count > 0), sections };
 }
