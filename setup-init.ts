@@ -1,7 +1,6 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { spawnSync } from 'node:child_process';
 import { installCompanions, installCompanionSkills, installationDisabled, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
 import { matrixInit } from './matrix-init.ts';
 import { ensureLocalExcludes } from './isolation.ts';
@@ -9,6 +8,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, INSTALL_TIMEOUT_MS, PI_PACKAGE, SKILL_
 import { installSkill, type InitOptions, type SkillResult, type SkillTargetSelection, type SkillScope } from './setup-skill.ts';
 import { doctor, summarizeInstall } from './setup-doctor.ts';
 import { installStoreDenyRules } from './harness.ts';
+import { runSync } from './spawn-sync.ts';
 
 export type MatrixOutcome = {
  /** True only when this run created `.crossmatrix/` through `crossmatrix-mcp init`. */
@@ -265,9 +265,9 @@ export type CompanionSetupResult = {
 };
 
 function gitLines(cwd:string, args:string[]):string[] | null {
- const r=spawnSync('git',args,{cwd,encoding:'utf8'});
+ const r=runSync('git',args,{cwd});
  if (r.error || r.status !== 0) return null;
- return String(r.stdout||'').split('\n').map((l)=>l.trim()).filter(Boolean);
+ return r.stdout.split('\n').map((l)=>l.trim()).filter(Boolean);
 }
 
 export function setupCompanions(
