@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-10
+
+### Fixed
+
+- A handoff whose contract names a `feature` or `plan.deliverable` no longer
+  creates a Crossmatrix model in the source checkout. The read-only matrix
+  context lookup opened the model, and opening a model the store did not hold
+  created it (config, dimensions, state, audit), so every following worktree
+  handoff refused the now-dirty checkout. The lookup now skips with a note when
+  the store has no model.
+
 ## [0.15.0] - 2026-11-10
 
 ### Fixed

@@ -121,3 +121,15 @@ test('a handoff result records the matrix context it added', async () => {
   }, true);
   assert.deepEqual(result.matrixContext, { feature: 'cpm:d-1', paths: ['src/a.ts'] });
 });
+
+test('matrixContextFor never opens (and so never creates) a model the store does not hold', async () => {
+  const dir = workdir();
+  mkdirSync(join(dir, '.crossmatrix', 'state'), { recursive: true });
+  let calls = 0;
+  const result = await matrixContextFor(
+    { cwd: dir, plan: { deliverable: 'd-1' } },
+    { deps: { callHop: (async () => { calls++; return { ok: true, result: {} }; }) as any } },
+  );
+  assert.deepEqual({ entries: result.entries, calls }, { entries: [], calls: 0 });
+  assert.match(String(result.note), /no matrix model/);
+});
