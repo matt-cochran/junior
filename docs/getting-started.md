@@ -95,7 +95,7 @@ configuration, and by default it makes no network call. Checks:
 - **Node**: the running version versus the supported minimum (`22.19.0`).
 - **Pi**: resolves `pi` on `PATH`, records the bounded `pi --version` output,
   the executable location, and the tested version pinned by
-  `delivery.config.json` (`pi.testedVersion`) or the built-in default (1.0.3). It
+  `delivery.config.json` (`pi.testedVersion`) or the built-in default (1.5.2). It
   reports `versionMatch` and a `versionStatus` pairing: an equal version
   matches, a newer patch is informational (`patch`), and a newer
   major/minor or an older install is a warning (`major`/`minor`/`older`).
@@ -172,7 +172,8 @@ junior doctor --online   # also verify the OpenRouter credential and credit
 Idempotent project setup. It creates, only when absent:
 
 - `delivery.config.json` with the project defaults (`provider`, `model`, and the
-  pinned tested Pi version (1.0.3)).
+  pinned tested Pi version (1.5.2)). `junior update` raises an older
+  `pi.testedVersion` to the tested version and leaves a newer one alone.
 - `tasks/example-task.json` with a runnable example contract.
 - The packaged delegation skill under `.agents/skills/junior/` (Codex) and
   `.claude/skills/junior/` (Claude Code), copied from the canonical

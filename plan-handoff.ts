@@ -423,6 +423,27 @@ export async function withPlanLease<R>(
   // pre-lease revision that the lease itself invalidated.
   if (typeof acquired.revision === 'number') plan.revision = acquired.revision;
   plan.leased = true;
+  // cpm releases a lease only on complete/failed; a hand-back to Ready keeps
+  // the lock until its TTL, which blocks every other caller. Drop this
+  // handoff's own lease explicitly after the Ready mark.
+  const dropOwnLease = async (reason: string, trackRevision: boolean): Promise<void> => {
+    try {
+      const response = await deps.callHop('cpm', {
+        tool: 'plan.force_release',
+        arguments: {
+          plan_id: plan.id,
+          deliverable_id: plan.deliverable,
+          reason: `handoff ${task.id} handed ${plan.deliverable} back to ready: ${reason}`.slice(0, 2048),
+        },
+      });
+      if (trackRevision && response.ok) {
+        const revisionError = await noteRevision(response, 'plan.force_release', true);
+        if (revisionError && !plan.error) plan.error = revisionError;
+      }
+    } catch {
+      // The Ready mark already landed; the lease then lapses at its TTL.
+    }
+  };
   // A refusal after the lease and before the run hands the deliverable back to
   // Ready, so a pre-worker stop never leaves a stray lease behind.
   const releaseLease = async (reason: string): Promise<void> => {
@@ -438,6 +459,7 @@ export async function withPlanLease<R>(
         },
       });
       plan.marked = 'ready';
+      await dropOwnLease(reason, false);
     } catch {
       // The original refusal is already recorded in plan.error.
     }
@@ -517,6 +539,7 @@ export async function withPlanLease<R>(
       } else {
         const revisionError = await noteRevision(response, 'plan.mark_status', true);
         if (revisionError) plan.error = revisionError;
+        await dropOwnLease(text, true);
       }
     } catch (error) {
       plan.error = `plan.mark_status failed: ${messageOf(error)}`;

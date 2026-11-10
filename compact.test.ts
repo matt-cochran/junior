@@ -5,9 +5,10 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { initHop, loadHop, saveHop } from './tools/tools.ts';
 import { buildCompactBlock as buildCompact, type CompactDeps } from './compact.ts';
 import type { PrSection } from './compact-prs.ts';
@@ -838,4 +839,207 @@ test('a throwing listNotes marks the notes section unavailable', async (t) => {
     },
   });
   assert.equal(block.sections.notes, 'unavailable');
+});
+
+// ---------------------------------------------------------------------------
+// Read-only planner database snapshots
+// ---------------------------------------------------------------------------
+
+function hashOf(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function snapshotWorkspace(t: any): string {
+  const dir = mkdtempSync(join(tmpdir(), 'junior-compact-snapshot-'));
+  t.after(() => {
+    try {
+      chmodSync(join(dir, 'planner'), 0o700);
+    } catch {
+      /* the fixture may not have a planner directory */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
+
+function plannerHop(dir: string, dbPath: string): string {
+  const path = join(dir, 'hop.json');
+  initHop(path, {
+    projectId: 'compact-snapshot-test',
+    probeVersion: () => 'test',
+    tools: {
+      cpm: { command: 'cpm-planner', sourceVersion: 'test', env: { CPM_PLANNER_DB: dbPath } },
+      fmeca: { command: 'fmeca-mcp', sourceVersion: 'test' },
+      'scientific-process': { command: 'scientific-process', sourceVersion: 'test' },
+    },
+  });
+  const manifest = loadHop(path);
+  manifest.revision = 7;
+  saveHop(path, manifest);
+  return path;
+}
+
+function seedPlannerDatabase(dir: string): { dbPath: string; hopPath: string } {
+  const dbPath = join(dir, 'planner', 'cpm.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  writeFileSync(dbPath, 'sqlite database');
+  return { dbPath, hopPath: plannerHop(dir, dbPath) };
+}
+
+function seedPlannerSiblings(dbPath: string): void {
+  writeFileSync(`${dbPath}-wal`, 'write-ahead log');
+  writeFileSync(`${dbPath}-shm`, 'shared memory');
+}
+
+function readOnlyPlanner(
+  t: any,
+  siblings = false,
+): { dir: string; dbPath: string; hopPath: string } {
+  const dir = snapshotWorkspace(t);
+  const fixture = seedPlannerDatabase(dir);
+  if (siblings) seedPlannerSiblings(fixture.dbPath);
+  chmodSync(dirname(fixture.dbPath), 0o500);
+  return { dir, ...fixture };
+}
+
+function plannerCallHop(
+  onCall?: (path: string, request: { tool: string }) => void,
+): NonNullable<CompactDeps['callHop']> {
+  return async (path, tool, request) => {
+    if (tool !== 'cpm') return failing(request.tool, 'none');
+    onCall?.(path, request);
+    if (request.tool === 'plan.list') return outcome('plan.list', []);
+    if (request.tool === 'plan.status') return outcome('plan.status', PLAN);
+    return failing(request.tool, 'none');
+  };
+}
+
+test('a read-only planner database is read through a snapshot Hop', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t);
+  let calledHop = '';
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') calledHop = path;
+    }),
+  });
+  assert.notEqual(calledHop, realpathSync(hopPath));
+});
+
+test('the snapshot Hop points cpm at a copied planner database', async (t) => {
+  const { dir, dbPath, hopPath } = readOnlyPlanner(t);
+  let snapshotDb = '';
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') snapshotDb = loadHop(path).tools.cpm.env.CPM_PLANNER_DB;
+    }),
+  });
+  assert.notEqual(snapshotDb, dbPath);
+});
+
+test('the snapshot copies the write-ahead log and shared-memory siblings', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t, true);
+  let siblings: boolean[] = [];
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') {
+        const snapshotDb = loadHop(path).tools.cpm.env.CPM_PLANNER_DB;
+        siblings = [existsSync(`${snapshotDb}-wal`), existsSync(`${snapshotDb}-shm`)];
+      }
+    }),
+  });
+  assert.deepEqual(siblings, [true, true]);
+});
+
+test('the snapshot directory is private to the compact run', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t);
+  let mode = 0;
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') {
+        const snapshotDb = loadHop(path).tools.cpm.env.CPM_PLANNER_DB;
+        mode = statSync(dirname(snapshotDb)).mode & 0o777;
+      }
+    }),
+  });
+  assert.equal(mode, 0o700);
+});
+
+test('the plan section names the snapshot source', async (t) => {
+  const { dir, dbPath, hopPath } = readOnlyPlanner(t);
+  const block = await buildCompactBlock({ cwd: dir, hopPath, callHop: plannerCallHop() });
+  assert.ok(block.markdown.includes(`read from a snapshot of ${dbPath} (database not writable)`));
+});
+
+test('the original planner database is unchanged after a snapshot compact', async (t) => {
+  const { dir, dbPath, hopPath } = readOnlyPlanner(t);
+  const before = hashOf(dbPath);
+  await buildCompactBlock({ cwd: dir, hopPath, callHop: plannerCallHop() });
+  assert.equal(hashOf(dbPath), before);
+});
+
+test('the original Hop is unchanged after a snapshot compact', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t, true);
+  const before = hashOf(hopPath);
+  await buildCompactBlock({ cwd: dir, hopPath, callHop: plannerCallHop() });
+  assert.equal(hashOf(hopPath), before);
+});
+
+test('the snapshot temp directory is removed after compact', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t);
+  let snapshotDir = '';
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') {
+        snapshotDir = dirname(loadHop(path).tools.cpm.env.CPM_PLANNER_DB);
+      }
+    }),
+  });
+  assert.equal(existsSync(snapshotDir), false);
+});
+
+test('every cpm call of a snapshot compact uses the same temporary Hop', async (t) => {
+  const { dir, hopPath } = readOnlyPlanner(t);
+  const paths: string[] = [];
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path) => paths.push(path)),
+  });
+  assert.equal(new Set(paths).size, 1);
+});
+
+test('a writable planner database keeps the original Hop', async (t) => {
+  const dir = snapshotWorkspace(t);
+  const { hopPath } = seedPlannerDatabase(dir);
+  let calledHop = '';
+  await buildCompactBlock({
+    cwd: dir,
+    hopPath,
+    callHop: plannerCallHop((path, request) => {
+      if (request.tool === 'plan.status') calledHop = path;
+    }),
+  });
+  assert.equal(calledHop, realpathSync(hopPath));
+});
+
+test('a failed planner snapshot reports the database as unavailable', async (t) => {
+  const dir = snapshotWorkspace(t);
+  const { dbPath, hopPath } = seedPlannerDatabase(dir);
+  chmodSync(dbPath, 0o100);
+  chmodSync(dirname(dbPath), 0o500);
+  const block = await buildCompactBlock({ cwd: dir, hopPath, callHop: plannerCallHop() });
+  assert.match(
+    block.markdown,
+    /unavailable: planner database .* is not writable and could not be snapshotted: .*; run compact where the database is writable or grant write access/,
+  );
 });

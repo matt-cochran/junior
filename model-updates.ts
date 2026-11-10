@@ -109,10 +109,16 @@ export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ no
  return { ids:parsed.ids, checkedAt:parsed.checkedAt, prices:sanitizePrices(parsed.prices) };
 }
 
-/** Pi's agent directory, honouring PI_CODING_AGENT_DIR like Pi itself. */
+/** Pi's agent directory, honouring PI_CODING_AGENT_DIR like Pi itself.
+ * A leading `~` or `~/` in PI_CODING_AGENT_DIR expands to the home directory. */
 export function piAgentDir(env:NodeJS.ProcessEnv = process.env):string {
- if (env.PI_CODING_AGENT_DIR) return env.PI_CODING_AGENT_DIR;
  const home=env.HOME || env.USERPROFILE || homedir();
+ const configured=env.PI_CODING_AGENT_DIR;
+ if (configured) {
+  if (configured === '~') return home;
+  if (configured.startsWith('~/')) return join(home, configured.slice(2));
+  return configured;
+ }
  return join(home,'.pi','agent');
 }
 

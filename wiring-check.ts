@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 
 /** One changed file; `addedLines` overrides what the diff says was added. */
 export type WiringChange = { path: string; addedLines?: readonly string[] };
@@ -49,7 +49,7 @@ function readLines(cwd: string, path: string): string[] {
 
 /** Files (tracked or untracked, not ignored) that mention `symbol` as a word. */
 function referencingFiles(cwd: string, symbol: string): string[] | null {
-  const r = spawnSync('git', ['grep', '--untracked', '-l', '-w', '-F', '-e', symbol], { cwd, encoding: 'utf8' });
+  const r = runSync('git', ['grep', '--untracked', '-l', '-w', '-F', '-e', symbol], { cwd });
   if (r.error || (r.status !== 0 && r.status !== 1)) return null;
   return r.stdout.split('\n').filter(Boolean);
 }

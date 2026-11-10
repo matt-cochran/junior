@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -14,6 +14,7 @@ import {
   OVERLAY_FILES,
   cleanupPiAgentOverlay,
   importResumeSession,
+  piAgentDir,
   preparePiAgentOverlay,
 } from './pi-overlay.ts';
 
@@ -52,6 +53,23 @@ function filesBelow(dir: string): string[] {
     .sort();
 }
 
+test('piAgentDir expands a bare tilde to the home directory', () => {
+  assert.equal(piAgentDir({ PI_CODING_AGENT_DIR: '~', HOME: '/home/fixture' }), '/home/fixture');
+});
+
+test('piAgentDir expands a leading tilde-slash to the home directory', () => {
+  assert.equal(piAgentDir({ PI_CODING_AGENT_DIR: '~/pi-agent', HOME: '/home/fixture' }), '/home/fixture/pi-agent');
+});
+
+test('preparePiAgentOverlay copies credentials from a tilde PI_CODING_AGENT_DIR', (t) => {
+  const root = tempRoot(t);
+  sourceAgentDir(root);
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { HOME: root, PI_CODING_AGENT_DIR: '~/source-agent' });
+
+  assert.deepEqual(result.copied, [...OVERLAY_FILES]);
+});
+
 test('preparePiAgentOverlay succeeds when the source agent directory is read-only', (t) => {
   const root = tempRoot(t);
   const source = sourceAgentDir(root);
@@ -85,6 +103,64 @@ test('preparePiAgentOverlay writes auth.json as a regular file with mode 0600', 
     isSymlink: false,
     mode: 0o600,
   });
+});
+
+test('preparePiAgentOverlay copies a symlinked ambient auth.json as a regular file', (t) => {
+  const root = tempRoot(t);
+  const source = join(root, 'source-agent');
+  const target = join(root, 'credential-target', 'auth.json');
+  mkdirSync(source, { recursive: true });
+  mkdirSync(join(root, 'credential-target'), { recursive: true });
+  writeFileSync(target, 'fixture target credential\n');
+  symlinkSync(target, join(source, 'auth.json'));
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source });
+
+  assert.equal(lstatSync(join(result.dir!, 'auth.json')).isSymbolicLink(), false);
+});
+
+test('preparePiAgentOverlay copies the target content of a symlinked ambient auth.json', (t) => {
+  const root = tempRoot(t);
+  const source = join(root, 'source-agent');
+  const target = join(root, 'credential-target', 'auth.json');
+  mkdirSync(source, { recursive: true });
+  mkdirSync(join(root, 'credential-target'), { recursive: true });
+  writeFileSync(target, 'fixture target credential\n');
+  symlinkSync(target, join(source, 'auth.json'));
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source });
+
+  assert.equal(readFileSync(join(result.dir!, 'auth.json'), 'utf8'), 'fixture target credential\n');
+});
+
+test('preparePiAgentOverlay records the resolved ambient directory', (t) => {
+  const root = tempRoot(t);
+  const source = sourceAgentDir(root);
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source });
+
+  assert.equal(result.ambient, source);
+});
+
+test('preparePiAgentOverlay leaves a read-only ambient directory unchanged', (t) => {
+  const root = tempRoot(t);
+  const source = sourceAgentDir(root);
+  const snapshot = () => ({
+    dirMode: statSync(source).mode & 0o777,
+    files: filesBelow(source).map((name) => ({
+      name,
+      mode: statSync(join(source, name)).mode & 0o777,
+      mtimeMs: statSync(join(source, name)).mtimeMs,
+      content: readFileSync(join(source, name), 'utf8'),
+    })),
+  });
+  chmodSync(source, 0o500);
+  const before = snapshot();
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source });
+  cleanupPiAgentOverlay(result.dir!);
+
+  assert.deepEqual(snapshot(), before);
 });
 
 test('preparePiAgentOverlay copies every credential file that exists in the source', (t) => {

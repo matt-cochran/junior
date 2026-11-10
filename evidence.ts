@@ -11,7 +11,7 @@
 
 import { lstatSync, readlinkSync, openSync, readSync, closeSync } from 'node:fs';
 import { resolve, relative, isAbsolute } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 
 export type GitFileChange = {
@@ -201,7 +201,7 @@ export function collectGitEvidence(cwd: string, opts: CollectOptions = {}): GitE
  const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
  const maxUntrackedBytes = opts.maxUntrackedBytes ?? DEFAULT_MAX_UNTRACKED_BYTES;
  const timeout = typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : 30000;
- const run = (args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024 });
+ const run = (args: string[]) => runSync('git', args, { cwd, timeout, maxBuffer: 32 * 1024 * 1024 });
 
  const inside = run(['rev-parse', '--is-inside-work-tree']);
  if (inside.error || inside.status !== 0 || (inside.stdout || '').trim() !== 'true') {

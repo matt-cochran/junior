@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 import { join, dirname, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -614,7 +614,7 @@ export const CHECKPOINT_ASSISTANT_MAX_BYTES = 4 * 1024;
  * (never throwing). Output beyond `maxBytes` is explicitly truncated. */
 function boundedGitCapture(cwd:string, args:string[], maxBytes:number):string {
  try {
-  const r=spawnSync('git', args, {cwd, encoding:'utf8', maxBuffer: Math.max(maxBytes*8, 1024*1024)});
+  const r=runSync('git', args, {cwd, maxBuffer: Math.max(maxBytes*8, 1024*1024)});
   if (r.error) return `(git ${args.join(' ')} unavailable: ${r.error.message})`;
   const text=`${r.stdout || ''}${r.stderr || ''}`;
   return text.length > maxBytes ? `${text.slice(0,maxBytes)}\n[... ${text.length-maxBytes} bytes omitted ...]` : text;

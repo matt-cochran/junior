@@ -551,12 +551,17 @@ skills for their domain: `fmeca*` for risk analysis, `cpm-*`/`deliverable-cpm`
 for planning, and `jevitate-getting-started` as the entry point for browser
 testing, demos and CI gates of web apps. A jevitate command with a pass/fail exit
 code (for example `jevitate check --suite <file>`) can be a contract `checks`
-entry so a commodity deliverable is verified in a real browser.
+entry so a commodity deliverable is verified in a real browser. Since jevitate
+0.30.0 a Journey or goal run that passes without a job done check exits `2`
+(inconclusive), which fails such a check: give the job a `done` check, or set
+`"doneCheckPolicy": "advisory"` in `.jevitate/project.json`.
 
 `junior doctor` is read-only; it reports Pi, skills, managed tools and companion
 tools separately. `junior doctor --check-updates` also asks npm and GitHub for
 newer releases (Junior's own included), and `junior update` updates Junior itself first, then adopts
-every newer tool and companion release and refreshes unmodified skills.
+every newer tool and companion release and refreshes unmodified skills. It also
+installs the tested Pi when the installed one is older (never downgrading a
+newer Pi) and raises an older `pi.testedVersion` in `delivery.config.json`.
 
 ## Report tool issues upstream
 
