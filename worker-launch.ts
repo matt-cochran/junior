@@ -110,7 +110,7 @@ export async function launch(state:RunState):Promise<RunState|any> {
     // made itself (budget, scope, watchdog, deadline, interrupt, output cap)
     // is not a Pi failure, so only Pi's own exits are classified.
     const piExited=segResult.stopReason === 'completed' || segResult.stopReason === 'failed';
-    const failure=piExited ? classifyPiFailure({exitCode:segResult.exitCode, stderr:segResult.stderr, assistantMessages:segReceipt.assistantMessages}) : null;
+    const failure=piExited ? classifyPiFailure({exitCode:segResult.exitCode, stderr:segResult.stderr, assistantMessages:segReceipt.assistantMessages, errorMessages:eventErrorMessages(segResult.stdout ?? '')}) : null;
     workerFailure=failure;
     if (!failure?.retryable || segReceipt.assistantMessages !== 0 || retriedFailure) break;
     retriedFailure=true;
@@ -177,4 +177,21 @@ export async function launch(state:RunState):Promise<RunState|any> {
  state.segments=segments; state.segmentReceipts=segmentReceipts;
  state.receipt=receipt; state.receiptOk=receiptOk;
  return state;
+}
+
+/** Pi's own error texts from the event stream (`errorMessage`/`finalError`),
+ * never tool output, so the failure classifier sees credential errors that Pi
+ * reports only as an event (#203). */
+export function eventErrorMessages(eventsText:string):string[] {
+ const out:string[]=[];
+ for (const line of eventsText.split('\n')) {
+  if (!line.includes('rror')) continue;
+  try {
+   const ev=JSON.parse(line);
+   for (const value of [ev?.errorMessage, ev?.finalError, ev?.message?.errorMessage]) {
+    if (typeof value === 'string' && value && !out.includes(value)) out.push(value);
+   }
+  } catch { /* not a JSON event line */ }
+ }
+ return out;
 }

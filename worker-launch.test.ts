@@ -268,3 +268,17 @@ test('a budget stop is not reported as a Pi failure', async (t) => {
   await running;
   assert.equal(state.workerFailure ?? null, null);
 });
+
+test('eventErrorMessages collects Pi event errors and ignores tool output (#203)', async () => {
+  const { eventErrorMessages } = await import('./worker-launch.ts');
+  const lines = [
+    JSON.stringify({ type: 'tool_execution_end', result: { content: [{ type: 'text', text: "EPERM mkdir 'x/auth.json.lock'" }] } }),
+    JSON.stringify({ type: 'message_end', message: { role: 'assistant', errorMessage: "Credential store read failed for openrouter: EROFS: read-only file system, mkdir '/home/u/.pi/agent/auth.json.lock'" } }),
+    JSON.stringify({ type: 'auto_retry_end', success: false, finalError: 'Connection error.' }),
+    'not json with an error word',
+  ].join('\n');
+  assert.deepEqual(eventErrorMessages(lines), [
+    "Credential store read failed for openrouter: EROFS: read-only file system, mkdir '/home/u/.pi/agent/auth.json.lock'",
+    'Connection error.',
+  ]);
+});
