@@ -129,13 +129,13 @@ test('A version probe that exits non-zero with EPERM on stderr stays a blocked p
  const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec: () => ({ status: 1, stdout: '', stderr: "Error: EPERM: operation not permitted, open '/home/u/.pi/agent/settings.json'" }) });
  assert.equal(probe.probeBlocked, true);
 });
-test('A refused EACCES spawn without an exit status reports a blocked probe', () => {
+test('An EACCES spawn without an exit status is a failed probe, not a blocked one', () => {
  const cwd = tmp('junior-probe-eacces-');
  const bin = join(cwd, 'bin');
  mkdirSync(bin, { recursive: true });
  writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
  const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec: () => ({ status: null, stdout: '', stderr: '', error: 'spawnSync pi EACCES' }) });
- assert.equal(probe.probeBlocked, true);
+ assert.deepEqual({ blocked: probe.probeBlocked, status: probe.probeStatus }, { blocked: false, status: 'failed' });
 });
 test('Doctor matches an installed Pi equal to the tested version', () => {
  const { deps } = doctorFixture({ installed: '1.0.3', tested: '1.0.3' });

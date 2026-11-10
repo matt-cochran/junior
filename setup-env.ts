@@ -150,12 +150,13 @@ export type PiCheck = {
 /** Classify an installed Pi version against the tested pin without blocking any
  * command: an equal version matches, a newer patch is informational, and a
  * major/minor difference or an older install is a (nonblocking) warning. */
-/** A host refusal: the spawn itself failed with EPERM/EACCES (no exit status),
- * or Pi exited non-zero reporting EPERM/EACCES on stderr. A spurious EPERM that
- * accompanies a zero exit status is a sandbox artefact, not a block. */
+/** A host refusal: the spawn itself failed with EPERM (no exit status), or Pi
+ * exited non-zero reporting EPERM on stderr. A spurious EPERM that accompanies a
+ * zero exit status is a sandbox artefact, not a block. EACCES means the Pi
+ * executable cannot be run, which is a real failure, not a host block. */
 function isBlockedProbeError(error:string|undefined, status:number|null|undefined):boolean {
  if (status === 0) return false;
- return /\b(?:EPERM|EACCES)\b/i.test(String(error ?? ''));
+ return /\bEPERM\b/i.test(String(error ?? ''));
 }
 
 function classifyPiVersion(installed:string|null, tested:string):{status:PiVersionStatus; match:boolean; warning:boolean; note?:string} {

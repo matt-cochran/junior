@@ -35,9 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A plan-leased handoff that stops before its run releases its own lease after
   handing the deliverable back to Ready. Before, the lease stayed held until its
   TTL, because cpm releases locks only on complete or failed.
-- `doctor` reports a probe as blocked only when the spawn was refused or Pi
-  exited non-zero with `EPERM`/`EACCES`, not when a sandbox adds a spurious
-  `EPERM` to a successful probe.
+- `doctor` reports a probe as blocked only when the spawn was refused with
+  `EPERM` or Pi exited non-zero with `EPERM`, not when a sandbox adds a
+  spurious `EPERM` to a successful probe.
 
 ### Changed
 
