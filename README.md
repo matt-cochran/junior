@@ -30,7 +30,9 @@ junior handoff tasks/example-task.json --mock # offline dry run; omit --mock for
 `junior init` sets up the project and installs the manager skill; `junior doctor`
 reports readiness (Node, Pi, credentials, model, skill and companion tools);
 `junior handoff` runs one contract and prints a compact handoff object. `--mock`
-performs no provider call.
+performs no provider call. Junior also runs inside a Codex `workspace-write`
+sandbox: it captures child output through files there, because the sandbox drops
+output that Node children write to pipes.
 
 ## Readiness and execution
 

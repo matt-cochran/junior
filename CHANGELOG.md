@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-10
+
+### Fixed
+
+- Junior works inside a Codex `workspace-write` sandbox. There, `spawnSync`
+  reports `EPERM` for every child even when it ran, and a Node child (Pi, npm,
+  jevitate) loses all output written to a pipe. Synchronous children now go
+  through `runSync`, which captures output through private temp files and
+  ignores an `EPERM` that comes with an exit status. The streaming Pi worker and
+  contract checks write to file descriptors that Junior tails. Worktree
+  preflight, Pi capability probes, `doctor` and handoffs run in the sandbox, and
+  isolation flags are applied there (#201, #203). The sandbox keeps `.git`
+  read-only, so `isolation: "worktree"` cannot create its worktree there; the
+  refusal now says so and points at `isolation: "none"` (#201).
+- Pi credential-store failures are typed: an `EROFS`/`EACCES`/`EPERM` on
+  `auth.json.lock`, or `Credential store read failed`, in Pi's stderr or in its
+  event errors is `credential_lock`, naming the path and the remedy. A
+  `PI_CODING_AGENT_DIR` starting with `~` is expanded the way Pi expands it, so
+  the run-local credential copy is no longer empty (#203).
+- `junior compact` restores the active plan when the planner database is
+  readable but not writable. It reads a private snapshot of the database through
+  a temporary Hop and never writes to the original (#200).
+- `commandPolicy.manifest` accepts the devbox placement schema
+  (`schemaVersion: 1`, `commands[]`). `local-control-plane` entries are refused
+  through a remote wrapper, with the entry's `localCommand`. `remote-heavy`
+  entries use the new `commandPolicy.remoteWrapper`. An unsupported version
+  names the supported schemas (#202).
+- A plan-leased handoff that stops before its run releases its own lease after
+  handing the deliverable back to Ready. Before, the lease stayed held until its
+  TTL, because cpm releases locks only on complete or failed.
+- `doctor` reports a probe as blocked only when the spawn was refused with
+  `EPERM` or Pi exited non-zero with `EPERM`, not when a sandbox adds a
+  spurious `EPERM` to a successful probe.
+
+### Changed
+
+- Pi 1.5.2 is the tested Pi (was 1.4.0).
+- `junior update` (and `init --install`) installs the tested Pi when the
+  installed Pi is missing or older, leaves a newer Pi in place with a note, and
+  reports `install.pi {from, to, action}`. It also raises an older
+  `pi.testedVersion` in the project's `delivery.config.json` to the tested
+  version (a newer pin is left alone) and reports `piPin`.
+- Jevitate 0.30.0 is the managed companion version. In 0.30.0 a Journey or goal
+  run that passes without a job done check exits `2` (inconclusive); add a
+  `done` check to the job or set `"doneCheckPolicy": "advisory"` in
+  `.jevitate/project.json`.
+
+### Verified
+
+- #168 (plan-leased handoff invalidating itself), #169 (`resumeFrom` after a
+  completed delivery) and #183 (0.13.2 package missing `dist/isolation.js`) are
+  fixed in the published 0.14.0. A new package test checks that every relative
+  import in the packed `dist/` resolves (#183).
+
 ## [0.14.0] - 2026-10-31
 
 ### Changed

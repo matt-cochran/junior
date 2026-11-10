@@ -17,7 +17,7 @@
 // small budget so startup never stalls on a slow registry.
 // ---------------------------------------------------------------------------
 
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSpec } from './cli-entry.ts';
@@ -132,8 +132,7 @@ function boundedCompanionExec(budgetMs: number): NonNullable<CompanionDeps['exec
     if (remaining <= 0) return { status: null, error: 'update check budget exceeded' };
     const spec = spawnSpec(command, args);
     const timeout = Math.max(1, Math.min(options.timeout ?? budgetMs, remaining));
-    const r = spawnSync(spec.command, spec.args, {
-      encoding: 'utf8',
+    const r = runSync(spec.command, spec.args, {
       timeout,
       env: options.env,
       cwd: options.cwd,

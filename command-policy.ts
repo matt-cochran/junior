@@ -26,6 +26,11 @@ export interface CommandRule {
   match: string[];
   placement: 'local' | 'remote';
   wrapper?: string;
+  /** Devbox entries match when any argv token names this path, rather than
+   * only as a leading command prefix. */
+  matchAnyToken?: string;
+  /** Guidance recorded on a devbox local-control-plane refusal. */
+  localCommand?: string;
 }
 
 export interface CommandPolicy {
@@ -50,8 +55,14 @@ export class CommandPolicyError extends Error {
   }
 }
 
-const CONTRACT_FIELDS = ['enforce', 'manifest', 'rules'];
+const CONTRACT_FIELDS = ['enforce', 'manifest', 'rules', 'remoteWrapper'];
 const MANIFEST_FIELDS = ['version', 'rules'];
+const DEVBOX_MANIFEST_FIELDS = ['schemaVersion', 'commands'];
+const DEVBOX_ENTRY_FIELDS = ['path', 'placement', 'reason', 'remoteWrapperPolicy', 'localCommand'];
+const DEVBOX_PLACEMENTS = ['local-control-plane', 'remote-heavy'];
+const DEVBOX_WRAPPER_POLICIES = ['allow', 'refuse'];
+const DEVBOX_PATH = /^[A-Za-z0-9._/-]+$/;
+const SUPPORTED_SCHEMA_VERSIONS = 'supported schema versions: 1 (version/rules and schemaVersion/commands)';
 const RULE_FIELDS = ['match', 'placement', 'wrapper'];
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
@@ -67,9 +78,16 @@ function fail(message: string): never {
   throw new CommandPolicyError(message);
 }
 
-function assertKnownFields(value: Record<string, unknown>, allowed: string[], source: string): void {
+function assertKnownFields(
+  value: Record<string, unknown>,
+  allowed: string[],
+  source: string,
+  guidance?: string,
+): void {
   for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) fail(`${source}: unknown field "${key}"`);
+    if (!allowed.includes(key)) {
+      fail(`${source}: unknown field "${key}"${guidance ? `; ${guidance}` : ''}`);
+    }
   }
 }
 
@@ -117,16 +135,98 @@ function validateRule(raw: unknown, source: string, cwd?: string): CommandRule {
   return { match, placement: 'local' };
 }
 
-/** Validate the pinned `scripts/devbox/command-placement.json` schema. */
+function requiredString(value: unknown, source: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    fail(`${source}: expected a non-empty string`);
+  }
+  return value.trim();
+}
+
+/** Translate one `schemaVersion: 1` devbox command entry into a rule. */
+function validateDevboxEntry(
+  raw: unknown,
+  source: string,
+  remoteWrapper: string | undefined,
+  cwd?: string,
+): CommandRule {
+  if (!isPlainObject(raw)) fail(`${source}: expected an object`);
+  assertKnownFields(raw, DEVBOX_ENTRY_FIELDS, source, SUPPORTED_SCHEMA_VERSIONS);
+
+  const path = requiredString(raw.path, `${source}.path`);
+  if (!DEVBOX_PATH.test(path)) {
+    fail(`${source}.path: unsafe path "${path}"; expected to match ^[A-Za-z0-9._/-]+$; ${SUPPORTED_SCHEMA_VERSIONS}`);
+  }
+  if (!path.includes('/')) {
+    fail(`${source}.path: unsafe path "${path}"; must contain "/"; ${SUPPORTED_SCHEMA_VERSIONS}`);
+  }
+  requiredString(raw.reason, `${source}.reason`);
+  const localCommand = requiredString(raw.localCommand, `${source}.localCommand`);
+  if (!DEVBOX_PLACEMENTS.includes(raw.placement as string)) {
+    fail(`${source}.placement: expected "local-control-plane" or "remote-heavy"`);
+  }
+  if (!DEVBOX_WRAPPER_POLICIES.includes(raw.remoteWrapperPolicy as string)) {
+    fail(`${source}.remoteWrapperPolicy: expected "allow" or "refuse"`);
+  }
+
+  if (raw.remoteWrapperPolicy === 'refuse') {
+    if (raw.placement !== 'local-control-plane') {
+      fail(`${source}.placement: expected "local-control-plane" for remoteWrapperPolicy "refuse"`);
+    }
+    return {
+      match: [path],
+      matchAnyToken: path,
+      placement: 'local',
+      localCommand,
+    };
+  }
+
+  if (raw.placement !== 'remote-heavy') {
+    fail(`${source}.placement: expected "remote-heavy" for remoteWrapperPolicy "allow"`);
+  }
+  if (typeof remoteWrapper !== 'string' || !remoteWrapper.trim()) {
+    fail(`${source}.remoteWrapper: required for entry "${path}" with remoteWrapperPolicy "allow"; set commandPolicy.remoteWrapper`);
+  }
+  const wrapper = remoteWrapper.trim();
+  if (cwd) assertWrapperInsideCwd(wrapper, cwd, `${source}.remoteWrapper`);
+  return { match: [path], matchAnyToken: path, placement: 'remote', wrapper };
+}
+
+/** Validate a command-placement manifest. Two schema-version-1 shapes are
+ * accepted: Junior's `{version?, rules}` and the repository devbox
+ * `{schemaVersion, commands}`. */
 export function parseCommandManifest(
   value: unknown,
   source = 'command-placement manifest',
   cwd?: string,
+  remoteWrapper?: string,
 ): CommandRule[] {
   if (!isPlainObject(value)) fail(`${source}: expected an object`);
+
+  const hasRules = 'rules' in value;
+  const hasCommands = 'commands' in value;
+  if (hasRules && hasCommands) {
+    fail(`${source}: rules and commands cannot be combined; ${SUPPORTED_SCHEMA_VERSIONS}`);
+  }
+
+  if (hasCommands || 'schemaVersion' in value) {
+    assertKnownFields(value, DEVBOX_MANIFEST_FIELDS, source, SUPPORTED_SCHEMA_VERSIONS);
+    if (!('schemaVersion' in value)) {
+      fail(`${source}.schemaVersion: required for a commands manifest; ${SUPPORTED_SCHEMA_VERSIONS}`);
+    }
+    if (value.schemaVersion !== 1) {
+      fail(`${source}.schemaVersion: unsupported schemaVersion ${String(value.schemaVersion)}; ${SUPPORTED_SCHEMA_VERSIONS}`);
+    }
+    if (!Array.isArray(value.commands) || value.commands.length === 0) {
+      fail(`${source}.commands: expected a non-empty array`);
+    }
+    return value.commands.map((entry, index) =>
+      validateDevboxEntry(entry, `${source}.commands[${index}]`, remoteWrapper, cwd),
+    );
+  }
+
   assertKnownFields(value, MANIFEST_FIELDS, source);
   if ('version' in value && value.version !== 1) {
-    fail(`${source}.version: expected 1`);
+    fail(`${source}.version: unsupported version ${String(value.version)}; ${SUPPORTED_SCHEMA_VERSIONS}`);
   }
   if (!Array.isArray(value.rules) || value.rules.length === 0) {
     fail(`${source}.rules: expected a non-empty array`);
@@ -136,7 +236,11 @@ export function parseCommandManifest(
 
 /** Read a manifest path relative to the contract cwd. Absolute paths and
  * `..` escapes are rejected; a malformed manifest is never a silent no-op. */
-export function readCommandManifest(manifestPath: string, cwd: string): CommandRule[] {
+export function readCommandManifest(
+  manifestPath: string,
+  cwd: string,
+  remoteWrapper?: string,
+): CommandRule[] {
   if (typeof manifestPath !== 'string' || !manifestPath.trim()) {
     fail('commandPolicy.manifest: expected a non-empty string');
   }
@@ -165,7 +269,7 @@ export function readCommandManifest(manifestPath: string, cwd: string): CommandR
     const message = error instanceof Error ? error.message : String(error);
     fail(`commandPolicy.manifest: invalid JSON in "${path}": ${message}`);
   }
-  return parseCommandManifest(parsed, `commandPolicy.manifest "${path}"`, cwd);
+  return parseCommandManifest(parsed, `commandPolicy.manifest "${path}"`, cwd, remoteWrapper);
 }
 
 /**
@@ -192,6 +296,12 @@ export function parseCommandPolicy(value: unknown, cwd: string): CommandPolicy |
     fail('commandPolicy.enforce: expected a boolean');
   }
 
+  let remoteWrapper: string | undefined;
+  if ('remoteWrapper' in raw) {
+    remoteWrapper = requiredString(raw.remoteWrapper, 'commandPolicy.remoteWrapper');
+    assertWrapperInsideCwd(remoteWrapper, cwd, 'commandPolicy.remoteWrapper');
+  }
+
   const contractRules: CommandRule[] = [];
   if ('rules' in raw) {
     if (!Array.isArray(raw.rules) || raw.rules.length === 0) {
@@ -207,7 +317,7 @@ export function parseCommandPolicy(value: unknown, cwd: string): CommandPolicy |
     if (typeof raw.manifest !== 'string' || !raw.manifest.trim()) {
       fail('commandPolicy.manifest: expected a non-empty string');
     }
-    manifestRules = readCommandManifest(raw.manifest, cwd);
+    manifestRules = readCommandManifest(raw.manifest, cwd, remoteWrapper);
   }
 
   if (contractRules.length === 0 && manifestRules.length === 0) {
@@ -601,7 +711,20 @@ function findWrapper(policy: CommandPolicy, token: string, cwd: string): Wrapper
   return undefined;
 }
 
+function normalizeMatchToken(token: string): string {
+  let normalized = token.replaceAll('\\', '/');
+  while (normalized.startsWith('./')) normalized = normalized.slice(2);
+  return normalized;
+}
+
 function matchesRule(rule: CommandRule, argv: string[]): boolean {
+  if (rule.matchAnyToken) {
+    const wanted = normalizeMatchToken(rule.matchAnyToken);
+    return argv.some((token) => {
+      const candidate = normalizeMatchToken(token);
+      return candidate === wanted || candidate.endsWith(`/${wanted}`);
+    });
+  }
   return rule.match.some((entry) => {
     const prefix = entry.trim().split(/\s+/).filter(Boolean);
     if (prefix.length === 0 || prefix.length > argv.length) return false;
@@ -645,6 +768,7 @@ function decideAgainstRules(
   policy: CommandPolicy,
   candidates: string[][],
   invoked: WrapperMatch | undefined,
+  safeWrapper: boolean,
   enforce: boolean,
   cwd: string,
 ): CommandDecision {
@@ -653,6 +777,17 @@ function decideAgainstRules(
     if (!rule) continue;
 
     if (rule.placement === 'local') {
+      if (rule.localCommand) {
+        if (invoked || safeWrapper) {
+          const path = rule.matchAnyToken ?? rule.match[0];
+          return refusal(
+            'local',
+            `${path} is a local SSH control-plane command; run locally: ${rule.localCommand}`,
+            rule,
+          );
+        }
+        return allow('local', rule);
+      }
       if (invoked) {
         if (enforce) {
           return refusal('local', `wrapper ${invoked.configured} is only valid for a remote command`, rule);
@@ -899,6 +1034,7 @@ function decideSegment(
 
   const cwd = policyCwds.get(policy) ?? process.cwd();
   const invoked = findWrapper(policy, argv[0], cwd);
+  const safeWrapper = normalizeMatchToken(argv[0]).endsWith('-safe.sh');
   const command = invoked ? argv.slice(1) : argv;
   if (command.length === 0) {
     if (enforce) return refusal('unknown', `wrapper ${argv[0]} was invoked without a command`);
@@ -932,11 +1068,11 @@ function decideSegment(
 
     const npx = resolveNpx(command);
     if (npx) {
-      return decideAgainstRules(policy, [npx.original, npx.resolved], invoked, enforce, cwd);
+      return decideAgainstRules(policy, [npx.original, npx.resolved], invoked, safeWrapper, enforce, cwd);
     }
   }
 
-  return decideAgainstRules(policy, [command], invoked, enforce, cwd);
+  return decideAgainstRules(policy, [command], invoked, safeWrapper, enforce, cwd);
 }
 
 function decideCommandInternal(

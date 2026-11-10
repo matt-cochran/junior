@@ -13,7 +13,7 @@ import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { COMPANION_INSTALL_TIMEOUT_MS, COMPANION_TIMEOUT_MS, compareVersions, type ExecResult } from './companions.ts';
 
 /** The Crossmatrix release that introduced the project store this command sets up. */
@@ -45,7 +45,7 @@ function defaultManagedStatePath(): string {
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv } = {}): ExecResult {
   const spec = spawnSpec(command, args);
-  const r = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: options.timeout, env: options.env, shell: spec.shell });
+  const r = runSync(spec.command, spec.args, { timeout: options.timeout, env: options.env, shell: spec.shell });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error?.message };
 }
 

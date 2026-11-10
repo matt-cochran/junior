@@ -309,3 +309,11 @@ test('a setup command without a commandPolicy still runs', (t) => {
   );
   assert.equal(existsSync(marker), true);
 });
+
+test('worktreeWriteRemediation explains a read-only .git and stays silent otherwise (#201)', async () => {
+  const { worktreeWriteRemediation } = await import('./isolation.ts');
+  const hint = worktreeWriteRemediation("fatal: could not create leading directories of '.git/worktrees/worktree': Read-only file system");
+  assert.match(hint, /isolation "none"/);
+  assert.match(hint, /\.git directory is not writable/);
+  assert.equal(worktreeWriteRemediation('fatal: invalid reference: HEAD'), '');
+});

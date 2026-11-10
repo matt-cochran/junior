@@ -31,6 +31,8 @@ import {
  * events and its accounting is attached to `outputBreakdown`. */
 export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promise<WorkerStreamResult> {
  const { settings, spawnChild, command, args, cwd, eventsPath, logPath, runtimePath } = opts;
+ const captureStdoutPath = `${eventsPath}.stdout`;
+ const captureStderrPath = `${logPath}.stderr`;
  const startedAt = Date.now();
  const heartbeat = opts.heartbeat ?? new RuntimeHeartbeat(runtimePath, settings, startedAt, opts.deadlineAt, opts.phase ?? 'worker');
  const watchdog = new ToolWatchdog();
@@ -389,7 +391,7 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  }
 
  try {
-  if (!opts.signal?.aborted) child = spawnChild(command, args, { cwd, env: opts.env });
+  if (!opts.signal?.aborted) child = spawnChild(command, args, { cwd, env: opts.env, stdoutPath: captureStdoutPath, stderrPath: captureStderrPath });
  } catch (err: any) {
   startupError = err?.message || String(err);
   stopReason = 'startup_error';

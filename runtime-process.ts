@@ -5,9 +5,11 @@
 // helpers, plus the async bounded check executor.
 // ---------------------------------------------------------------------------
 
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { spawn } from 'node:child_process';
+import { closeSync, mkdirSync, openSync, readSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { DEFAULT_MAX_OUTPUT_BYTES, KILL_GRACE_MS, type ExecutionSettings } from './runtime-settings.ts';
 import type { OutputBreakdown } from './runtime-events.ts';
 
@@ -80,6 +82,8 @@ export class RuntimeHeartbeat {
   };
  }
  snapshot(): RuntimeSnapshot { return { ...this.snap }; }
+ /** Directory holding the run artifacts (where runtime.json lives). */
+ captureDir(): string { return dirname(this.path); }
  private write(force = false): void {
   const now = Date.now();
   if (!force && now - this.lastWriteAt < this.snap.heartbeatMs) return;
@@ -185,17 +189,123 @@ export type ChildProcessLike = {
  kill(signal?: NodeJS.Signals): boolean;
 };
 
-export type SpawnChild = (command: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }) => ChildProcessLike;
+export type SpawnChildOptions = {
+ cwd: string;
+ env?: NodeJS.ProcessEnv;
+ /** Capture stdout in this file instead of a pipe. */
+ stdoutPath?: string;
+ /** Capture stderr in this file instead of a pipe. */
+ stderrPath?: string;
+};
+
+export type SpawnChild = (command: string, args: string[], opts: SpawnChildOptions) => ChildProcessLike;
+
+type FileTail = {
+ stream: PassThrough;
+ readAvailable(): void;
+ end(): void;
+};
+
+const TAIL_POLL_MS = 25;
+
+/** Tail one capture file as a Readable so the caller's existing line handling
+ * sees every byte even though the child wrote to a plain file descriptor. */
+function createFileTail(path: string): FileTail {
+ const stream = new PassThrough();
+ const buffer = Buffer.alloc(64 * 1024);
+ let fd: number | null = null;
+ let offset = 0;
+ const open = (): number | null => {
+  if (fd !== null) return fd;
+  try { fd = openSync(path, 'r'); } catch { fd = null; }
+  return fd;
+ };
+ const readAvailable = (): void => {
+  const handle = open();
+  if (handle === null) return;
+  for (;;) {
+   let bytes = 0;
+   try { bytes = readSync(handle, buffer, 0, buffer.length, offset); }
+   catch { return; }
+   if (bytes <= 0) return;
+   offset += bytes;
+   stream.write(buffer.subarray(0, bytes));
+  }
+ };
+ return {
+  stream,
+  readAvailable,
+  end(): void {
+   readAvailable();
+   stream.end();
+   if (fd !== null) { try { closeSync(fd); } catch { /* already closed */ } fd = null; }
+  },
+ };
+}
+
+/** Wrap a capture-backed child so its exit/close follow the tail streams. */
+function captureChild(raw: ChildProcess, stdoutTail?: FileTail, stderrTail?: FileTail): ChildProcessLike {
+ const wrapper = new EventEmitter() as unknown as ChildProcessLike & EventEmitter;
+ wrapper.pid = raw.pid;
+ wrapper.stdout = stdoutTail ? stdoutTail.stream : raw.stdout;
+ wrapper.stderr = stderrTail ? stderrTail.stream : raw.stderr;
+ wrapper.kill = (signal?: NodeJS.Signals) => raw.kill(signal as any);
+ let finished = false;
+ const poll = setInterval(() => { stdoutTail?.readAvailable(); stderrTail?.readAvailable(); }, TAIL_POLL_MS);
+ const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
+  if (finished) return;
+  finished = true;
+  clearInterval(poll);
+  stdoutTail?.end();
+  stderrTail?.end();
+  // Let the final tail chunks reach data listeners before the lifecycle events.
+  setImmediate(() => {
+   wrapper.emit('exit', code, signal);
+   wrapper.emit('close', code, signal);
+  });
+ };
+ raw.on('error', (err: Error) => { wrapper.emit('error', err); });
+ raw.on('exit', (code: number | null, signal: NodeJS.Signals | null) => { finish(code, signal); });
+ raw.on('close', (code: number | null, signal: NodeJS.Signals | null) => { finish(code, signal); });
+ return wrapper;
+}
 
 /** Detached spawn so the child leads its own process group on Linux; this lets
- * cancellation reach shell children rather than only the direct process. */
+ * cancellation reach shell children rather than only the direct process. When
+ * capture paths are supplied they become plain fds, which keep working inside a
+ * Codex workspace-write sandbox where child pipes lose all output. */
 export const spawnChildDetached: SpawnChild = (command, args, opts) => {
- return spawn(command, args, {
-  cwd: opts.cwd,
-  env: opts.env ?? process.env,
-  detached: process.platform !== 'win32',
-  stdio: ['ignore', 'pipe', 'pipe'],
- }) as unknown as ChildProcessLike;
+ const stdoutPath = opts.stdoutPath;
+ const stderrPath = opts.stderrPath;
+ if (!stdoutPath && !stderrPath) {
+  return spawn(command, args, {
+   cwd: opts.cwd,
+   env: opts.env ?? process.env,
+   detached: process.platform !== 'win32',
+   stdio: ['ignore', 'pipe', 'pipe'],
+  }) as unknown as ChildProcessLike;
+ }
+
+ let stdoutFd: number | undefined;
+ let stderrFd: number | undefined;
+ const fds: number[] = [];
+ let child: ChildProcessLike;
+ try {
+  if (stdoutPath) { mkdirSync(dirname(stdoutPath), { recursive: true }); stdoutFd = openSync(stdoutPath, 'w', 0o600); fds.push(stdoutFd); }
+  if (stderrPath) { mkdirSync(dirname(stderrPath), { recursive: true }); stderrFd = openSync(stderrPath, 'w', 0o600); fds.push(stderrFd); }
+  const raw = spawn(command, args, {
+   cwd: opts.cwd,
+   env: opts.env ?? process.env,
+   detached: process.platform !== 'win32',
+   stdio: ['ignore', stdoutFd ?? 'pipe', stderrFd ?? 'pipe'],
+  });
+  const stdoutTail = stdoutPath ? createFileTail(stdoutPath) : undefined;
+  const stderrTail = stderrPath ? createFileTail(stderrPath) : undefined;
+  child = captureChild(raw, stdoutTail, stderrTail);
+ } finally {
+  for (const fd of fds) { try { closeSync(fd); } catch { /* already closed */ } }
+ }
+ return child;
 };
 
 /** Stop the child's whole process group (Linux/macOS) or the child itself. */
@@ -236,11 +346,16 @@ export type ExecuteCheckOptions = {
  signal?: AbortSignal;
  maxOutputBytes?: number;
  heartbeat?: RuntimeHeartbeat;
+ /** Optional file-backed capture paths (sandbox-safe stdout/stderr). */
+ stdoutPath?: string;
+ stderrPath?: string;
 };
 
 /** Run one acceptance check as an async bounded process. The whole process
  * group is stopped with SIGTERM then a bounded SIGKILL, so a hung check with a
  * TERM-ignoring descendant cannot survive. Always resolves; never throws. */
+let checkCaptureSequence = 0;
+
 export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResult> {
  const startedAt = Date.now();
  const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES;
@@ -260,6 +375,10 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
  let completionRequested = false;
  let child: ChildProcessLike | undefined;
  let monitor: ReturnType<typeof setInterval> | undefined;
+ const captureDir = opts.heartbeat?.captureDir?.();
+ const captureSequence = checkCaptureSequence++;
+ const stdoutPath = opts.stdoutPath ?? (captureDir ? join(captureDir, `check-${captureSequence}.stdout`) : undefined);
+ const stderrPath = opts.stderrPath ?? (captureDir ? join(captureDir, `check-${captureSequence}.stderr`) : undefined);
 
  let resolveDone!: (r: CheckResult) => void;
  const done = new Promise<CheckResult>((res) => { resolveDone = res; });
@@ -310,7 +429,7 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
  }
 
  try {
-  if (!opts.signal?.aborted) child = opts.spawnChild(opts.command, opts.args, { cwd: opts.cwd });
+  if (!opts.signal?.aborted) child = opts.spawnChild(opts.command, opts.args, { cwd: opts.cwd, stdoutPath, stderrPath });
  } catch (err: any) {
   error = err?.message || String(err);
  }

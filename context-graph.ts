@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import path from 'node:path';
 import { CROSSMATRIX_WRITE_SCHEMA_VERSION, serverErrorDetail } from './matrix-sync.ts';
 import { callHop, loadHop } from './tools/tools.ts';
@@ -511,7 +511,7 @@ export function contractContext(slice: GraphSlice): ContractContext {
 /** Whether a `jevitate` binary is on PATH. */
 function defaultHasJevitate(): boolean {
   const probe = process.platform === 'win32' ? 'where' : 'which';
-  const result = spawnSync(probe, ['jevitate'], { stdio: 'ignore' });
+  const result = runSync(probe, ['jevitate'], { stdio: 'ignore' });
   return result.status === 0;
 }
 

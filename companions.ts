@@ -20,7 +20,7 @@
 import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 
 export type CompanionId = 'fmeca' | 'cpm' | 'crossmatrix' | 'scientific-process' | 'elicitation' | 'jevitate' | 'triz';
@@ -95,7 +95,7 @@ function defaultPackageVersion(executable: string, pkg: string): string | null {
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): ExecResult {
   const spec = spawnSpec(command, args);
-  const r = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: options.timeout, env: options.env, cwd: options.cwd, shell: spec.shell });
+  const r = runSync(spec.command, spec.args, { timeout: options.timeout, env: options.env, cwd: options.cwd, shell: spec.shell });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error?.message };
 }
 

@@ -4,12 +4,12 @@
 // isDirectEntry block.
 // ---------------------------------------------------------------------------
 
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { planStatusRows } from './companion-shapes.ts';
 import { playbookDimensions } from './playbooks.ts';
 import { callHop } from './tools/tools.ts';
+import { runSync } from './spawn-sync.ts';
 import {
   codeLocations,
   cpmDeliverables,
@@ -249,7 +249,7 @@ function parseMax(value: string | undefined): number | undefined {
 }
 
 function gitTrackedFiles(dir: string): MatrixFile[] {
-  const listing = spawnSync('git', ['ls-files'], { cwd: dir, encoding: 'utf8' });
+  const listing = runSync('git', ['ls-files'], { cwd: dir });
   if (listing.status !== 0) throw new Error(`git ls-files failed in ${dir}: ${listing.stderr?.trim() ?? 'unknown error'}`);
   const files: MatrixFile[] = [];
   for (const line of listing.stdout.split('\n')) {

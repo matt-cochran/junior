@@ -177,6 +177,25 @@ test('The packed tarball leaks no source, test, workspace or credential files', 
   assert.deepEqual(leaked, []);
 });
 
+test('Every relative import in the packed dist resolves to a packed file (#183)', () => {
+  // 0.13.2 shipped dist/retention.js importing a dist/isolation.js that was not
+  // packed, so `junior update` could not even start. Walk the packed module graph.
+  const packed = new Set(packedFiles);
+  const dangling: string[] = [];
+  for (const file of packedFiles.filter((p) => p.startsWith('dist/') && p.endsWith('.js'))) {
+    const source = readFileSync(join(pkgDir, file), 'utf8');
+    const specifiers = [
+      ...source.matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]/g),
+      ...source.matchAll(/\bimport\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g),
+    ].map((m) => m[1]);
+    for (const specifier of specifiers) {
+      const target = join(file, '..', specifier).replaceAll('\\', '/');
+      if (!packed.has(target)) dangling.push(`${file} -> ${specifier}`);
+    }
+  }
+  assert.deepEqual(dangling, []);
+});
+
 // --- installed shim ---------------------------------------------------------
 
 test('The installed shim runs --version successfully', () => assert.equal(runBin(['--version']).status, 0));

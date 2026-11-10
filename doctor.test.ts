@@ -9,7 +9,7 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectIntegrations, TOOL_REPOS } from './installer.ts';
-import { doctor, summarizeInstall } from './setup.ts';
+import { checkPi, doctor, summarizeInstall } from './setup.ts';
 import { sha, tmp, stateWith, fmecaAsset, doctorFixture } from './dependencies-helpers.test.ts';
 
 test('Doctor reports integrations readiness separately from execution readiness', async () => {
@@ -98,6 +98,44 @@ test('Doctor reports a configured local HOP binary as usable unverified provenan
   const installRoot = tmp('junior-doc-hop-root-');
   const report = inspectIntegrations({ installRoot, statePath: join(installRoot, 'installed.json'), hopPath, cwd });
   assert.equal(report.tools.find((t) => t.tool === 'fmeca')?.usable, true);
+});
+test('A version probe that exits 0 with a spurious EPERM reports ok with its version and isolation flags', () => {
+ const cwd = tmp('junior-probe-spurious-');
+ const bin = join(cwd, 'bin');
+ mkdirSync(bin, { recursive: true });
+ writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+ const exec = (_command: string, args: string[]) => ({
+  status: 0,
+  stdout: args.includes('--version') ? 'pi 1.5.2\n' : '--no-extensions --no-skills --no-context-files --no-prompt-templates --no-approve --no-mcp --tools\n',
+  stderr: '',
+  error: 'spawnSync pi EPERM',
+ });
+ const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec });
+ assert.deepEqual({ probeStatus: probe.probeStatus, version: probe.version, supported: probe.isolation.supported, missing: probe.isolation.missing }, { probeStatus: 'ok', version: '1.5.2', supported: true, missing: [] });
+});
+test('A refused EPERM spawn without an exit status reports a blocked probe', () => {
+ const cwd = tmp('junior-probe-refused-');
+ const bin = join(cwd, 'bin');
+ mkdirSync(bin, { recursive: true });
+ writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+ const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec: () => ({ status: null, stdout: '', stderr: '', error: 'spawnSync pi EPERM' }) });
+ assert.equal(probe.probeBlocked, true);
+});
+test('A version probe that exits non-zero with EPERM on stderr stays a blocked probe', () => {
+ const cwd = tmp('junior-probe-stderr-eperm-');
+ const bin = join(cwd, 'bin');
+ mkdirSync(bin, { recursive: true });
+ writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+ const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec: () => ({ status: 1, stdout: '', stderr: "Error: EPERM: operation not permitted, open '/home/u/.pi/agent/settings.json'" }) });
+ assert.equal(probe.probeBlocked, true);
+});
+test('An EACCES spawn without an exit status is a failed probe, not a blocked one', () => {
+ const cwd = tmp('junior-probe-eacces-');
+ const bin = join(cwd, 'bin');
+ mkdirSync(bin, { recursive: true });
+ writeFileSync(join(bin, 'pi'), '#!/bin/sh\n');
+ const probe = checkPi({ env: { PATH: bin }, execPath: join(bin, 'node'), exec: () => ({ status: null, stdout: '', stderr: '', error: 'spawnSync pi EACCES' }) });
+ assert.deepEqual({ blocked: probe.probeBlocked, status: probe.probeStatus }, { blocked: false, status: 'failed' });
 });
 test('Doctor matches an installed Pi equal to the tested version', () => {
  const { deps } = doctorFixture({ installed: '1.0.3', tested: '1.0.3' });
