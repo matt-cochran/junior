@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { installCompanions, installCompanionSkills, installationDisabled, type CompanionInstallReport, type CompanionSkillReport } from './companions.ts';
 import { matrixInit } from './matrix-init.ts';
 import { ensureLocalExcludes } from './isolation.ts';
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, INSTALL_TIMEOUT_MS, PI_PACKAGE, SKILL_MANIFEST_FILENAME, TESTED_PI_VERSION, MATRIX_COMMIT, MATRIX_REMINDER, MATRIX_UPDATE_SKIP, asSpawn, exists, readText, type SetupDeps } from './setup-env.ts';
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, INSTALL_TIMEOUT_MS, PI_PACKAGE, SKILL_MANIFEST_FILENAME, TESTED_PI_VERSION, MATRIX_COMMIT, MATRIX_REMINDER, MATRIX_UPDATE_SKIP, asSpawn, compareSemver, exists, readText, type SetupDeps } from './setup-env.ts';
 import { installSkill, type InitOptions, type SkillResult, type SkillTargetSelection, type SkillScope } from './setup-skill.ts';
 import { doctor, summarizeInstall } from './setup-doctor.ts';
 import { installStoreDenyRules } from './harness.ts';
@@ -17,6 +17,16 @@ export type MatrixOutcome = {
  existing?:boolean;
  /** Why creation was skipped: explicit opt-out, update rule, or a matrixInit failure. */
  skipped?:string;
+};
+
+export type PiInstallAction = 'installed'|'upgraded'|'current'|'newer'|'disabled'|'failed';
+export type PiInstallOutcome = {
+ /** The version found before this run, or null when Pi was absent/unknown. */
+ from:string|null;
+ /** The version in place after this run; on a failed attempt the old version remains. */
+ to:string|null;
+ action:PiInstallAction;
+ error?:string;
 };
 
 export type InitResult = {
@@ -32,7 +42,7 @@ export type InitResult = {
  excluded:string[];
  /** Outcome of the project Crossmatrix store step, independent of `ready`. */
  matrix:MatrixOutcome;
- install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string };
+ install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string; note?:string; pi:PiInstallOutcome };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
  instructions:string[];
@@ -133,25 +143,44 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  lockStore();
  let readiness=doctor(deps);
  let install:InitResult['install'];
- if (opts.install && installationDisabled(deps.env)) {
-  install={ requested:true, attempted:false, ok:true, skipped:'JUNIOR_NO_INSTALL' };
- } else if (opts.install && readiness.pi.found && readiness.pi.version) {
-  install={requested:true,attempted:false,ok:true};
- } else if (opts.install) {
-  if (!tested) {
-   install={ requested:true, attempted:false, ok:false,
-    error:`Cannot determine the exact tested Pi version from a local package.json; install with \`npm install -g --ignore-scripts ${PI_PACKAGE}\` using the active Node/nvm.` };
-  } else {
-   const spec=`${tested.name}@${tested.version}`;
-   const args=['install','-g','--ignore-scripts',spec];
-   const r=(deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o)))('npm',args,{timeout:INSTALL_TIMEOUT_MS, env:deps.env ?? process.env});
-   install={ requested:true, attempted:true, ok:r.status===0, command:['npm',...args], spec,
-    ...(r.status===0 ? {} : { error: r.error || (r.stderr || `npm install exited ${r.status}`) }) };
+ if (opts.install) {
+  const installed=readiness.pi.version;
+  if (installationDisabled(deps.env)) {
+   install={ requested:true, attempted:false, ok:true, skipped:'JUNIOR_NO_INSTALL',
+    pi:{ from:installed, to:installed, action:'disabled' } };
+  } else if (readiness.pi.found && installed) {
+   const comparison=compareSemver(installed,tested.version);
+   if (comparison === 0) {
+    install={ requested:true, attempted:false, ok:true,
+     pi:{ from:installed, to:installed, action:'current' } };
+   } else if (comparison > 0) {
+    const note=`installed pi ${installed} is newer than the tested ${tested.version}; leaving it alone`;
+    install={ requested:true, attempted:false, ok:true, note,
+     pi:{ from:installed, to:installed, action:'newer' } };
+   }
+  }
+  if (!install) {
+   if (!tested) {
+    const error=`Cannot determine the exact tested Pi version from a local package.json; install with \`npm install -g --ignore-scripts ${PI_PACKAGE}\` using the active Node/nvm.`;
+    install={ requested:true, attempted:false, ok:false, error,
+     pi:{ from:installed, to:installed, action:'failed', error } };
+   } else {
+    const spec=`${tested.name}@${tested.version}`;
+    const args=['install','-g','--ignore-scripts',spec];
+    const r=(deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o)))('npm',args,{timeout:INSTALL_TIMEOUT_MS, env:deps.env ?? process.env});
+    const ok=r.status===0;
+    const error=ok ? undefined : (r.error || (r.stderr || `npm install exited ${r.status}`));
+    install={ requested:true, attempted:true, ok, command:['npm',...args], spec,
+     ...(error ? { error } : {}),
+     pi:{ from:installed, to:ok ? tested.version : installed,
+      action:ok ? (installed ? 'upgraded' : 'installed') : 'failed', ...(error ? { error } : {}) } };
+   }
   }
  }
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
+ if (install?.note) instructions.push(install.note);
  const command=opts.command ?? 'init';
  const storePath=join(cwd,'.crossmatrix');
  const hadStore=exists(deps, storePath);
