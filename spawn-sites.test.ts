@@ -18,7 +18,7 @@ import { runGit } from './isolation.ts';
 import { probePiCapabilities } from './worker-pi.ts';
 
 const ROOT = import.meta.dirname;
-const ALLOWED = new Set(['spawn-sync.ts', 'setup-env.ts', 'setup-init.ts', 'companions.ts']);
+const ALLOWED = new Set(['spawn-sync.ts']);
 const SKIPPED_DIRS = new Set(['node_modules', 'dist', '.git', '.delivery']);
 
 function typescriptSources(dir: string, out: string[] = []): string[] {
