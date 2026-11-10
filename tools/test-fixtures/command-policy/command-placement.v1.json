@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "commands": [
+    {
+      "path": "scripts/devbox/fleet-controller.ts",
+      "placement": "local-control-plane",
+      "reason": "Local SSH controller; its own transport sends bounded work to the remote host.",
+      "remoteWrapperPolicy": "refuse",
+      "localCommand": "node scripts/devbox/fleet-controller.ts <command> [args]"
+    },
+    {
+      "path": "scripts/devbox/heavy-suite.ts",
+      "placement": "remote-heavy",
+      "reason": "Runs the full regression suite; send it through the remote wrapper.",
+      "remoteWrapperPolicy": "allow",
+      "localCommand": "scripts/devbox/run-safe.sh node scripts/devbox/heavy-suite.ts"
+    }
+  ]
+}
