@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { dirname, join } from 'node:path';
 import { tests as testArtifacts } from './matrix.ts';
 import { gitAnchor, gitStaleness, type GitLink, type GitStalenessResult } from './matrix-staleness.ts';
@@ -371,7 +371,7 @@ export async function codemapLink(options: CodemapLinkOptions): Promise<CodemapR
   const resultId = String(record.id ?? '');
   const files = changedFiles(result);
   const startDir = dirname(options.resultPath);
-  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: startDir, encoding: 'utf8' });
+  const top = runSync('git', ['rev-parse', '--show-toplevel'], { cwd: startDir });
   const dir = options.dir ?? (top.status === 0 ? top.stdout.trim() : startDir);
 
   const sent: CodemapSent[] = [];

@@ -1,7 +1,7 @@
-import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parsePiCapabilities, type PiCapabilities } from './pi-isolation.ts';
+import { runSync } from './spawn-sync.ts';
 
 // The run-local overlay lives in pi-overlay.ts. Re-export both operations so
 // existing imports through worker-pi.ts (and worker.ts) keep working.
@@ -47,7 +47,7 @@ export function buildPiArgs(requested:{provider:string;model:string}, sessionId?
  * offline and bounded; any failure (missing binary, non-zero status, timeout)
  * yields null so the caller can fall back to assuming every flag works. */
 export function probePiCapabilities(run?: (command:string, args:string[], options:any) => { status:number|null; stdout?:string; error?:Error }): PiCapabilities | null {
- const invoke = run ?? ((command:string, args:string[], options:any) => spawnSync(command, args, options));
+ const invoke = run ?? ((command:string, args:string[], options:any) => runSync(command, args, options));
  try {
   const result = invoke('pi', ['--offline','--no-approve','--help'], {
    encoding:'utf8', timeout:10000, maxBuffer:1048576,

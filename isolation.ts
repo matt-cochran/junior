@@ -13,7 +13,7 @@
 
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync, readdirSync, statSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync, type RunSyncOptions } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandPolicy } from './command-policy.ts';
 
@@ -27,13 +27,16 @@ export function resolveIsolation(t: any): { mode: IsolationMode; error?: string 
  return { mode: 'none', error: 'Invalid isolation (expected "none" or "worktree")' };
 }
 
-function git(cwd: string, args: string[], timeoutMs = 60000) {
- return spawnSync('git', args, { cwd, encoding: 'utf8', timeout: typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 1, maxBuffer: 8 * 1024 * 1024 });
+/** Test seam for injecting the underlying spawn implementation. */
+export type GitRunSeam = Pick<RunSyncOptions, 'spawn' | 'tempRoot'>;
+
+function git(cwd: string, args: string[], timeoutMs = 60000, seam: GitRunSeam = {}) {
+ return runSync('git', args, { cwd, timeout: typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : undefined, maxBuffer: 8 * 1024 * 1024, ...seam });
 }
 
 /** Bounded Git subprocess runner shared by the retention/quarantine helpers. */
-export function runGit(cwd: string, args: string[], timeoutMs = 60000) {
- return git(cwd, args, timeoutMs);
+export function runGit(cwd: string, args: string[], timeoutMs = 60000, seam: GitRunSeam = {}) {
+ return git(cwd, args, timeoutMs, seam);
 }
 
 /** Report whether a checkout has any staged, unstaged or nonignored untracked
@@ -310,7 +313,7 @@ export function provisionIsolationSetup(
    return finish('wall deadline exceeded before setup command');
   }
   const timeout = Math.max(1, Math.min(opts.checkTimeoutMs > 0 ? opts.checkTimeoutMs : remaining, remaining));
-  const r = spawnSync(cmd.command, cmd.args ?? [], { cwd, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024 });
+  const r = runSync(cmd.command, cmd.args ?? [], { cwd, timeout, maxBuffer: 8 * 1024 * 1024 });
   const output = `${r.stdout || ''}${r.stderr || ''}`;
   if (output) lines.push(`command ${[cmd.command, ...(cmd.args ?? [])].join(' ')} output:\n${output}`);
   if (r.error) {

@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import path from 'node:path';
 import { CROSSMATRIX_WRITE_SCHEMA_VERSION } from './matrix-sync.ts';
 import { graphSlice } from './context-graph.ts';
@@ -641,9 +641,8 @@ function defaultGit(project: string): LinkQcGit {
   return {
     pathExists: (p: string) => fs.existsSync(path.join(project, p)),
     lastChange: (p: string) => {
-      const result = spawnSync('git', ['log', '-1', '--format=%cI', '--', p], {
+      const result = runSync('git', ['log', '-1', '--format=%cI', '--', p], {
         cwd: project,
-        encoding: 'utf8',
       });
       if (result.status !== 0) return null;
       const out = (result.stdout ?? '').trim();

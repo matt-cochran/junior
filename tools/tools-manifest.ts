@@ -3,12 +3,12 @@
  * Split from tools/tools.ts per ADR 0016; the facade re-exports the public API.
  */
 
-import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { runSync } from "../spawn-sync.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -147,11 +147,8 @@ const UNKNOWN_SOURCE_VERSION = "unknown";
 
 /** Run `<command> --version` and return the first semver it prints, or null. */
 export function probeToolVersion(command: string): string | null {
-  const res = spawnSync(command, ["--version"], {
-    encoding: "utf8",
+  const res = runSync(command, ["--version"], {
     timeout: VERSION_PROBE_TIMEOUT_MS,
-    stdio: ["ignore", "pipe", "ignore"],
-    windowsHide: true,
   });
   if (res.error || res.status !== 0 || typeof res.stdout !== "string") return null;
   const match = /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/.exec(res.stdout);
