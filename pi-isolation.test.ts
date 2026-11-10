@@ -3,7 +3,7 @@
 //
 // The help excerpt is a trimmed copy of `pi --offline --no-approve --help`
 // captured from the installed Pi 1.0.4 CLI (every option line is unchanged in
-// Pi 1.4.0), so capability parsing is exercised
+// Pi 1.5.2), so capability parsing is exercised
 // against real option text rather than a hand-written list.
 // ---------------------------------------------------------------------------
 

@@ -22,7 +22,7 @@ import { inspectIntegrations, type IntegrationsResult, type InstallerDeps } from
 import { VERIFIED_VERSIONS } from './companion-shapes.ts';
 import { updateCheckCachePath, type UpdateSummary } from './update-check.ts';
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { createInterface } from 'node:readline/promises';
 import { join, resolve, dirname, delimiter } from 'node:path';
 import { ensureLocalExcludes } from './isolation.ts';
@@ -438,7 +438,7 @@ function defaultSetupExec(
   args: string[],
   options?: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string },
 ): { status: number | null; stdout?: string; stderr?: string; error?: string } {
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: options?.timeout, env: options?.env, cwd: options?.cwd });
+  const result = runSync(command, args, { timeout: options?.timeout, env: options?.env, cwd: options?.cwd });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message };
 }
 
@@ -452,7 +452,7 @@ async function defaultPrompt(question: string): Promise<string> {
 /** Repo-relative untracked files, or null outside a Git checkout (a git
  * failure is treated as "not a repository" so exclusion stays silent). */
 function gitUntracked(cwd: string): string[] | null {
-  const r = spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd, encoding: 'utf8' });
+  const r = runSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd });
   if (r.error || r.status !== 0) return null;
   return String(r.stdout ?? '').split('\n').map((line) => line.trim()).filter(Boolean);
 }

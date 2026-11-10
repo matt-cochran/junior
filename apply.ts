@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 import { featureFromResult } from './matrix-defaults.ts';
 
@@ -32,7 +32,7 @@ type Run = { status: number; stdout: string; stderr: string; error?: string };
 
 /** Bounded Git subprocess runner using argv arrays (never a shell). */
 function runGit(cwd: string, args: string[], input?: string): Run {
- const r = spawnSync('git', args, { cwd, encoding: 'utf8', input, maxBuffer: 32 * 1024 * 1024 });
+ const r = runSync('git', args, { cwd, input, maxBuffer: 32 * 1024 * 1024 });
  return { status: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.message };
 }
 
@@ -86,10 +86,10 @@ function linkApplied(resultPath: string, cwd: string): { requestIds?: string[]; 
  const feature = featureFromResult(resultPath);
  if (!feature) return undefined;
  if (!existsSync(join(cwd, '.crossmatrix'))) return undefined;
- const child = spawnSync(
+ const child = runSync(
   process.execPath,
   [cliEntry(), 'matrix', 'link', '--result', resultPath, '--feature', feature, '--dir', cwd],
-  { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+  { cwd, maxBuffer: 8 * 1024 * 1024 },
  );
  const stdout = (child.stdout ?? '').trim();
  let parsed: { requestIds?: string[]; error?: string } | undefined;

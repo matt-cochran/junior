@@ -15,7 +15,7 @@
 // `codemapLink`, which is itself idempotent.
 // ---------------------------------------------------------------------------
 
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { codemapLink, codemapObserve, type CodemapDeps, type CodemapSent } from './codemap.ts';
@@ -133,7 +133,7 @@ function parseJson(text: string): unknown {
 
 /** Tracked files under `dir` with their bytes, as matrix.ts's adapters expect. */
 function trackedFiles(dir: string): MatrixFile[] {
-  const listing = spawnSync('git', ['ls-files'], { cwd: dir, encoding: 'utf8' });
+  const listing = runSync('git', ['ls-files'], { cwd: dir });
   if (listing.status !== 0) {
     throw new Error(`git ls-files failed in ${dir}: ${listing.stderr?.trim() ?? 'unknown error'}`);
   }

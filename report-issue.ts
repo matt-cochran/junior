@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { readPackageVersion, spawnSpec } from './cli-entry.ts';
 import { loadHop } from './tools/tools.ts';
 
@@ -100,8 +100,7 @@ const VERSION_TIMEOUT_MS = 15_000;
 
 function defaultExec(command: string, args: string[], options: { timeout?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): ExecResult {
   const spec = spawnSpec(command, args);
-  const result = spawnSync(spec.command, spec.args, {
-    encoding: 'utf8',
+  const result = runSync(spec.command, spec.args, {
     timeout: options.timeout,
     env: options.env,
     cwd: options.cwd,

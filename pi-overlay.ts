@@ -34,6 +34,8 @@ export interface OverlayError {
 export interface PrepareOverlayResult {
   dir?: string;
   copied?: string[];
+  /** The resolved ambient Pi agent directory that credentials were read from. */
+  ambient?: string;
   error?: string;
 }
 
@@ -59,9 +61,9 @@ export function preparePiAgentOverlay(
       chmodSync(to, 0o600);
       copied.push(name);
     }
-    return { dir, copied };
+    return { dir, copied, ambient: source };
   } catch (e: any) {
-    return { error: `cannot create workspace-local Pi credential state at ${dir}: ${e?.message ?? String(e)}` };
+    return { ambient: source, error: `cannot create workspace-local Pi credential state at ${dir}: ${e?.message ?? String(e)}` };
   }
 }
 

@@ -332,6 +332,16 @@ test('withPlanLease marks a run that never started ready', async () => {
   assert.deepEqual(markCall(calls)?.request.arguments.status, { status: 'ready' });
 });
 
+test('withPlanLease releases its own lease after handing a never-started run back to ready', async () => {
+  const { calls, callHop } = harness();
+  const result = { status: 'blocked', segments: 0, runtime: { stopReason: 'blocked' }, model: { observed: [] } };
+  await withPlanLease(TASK, async () => result, deps(callHop));
+  const tools = calls.map((call) => call.request.tool);
+  const release = calls.find((call) => call.request.tool === 'plan.force_release');
+  assert.ok(tools.indexOf('plan.force_release') > tools.lastIndexOf('plan.mark_status'));
+  assert.deepEqual({ plan: release?.request.arguments.plan_id, deliverable: release?.request.arguments.deliverable_id }, { plan: 'plan_1', deliverable: DELIVERABLE });
+});
+
 test('withPlanLease records the never-started run in the ready evidence', async () => {
   const { calls, callHop } = harness();
   const result = { status: 'blocked', segments: 0, runtime: { stopReason: 'blocked' }, model: { observed: [] } };

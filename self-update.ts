@@ -15,7 +15,7 @@
 
 import { spawnSpec } from './cli-entry.ts';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareVersions, installationDisabled } from './companions.ts';
@@ -74,8 +74,8 @@ export interface SelfUpdateOutcome {
 function defaultExec(command: string, args: string[], options: ExecOptions = {}): ExecResult {
   const inherited = options.stdio === 'inherit';
   const spec = spawnSpec(command, args);
-  const r = spawnSync(spec.command, spec.args, {
-    ...(inherited ? { stdio: 'inherit' as const } : { encoding: 'utf8' as const }),
+  const r = runSync(spec.command, spec.args, {
+    ...(inherited ? { stdio: 'inherit' as const } : {}),
     timeout: options.timeout,
     env: options.env,
     cwd: options.cwd,

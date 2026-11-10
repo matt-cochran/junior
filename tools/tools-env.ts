@@ -3,7 +3,6 @@
  * Split from tools/tools.ts per ADR 0016; the facade re-exports the public API.
  */
 
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -12,6 +11,7 @@ import type { GatewayDeps } from "../gateway.ts";
 import { loadDefaults } from "../setup.ts";
 import { assertCommodity } from "../model-policy.ts";
 import { HopError, NATIVE_RELATIVE, isSet } from "./tools-manifest.ts";
+import { runSync } from "../spawn-sync.ts";
 import type { CallKind, HopManifest, SnapshotRef, ToolName } from "./tools-manifest.ts";
 
 // ---------------------------------------------------------------------------
@@ -59,8 +59,7 @@ export function nativeAbsPath(hopPath: string, tool: ToolName, manifest: HopMani
  */
 function gitTopLevel(startDir: string): string | null {
   try {
-    const res = spawnSync("git", ["-C", startDir, "rev-parse", "--show-toplevel"], {
-      encoding: "utf8",
+    const res = runSync("git", ["-C", startDir, "rev-parse", "--show-toplevel"], {
       timeout: 5_000,
     });
     if (res.status === 0) {

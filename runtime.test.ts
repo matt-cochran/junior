@@ -8,12 +8,12 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { executeWorkerStreaming, executeCheck, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET } from './runtime.ts';
+import { executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
 
@@ -299,6 +299,94 @@ test('outputBreakdown.largestToolResults lists a tool call once when it also arr
   fake.end(0);
   const res: any = await promise;
   assert.deepEqual(res.outputBreakdown.largestToolResults.map((r: any) => r.toolCallId), ['c1']);
+});
+
+// --- sandbox-safe file capture ---
+
+const realStreamRun = (dir: string, script: string, over: any = {}) => {
+  const eventsPath = eventsPathFor(dir);
+  const logPath = join(dir, 'worker.log');
+  return executeWorkerStreaming({
+    spawnChild: spawnChildDetached,
+    command: process.execPath,
+    args: ['-e', script],
+    cwd: dir,
+    eventsPath,
+    logPath,
+    runtimePath: join(dir, 'runtime.json'),
+    settings: { ...EXECUTION_DEFAULTS, quietMs: 100000, heartbeatMs: 20 },
+    deadlineAt: Date.now() + 60000,
+    ...over,
+  });
+};
+
+test('A real captured child leaves its full 200 KB stdout in the capture file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-real-capture-'));
+  const lines = Array.from({ length: 200 }, () => 'x'.repeat(1023)).join('\n') + '\n';
+  const tail = '{"type":"agent_settled"}';
+  const script = `const fs=require('fs');const line='x'.repeat(1023)+'\\n';for(let i=0;i<200;i++)fs.writeSync(1,line);fs.writeSync(1,${JSON.stringify(tail)});`;
+  await realStreamRun(dir, script);
+  assert.equal(readFileSync(`${eventsPathFor(dir)}.stdout`, 'utf8'), lines + tail);
+});
+
+test('A real captured child has its partial final line processed before close', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-real-partial-'));
+  const script = `const fs=require('fs');fs.writeSync(1,${JSON.stringify('{"type":"agent_settled"}')});`;
+  await realStreamRun(dir, script);
+  assert.ok(readEvents(dir).includes('{"type":"agent_settled"}'));
+});
+
+test('A real captured child stderr reaches the worker result', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-real-stderr-'));
+  const script = `require('fs').writeSync(2,'captured stderr\\n');`;
+  const res = await realStreamRun(dir, script);
+  assert.equal(res.stderr, 'captured stderr\n');
+});
+
+test('A real captured child is stopped at the output cap', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-real-cap-'));
+  const script = `const fs=require('fs');for(let i=0;i<300;i++)fs.writeSync(1,'x'.repeat(1023)+'\\n');`;
+  const res = await realStreamRun(dir, script, { maxOutputBytes: 1024 });
+  assert.equal(res.outputTruncated, true);
+});
+
+test('A real captured child killed by the deadline reports deadline_exceeded', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-real-deadline-'));
+  const script = `const fs=require('fs');fs.writeSync(1,'{"type":"session","id":"s"}\\n');setInterval(()=>{},1000);`;
+  const res = await realStreamRun(dir, script, { deadlineAt: Date.now() + 300 });
+  assert.equal(res.deadlineExceeded, true);
+});
+
+test('executeCheck captures caller-supplied stdout through a file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-check-capture-out-'));
+  const stdoutPath = join(dir, 'check.stdout');
+  await executeCheck({
+    spawnChild: spawnChildDetached,
+    command: process.execPath,
+    args: ['-e', `process.stdout.write('check output\\n')`],
+    cwd: dir,
+    timeoutMs: 5000,
+    deadlineAt: Date.now() + 60000,
+    stdoutPath,
+    stderrPath: join(dir, 'check.stderr'),
+  });
+  assert.equal(readFileSync(stdoutPath, 'utf8'), 'check output\n');
+});
+
+test('executeCheck places default check capture files beside the run heartbeat', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-check-capture-default-'));
+  const heartbeat = new RuntimeHeartbeat(join(dir, 'runtime.json'), { ...EXECUTION_DEFAULTS, heartbeatMs: 20 }, Date.now(), Date.now() + 60000, 'checks');
+  await executeCheck({
+    spawnChild: spawnChildDetached,
+    command: process.execPath,
+    args: ['-e', `process.stdout.write('check output\\n')`],
+    cwd: dir,
+    timeoutMs: 5000,
+    deadlineAt: Date.now() + 60000,
+    heartbeat,
+  });
+  const capture = readdirSync(dir).find((name) => name.startsWith('check-') && name.endsWith('.stdout'));
+  assert.equal(capture ? readFileSync(join(dir, capture), 'utf8') : null, 'check output\n');
 });
 
 // --- #161 workflow budgets ---

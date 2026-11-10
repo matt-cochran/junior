@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { runSync } from "./spawn-sync.ts";
 import process from "node:process";
 import {
   DEFAULT_MAX_ASSET_BYTES,
@@ -494,15 +494,15 @@ export function extractEntryToBuffer(archivePath: string, entryName: string, dep
 }
 
 export function defaultExec(command: string, args: string[], options: any = {}): ExecResult {
-  const r = spawnSync(command, args, { encoding: "utf8", ...options });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error?.message };
+  const r = runSync(command, args, options);
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error?.message };
 }
 export function defaultExecBuffer(command: string, args: string[], options: any = {}): ExecBufferResult {
-  const r = spawnSync(command, args, { maxBuffer: options.maxBuffer ?? DEFAULT_MAX_ASSET_BYTES, timeout: options.timeout, ...options });
+  const r = runSync(command, args, { ...options, maxBuffer: options.maxBuffer ?? DEFAULT_MAX_ASSET_BYTES });
   return {
     status: r.status,
-    stdout: Buffer.isBuffer(r.stdout) ? r.stdout : Buffer.from(r.stdout ?? ""),
-    stderr: typeof r.stderr === "string" ? r.stderr : r.stderr?.toString("utf8"),
+    stdout: Buffer.from(r.stdout),
+    stderr: r.stderr,
     error: r.error?.message,
   };
 }

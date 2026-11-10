@@ -9,7 +9,7 @@
 // is committed.
 // ---------------------------------------------------------------------------
 
-import { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 
 export interface GitAnchor {
   commit: string;
@@ -67,7 +67,7 @@ export interface GitCommandResult {
 export type GitRunner = (args: string[], dir: string) => GitCommandResult;
 
 function runGitDefault(args: string[], dir: string): GitCommandResult {
-  const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  const result = runSync('git', args, { cwd: dir });
   return {
     status: result.status,
     stdout: result.stdout ?? '',

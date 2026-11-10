@@ -35,7 +35,13 @@ export interface ClassifyPiFailureInput {
   stderr: string;
   receipt?: { assistantMessages?: number } | null;
   assistantMessages?: number;
+  /** Raw event JSONL or an equivalent text projection of assistant/event errors. */
+  eventsText?: string | readonly string[] | readonly { errorMessage?: string }[];
+  /** Error messages captured from assistant/event records. */
+  errorMessages?: string | readonly string[] | readonly { errorMessage?: string }[];
 }
+
+const CREDENTIAL_REMEDIATION = 'Junior runs Pi with a run-local copy of your Pi credentials; if this path is your ambient Pi directory, set PI_CODING_AGENT_DIR to a writable directory or report it';
 
 const REDACTED = '[REDACTED]';
 
@@ -83,6 +89,38 @@ export function redactSecrets(text: string): string {
   return out;
 }
 
+function eventText(input: ClassifyPiFailureInput): string {
+  const out: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === 'string') {
+      out.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) add(item);
+    } else if (value && typeof value === 'object' && typeof (value as { errorMessage?: unknown }).errorMessage === 'string') {
+      out.push((value as { errorMessage: string }).errorMessage);
+    }
+  };
+  add(input.eventsText);
+  add(input.errorMessages);
+  return out.join('\n');
+}
+
+/** The auth lock path named by a credential failure, for an actionable summary. */
+function credentialLockPath(text: string): string | undefined {
+  const quoted = text.match(/['"`]([^'"`]*auth\.json\.lock)[^'"`]*['"`]/i);
+  if (quoted) return quoted[1];
+  const bare = text.match(/([^\s:'"`]+auth\.json\.lock)\b/i);
+  return bare?.[1];
+}
+
+function credentialFailure(text: string, detail: string): PiFailure {
+  const path = credentialLockPath(text);
+  const summary = path
+    ? `Pi could not read or lock the credential store at ${path}; ${CREDENTIAL_REMEDIATION}`
+    : `Pi could not read or lock its credential store; ${CREDENTIAL_REMEDIATION}`;
+  return result('credential_lock', summary, false, detail);
+}
+
 function assistantCount(input: ClassifyPiFailureInput): number | undefined {
   if (typeof input.assistantMessages === 'number') return input.assistantMessages;
   const fromReceipt = input.receipt?.assistantMessages;
@@ -128,19 +166,18 @@ export function classifyPiFailure(input: ClassifyPiFailureInput): PiFailure | nu
   const stderr = typeof input.stderr === 'string' ? input.stderr : '';
   const exitCode = input.exitCode;
   const messages = assistantCount(input);
-  const detail = redactSecrets(stderr).slice(-500);
+  const combined = [stderr, eventText(input)].filter(Boolean).join('\n');
+  const detail = redactSecrets(combined).slice(-500);
 
   // A process that produced an assistant message and exited cleanly is a
   // success even when its stderr mentions a transient transport warning.
   if (exitCode === 0 && typeof messages === 'number' && messages > 0) return null;
 
-  if (/(EROFS|EACCES|EPERM)/i.test(stderr) && /\.lock\b/i.test(stderr)) {
-    return result(
-      'credential_lock',
-      'Pi could not create its credential lock; use a writable Pi agent directory and retry.',
-      false,
-      detail,
-    );
+  // Credential-store failures are actionable and must be visible even when the
+  // only evidence is an assistant/event error rather than stderr.
+  if (/Credential store read failed/i.test(combined)
+    || (/(EROFS|EACCES|EPERM)/i.test(combined) && /\.lock\b/i.test(combined))) {
+    return credentialFailure(combined, detail);
   }
   if (/No session found matching/i.test(stderr)) {
     return result(

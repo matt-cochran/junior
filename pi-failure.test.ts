@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import { classifyPiFailure, redactSecrets } from './pi-failure.ts';
 
+const CREDENTIAL_203 = "Credential store read failed for openrouter: EROFS: read-only file system, mkdir '/home/u/.pi/agent/auth.json.lock'";
+const CREDENTIAL_REMEDIATION = 'Junior runs Pi with a run-local copy of your Pi credentials; if this path is your ambient Pi directory, set PI_CODING_AGENT_DIR to a writable directory or report it';
+
 test('a fetch failure maps to a transport category', () => {
   const failure = classifyPiFailure({ exitCode: 1, stderr: 'fetch failed' });
   assert.equal(failure?.category, 'transport_fetch');
@@ -18,6 +21,48 @@ test('an EROFS lock error maps to credential_lock', () => {
     exitCode: 1,
     stderr: 'EROFS: read-only file system, open /home/me/.pi/agent/auth.json.lock',
   });
+  assert.equal(failure?.category, 'credential_lock');
+});
+
+test('the #203 credential-store text in stderr maps to credential_lock', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: CREDENTIAL_203 });
+  assert.equal(failure?.category, 'credential_lock');
+});
+
+test('a credential-store failure summary names the lock path from stderr', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: CREDENTIAL_203 });
+  assert.ok(failure?.summary.includes('/home/u/.pi/agent/auth.json.lock'));
+});
+
+test('a credential-store failure summary states the ambient-directory remediation', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: CREDENTIAL_203 });
+  assert.ok(failure?.summary.includes(CREDENTIAL_REMEDIATION));
+});
+
+test('a credential-store failure is not retryable', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: CREDENTIAL_203 });
+  assert.equal(failure?.retryable, false);
+});
+
+test('a credential-store error in an event errorMessage maps to credential_lock', () => {
+  const failure = classifyPiFailure({
+    exitCode: 1,
+    stderr: '',
+    eventsText: JSON.stringify({ type: 'error', errorMessage: CREDENTIAL_203 }),
+  });
+  assert.equal(failure?.category, 'credential_lock');
+});
+
+test('an EACCES lock error maps to credential_lock', () => {
+  const failure = classifyPiFailure({
+    exitCode: 1,
+    stderr: "EACCES: permission denied, open '/home/me/.pi/agent/auth.json.lock'",
+  });
+  assert.equal(failure?.category, 'credential_lock');
+});
+
+test('errorMessages entries are inspected for credential-store failures', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: '', errorMessages: [CREDENTIAL_203] });
   assert.equal(failure?.category, 'credential_lock');
 });
 
