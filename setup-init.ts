@@ -42,6 +42,8 @@ export type InitResult = {
  excluded:string[];
  /** Outcome of the project Crossmatrix store step, independent of `ready`. */
  matrix:MatrixOutcome;
+ /** `update` only: the project config's Pi pin before and after this run. */
+ piPin?:{ from:string; to:string; action:'raised'|'current'|'newer'|'unreadable' };
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string; note?:string; pi:PiInstallOutcome };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
@@ -92,6 +94,21 @@ function defaultMatrixInit(deps:SetupDeps, dir:string):{created:string[]} {
 /** Idempotent project setup. Creates project defaults and an example task only
  * when absent; existing files and all global auth/model configuration are
  * preserved. Installation happens only when `opts.install` is true. */
+/** Raise an older `pi.testedVersion` in delivery.config.json to `tested`,
+ * preserving every other field and the file's two-space formatting. */
+function refreshProjectPiPin(deps:SetupDeps, path:string, tested:string, write:(p:string,d:string)=>void):NonNullable<InitResult['piPin']>|undefined {
+ let config:any;
+ try { config=JSON.parse(readText(deps,path)); } catch { return { from:'', to:'', action:'unreadable' }; }
+ const pinned=config?.pi?.testedVersion;
+ if (typeof pinned !== 'string' || !/^\d+\.\d+\.\d+/.test(pinned)) return undefined;
+ const order=compareSemver(pinned,tested);
+ if (order === 0) return { from:pinned, to:pinned, action:'current' };
+ if (order > 0) return { from:pinned, to:pinned, action:'newer' };
+ config.pi={ ...config.pi, testedVersion:tested };
+ write(path, JSON.stringify(config,null,2)+'\n');
+ return { from:pinned, to:tested, action:'raised' };
+}
+
 export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  const cwd=deps.cwd ?? process.cwd();
  const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
@@ -101,8 +118,14 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
 
  const tested={name:PI_PACKAGE,version:TESTED_PI_VERSION};
  const defaultsPath=join(cwd,'delivery.config.json');
- if (exists(deps,defaultsPath)) preserved.push('delivery.config.json');
- else {
+ let piPin:InitResult['piPin'];
+ if (exists(deps,defaultsPath)) {
+  preserved.push('delivery.config.json');
+  // `junior update` moves a consumer to the Pi this Junior is tested with: a
+  // project pin older than the built-in tested version (written by an older
+  // init) is raised; a newer pin is a deliberate choice and is left alone.
+  if (opts.command === 'update') piPin=refreshProjectPiPin(deps, defaultsPath, tested.version, write);
+ } else {
   const config:any={ provider:DEFAULT_PROVIDER, model:DEFAULT_MODEL };
   if (tested) config.pi={ name:tested.name, testedVersion:tested.version };
   write(defaultsPath, JSON.stringify(config,null,2)+'\n');
@@ -208,7 +231,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  } else if (!exists(deps, storePath) && !(command === 'update' && opts.matrix !== true)) {
   instructions.push(MATRIX_REMINDER);
  }
- return { ...(storeLockdown ? { storeLockdown } : {}), command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, skill, excluded, matrix, install,
+ return { ...(storeLockdown ? { storeLockdown } : {}), command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, ...(piPin ? { piPin } : {}), skill, excluded, matrix, install,
   installSummary:summarizeInstall(install,null), instructions };
 }
 

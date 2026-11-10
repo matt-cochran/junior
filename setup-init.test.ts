@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { init } from './setup-init.ts';
@@ -144,4 +144,39 @@ test('failed older Pi upgrade leaves the old Pi in place', () => {
   const f = fixture('0.9.0', { status: 1, stderr: 'npm registry unavailable' });
   const result = init(f.deps, f.opts);
   assert.equal(result.pi.version, '0.9.0');
+});
+
+function withConfig(testedVersion: string) {
+  const f = fixture(TESTED_PI_VERSION);
+  writeFileSync(join(f.cwd, 'delivery.config.json'), JSON.stringify({ provider: 'openrouter', model: 'x', pi: { name: PI_PACKAGE, testedVersion }, extra: { keep: true } }, null, 2) + '\n');
+  return f;
+}
+const readConfig = (cwd: string) => JSON.parse(readFileSync(join(cwd, 'delivery.config.json'), 'utf8'));
+
+test('update raises an older project Pi pin to the tested version and keeps other fields', () => {
+  const f = withConfig('1.0.3');
+  const r = init(f.deps, { ...f.opts, command: 'update' });
+  assert.deepEqual(r.piPin, { from: '1.0.3', to: TESTED_PI_VERSION, action: 'raised' });
+  assert.equal(readConfig(f.cwd).pi.testedVersion, TESTED_PI_VERSION);
+  assert.deepEqual(readConfig(f.cwd).extra, { keep: true });
+  assert.equal(r.pi.versionStatus, 'match');
+});
+
+test('update leaves a newer project Pi pin alone', () => {
+  const f = withConfig('99.0.0');
+  const r = init(f.deps, { ...f.opts, command: 'update' });
+  assert.deepEqual(r.piPin, { from: '99.0.0', to: '99.0.0', action: 'newer' });
+  assert.equal(readConfig(f.cwd).pi.testedVersion, '99.0.0');
+});
+
+test('update reports a current project Pi pin without rewriting it', () => {
+  const f = withConfig(TESTED_PI_VERSION);
+  assert.deepEqual(init(f.deps, { ...f.opts, command: 'update' }).piPin, { from: TESTED_PI_VERSION, to: TESTED_PI_VERSION, action: 'current' });
+});
+
+test('plain init never rewrites an existing project Pi pin', () => {
+  const f = withConfig('1.0.3');
+  const r = init(f.deps, f.opts);
+  assert.equal(r.piPin, undefined);
+  assert.equal(readConfig(f.cwd).pi.testedVersion, '1.0.3');
 });
