@@ -7,8 +7,10 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import {
   detectPlatform,
   installTools,
@@ -18,6 +20,8 @@ import {
   checkToolUpdates,
   TRIZ_REPO,
 } from './installer.ts';
+import { extractEntryToBuffer } from './installer-release.ts';
+import { withInstallLock } from './installer-state.ts';
 import {
   tmp,
   response,
@@ -767,4 +771,45 @@ test('An install without an explicit install root falls back to the default root
   });
   const { installRoot: _root, ...deps } = baseDeps(server);
   await assert.doesNotReject(installTools({ tools: [] }, deps));
+});
+
+// --- #210: binary extraction and crash-stranded install locks ---------------
+
+test('extractEntryToBuffer extracts a binary entry byte-for-byte', { skip: process.platform === 'win32' }, () => {
+  const dir = tmp('installer-210-');
+  const bytes = Buffer.from(Array.from({ length: 4096 }, (_, i) => (i * 37 + 0x80) & 0xff));
+  writeFileSync(join(dir, 'tool-bin'), bytes);
+  const archive = join(dir, 'tool.tar.gz');
+  const r = spawnSync('tar', ['-czf', archive, '-C', dir, 'tool-bin']);
+  assert.equal(r.status, 0, String(r.stderr));
+  const out = extractEntryToBuffer(archive, 'tool-bin', {});
+  assert.equal(out.length, bytes.length);
+  assert.ok(out.equals(bytes), 'extracted bytes differ from the archived binary');
+});
+
+test('withInstallLock records its holder and reaps a lock left by a dead process', async () => {
+  const dir = tmp('installer-210-');
+  const statePath = join(dir, 'installed.json');
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  writeFileSync(`${statePath}.lock`, JSON.stringify({ pid: dead, hostname: hostname(), at: new Date().toISOString() }));
+  let holder: { pid?: number } | undefined;
+  await withInstallLock(statePath, async () => {
+    holder = JSON.parse(readFileSync(`${statePath}.lock`, 'utf8'));
+  });
+  assert.equal(holder?.pid, process.pid);
+  assert.equal(existsSync(`${statePath}.lock`), false);
+});
+
+test('an install removes staging directories a crashed install left behind', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const deps = baseDeps(server);
+  const stale = join(deps.installRoot, '.tmp-cpm-crashed');
+  mkdirSync(stale, { recursive: true });
+  writeFileSync(join(stale, 'cpm-planner'), 'partial');
+  await installTools({ tools: ['fmeca'] }, deps);
+  assert.equal(existsSync(stale), false);
 });

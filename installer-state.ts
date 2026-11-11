@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { loadHop, mcpCallSequence } from "./tools/tools.ts";
+import { reapDeadHolderLock, writeLockHolder } from "./lock-holder.ts";
 import {
   DEFAULT_INSTALL_ROOT,
   DEFAULT_PROBE_TIMEOUT_MS,
@@ -89,11 +90,15 @@ export async function withInstallLock<T>(statePath: string, fn: () => Promise<T>
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") throw new InstallerError("IO_ERROR", `cannot acquire install lock ${lockPath}`, err);
+      // A crashed install (the process aborted before its finally ran) leaves
+      // the lock behind; reap it when its recorded holder is gone (#210).
+      if (reapDeadHolderLock(lockPath)) continue;
       if (Date.now() >= deadline) throw new InstallerError("LOCKED", `another install holds ${lockPath}`);
       await new Promise((r) => setTimeout(r, 25));
     }
   }
   try {
+    writeLockHolder(fd);
     return await fn();
   } finally {
     try {

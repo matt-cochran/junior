@@ -364,6 +364,27 @@ async function installOne(
 }
 
 /**
+ * Remove `.tmp-<tool>-*` staging directories a crashed install left behind.
+ * Only called while holding the install lock, so no live install owns them (#210).
+ */
+function removeStaleTempDirs(installRoot: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(installRoot);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(".tmp-")) continue;
+    try {
+      fs.rmSync(path.join(installRoot, name), { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/**
  * Install or verify the requested tools. With no `update`, an existing current
  * install is left untouched and a newer release is reported without floating to
  * it. A failure for one tool never removes another tool's working binary.
@@ -385,6 +406,7 @@ export async function installTools(
   let fatal: string | undefined;
 
   await withInstallLock(statePath, async () => {
+    removeStaleTempDirs(installRoot);
     const state = readInstallState(runDeps);
     const previousTools: Partial<Record<ToolName, InstalledTool>> = { ...state.tools };
     for (const tool of selected) {

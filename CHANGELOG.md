@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-11
+
+### Fixed
+
+- `junior update` installs binary tools again. Extracting the binary from its
+  release archive (`tar -xOf`) went through `runSync`, which decoded the capture
+  as UTF-8; invalid byte sequences became U+FFFD, so the binary came out garbled
+  and larger than the original (`Exec format error`). `runSync` now returns the
+  raw bytes as `stdoutBytes`, and extraction uses them, byte for byte (#210).
+- A tool that exits or closes stdin during the MCP health probe is a failed
+  probe (`SPAWN_ERROR`), not a crash. The asynchronous `EPIPE` on the child's
+  stdin was an unhandled `'error'` event and aborted Node (#210).
+- A crashed install no longer strands `installed.json.lock`. The install lock
+  now records its holder's pid and hostname, like the HOP manifest lock, and a
+  lock whose same-host holder is gone is reaped. Leftover `.tmp-<tool>-*`
+  staging directories are removed at the start of the next install (#210).
+
 ## [0.15.1] - 2026-11-10
 
 ### Fixed
