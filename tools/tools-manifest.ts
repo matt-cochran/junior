@@ -5,10 +5,10 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { runSync } from "../spawn-sync.ts";
+import { reapDeadHolderLock, writeLockHolder } from "../lock-holder.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -332,54 +332,6 @@ export function saveHop(hopPath: string, manifest: HopManifest): void {
   writeFileAtomic(hopPath, JSON.stringify(manifest, null, 2) + "\n");
 }
 
-type LockHolder = { pid?: number; hostname?: string };
-
-/** Read the holder recorded by an existing lock file, or null when it is
- * unreadable, malformed (legacy) or already gone. */
-function readLockHolder(lockPath: string): LockHolder | null {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(lockPath, "utf8");
-  } catch {
-    return null;
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!isRecord(value)) return null;
-  const pid = typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 ? value.pid : undefined;
-  const hostname = typeof value.hostname === "string" && value.hostname.length > 0 ? value.hostname : undefined;
-  return { pid, hostname };
-}
-
-/** True when `pid` names a live process (or liveness cannot be proven). Only a
- * `process.kill(pid, 0)` that throws ESRCH proves the holder is gone. */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-/** Remove a lock left by a dead same-host holder. A lock from another host, an
- * unparseable/legacy lock, or a live pid is never removed (returns false). */
-function reapDeadHolderLock(lockPath: string): boolean {
-  const holder = readLockHolder(lockPath);
-  if (!holder || holder.hostname !== os.hostname() || holder.pid === undefined) return false;
-  if (isPidAlive(holder.pid)) return false;
-  try {
-    fs.unlinkSync(lockPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Serialize access to one manifest via an exclusive lock file
  * (`<hop.json>.lock`). The lock records the holder's pid, hostname and creation
@@ -411,7 +363,7 @@ export async function withManifestLock<T>(
     }
   }
   try {
-    fs.writeSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname(), at: nowIso() }));
+    writeLockHolder(fd, nowIso());
     return await fn();
   } finally {
     try {

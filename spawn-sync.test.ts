@@ -102,3 +102,20 @@ test('inherit and ignore modes run without capturing', () => {
   assert.equal(r.capture, 'none');
   assert.equal(r.stdout, '');
 });
+
+// #210: `tar -xOf` of a binary entry went through runSync, which decoded the
+// capture as UTF-8; invalid sequences became U+FFFD and the binary was garbled.
+const ALL_BYTES = 'process.stdout.write(Buffer.from(Array.from({length:256},(_,i)=>i)))';
+
+test('keeps binary stdout byte-for-byte in stdoutBytes', () => {
+  const r = runSync(node, ['-e', ALL_BYTES]);
+  assert.equal(r.capture, 'files');
+  assert.equal(r.stdoutBytes.length, 256);
+  assert.deepEqual([...r.stdoutBytes], Array.from({ length: 256 }, (_, i) => i));
+});
+
+test('keeps binary stdout byte-for-byte on the pipe fallback', () => {
+  const r = runSync(node, ['-e', ALL_BYTES], { tempRoot: join(tmpdir(), 'junior-missing-root', 'nope') });
+  assert.equal(r.capture, 'pipes');
+  assert.deepEqual([...r.stdoutBytes], Array.from({ length: 256 }, (_, i) => i));
+});
