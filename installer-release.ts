@@ -501,7 +501,9 @@ export function defaultExecBuffer(command: string, args: string[], options: any 
   const r = runSync(command, args, { ...options, maxBuffer: options.maxBuffer ?? DEFAULT_MAX_ASSET_BYTES });
   return {
     status: r.status,
-    stdout: Buffer.from(r.stdout),
+    // The raw bytes, never the decoded text: a binary archive entry must
+    // survive byte-for-byte (#210).
+    stdout: r.stdoutBytes,
     stderr: r.stderr,
     error: r.error?.message,
   };
