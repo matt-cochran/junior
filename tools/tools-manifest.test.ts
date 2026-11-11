@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withManifestLock } from "./tools-manifest.ts";
+import { mcpCallSequence } from "./tools-mcp.ts";
 import { ROOT, TOOLS, FAKE, NODE, tmpdir, toolEntry, writeConfig, writeJson, runCli, cliJson, initHop, cpmLoggingHop, managedState, initHopManifest, probeToolVersion, isReadTool, TOOL_NAMES } from "./tools-helpers.test.ts";
 
 // --- init / manifest contract -------------------------------------------------
@@ -303,4 +304,26 @@ test("an unparseable lock is never reaped and yields LOCKED", async () => {
     () => withManifestLock(hop, 100, async () => {}),
     (err) => err.code === "LOCKED",
   );
+});
+
+// --- #210: a server that drops stdin mid-probe is a failed call, not a crash --
+
+test("mcpCallSequence reports SPAWN_ERROR when the server closes stdin before the request", { skip: process.platform === "win32" }, async () => {
+  // The server closes its stdin and lingers, so the request write hits EPIPE
+  // asynchronously; unhandled, that 'error' event aborts the whole process.
+  const err = await mcpCallSequence(
+    { command: "sh", args: ["-c", "exec 0<&-; sleep 2"], timeoutMs: 5000 },
+    [{ name: "noop", arguments: {} }],
+  ).then(() => null, (e) => e);
+  assert.ok(err, "expected the call to fail");
+  assert.equal(err.code, "SPAWN_ERROR");
+});
+
+test("mcpCallSequence reports SPAWN_ERROR when the server exits at once", async () => {
+  const err = await mcpCallSequence(
+    { command: process.execPath, args: ["-e", "process.exit(1)"], timeoutMs: 5000 },
+    [{ name: "noop", arguments: {} }],
+  ).then(() => null, (e) => e);
+  assert.ok(err, "expected the call to fail");
+  assert.equal(err.code, "SPAWN_ERROR");
 });

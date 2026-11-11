@@ -127,6 +127,13 @@ export async function mcpCallSequence(
     child.on("error", (err) => {
       fail(new HopError("SPAWN_ERROR", `failed to spawn '${options.command}': ${err.message}`, err));
     });
+    // A server that exits or closes stdin while a request is being written
+    // raises EPIPE asynchronously on the stdin stream; unhandled, it aborts the
+    // whole process (and strands any lock its caller holds). Report it as a
+    // failed call instead (#210).
+    child.stdin?.on("error", (err) => {
+      fail(new HopError("SPAWN_ERROR", `cannot write to MCP server '${options.command}': ${err.message}`, err));
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       if (stderrText.length < 8192) stderrText += chunk.toString("utf8");
     });

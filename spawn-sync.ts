@@ -45,6 +45,9 @@ export interface RunSyncResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
+  /** The raw stdout bytes, for binary output such as `tar -xO` (#210). `stdout`
+   * is these bytes decoded as UTF-8, which is lossy for non-text output. */
+  stdoutBytes: Buffer;
   stderr: string;
   error?: NodeJS.ErrnoException;
   /** True when spawnSync reported EPERM although the child exited normally. */
@@ -59,12 +62,13 @@ export function isSpuriousEperm(r: { error?: NodeJS.ErrnoException | Error; stat
   return code === 'EPERM' && typeof r.status === 'number';
 }
 
-function normalize(raw: ReturnType<typeof spawnSync>, stdout: string, stderr: string, capture: RunSyncResult['capture']): RunSyncResult {
+function normalize(raw: ReturnType<typeof spawnSync>, stdout: Buffer, stderr: string, capture: RunSyncResult['capture']): RunSyncResult {
   const result: RunSyncResult = {
     pid: raw.pid ?? 0,
     status: raw.status,
     signal: raw.signal,
-    stdout,
+    stdout: stdout.toString('utf8'),
+    stdoutBytes: stdout,
     stderr,
     capture,
   };
@@ -74,10 +78,16 @@ function normalize(raw: ReturnType<typeof spawnSync>, stdout: string, stderr: st
   return result;
 }
 
-function readCapped(path: string, limit: number): { text: string; overflow: boolean } {
+function readCapped(path: string, limit: number): { bytes: Buffer; overflow: boolean } {
   const size = statSync(path).size;
-  if (size <= limit) return { text: readFileSync(path, 'utf8'), overflow: false };
-  return { text: readFileSync(path).subarray(0, limit).toString('utf8'), overflow: true };
+  if (size <= limit) return { bytes: readFileSync(path), overflow: false };
+  return { bytes: readFileSync(path).subarray(0, limit), overflow: true };
+}
+
+function toBuffer(value: unknown): Buffer {
+  if (Buffer.isBuffer(value)) return value;
+  if (value === null || value === undefined) return Buffer.alloc(0);
+  return Buffer.from(String(value), 'utf8');
 }
 
 function enobufs(command: string): NodeJS.ErrnoException {
@@ -106,7 +116,7 @@ export function runSync(command: string, args: readonly string[] = [], opts: Run
 
   if (opts.stdio === 'inherit' || opts.stdio === 'ignore') {
     const raw = spawn(command, [...args], { ...base, stdio: opts.stdio === 'inherit' ? 'inherit' : 'ignore', input: undefined });
-    return normalize(raw, '', '', 'none');
+    return normalize(raw, Buffer.alloc(0), '', 'none');
   }
 
   let dir: string | undefined;
@@ -117,8 +127,8 @@ export function runSync(command: string, args: readonly string[] = [], opts: Run
   }
   if (!dir) {
     // No writable temp dir: fall back to pipes, which still work outside a sandbox.
-    const raw = spawn(command, [...args], { ...base, encoding: 'utf8', input: opts.input ?? '', maxBuffer: limit });
-    return normalize(raw, String(raw.stdout ?? ''), String(raw.stderr ?? ''), 'pipes');
+    const raw = spawn(command, [...args], { ...base, encoding: 'buffer', input: opts.input ?? '', maxBuffer: limit });
+    return normalize(raw, toBuffer(raw.stdout), toBuffer(raw.stderr).toString('utf8'), 'pipes');
   }
 
   const fds: number[] = [];
@@ -140,7 +150,7 @@ export function runSync(command: string, args: readonly string[] = [], opts: Run
     for (const fd of fds.splice(0)) closeSync(fd);
     const stdout = readCapped(outPath, limit);
     const stderr = readCapped(errPath, limit);
-    const result = normalize(raw, stdout.text, stderr.text, 'files');
+    const result = normalize(raw, stdout.bytes, stderr.bytes.toString('utf8'), 'files');
     if ((stdout.overflow || stderr.overflow) && !result.error) result.error = enobufs(command);
     return result;
   } finally {
