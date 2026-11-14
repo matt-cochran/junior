@@ -224,7 +224,7 @@ test('mergeStoreDenyRules on empty settings writes the current Claude deny list'
  assert.deepEqual(deny, [
   'Read(./.crossmatrix/**)',
   'Edit(./.crossmatrix/**)',
-  'Bash(cat .crossmatrix:*)',
+  'Bash(cat .crossmatrix*)',
   'Bash(grep * .crossmatrix*)',
   'Bash(jq * .crossmatrix*)',
  ]);
@@ -236,7 +236,7 @@ test('inspectStoreDenyRules reports the current Claude deny list as present', ()
    deny: [
     'Read(./.crossmatrix/**)',
     'Edit(./.crossmatrix/**)',
-    'Bash(cat .crossmatrix:*)',
+    'Bash(cat .crossmatrix*)',
     'Bash(grep * .crossmatrix*)',
     'Bash(jq * .crossmatrix*)',
    ],
@@ -293,9 +293,10 @@ test('installStoreDenyRules leaves settings untouched when no store exists', () 
  const result = installStoreDenyRules({ projectDir: cwd });
  assert.equal(result.changed, false);
 });
-test('RETIRED_STORE_DENY_RULES lists the three retired rule spellings', () => {
+test('RETIRED_STORE_DENY_RULES lists the four retired rule spellings', () => {
  assert.deepEqual([...RETIRED_STORE_DENY_RULES], [
   'Write(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
   'Bash(grep * .crossmatrix:*)',
   'Bash(jq * .crossmatrix:*)',
  ]);
@@ -320,8 +321,12 @@ test('mergeStoreDenyRules migrates the 0.16.0 list while preserving a user rule'
   'Read(./secrets/**)',
  ] } };
  assert.deepEqual((mergeStoreDenyRules(settings).settings.permissions as any).deny, [
-  ...CLAUDE_STORE_DENY_RULES,
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
   'Read(./secrets/**)',
+  'Bash(cat .crossmatrix*)',
  ]);
 });
 

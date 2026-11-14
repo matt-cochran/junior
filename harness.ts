@@ -151,7 +151,7 @@ export function harnessMcpConfig(harness: Harness, ctx: HarnessContext): Harness
 export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
   'Read(./.crossmatrix/**)',
   'Edit(./.crossmatrix/**)',
-  'Bash(cat .crossmatrix:*)',
+  'Bash(cat .crossmatrix*)',
   'Bash(grep * .crossmatrix*)',
   'Bash(jq * .crossmatrix*)',
 ];
@@ -159,6 +159,7 @@ export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
 /** Older spellings Junior may have written; upgrades replace them. */
 export const RETIRED_STORE_DENY_RULES: readonly string[] = [
   'Write(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
   'Bash(grep * .crossmatrix:*)',
   'Bash(jq * .crossmatrix:*)',
 ];
