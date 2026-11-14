@@ -17,7 +17,8 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { loadAdrs, type Adr, type AdrDeps } from './adr.ts';
 import type { AdrConfig } from './adr-config.ts';
 import { renderGateMarkdown, runAdrGate, type AdrGateResult } from './adr-gate.ts';
-import { adrContentHash } from './adr-ledger.ts';
+import { adrContentHash, LEDGER_PATH } from './adr-ledger.ts';
+import { createHash } from 'node:crypto';
 import { analyze, type AnalysisCriterion } from './matrix-analyze.ts';
 import {
   readTicketsConfig,
@@ -48,6 +49,10 @@ export interface TicketCheckResult {
 interface TicketCacheFile {
   revision: string;
   adrHashes: Record<string, string>;
+  /** Gate mode, minConfidence and the decision ledger's hash: a cached result
+   * is reused only while all three match, so a stricter gate or a newly
+   * recorded decision is never answered from a stale cache. */
+  gateKey?: string;
   result: TicketCheckResult;
   commentId?: string;
 }
@@ -189,6 +194,17 @@ function writeCache(path: string, document: TicketCacheFile): void {
   writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`);
 }
 
+
+function gateCacheKey(root: string, config: AdrConfig): string {
+  let ledger = '';
+  try {
+    ledger = createHash('sha256').update(readFileSync(join(root, LEDGER_PATH))).digest('hex');
+  } catch {
+    ledger = 'none';
+  }
+  return `${config.gate}|${config.minConfidence ?? ''}|${ledger}`;
+}
+
 /** Quote the ticket as delimited untrusted data (ADR 0018 R10). */
 function relevanceQuestion(target: string, text: string): string {
   return [
@@ -247,13 +263,15 @@ async function filterRelevant(
 export async function checkTicket(opts: CheckTicketOptions): Promise<TicketCheckResult> {
   const adrs = acceptedAdrs(opts);
   const hashes = adrHashes(adrs);
+  const gateKey = gateCacheKey(opts.root, opts.config);
   const cachePath = cacheFilePath(opts.root, opts.cacheDir, opts.ticket.id);
   const cached = readCache(cachePath);
 
   if (
     cached !== null &&
     cached.revision === opts.ticket.updatedAt &&
-    sameHashes(cached.adrHashes, hashes)
+    sameHashes(cached.adrHashes, hashes) &&
+    cached.gateKey === gateKey
   ) {
     const result: TicketCheckResult = {...cached.result, fromCache: true};
     attachCachePath(result, cachePath);
@@ -297,6 +315,7 @@ export async function checkTicket(opts: CheckTicketOptions): Promise<TicketCheck
   const next: TicketCacheFile = {
     revision: opts.ticket.updatedAt,
     adrHashes: hashes,
+    gateKey,
     result,
     ...(cached?.commentId !== undefined ? {commentId: cached.commentId} : {}),
   };

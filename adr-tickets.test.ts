@@ -357,3 +357,15 @@ test('writeBack enabled updates the stored comment instead of posting again', as
   await writeBack(adapter, result, {enabled: true, root, cacheDir});
   assert.equal(adapter.comments.length, 1);
 });
+
+test('A cached advisory result is not reused once the gate is enforce', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'junior-adr-tickets-gatekey-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ticket = { id: '7', url: '', title: 'Pin versions', body: 'Pin every tool version.', labels: [], acceptance: [], updatedAt: '2026-11-14T00:00:00Z' };
+  const adrs = [{ id: 'ADR-0001', number: 1, title: 'Never pin', status: 'accepted' as const, date: '', supersedes: [], appliesTo: [], rules: [{ id: 'R1', text: 'Never pin versions' }], context: '', decision: 'Never pin', consequences: '', path: '' }];
+  let calls = 0;
+  const classify = async ({ state }: any) => { calls += 1; const answers: Record<string, unknown> = {}; for (const item of state.items) for (const c of state.criteria) answers[`cell:${item.id}:${c.id}`] = { type: 'choice', choice: c.id === 'relevant' ? 'yes' : 'contradicts', confidence: 0.95 }; return { answers }; };
+  await checkTicket({ root, ticket, config: { dir: 'docs/adr', format: 'junior', gate: 'advisory' }, adrs, classify });
+  const enforced = await checkTicket({ root, ticket, config: { dir: 'docs/adr', format: 'junior', gate: 'enforce' }, adrs, classify });
+  assert.equal(enforced.gate.blocked, true);
+});
