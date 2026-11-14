@@ -442,3 +442,17 @@ test('A low-confidence contradiction is reported as uncertain', async (t) => {
   const result = await run(root, config, classify);
   assert.deepEqual(result.findings.filter((f) => f.adrId === 'ADR-0001').map((f) => f.verdict), ['uncertain']);
 });
+
+test('An uncertain finding does not block enforce by default', async (t) => {
+  const {root, config} = seed(t);
+  const {classify} = fakeClassifier({'ADR-0001/R1': {choice: 'contradicts', confidence: 0.02}});
+  const result = await run(root, config, classify);
+  assert.equal(result.blocked, false);
+});
+
+test('An uncertain finding blocks enforce when flagUncertain is true', async (t) => {
+  const {root, config} = seed(t);
+  const {classify} = fakeClassifier({'ADR-0001/R1': {choice: 'contradicts', confidence: 0.02}});
+  const result = await run(root, {...config, flagUncertain: true}, classify);
+  assert.equal(result.blocked, true);
+});

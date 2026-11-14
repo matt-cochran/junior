@@ -24,6 +24,8 @@ export interface AdrConfig {
   format: AdrFormat;
   gate: AdrGate;
   minConfidence?: number;
+  /** Uncertain (low-confidence) findings also block under enforce. Default false: only likely contradictions block. */
+  flagUncertain?: boolean;
 }
 
 export interface AdrDirDetection {
@@ -108,6 +110,10 @@ export function readAdrConfig(root: string): AdrConfig | null {
       throw new Error('adr.minConfidence must be a number between 0 and 1');
     }
     config.minConfidence = minConfidence;
+  }
+  if (block.flagUncertain !== undefined) {
+    if (typeof block.flagUncertain !== 'boolean') throw new Error('adr.flagUncertain must be a boolean');
+    config.flagUncertain = block.flagUncertain;
   }
   return config;
 }

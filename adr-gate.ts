@@ -327,7 +327,9 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
 
   return {
     gate: opts.config.gate,
-    blocked: opts.config.gate === 'enforce' && findings.some((finding) => !finding.cleared),
+    // ADR 0018 R4: by default only a likely contradiction blocks; uncertain
+    // findings are reported as advisory unless adr.flagUncertain is true.
+    blocked: opts.config.gate === 'enforce' && findings.some((finding) => !finding.cleared && (finding.verdict === 'contradicts' || opts.config.flagUncertain === true)),
     findings,
     checked,
     skipped: [...skippedSet],
@@ -405,7 +407,7 @@ function decisionState(finding: AdrGateFinding): string {
   if (finding.decision) return `${finding.decision.decision} (not cleared)`;
   if (finding.lapsed) return `lapsed ${finding.lapsed.id}`;
   if (finding.carried) return `carried ${finding.carried.id}`;
-  return 'unresolved';
+  return finding.verdict === 'uncertain' ? 'unresolved (advisory unless adr.flagUncertain)' : 'unresolved';
 }
 
 /** Render a review table followed by the gate's final BLOCKED or PASS line. */

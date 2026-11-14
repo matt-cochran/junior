@@ -24,6 +24,7 @@ location to `delivery.config.json` only after you confirm:
 | `format` | `junior`, `madr`, `nygard` | `junior` ADRs carry `applies_to` and `rules` front matter. MADR and Nygard ADRs are checked against their Decision section. |
 | `gate` | `enforce`, `advisory`, `off` | `enforce` blocks on findings. `advisory` only reports them. Defaults to `enforce` when accepted ADRs exist, and `off` otherwise. |
 | `minConfidence` | 0..1 (optional) | Also flags any check whose confidence is below this |
+| `flagUncertain` | `true` / `false` (default `false`) | Let low-confidence findings block under `enforce` too. By default only likely contradictions block; uncertain ones are listed as advisory. |
 
 ADRs without Junior front matter work as they are. Junior can draft `applies_to` and `rules` for them, but
 only as a proposal under `.delivery/adr-proposals/`. Your ADR files are never edited.
@@ -50,11 +51,14 @@ owns only that block. Everything else in those files is left exactly as you wrot
 
 For each accepted ADR rule whose `applies_to` matches the work, Jev (on the commodity default model) rates
 the work as conforms, contradicts or not applicable. A **finding** is a contradiction, or any rating Jev is
-not confident about. Being cautious is cheap here: a low-confidence rating costs you one decision, while a
-missed violation can cost you a design.
+not confident about (marked uncertain). Work with no file list, such as a design document or a ticket,
+first goes through one relevance pass, so ADRs that clearly don't apply are skipped. Jev is rarely
+confident about abstract text, so only likely contradictions block by default. Uncertain findings stay in
+the report for you to review.
 
-Jev never passes or fails anything by itself. With no findings the check passes. With findings under
-`enforce`, the stage stops until you decide.
+Jev never passes or fails anything by itself. With no findings the check passes. Under `enforce`, a likely
+contradiction stops the stage until you decide; uncertain findings are listed for you to review but do not
+block unless you set `flagUncertain: true`.
 
 ## Deciding
 

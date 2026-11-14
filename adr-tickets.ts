@@ -202,7 +202,7 @@ function gateCacheKey(root: string, config: AdrConfig): string {
   } catch {
     ledger = 'none';
   }
-  return `${config.gate}|${config.minConfidence ?? ''}|${ledger}`;
+  return `${config.gate}|${config.minConfidence ?? ''}|${config.flagUncertain === true}|v2|${ledger}`;
 }
 
 /** Quote the ticket as delimited untrusted data (ADR 0018 R10). */
