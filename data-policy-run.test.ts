@@ -271,6 +271,7 @@ test('Compact handoff exposes the recorded data policy routing and providers', (
   const dataPolicy = {
     routing: { only: ['alpha/fp8'], allow_fallbacks: false },
     providers: [{ provider: 'Alpha Cloud', headquarters: 'United States', datacenters: ['US'], allowed: true }],
+    verified: true,
   };
   assert.deepEqual(compactHandoff({ id: 'h', status: 'ready_for_review', dataPolicy }).dataPolicy, dataPolicy);
 });

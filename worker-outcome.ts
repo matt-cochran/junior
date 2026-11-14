@@ -235,7 +235,9 @@ export async function finish(state:RunState):Promise<any> {
   const captured=Array.isArray(billing?.providers) ? billing.providers : [];
   if (captured.length===0) {
    dataPolicyRecord={ routing, providers:[], verified:false };
-   dataPolicyIssues.push('data policy: served providers could not be verified; set billing in the contract to capture them');
+   dataPolicyIssues.push(billing?.reason
+    ? `data policy: served providers could not be verified; billing capture failed: ${billing.reason}`
+    : 'data policy: served providers could not be verified; set billing in the contract to capture them');
   } else {
    const verification=verifyServedProviders(
     state.dataPolicy,
