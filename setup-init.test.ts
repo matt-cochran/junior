@@ -3,7 +3,8 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { init } from './setup-init.ts';
+import { init, parseInitOptions } from './setup-init.ts';
+import { renderAgentInstructions } from './agent-instructions.ts';
 import { INSTALL_TIMEOUT_MS, PI_PACKAGE, TESTED_PI_VERSION } from './setup-env.ts';
 
 type ExecCall = { command: string; args: string[]; options: any };
@@ -179,4 +180,41 @@ test('plain init never rewrites an existing project Pi pin', () => {
   const r = init(f.deps, f.opts);
   assert.equal(r.piPin, undefined);
   assert.equal(readConfig(f.cwd).pi.testedVersion, '1.0.3');
+});
+
+// --- managed agent instruction files (ADR 0018 R11) ------------------------
+
+test('init creates both agent instruction files for the both target', () => {
+  const f = fixture(TESTED_PI_VERSION);
+  const r = init(f.deps, { ...f.opts, install: false, target: 'both' });
+  assert.deepEqual(r.agentInstructions, {
+    files: [
+      { path: 'CLAUDE.md', action: 'created' },
+      { path: 'AGENTS.md', action: 'created' },
+    ],
+  });
+});
+
+test('update refreshes an outdated agent instruction block', () => {
+  const f = fixture(TESTED_PI_VERSION);
+  writeFileSync(join(f.cwd, 'CLAUDE.md'), '<junior>\nstale\n</junior>\n');
+  init(f.deps, { ...f.opts, install: false, command: 'update', target: 'claude' });
+  assert.equal(readFileSync(join(f.cwd, 'CLAUDE.md'), 'utf8'), `<junior>\n${renderAgentInstructions()}\n</junior>\n`);
+});
+
+test('--no-agent-instructions skips the managed block step', () => {
+  const f = fixture(TESTED_PI_VERSION);
+  const r = init(f.deps, { ...f.opts, install: false, target: 'both', agentInstructions: false });
+  assert.deepEqual(r.agentInstructions, { skipped: true });
+});
+
+test('parseInitOptions accepts --no-agent-instructions', () => {
+  assert.equal(parseInitOptions(['--no-agent-instructions']).agentInstructions, false);
+});
+
+test('a conflicting instruction file is reported in the init instructions', () => {
+  const f = fixture(TESTED_PI_VERSION);
+  writeFileSync(join(f.cwd, 'CLAUDE.md'), '<junior>\none\n</junior>\n<junior>\ntwo\n</junior>\n');
+  const r = init(f.deps, { ...f.opts, install: false, target: 'claude' });
+  assert.ok(r.instructions.includes('CLAUDE.md: duplicate <junior> tags at lines 1, 4; fix them by hand, then rerun junior update'));
 });

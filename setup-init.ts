@@ -5,7 +5,11 @@ import { installCompanions, installCompanionSkills, installationDisabled, type C
 import { matrixInit } from './matrix-init.ts';
 import { ensureLocalExcludes } from './isolation.ts';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, INSTALL_TIMEOUT_MS, PI_PACKAGE, SKILL_MANIFEST_FILENAME, TESTED_PI_VERSION, MATRIX_COMMIT, MATRIX_REMINDER, MATRIX_UPDATE_SKIP, asSpawn, compareSemver, exists, readText, type SetupDeps } from './setup-env.ts';
-import { installSkill, type InitOptions, type SkillResult, type SkillTargetSelection, type SkillScope } from './setup-skill.ts';
+import { installSkill, type InitOptions as SkillInitOptions, type SkillResult, type SkillTargetSelection, type SkillScope } from './setup-skill.ts';
+import { applyAgentInstructions, type ApplyAgentInstructionsResult, type AgentTarget } from './agent-instructions.ts';
+
+/** `init` flags plus the R11 opt-out for the managed agent instruction block. */
+export type InitOptions = SkillInitOptions & { agentInstructions?:boolean };
 import { doctor, summarizeInstall } from './setup-doctor.ts';
 import { installStoreDenyRules } from './harness.ts';
 import { runSync } from './spawn-sync.ts';
@@ -47,6 +51,8 @@ export type InitResult = {
  install?:{ requested:boolean; attempted:boolean; ok:boolean; command?:string[]; spec?:string; skipped?:string; error?:string; note?:string; pi:PiInstallOutcome };
  /** Distinguishes the Pi attempt from the prebuilt-tools attempt. */
  installSummary:InitInstallSummary;
+ /** Managed `<junior>` blocks written by this run (ADR 0018 R11), or the opt-out. */
+ agentInstructions:ApplyAgentInstructionsResult|{ skipped:true };
  instructions:string[];
 };
 
@@ -203,8 +209,17 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  if (install?.attempted && install.ok) readiness=doctor(deps);
  const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
  const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
- if (install?.note) instructions.push(install.note);
  const command=opts.command ?? 'init';
+ let agentInstructions:InitResult['agentInstructions'];
+ if (opts.agentInstructions === false) {
+  agentInstructions={ skipped:true };
+ } else {
+  agentInstructions=applyAgentInstructions(cwd,{ target:(opts.target ?? 'both') as AgentTarget, command, deps });
+  for (const file of agentInstructions.files) {
+   if (file.action === 'conflict') instructions.push(`${file.path}: ${file.reason} <junior> tags at lines ${(file.lines ?? []).join(', ')}; fix them by hand, then rerun junior update`);
+  }
+ }
+ if (install?.note) instructions.push(install.note);
  const storePath=join(cwd,'.crossmatrix');
  const hadStore=exists(deps, storePath);
  // `update` only creates committed project state when explicitly opted in;
@@ -232,7 +247,7 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   instructions.push(MATRIX_REMINDER);
  }
  return { ...(storeLockdown ? { storeLockdown } : {}), command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, ...(piPin ? { piPin } : {}), skill, excluded, matrix, install,
-  installSummary:summarizeInstall(install,null), instructions };
+  installSummary:summarizeInstall(install,null), agentInstructions, instructions };
 }
 
 
@@ -259,6 +274,7 @@ export function parseInitOptions(argv:string[]):InitOptions {
   else if (a === '--with-matrix') opts.matrix=true;
   else if (a === '--force') opts.force=true;
   else if (a === '--no-skill') opts.target='none';
+  else if (a === '--no-agent-instructions') opts.agentInstructions=false;
   else if (a === '--scope') opts.scope = argv[++i] === 'user' ? 'user' : 'project';
   else if (a.startsWith('--scope=')) opts.scope = a.slice('--scope='.length) === 'user' ? 'user' : 'project';
   else if (a === '--target') { const v=argv[++i]; opts.target=isSkillTarget(v) ? v : 'both'; }
