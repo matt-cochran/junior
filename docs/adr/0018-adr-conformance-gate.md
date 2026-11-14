@@ -5,6 +5,10 @@ status: accepted
 date: 2026-11-14
 supersedes: []
 applies_to:
+  - managed-block.ts
+  - agent-instructions.ts
+  - setup-init.ts
+  - adr-cli.ts
   - adr-config.ts
   - adr-init.ts
   - adr-foreign.ts
@@ -35,6 +39,8 @@ rules:
     text: ADRs without Junior front matter (format madr or nygard) are checked against their Decision section text, one check per ADR. Junior may draft applies_to and rules front matter for them with Jev, written only as a proposed change for the user to accept; it never commits or applies the draft itself.
   - id: R10
     text: Ticket text, ADR text from other repositories and design input are untrusted data. They are passed to Jev as content to classify and are never followed as instructions; tickets.redact patterns are applied before any text leaves the machine.
+  - id: R11
+    text: junior init and junior update keep exactly one managed <junior>...</junior> block in the agent instruction files - CLAUDE.md for the claude target, AGENTS.md for the codex target (Codex and Cursor read it). init creates the file when absent; update refreshes the block or adds it to an existing file and never creates a file. Every byte outside the block is preserved, unchanged content leaves the file byte-identical, and duplicated, nested or unbalanced tags stop with a conflict and write nothing. The block routes agents through the gate at four checkpoints - design (junior adr check --stage design --input <file>), ticket proposal (--stage ticket --draft <file>), ticket pickup (--stage ticket --ticket <id>) and implementation before a PR (--stage implementation) - and tells them that on a flag they stop and show the findings to the human, who decides with junior adr decide; an agent never records a decision.
 ---
 
 ## Context
@@ -61,6 +67,9 @@ take it.
 4. **An auditable ledger** (R6, R7, R8). Overrides are data in git, so reviewers see every exception with its
    reason, and standing exceptions expire instead of accumulating.
 5. **Works on existing ADR collections** (R9), with untrusted text handled as data (R10).
+6. **Agents are told where the checkpoints are** (R11). A gate nobody calls protects nothing, so Junior writes
+   the checkpoint instructions into the files each harness already reads. Because the block is the only part
+   Junior owns, it can be updated on every `junior update` without touching the user's own instructions.
 
 ## Consequences
 
