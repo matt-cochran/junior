@@ -64,7 +64,7 @@ junior adr decide <finding> --amend      # Junior drafts an updated ADR (propose
 junior adr decide <finding> --revise     # the work goes back to be changed
 ```
 
-Every decision is appended to `.delivery/adr-overrides.jsonl`. Commit it so reviewers see each exception
+Every decision is appended to `.junior/adr-decisions.jsonl`. Commit it so reviewers see each exception
 and its reason. An override covers one deliverable. A standing override (`--standing --expires <date>` or
 `--expires until-adr-change`) also applies to later work until it lapses, and the next run then flags the
 finding again, citing the lapsed decision. A ticket-stage decision is shown again at design and

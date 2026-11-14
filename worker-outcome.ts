@@ -125,7 +125,7 @@ export async function finish(state:RunState):Promise<any> {
    prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
    if (classify) {
     try {
-     prepareBrief=await designGate({cwd:executionCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
+     prepareBrief=await designGate({cwd:sourceCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
     } catch (e) {
      adrGateIssues.push(`ADR design gate skipped: ${msg(e)}`);
     }
@@ -167,7 +167,7 @@ export async function finish(state:RunState):Promise<any> {
   if (classify) {
    try {
     const gated=await implementationGate({
-     cwd:executionCwd,
+     cwd:sourceCwd,
      changedFiles:evidence.runChangedFiles.map((f:any)=>f.path),
      deliverable:t.plan?.deliverable ?? t.id,
      classify,
@@ -184,7 +184,7 @@ export async function finish(state:RunState):Promise<any> {
    }
   } else {
    let hasAdrGate=false;
-   try { hasAdrGate=resolveGateConfig(executionCwd) !== null; } catch { hasAdrGate=false; }
+   try { hasAdrGate=resolveGateConfig(sourceCwd) !== null; } catch { hasAdrGate=false; }
    if (hasAdrGate) adrGateIssues.push('ADR gate skipped: classifier unavailable');
   }
  }

@@ -86,7 +86,9 @@ export type AdrObservation = {
   evidence: string;
 };
 
-export const LEDGER_PATH = '.delivery/adr-overrides.jsonl';
+// Outside .delivery/ (which init excludes locally) so the ledger can be
+// committed and worktree handoffs see the same decisions (ADR 0018 R6).
+export const LEDGER_PATH = '.junior/adr-decisions.jsonl';
 
 const STAGES = new Set<AdrDecisionStage>(['design', 'implementation', 'ticket']);
 const DECISIONS = new Set<AdrDecisionKind>(['override', 'amend', 'revise']);

@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join , dirname} from 'node:path';
 import {
   LEDGER_PATH,
   activeDecision,
@@ -63,7 +63,7 @@ function key(overrides: Record<string, unknown> = {}) {
 const ctx = (adrHash = 'hash-a') => ({now: NOW, adrHash});
 
 test('LEDGER_PATH is the committed ledger location', () => {
-  assert.equal(LEDGER_PATH, '.delivery/adr-overrides.jsonl');
+  assert.equal(LEDGER_PATH, '.junior/adr-decisions.jsonl');
 });
 
 test('appendDecision stores schemaVersion 1', () => {
@@ -152,7 +152,7 @@ test('readLedger returns an empty list when the ledger file is absent', () => {
 test('readLedger names the malformed line number', () => {
   const root = rootDir();
   const path = join(root, LEDGER_PATH);
-  mkdirSync(join(root, '.delivery'), {recursive: true});
+  mkdirSync(dirname(path), {recursive: true});
   writeFileSync(path, `${JSON.stringify({id: 'adrd-000000000001'})}\n{not json}\n`, {
     encoding: 'utf8',
     flag: 'w+',
