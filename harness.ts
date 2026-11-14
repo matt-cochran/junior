@@ -151,10 +151,9 @@ export function harnessMcpConfig(harness: Harness, ctx: HarnessContext): Harness
 export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
   'Read(./.crossmatrix/**)',
   'Edit(./.crossmatrix/**)',
-  'Write(./.crossmatrix/**)',
   'Bash(cat .crossmatrix:*)',
-  'Bash(grep * .crossmatrix:*)',
-  'Bash(jq * .crossmatrix:*)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
 ];
 
 type JsonObject = Record<string, any>;

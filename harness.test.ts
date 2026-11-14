@@ -217,13 +217,56 @@ test('unknown MCP config is the deduplicated union of every harness', () => {
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { mergeStoreDenyRules, installStoreDenyRules } from './harness.ts';
+import { inspectStoreDenyRules, mergeStoreDenyRules, installStoreDenyRules } from './harness.ts';
 
-test('mergeStoreDenyRules adds every Claude deny rule once', () => {
- const settings = {};
- mergeStoreDenyRules(settings);
- const deny = (mergeStoreDenyRules(settings).settings.permissions as any).deny;
- assert.equal(deny.length, 6);
+test('mergeStoreDenyRules on empty settings writes the current Claude deny list', () => {
+ const deny = (mergeStoreDenyRules({}).settings.permissions as any).deny;
+ assert.deepEqual(deny, [
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
+ ]);
+});
+
+test('inspectStoreDenyRules reports the current Claude deny list as present', () => {
+ const settings = JSON.stringify({
+  permissions: {
+   deny: [
+    'Read(./.crossmatrix/**)',
+    'Edit(./.crossmatrix/**)',
+    'Bash(cat .crossmatrix:*)',
+    'Bash(grep * .crossmatrix*)',
+    'Bash(jq * .crossmatrix*)',
+   ],
+  },
+ });
+ const present = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).present;
+ assert.equal(present, true);
+});
+
+test('inspectStoreDenyRules reports the 0.16.0 Claude deny list as absent', () => {
+ const settings = JSON.stringify({
+  permissions: {
+   deny: [
+    'Read(./.crossmatrix/**)',
+    'Edit(./.crossmatrix/**)',
+    'Write(./.crossmatrix/**)',
+    'Bash(cat .crossmatrix:*)',
+    'Bash(grep * .crossmatrix:*)',
+    'Bash(jq * .crossmatrix:*)',
+   ],
+  },
+ });
+ const present = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).present;
+ assert.equal(present, false);
 });
 
 test('installStoreDenyRules writes the Claude deny rules when a store exists', () => {
