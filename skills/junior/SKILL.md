@@ -27,6 +27,7 @@ job, then follow its first command.
 | `improve-plan` | fork, simulate, compare and select plan variants | `junior tools call cpm plan.fork request.json` | cpm-improve |
 | `track-plan` | baseline, earned value and plan snapshots | `junior tools call cpm plan.baseline plan_id=<id> reason=<text>` | cpm-ev |
 | `risk` | what could go wrong; FMECA failure modes and readiness | `junior tools call fmeca session.open request.json` | fmeca |
+| `adr` | check designs, tickets and code against the ADRs (stage design, ticket or implementation); record a human decision on findings | `junior adr check --stage <stage>` | — |
 | `matrix` | trace requirements to tests; crossmatrix graph and QC | `junior matrix init` | crossmatrix |
 | `discover` | turn a vague idea into acceptance criteria | `junior handoff <task.json>  # contract workflow: discover` | — |
 | `investigate` | find root cause; frame a scientific-process experiment | `junior handoff <task.json>  # contract workflow: investigate` | — |

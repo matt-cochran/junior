@@ -241,6 +241,22 @@ export const ROUTES: readonly Route[] = [
     ],
   },
   {
+    id: 'adr',
+    job: 'Check designs, tickets and code against the ADRs, and record a human decision on findings',
+    triggers: [
+      'check this against our ADRs',
+      'adr compliance check',
+      'does this violate an architecture decision',
+      'check this ticket against the ADRs',
+      'set up ADRs for this repo',
+    ],
+    first: 'junior adr check --stage <stage>',
+    then: [
+      'junior adr decide <finding>',
+      'junior adr init',
+    ],
+  },
+  {
     id: 'matrix',
     job: 'Build traceability with crossmatrix: initialize and sync the graph, bootstrap links, walk it and audit quality.',
     triggers: [

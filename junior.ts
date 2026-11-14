@@ -16,6 +16,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, inspectSkill, type InitOptions } from './setup.ts';
+import { inspectDataPolicy, renderDataPolicyPosture } from './doctor-data-policy.ts';
 import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { refreshUpdateCache } from './update-check.ts';
@@ -467,6 +468,9 @@ async function main(argv: string[]): Promise<void> {
   const result:any = doctor({}, { harness: parsed.values['--harness'] });
   if (parsed.flags.has('--online')) {
    result.credentialsOnline = await checkCredentialsOnline();
+   const posture = await inspectDataPolicy({ cwd: process.cwd(), models: [result.model.id] });
+   result.dataPolicy = posture;
+   result.warnings.push(...renderDataPolicyPosture(posture).split('\n'));
   }
   if (parsed.flags.has('--check-updates')) {
    const collected = await updateCheck.collectUpdateCheck({
