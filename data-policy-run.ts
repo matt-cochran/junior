@@ -119,16 +119,21 @@ export async function dataPolicyPreflight(opts: DataPolicyPreflightOptions): Pro
     ?? ((url) => globalThis.fetch(url) as any);
   // One wrapped fetch serves both the region resolver and the directory read,
   // so the unauthenticated metadata lookups are made once per preflight (R2).
-  const cache = new Map<string, Promise<{ ok: boolean; json: () => Promise<unknown> }>>();
+  // A real Response body can be read only once, so the cache keeps the parsed
+  // JSON and hands every caller a response whose json() returns it.
+  const cache = new Map<string, Promise<unknown>>();
   const cachedFetch: RegionResolutionDeps['fetch'] = async (url) => {
     let pending = cache.get(url);
     if (!pending) {
-      pending = fetchImpl(url);
+      pending = (async () => {
+        const response = await fetchImpl(url);
+        if (!response.ok) throw new Error(`data policy metadata request failed for ${url}`);
+        return response.json();
+      })();
       cache.set(url, pending);
     }
-    const response = await pending;
-    if (!response.ok) throw new Error(`data policy metadata request failed for ${url}`);
-    return response;
+    const body = await pending;
+    return { ok: true, json: async () => body };
   };
 
   let resolution;

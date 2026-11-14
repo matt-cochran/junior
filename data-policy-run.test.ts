@@ -274,3 +274,18 @@ test('Compact handoff exposes the recorded data policy routing and providers', (
   };
   assert.deepEqual(compactHandoff({ id: 'h', status: 'ready_for_review', dataPolicy }).dataPolicy, dataPolicy);
 });
+
+test('Region resolution reads each real metadata response body only once', async (t) => {
+  // A real Response throws when its body is read twice; model that here.
+  const singleRead = async (url: string) => {
+    const body = url.includes('/endpoints') ? { data: { endpoints: alphaEndpoints } } : { data: alphaProviders };
+    let read = false;
+    return { ok: true, json: async () => { if (read) throw new TypeError('Body is unusable: Body has already been read'); read = true; return body; } };
+  };
+  const result = await dataPolicyPreflight({
+    cwd: projectWith({ regions: ['US', 'DE'] }, t),
+    provider: 'openrouter', model: COMMODITY_MODEL,
+    fetch: singleRead,
+  });
+  assert.deepEqual(result.ok ? result.routing?.only : result.reason, ['alpha/fp8']);
+});
