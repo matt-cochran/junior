@@ -219,7 +219,7 @@ test('Install summary reports no attempt for a Pi-only setup without installing'
  assert.equal(summary.attempted, false);
 });
 
-import { inspectStoreDenyRules } from './harness.ts';
+import { CLAUDE_STORE_DENY_RULES, RETIRED_STORE_DENY_RULES, inspectStoreDenyRules } from './harness.ts';
 
 test('Doctor warns when a .crossmatrix store exists without Claude deny rules', () => {
  const cwd = tmp('junior-doctor-store-');
@@ -238,4 +238,31 @@ test('Doctor reports the setup command as store-lockdown remediation', () => {
 test('Store lockdown inspection reports missing rules only when the store exists', () => {
  const cwd = tmp('junior-store-inspect-');
  assert.equal(inspectStoreDenyRules(cwd).storeExists, false);
+});
+
+test('Doctor warns when the Claude deny rules use retired spellings', () => {
+ const cwd = tmp('junior-doctor-store-outdated-');
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ mkdirSync(join(cwd, '.claude'), { recursive: true });
+ writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: [RETIRED_STORE_DENY_RULES[0]] } }));
+ const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-outdated-tools-') } as any);
+ assert.match(d.warnings.join(' '), /outdated/);
+});
+
+test('Doctor recommends junior init for outdated Claude deny rules', () => {
+ const cwd = tmp('junior-doctor-store-outdated-fix-');
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ mkdirSync(join(cwd, '.claude'), { recursive: true });
+ writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: [RETIRED_STORE_DENY_RULES[0]] } }));
+ const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-outdated-fix-tools-') } as any);
+ assert.match(d.remediation.join(' '), /junior init/);
+});
+
+test('Doctor reports no store-lockdown warning when the Claude deny rules are current', () => {
+ const cwd = tmp('junior-doctor-store-current-');
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ mkdirSync(join(cwd, '.claude'), { recursive: true });
+ writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: [...CLAUDE_STORE_DENY_RULES] } }));
+ const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-current-tools-') } as any);
+ assert.doesNotMatch(d.warnings.join(' '), /\.crossmatrix/);
 });
