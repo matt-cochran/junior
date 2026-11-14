@@ -217,13 +217,56 @@ test('unknown MCP config is the deduplicated union of every harness', () => {
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { mergeStoreDenyRules, installStoreDenyRules } from './harness.ts';
+import { CLAUDE_STORE_DENY_RULES, RETIRED_STORE_DENY_RULES, inspectStoreDenyRules, mergeStoreDenyRules, installStoreDenyRules } from './harness.ts';
 
-test('mergeStoreDenyRules adds every Claude deny rule once', () => {
- const settings = {};
- mergeStoreDenyRules(settings);
- const deny = (mergeStoreDenyRules(settings).settings.permissions as any).deny;
- assert.equal(deny.length, 6);
+test('mergeStoreDenyRules on empty settings writes the current Claude deny list', () => {
+ const deny = (mergeStoreDenyRules({}).settings.permissions as any).deny;
+ assert.deepEqual(deny, [
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix*)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
+ ]);
+});
+
+test('inspectStoreDenyRules reports the current Claude deny list as present', () => {
+ const settings = JSON.stringify({
+  permissions: {
+   deny: [
+    'Read(./.crossmatrix/**)',
+    'Edit(./.crossmatrix/**)',
+    'Bash(cat .crossmatrix*)',
+    'Bash(grep * .crossmatrix*)',
+    'Bash(jq * .crossmatrix*)',
+   ],
+  },
+ });
+ const present = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).present;
+ assert.equal(present, true);
+});
+
+test('inspectStoreDenyRules reports the 0.16.0 Claude deny list as absent', () => {
+ const settings = JSON.stringify({
+  permissions: {
+   deny: [
+    'Read(./.crossmatrix/**)',
+    'Edit(./.crossmatrix/**)',
+    'Write(./.crossmatrix/**)',
+    'Bash(cat .crossmatrix:*)',
+    'Bash(grep * .crossmatrix:*)',
+    'Bash(jq * .crossmatrix:*)',
+   ],
+  },
+ });
+ const present = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).present;
+ assert.equal(present, false);
 });
 
 test('installStoreDenyRules writes the Claude deny rules when a store exists', () => {
@@ -249,4 +292,104 @@ test('installStoreDenyRules leaves settings untouched when no store exists', () 
  const cwd = join(tmpdir(), `junior-store-${process.pid}-${Date.now()}-none`);
  const result = installStoreDenyRules({ projectDir: cwd });
  assert.equal(result.changed, false);
+});
+test('RETIRED_STORE_DENY_RULES lists the four retired rule spellings', () => {
+ assert.deepEqual([...RETIRED_STORE_DENY_RULES], [
+  'Write(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
+  'Bash(grep * .crossmatrix:*)',
+  'Bash(jq * .crossmatrix:*)',
+ ]);
+});
+
+test('mergeStoreDenyRules replaces retired rules with the current list after user rules', () => {
+ const settings = { permissions: { deny: [...RETIRED_STORE_DENY_RULES, 'Read(./secrets/**)'] } };
+ assert.deepEqual((mergeStoreDenyRules(settings).settings.permissions as any).deny, [
+  'Read(./secrets/**)',
+  ...CLAUDE_STORE_DENY_RULES,
+ ]);
+});
+
+test('mergeStoreDenyRules migrates the 0.16.0 list while preserving a user rule', () => {
+ const settings = { permissions: { deny: [
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Write(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix:*)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
+  'Read(./secrets/**)',
+ ] } };
+ assert.deepEqual((mergeStoreDenyRules(settings).settings.permissions as any).deny, [
+  'Read(./.crossmatrix/**)',
+  'Edit(./.crossmatrix/**)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
+  'Read(./secrets/**)',
+  'Bash(cat .crossmatrix*)',
+ ]);
+});
+
+test('mergeStoreDenyRules leaves an already migrated deny list identical', () => {
+ const first = mergeStoreDenyRules({ permissions: { deny: [...RETIRED_STORE_DENY_RULES, 'Read(./secrets/**)'] } });
+ const second = mergeStoreDenyRules(first.settings);
+ assert.deepEqual((second.settings.permissions as any).deny, (first.settings.permissions as any).deny);
+});
+
+test('mergeStoreDenyRules reports no change for an already migrated deny list', () => {
+ const first = mergeStoreDenyRules({ permissions: { deny: [...RETIRED_STORE_DENY_RULES, 'Read(./secrets/**)'] } });
+ assert.equal(mergeStoreDenyRules(first.settings).changed, false);
+});
+
+test('inspectStoreDenyRules reports a hand-fixed current list with user rules as current', () => {
+ const settings = JSON.stringify({ permissions: { deny: [...CLAUDE_STORE_DENY_RULES, 'Read(./secrets/**)'] } });
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).state;
+ assert.equal(state, 'current');
+});
+
+test('inspectStoreDenyRules reports a retired rule alongside the current list as outdated', () => {
+ const settings = JSON.stringify({ permissions: { deny: [...CLAUDE_STORE_DENY_RULES, RETIRED_STORE_DENY_RULES[0]] } });
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).state;
+ assert.equal(state, 'outdated');
+});
+
+test('inspectStoreDenyRules reports a partial current list as outdated', () => {
+ const settings = JSON.stringify({ permissions: { deny: [CLAUDE_STORE_DENY_RULES[0]] } });
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).state;
+ assert.equal(state, 'outdated');
+});
+
+test('inspectStoreDenyRules reports settings with no Junior rules as missing', () => {
+ const settings = JSON.stringify({ permissions: { deny: ['Read(./secrets/**)'] } });
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).state;
+ assert.equal(state, 'missing');
+});
+
+test('inspectStoreDenyRules reports a missing settings file as missing', () => {
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: (path) => path.endsWith('.crossmatrix'),
+ }).state;
+ assert.equal(state, 'missing');
+});
+
+test('installStoreDenyRules leaves a hand-fixed current settings file unchanged', () => {
+ const cwd = join(tmpdir(), `junior-store-${process.pid}-${Date.now()}-current`);
+ mkdirSync(join(cwd, '.crossmatrix'), { recursive: true });
+ mkdirSync(join(cwd, '.claude'), { recursive: true });
+ const original = { permissions: { deny: [...CLAUDE_STORE_DENY_RULES, 'Read(./secrets/**)'] } };
+ writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify(original));
+ installStoreDenyRules({ projectDir: cwd });
+ assert.deepEqual(JSON.parse(readFileSync(join(cwd, '.claude', 'settings.json'), 'utf8')), original);
 });

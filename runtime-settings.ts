@@ -47,42 +47,72 @@ export const EXECUTION_BOUNDS: Record<keyof ExecutionSettings, { min: number; ma
 
 export const EXECUTION_FIELDS = Object.keys(EXECUTION_DEFAULTS) as (keyof ExecutionSettings)[];
 
-/** Read the raw settings block. A nested `execution` object wins over top-level
- * task fields, so a task can group runtime settings without ambiguity. */
-function settingsSource(t: any): any {
- if (t && typeof t.execution === 'object' && t.execution !== null && !Array.isArray(t.execution)) return t.execution;
- return t ?? {};
+/** The settings layers in precedence order: top-level task fields first, then a
+ * nested `execution` object, which overrides per key. */
+function settingsLayers(t: any): any[] {
+ const root = t ?? {};
+ const layers = [root];
+ if (root && typeof root.execution === 'object' && root.execution !== null && !Array.isArray(root.execution)) {
+  layers.push(root.execution);
+ }
+ return layers;
 }
 
-/** Validate and resolve execution settings from a task. Any supplied value must
- * be a finite number within its bound; omitted values take the default. Throws
- * on an invalid value so a bad contract fails before any paid call. */
+function supplied(v: unknown): boolean {
+ return v !== undefined && v !== null;
+}
+
+function checkedValue(key: keyof ExecutionSettings, v: unknown): number {
+ const bound = EXECUTION_BOUNDS[key];
+ if (typeof v !== 'number' || !Number.isFinite(v) || v < bound.min || v > bound.max) {
+  throw Error(`Invalid execution.${key} (expected a finite number in [${bound.min}, ${bound.max}])`);
+ }
+ if (key === 'continuations' && !Number.isInteger(v)) {
+  throw Error(`Invalid execution.continuations (expected an integer in [${bound.min}, ${bound.max}])`);
+ }
+ return v;
+}
+
+/** Names of execution fields supplied both at the top level and inside an
+ * `execution` object with different values, sorted. Empty when there is no
+ * execution object or no conflict. */
+export function shadowedExecutionFields(t: any): string[] {
+ const root = t ?? {};
+ const nested = root && typeof root.execution === 'object' && root.execution !== null && !Array.isArray(root.execution)
+  ? root.execution
+  : null;
+ if (!nested) return [];
+ const fields = EXECUTION_FIELDS.filter((key) => supplied(root[key]) && supplied(nested[key]) && root[key] !== nested[key]);
+ return fields.map(String).sort();
+}
+
+/** Validate and resolve execution settings from a task. Top-level fields are
+ * read first and a nested `execution` object overrides per key. Any supplied
+ * value must be a finite number within its bound; omitted values take the
+ * default. Throws on an invalid value so a bad contract fails before any paid
+ * call. */
 export function resolveExecutionSettings(t: any): ExecutionSettings {
- const src = settingsSource(t);
+ const layers = settingsLayers(t);
  const out: any = { ...EXECUTION_DEFAULTS };
  for (const key of EXECUTION_FIELDS) {
   // checkReserveMs default depends on the resolved deadlineMs, so it is
   // resolved after the deadline is known.
   if (key === 'checkReserveMs') continue;
-  const v = src?.[key];
-  if (v === undefined || v === null) continue;
-  const bound = EXECUTION_BOUNDS[key];
-  if (typeof v !== 'number' || !Number.isFinite(v) || v < bound.min || v > bound.max) {
-   throw Error(`Invalid execution.${key} (expected a finite number in [${bound.min}, ${bound.max}])`);
+  for (const src of layers) {
+   const v = src?.[key];
+   if (!supplied(v)) continue;
+   out[key] = checkedValue(key, v);
   }
-  if (key === 'continuations' && !Number.isInteger(v)) {
-   throw Error(`Invalid execution.continuations (expected an integer in [${bound.min}, ${bound.max}])`);
-  }
-  out[key] = v;
  }
- const reserve = src?.checkReserveMs;
- if (reserve === undefined || reserve === null) {
+ let reserve: number | undefined;
+ for (const src of layers) {
+  const v = src?.checkReserveMs;
+  if (!supplied(v)) continue;
+  reserve = checkedValue('checkReserveMs', v);
+ }
+ if (reserve === undefined) {
   out.checkReserveMs = Math.min(120000, out.deadlineMs * 0.2);
  } else {
-  const bound = EXECUTION_BOUNDS.checkReserveMs;
-  if (typeof reserve !== 'number' || !Number.isFinite(reserve) || reserve < bound.min || reserve > bound.max) {
-   throw Error(`Invalid execution.checkReserveMs (expected a finite number in [${bound.min}, ${bound.max}])`);
-  }
   out.checkReserveMs = reserve;
  }
  if (!(out.checkReserveMs < out.deadlineMs)) throw Error('Invalid execution.checkReserveMs (expected less than deadlineMs)');

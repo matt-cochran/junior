@@ -4,6 +4,7 @@ import { validateIsolationSetup } from './isolation.ts';
 import { parseCommandPolicy, type CommandPolicy } from './command-policy.ts';
 import { validatePricing } from './worker-receipt.ts';
 import { validateExecutionSettings } from './runtime.ts';
+import { shadowedExecutionFields } from './runtime-settings.ts';
 import { validateBilling } from './billing.ts';
 import { validatePiContext } from './pi-isolation.ts';
 import { validateJevProvider } from './gateway.ts';
@@ -639,6 +640,9 @@ export function contractWarnings(t:any):string[] {
  const maxToolOutputBytes = t?.budget?.maxToolOutputBytes;
  if (typeof maxToolOutputBytes === 'number' && maxToolOutputBytes < MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES) {
   warnings.push(`budget.maxToolOutputBytes is ${maxToolOutputBytes}; it is a cumulative per-run cap, not a per-call cap. Consider at least ${MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES}.`);
+ }
+ for (const field of shadowedExecutionFields(t)) {
+  warnings.push(`${field} is set both at top level and in execution; execution.${field} (${t.execution[field]}) wins over the top-level value (${t[field]})`);
  }
  return warnings;
 }
