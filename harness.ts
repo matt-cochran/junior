@@ -151,6 +151,13 @@ export function harnessMcpConfig(harness: Harness, ctx: HarnessContext): Harness
 export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
   'Read(./.crossmatrix/**)',
   'Edit(./.crossmatrix/**)',
+  'Bash(cat .crossmatrix*)',
+  'Bash(grep * .crossmatrix*)',
+  'Bash(jq * .crossmatrix*)',
+];
+
+/** Older spellings Junior may have written; upgrades replace them. */
+export const RETIRED_STORE_DENY_RULES: readonly string[] = [
   'Write(./.crossmatrix/**)',
   'Bash(cat .crossmatrix:*)',
   'Bash(grep * .crossmatrix:*)',
@@ -169,17 +176,21 @@ function cloneJson(value: unknown): JsonObject {
   return JSON.parse(JSON.stringify(value)) as JsonObject;
 }
 
-/** Add the store deny rules to Claude settings, preserving every existing rule.
- * The input object is never mutated and a second merge adds nothing. */
+/** Migrate the store deny rules in Claude settings, preserving every other
+ * rule. Retired spellings are removed, missing current rules are appended, and
+ * a second merge adds nothing. The input object is never mutated. */
 export function mergeStoreDenyRules(settings: unknown): { settings: JsonObject; changed: boolean } {
   const merged = cloneJson(settings);
   const permissions = merged.permissions === undefined ? {} : merged.permissions;
   if (!isJsonObject(permissions)) throw new TypeError('settings.permissions must be a JSON object');
   const deny = permissions.deny === undefined ? [] : permissions.deny;
   if (!Array.isArray(deny)) throw new TypeError('settings.permissions.deny must be an array');
-  const missing = CLAUDE_STORE_DENY_RULES.filter((rule) => !deny.includes(rule));
-  if (missing.length === 0) return { settings: merged, changed: false };
-  merged.permissions = { ...permissions, deny: [...deny, ...missing] };
+  const retired = new Set<string>(RETIRED_STORE_DENY_RULES);
+  const kept = deny.filter((rule) => !retired.has(rule));
+  const removed = kept.length !== deny.length;
+  const missing = CLAUDE_STORE_DENY_RULES.filter((rule) => !kept.includes(rule));
+  if (!removed && missing.length === 0) return { settings: merged, changed: false };
+  merged.permissions = { ...permissions, deny: [...kept, ...missing] };
   return { settings: merged, changed: true };
 }
 
@@ -190,24 +201,37 @@ export type StoreDenyFileSystem = {
   mkdirSync?: (path: string, options: { recursive: true }) => void;
 };
 
+/** `current`: every current rule and no retired spelling; `outdated`: a retired
+ * spelling, or only some Junior rules; `missing`: no Junior rule or no file. */
+export type StoreDenyState = 'current' | 'outdated' | 'missing';
+
 /** Read-only view of the store and its Claude deny rules. A store only counts
  * when `.crossmatrix` exists; the rules only count when all are present. */
+
 export function inspectStoreDenyRules(
   projectDir: string,
   deps: StoreDenyFileSystem = {},
-): { storeExists: boolean; present: boolean; path: string } {
+): { storeExists: boolean; present: boolean; state: StoreDenyState; path: string } {
   const exists = deps.existsSync ?? fs.existsSync;
   const read = deps.readFileSync ?? ((path: string, encoding: 'utf8') => fs.readFileSync(path, encoding));
   const path = join(projectDir, '.claude', 'settings.json');
   const storeExists = exists(join(projectDir, '.crossmatrix'));
-  if (!storeExists || !exists(path)) return { storeExists, present: false, path };
+  const missing = { storeExists, present: false, state: 'missing' as const, path };
+  if (!storeExists || !exists(path)) return missing;
   try {
     const parsed = JSON.parse(read(path, 'utf8'));
     const deny = parsed?.permissions?.deny;
-    const present = Array.isArray(deny) && CLAUDE_STORE_DENY_RULES.every((rule) => deny.includes(rule));
-    return { storeExists, present, path };
+    if (!Array.isArray(deny)) return missing;
+    const hasRetired = deny.some((rule) => RETIRED_STORE_DENY_RULES.includes(rule));
+    const juniorRules = new Set<string>([...CLAUDE_STORE_DENY_RULES, ...RETIRED_STORE_DENY_RULES]);
+    const hasJunior = deny.some((rule) => juniorRules.has(rule));
+    const hasAllCurrent = CLAUDE_STORE_DENY_RULES.every((rule) => deny.includes(rule));
+    const state: StoreDenyState = hasAllCurrent && !hasRetired
+      ? 'current'
+      : hasRetired || hasJunior ? 'outdated' : 'missing';
+    return { storeExists, present: state === 'current', state, path };
   } catch {
-    return { storeExists, present: false, path };
+    return missing;
   }
 }
 
