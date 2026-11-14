@@ -218,6 +218,16 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   for (const file of agentInstructions.files) {
    if (file.action === 'conflict') instructions.push(`${file.path}: ${file.reason} <junior> tags at lines ${(file.lines ?? []).join(', ')}; fix them by hand, then rerun junior update`);
   }
+  // Like a generated delivery.config.json, an instruction file init creates is
+  // excluded locally so a fresh project stays ready for a worktree handoff; a
+  // file the user already had is theirs to commit.
+  const createdFiles=agentInstructions.files.filter((file)=>file.action === 'created').map((file)=>file.path);
+  if (createdFiles.length) {
+   excluded.push(...ensureLocalExcludes(cwd, createdFiles.map((path)=>`/${path}`)).added);
+   instructions.push(`Created ${createdFiles.join(' and ')} with the Junior <junior> block and excluded locally; to share it with your team, remove its line from .git/info/exclude and commit it.`);
+  }
+  const editedFiles=agentInstructions.files.filter((file)=>file.action === 'added' || file.action === 'updated').map((file)=>file.path);
+  if (editedFiles.length) instructions.push(`Commit the <junior> block in ${editedFiles.join(' and ')}; worktree handoffs need a clean checkout.`);
  }
  if (install?.note) instructions.push(install.note);
  const storePath=join(cwd,'.crossmatrix');
