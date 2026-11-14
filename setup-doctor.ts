@@ -395,7 +395,10 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  const warnings:string[]=[];
  if (pi.probeBlocked) warnings.push(BLOCKED_PROBE_WARNING);
  const storeLockdown=inspectStoreDenyRules(cwd,{ existsSync:deps.exists, readFileSync:deps.readFile ? (path:string)=>readText(deps,path) : undefined });
- if (storeLockdown.storeExists && !storeLockdown.present) {
+ if (storeLockdown.storeExists && storeLockdown.state === 'outdated') {
+  warnings.push('The .crossmatrix/ store has outdated Claude Code deny rules (retired spellings); agents may read it directly.');
+  remediation.push('Migrate the .crossmatrix/ store deny rules with `junior init` (idempotent; replaces the retired spellings).');
+ } else if (storeLockdown.storeExists && storeLockdown.state === 'missing') {
   warnings.push('The .crossmatrix/ store has no Claude Code deny rules; agents can read it directly.');
   remediation.push('Lock down the .crossmatrix/ store with `junior init` (idempotent; adds the Claude Code deny rules).');
  }

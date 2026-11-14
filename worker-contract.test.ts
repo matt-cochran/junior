@@ -207,6 +207,12 @@ test('validate rejects an unknown budget field',()=>{
 test('contract warnings explain that maxToolOutputBytes is a cumulative per-run cap',()=>{
  assert.match(contractWarnings(bounded({budget:{maxToolOutputBytes:1000}})).join(' '),/maxToolOutputBytes.*cumulative per-run.*at least 200000/i);
 });
+test('contract warnings report a runtime field shadowed by execution with both values',()=>{
+ assert.ok(contractWarnings({deadlineMs:3600000,execution:{deadlineMs:1200000}}).includes('deadlineMs is set both at top level and in execution; execution.deadlineMs (1200000) wins over the top-level value (3600000)'));
+});
+test('contract warnings stay quiet when execution only sets other runtime fields',()=>{
+ assert.doesNotMatch(contractWarnings({deadlineMs:3600000,execution:{checkTimeoutMs:900000}}).join(' '),/is set both at top level and in execution/);
+});
 test('validate rejects a scope expansion without a reason',()=>{
  assert.throws(()=>validate(bounded({scopeExpansion:{paths:['src/b.ts']}})),/Invalid scopeExpansion\.reason/);
 });

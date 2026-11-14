@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-14
+
+### Fixed
+
+- The Claude Code `.crossmatrix/` deny rules Junior writes are now all valid.
+  Three of the six 0.16.0 rules drew startup warnings and did nothing:
+  `Write(./.crossmatrix/**)` (Claude Code checks writes against `Edit` rules)
+  and `Bash(grep * .crossmatrix:*)` / `Bash(jq * .crossmatrix:*)` (the middle
+  `*` of a `:*` prefix rule is literal). A fourth, `Bash(cat .crossmatrix:*)`,
+  is a word-prefix rule that never matched `cat .crossmatrix/<file>`. The rules
+  are now `Read(./.crossmatrix/**)`, `Edit(./.crossmatrix/**)`,
+  `Bash(cat .crossmatrix*)`, `Bash(grep * .crossmatrix*)` and
+  `Bash(jq * .crossmatrix*)`. In Claude Code 2.1.325 the `Read` rule already
+  covered paths inside Bash commands, so store reads were blocked, but the
+  dead rules were noise and relied on that (#214).
+- Upgrading migrates the rules: `junior init` removes the spellings Junior
+  wrote earlier, adds the current ones and never touches rules you wrote; a
+  second run changes nothing. `junior doctor` reports the lockdown as current,
+  outdated (retired spellings, run `junior init`) or missing, and a hand-fixed
+  settings file now passes (#217).
+- A contract with both a top-level runtime field (for example `deadlineMs`)
+  and an `execution` object no longer drops the top-level value: top-level
+  fields are read first and `execution` overrides per key. `junior validate`
+  warns when both set the same field differently, and the compact receipt's
+  `runtime` shows the resolved `deadlineMs` and `checkTimeoutMs` (#219).
+
+### Added
+
+- `harness-rule-grammar.ts` and its test lint every Claude Code permission
+  rule Junior writes against the rule grammar and check, row by row, which
+  commands and paths the rules block (#215).
+- `scripts/claude-smoke.mjs` and the model-free `Claude smoke` workflow: CI
+  runs the grammar test and an offline self-test of the smoke verdict. The
+  real Claude Code run (`--live`) reads rule warnings from Claude Code's debug
+  log and is never run in CI (#216).
+
 ## [0.16.0] - 2026-11-11
 
 ### Fixed
