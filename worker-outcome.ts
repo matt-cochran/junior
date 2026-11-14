@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import { briefMdPath, briefPath, buildPlaceholderBrief, renderBrief } from './prepare.ts';
+import { designGate, implementationGate, resolveGateConfig } from './worker-adr-gate.ts';
 import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { collectGitEvidence, evidenceDelta } from './evidence.ts';
 import { withinWorkspace } from './worker-contract.ts';
@@ -103,6 +104,7 @@ export async function finish(state:RunState):Promise<any> {
  else if (!receiptOk) status='receipt_failed';
  else if (checks.some((c:any)=>c.exitCode !== 0 || c.error || c.timedOut || c.outputTruncated)) status='checks_failed';
  else status= mock ? 'simulation_passed' : 'ready_for_review';
+ const adrGateIssues:string[]=[];
 
  // A mock prepare run has no model to author the brief, so synthesize a
  // well-formed placeholder; a live run reads (and augments) what the worker
@@ -113,12 +115,23 @@ export async function finish(state:RunState):Promise<any> {
   writeFileSync(briefPath(dir), JSON.stringify(placeholder, null, 2));
   writeFileSync(briefMdPath(dir), renderBrief(placeholder));
  }
+ // ADR 0018 R3/R5: gate the brief's design options before the manager is
+ // asked to choose. The gated brief (findings and all) is what the manager
+ // reads, so a flagged option is visible before implementation starts.
  let prepareBrief:any=null;
  if (prepareRun && existsSync(briefPath(dir))) {
   try { prepareBrief=JSON.parse(readFileSync(briefPath(dir),'utf8')); } catch { prepareBrief=null; }
   if (prepareBrief) {
    prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
+   if (classify) {
+    try {
+     prepareBrief=await designGate({cwd:executionCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
+    } catch (e) {
+     adrGateIssues.push(`ADR design gate skipped: ${msg(e)}`);
+    }
+   }
    writeFileSync(briefPath(dir), JSON.stringify(prepareBrief, null, 2));
+   writeFileSync(briefMdPath(dir), renderBrief(prepareBrief));
   }
  }
 
@@ -144,6 +157,36 @@ export async function finish(state:RunState):Promise<any> {
  if (isQa && evidence.changed && (status === 'simulation_passed' || status === 'ready_for_review')) {
   status='needs_review';
   workerError = workerError || `QA run changed production files despite report-only instructions: ${evidence.runChangedFiles.map((f:any)=>f.path).join(', ')}`;
+ }
+
+ // ADR 0018 R3-R5: a live code handoff is checked at the implementation stage
+ // before it is ready for review. A blocked gate needs a human decision (or
+ // stops an unattended run); it never silently passes.
+ let implementationAdrGate:any=null;
+ if (!mock && !prepareRun && !reportWorkflow && !isQa && status === 'ready_for_review') {
+  if (classify) {
+   try {
+    const gated=await implementationGate({
+     cwd:executionCwd,
+     changedFiles:evidence.runChangedFiles.map((f:any)=>f.path),
+     deliverable:t.plan?.deliverable ?? t.id,
+     classify,
+     unattended:t.unattended === true,
+    });
+    implementationAdrGate=gated.result;
+    if (gated.markdown !== null) writeFileSync(join(dir,'adr-gate.md'),gated.markdown);
+    if (gated.status !== null) {
+     status=gated.status;
+     adrGateIssues.push('ADR conformance findings need a human decision: junior adr decide (see adr-gate.md)');
+    }
+   } catch (e) {
+    adrGateIssues.push(`ADR gate skipped: ${msg(e)}`);
+   }
+  } else {
+   let hasAdrGate=false;
+   try { hasAdrGate=resolveGateConfig(executionCwd) !== null; } catch { hasAdrGate=false; }
+   if (hasAdrGate) adrGateIssues.push('ADR gate skipped: classifier unavailable');
+  }
  }
 
  // Enforce can only downgrade an otherwise-passing run; it never upgrades
@@ -231,8 +274,10 @@ export async function finish(state:RunState):Promise<any> {
  if (dataPolicyRecord) result.dataPolicy=dataPolicyRecord;
  if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
+ if (implementationAdrGate) result.adrGate=implementationAdrGate;
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
+ for (const issue of adrGateIssues) result.unresolved.push(issue);
  for (const issue of dataPolicyIssues) result.unresolved.push(issue);
  if (streamResult?.timedOut && streamResult.timedOutTool) {
   result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
