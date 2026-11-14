@@ -213,6 +213,14 @@ test('A repair run shares the affinity key of its root run',async()=>{
  assert.equal(seen.env.JUNIOR_PI_AFFINITY_KEY,affinityKeyFor(resolve(repo.dir),'root-affinity'));
 });
 
+test('A data policy is merged over the profile routing in the worker env',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra'],allow_fallbacks:true}}],dataPolicy:{dataCollection:'deny'}}}));
+ let seen:any;
+ await run(okTask(repo,{id:'policy-env',provider:'openrouter',model:COMMODITY_MODEL}),false,{spawnPi:(_c,_a,opts)=>{seen=opts;return {status:0,stdout:stream({type:'session',id:'s'},assistant(),{type:'agent_settled'}),stderr:''};}});
+ assert.deepEqual(JSON.parse(seen.env.JUNIOR_PI_OPENROUTER_ROUTING),{order:['deepinfra'],allow_fallbacks:false,data_collection:'deny'});
+});
+
 test('An openrouter run passes the selected profile routing to the worker env',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  writeFileSync(join(repo.dir,'delivery.config.json'),JSON.stringify({provider:'openrouter',model:COMMODITY_MODEL,models:{roster:[{id:'general',openrouter:{order:['deepinfra']}}]}}));

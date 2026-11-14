@@ -51,7 +51,11 @@ export async function launch(state:RunState):Promise<RunState|any> {
  }
  if (affinityKey) piBashEnv.JUNIOR_PI_AFFINITY_KEY = affinityKey;
  else delete piBashEnv.JUNIOR_PI_AFFINITY_KEY;
- if (openrouterRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(openrouterRouting);
+ // The guard merges this over the request's provider object at request time,
+ // after Pi applies models.json compat, so the data policy is merged last: a
+ // profile's routing (order, affinity) can never loosen it (ADR 0017 R3).
+ const requestRouting=openrouterRouting || policyRouting ? { ...(openrouterRouting ?? {}), ...(policyRouting ?? {}) } : null;
+ if (requestRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(requestRouting);
  else delete piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING;
  // The guard enforces the contract's command placement on every bash call. The
  // policy is passed with manifest rules already merged, so the guard never
