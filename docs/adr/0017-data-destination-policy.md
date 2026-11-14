@@ -15,7 +15,7 @@ applies_to:
   - auth.ts
 rules:
   - id: R1
-    text: delivery.config.json may hold models.dataPolicy = {dataCollection?: allow|deny, zdr?: boolean, providers?: {only?: string[], ignore?: string[]}, regions?: string[] (ISO 3166-1 alpha-2 codes), allowFallbacks?: boolean}. Unknown fields or malformed values fail validation before any paid call. With no dataPolicy Junior sends no routing preferences and doctor warns that the destination is unconstrained.
+    text: delivery.config.json may hold models.dataPolicy = {dataCollection?: allow|deny, zdr?: boolean, providers?: {only?: string[], ignore?: string[]}, regions?: string[] (ISO 3166-1 alpha-2 codes), allowFallbacks?: boolean, allowUncovered?: ('typesafe'|'companions')[]}. Unknown fields or malformed values fail validation before any paid call. With no dataPolicy Junior sends no routing preferences and doctor warns that the destination is unconstrained.
   - id: R2
     text: The resolved policy maps to OpenRouter's provider object - data_collection, zdr, only, ignore, allow_fallbacks (default false whenever a dataPolicy is set). regions has no OpenRouter field; Junior resolves it by intersecting each candidate endpoint's provider (from GET /api/v1/models/{model}/endpoints) with providers whose datacenters (GET /api/v1/providers) all lie in the allowed regions, and sends the result as only. These lookups are unauthenticated metadata reads made by Junior's code paths, cached per run.
   - id: R3
