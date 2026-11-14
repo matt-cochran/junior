@@ -21,7 +21,7 @@ const msg=(e:unknown)=>e instanceof Error ? e.message : String(e);
 export const TASK_FIELDS = [
  'id','deliverable','cwd','acceptance','assumptions','checks','constraints','context',
  'provider','model','thinking','pricing','jev',
- 'workflow','isolation','billing',
+ 'workflow','isolation','billing','ticket',
  'resumeFrom','repairFrom','reviewFrom','maxRepairs','lineageDeadlineMs','preparedFrom','checkBack',
  'approveModel','approvedProfiles','modelProfile',
  'plan',

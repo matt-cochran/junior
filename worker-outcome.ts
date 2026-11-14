@@ -275,6 +275,9 @@ export async function finish(state:RunState):Promise<any> {
  if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
  if (implementationAdrGate) result.adrGate=implementationAdrGate;
+ // The ticket-stage check ran in preflight (ADR 0018 R3); surface its outcome.
+ if ((state as any).ticketGate) result.ticketGate=(state as any).ticketGate;
+ if ((state as any).ticketGateUnresolved) adrGateIssues.push((state as any).ticketGateUnresolved);
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
  for (const issue of adrGateIssues) result.unresolved.push(issue);
