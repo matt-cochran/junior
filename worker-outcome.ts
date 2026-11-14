@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
 import { briefMdPath, briefPath, buildPlaceholderBrief, renderBrief } from './prepare.ts';
+import { designGate, implementationGate, resolveGateConfig } from './worker-adr-gate.ts';
 import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { collectGitEvidence, evidenceDelta } from './evidence.ts';
 import { withinWorkspace } from './worker-contract.ts';
@@ -8,6 +9,7 @@ import { reportEvidence } from './worker-workflows.ts';
 import type { ReportEvidence } from './worker-workflows.ts';
 import { assessPostflight, raceSignal, resolveOpenRouterKey, OUTPUT_LIMIT_ERROR } from './worker-gates.ts';
 import { captureBilling, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture } from './billing.ts';
+import { verifyServedProviders } from './data-policy-run.ts';
 import { estimateCost } from './worker-receipt.ts';
 import { findUnwiredExports, type UnwiredSymbol } from './wiring-check.ts';
 import { verifyIsolation, DEFAULT_PI_TOOLS } from './pi-isolation.ts';
@@ -102,6 +104,7 @@ export async function finish(state:RunState):Promise<any> {
  else if (!receiptOk) status='receipt_failed';
  else if (checks.some((c:any)=>c.exitCode !== 0 || c.error || c.timedOut || c.outputTruncated)) status='checks_failed';
  else status= mock ? 'simulation_passed' : 'ready_for_review';
+ const adrGateIssues:string[]=[];
 
  // A mock prepare run has no model to author the brief, so synthesize a
  // well-formed placeholder; a live run reads (and augments) what the worker
@@ -112,12 +115,23 @@ export async function finish(state:RunState):Promise<any> {
   writeFileSync(briefPath(dir), JSON.stringify(placeholder, null, 2));
   writeFileSync(briefMdPath(dir), renderBrief(placeholder));
  }
+ // ADR 0018 R3/R5: gate the brief's design options before the manager is
+ // asked to choose. The gated brief (findings and all) is what the manager
+ // reads, so a flagged option is visible before implementation starts.
  let prepareBrief:any=null;
  if (prepareRun && existsSync(briefPath(dir))) {
   try { prepareBrief=JSON.parse(readFileSync(briefPath(dir),'utf8')); } catch { prepareBrief=null; }
   if (prepareBrief) {
    prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
+   if (classify) {
+    try {
+     prepareBrief=await designGate({cwd:sourceCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
+    } catch (e) {
+     adrGateIssues.push(`ADR design gate skipped: ${msg(e)}`);
+    }
+   }
    writeFileSync(briefPath(dir), JSON.stringify(prepareBrief, null, 2));
+   writeFileSync(briefMdPath(dir), renderBrief(prepareBrief));
   }
  }
 
@@ -143,6 +157,37 @@ export async function finish(state:RunState):Promise<any> {
  if (isQa && evidence.changed && (status === 'simulation_passed' || status === 'ready_for_review')) {
   status='needs_review';
   workerError = workerError || `QA run changed production files despite report-only instructions: ${evidence.runChangedFiles.map((f:any)=>f.path).join(', ')}`;
+ }
+
+ // ADR 0018 R3-R5: a live code handoff is checked at the implementation stage
+ // before it is ready for review. A blocked gate needs a human decision (or
+ // stops an unattended run); it never silently passes.
+ let implementationAdrGate:any=null;
+ if (!mock && !prepareRun && !reportWorkflow && !isQa && status === 'ready_for_review') {
+  if (classify) {
+   try {
+    const gated=await implementationGate({
+     cwd:sourceCwd,
+     changedFiles:evidence.runChangedFiles.map((f:any)=>f.path),
+     deliverable:t.plan?.deliverable ?? t.id,
+     classify,
+     unattended:t.unattended === true,
+     contentRoot:executionCwd,
+    });
+    implementationAdrGate=gated.result;
+    if (gated.markdown !== null) writeFileSync(join(dir,'adr-gate.md'),gated.markdown);
+    if (gated.status !== null) {
+     status=gated.status;
+     adrGateIssues.push('ADR conformance findings need a human decision: junior adr decide (see adr-gate.md)');
+    }
+   } catch (e) {
+    adrGateIssues.push(`ADR gate skipped: ${msg(e)}`);
+   }
+  } else {
+   let hasAdrGate=false;
+   try { hasAdrGate=resolveGateConfig(sourceCwd) !== null; } catch { hasAdrGate=false; }
+   if (hasAdrGate) adrGateIssues.push('ADR gate skipped: classifier unavailable');
+  }
  }
 
  // Enforce can only downgrade an otherwise-passing run; it never upgrades
@@ -177,6 +222,41 @@ export async function finish(state:RunState):Promise<any> {
   }
  }
 
+ // ADR 0017 R5: verify the upstream providers that actually served the run.
+ // A provider outside the policy fails the run even when its checks passed. A
+ // policy that could not be verified is recorded as a limitation, never a
+ // silent pass.
+ let dataPolicyRecord:any;
+ const dataPolicyIssues:string[]=[];
+ if (state.dataPolicy) {
+  const routing=state.dataPolicyRouting ?? null;
+  const resolvedOnly=Array.isArray((routing as any)?.only)
+   ? ((routing as any).only as unknown[]).filter((value):value is string=>typeof value==='string')
+   : undefined;
+  const captured=Array.isArray(billing?.providers) ? billing.providers : [];
+  if (captured.length===0) {
+   dataPolicyRecord={ routing, providers:[], verified:false };
+   dataPolicyIssues.push(billing?.reason
+    ? `data policy: served providers could not be verified; billing capture failed: ${billing.reason}`
+    : 'data policy: served providers could not be verified; set billing in the contract to capture them');
+  } else {
+   const verification=verifyServedProviders(
+    state.dataPolicy,
+    captured.map((entry:any)=>({ provider:typeof entry.provider==='string' ? entry.provider : null })),
+    Array.isArray(state.dataPolicyDirectory) ? state.dataPolicyDirectory : [],
+    resolvedOnly,
+   );
+   dataPolicyRecord={ routing, providers:verification.providers, verified:true };
+   if (!verification.ok) {
+    status='data_policy_violated';
+    for (const entry of verification.providers) {
+     if (!entry.allowed) dataPolicyIssues.push(`data policy: served provider ${entry.provider ?? 'unknown'} violated the policy: ${entry.reason ?? 'not allowed'}`);
+    }
+    heartbeat.setState('failed',{stopReason:'data_policy_violated'});
+   }
+  }
+ }
+
  const runtime=heartbeat.snapshot();
  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null,unwired};
  result.checkTimeoutMs=settings.checkTimeoutMs;
@@ -194,10 +274,17 @@ export async function finish(state:RunState):Promise<any> {
  }
  if (piIsolation) result.piIsolation=piIsolation;
  if (externalContext) result.externalContext=externalContext;
+ if (dataPolicyRecord) result.dataPolicy=dataPolicyRecord;
  if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
+ if (implementationAdrGate) result.adrGate=implementationAdrGate;
+ // The ticket-stage check ran in preflight (ADR 0018 R3); surface its outcome.
+ if ((state as any).ticketGate) result.ticketGate=(state as any).ticketGate;
+ if ((state as any).ticketGateUnresolved) adrGateIssues.push((state as any).ticketGateUnresolved);
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
+ for (const issue of adrGateIssues) result.unresolved.push(issue);
+ for (const issue of dataPolicyIssues) result.unresolved.push(issue);
  if (streamResult?.timedOut && streamResult.timedOutTool) {
   result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
   result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));

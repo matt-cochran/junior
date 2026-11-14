@@ -575,8 +575,8 @@ export async function main(argv: string[]): Promise<number> {
     return runAnalyze(argv.slice(1));
   }
   if (argv[0] === 'adr') {
-    const { runAdr } = await import('./adr.ts');
-    return runAdr(argv.slice(1));
+    const { runAdrCli } = await import('./adr-cli.ts');
+    return runAdrCli(argv.slice(1));
   }
   if (argv[0] !== 'export') {
     process.stdout.write(`${MATRIX_USAGE}\n`);

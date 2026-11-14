@@ -29,6 +29,26 @@ import { dirname, join } from 'node:path';
 import { analyze, type AnalysisCriterion, type AnalysisResult, type ScaleOption } from './matrix-analyze.ts';
 import type { GateClassifier } from './worker.ts';
 import type { ToolRoute } from './tool-routing.ts';
+import { renderGateMarkdown, runAdrGate, type AdrGateFinding, type AdrGateResult } from './adr-gate.ts';
+import { activeDecision, readLedger } from './adr-ledger.ts';
+
+/** A decision recorded after the brief was gated clears its finding too:
+ * re-read the ledger at choose time so a stale brief never blocks an
+ * override the human already recorded (ADR 0018 R5). */
+function overriddenSince(cwd: string, finding: AdrGateFinding): boolean {
+  try {
+    const decision = activeDecision(
+      readLedger(cwd),
+      { adrId: finding.adrId, ruleId: finding.ruleId, target: finding.target, deliverable: finding.deliverable },
+      { now: new Date(), adrHash: finding.adrHash },
+    );
+    return decision?.decision === 'override';
+  } catch {
+    return false;
+  }
+}
+import type { AdrConfig } from './adr-config.ts';
+import type { Adr } from './adr.ts';
 
 // ---------------------------------------------------------------------------
 // Artifact paths
@@ -108,6 +128,8 @@ export interface Brief {
   /** The routed playbooks that triggered this prepare run (recorded for the
    * correction-rate history). */
   playbooks?: string[];
+  /** ADR 0018 R3-R5: per-option design-stage conformance findings. */
+  adrGate?: AdrGateResult;
 }
 
 const isRecord = (value: unknown): value is Record<string, any> =>
@@ -229,6 +251,10 @@ export function renderBrief(brief: Brief): string {
     lines.push('');
   });
 
+  if (brief.adrGate) {
+    lines.push('## ADR conformance', '', renderGateMarkdown(brief.adrGate), '');
+  }
+
   lines.push('## Recommendation', `- ${brief.recommendation.option}: ${brief.recommendation.why}`);
   return lines.join('\n');
 }
@@ -260,7 +286,6 @@ export const OPTION_CRITERIA: AnalysisCriterion[] = [
   { id: 'risk', label: 'Risk contained', question: 'How well does this option contain downside risk?', weight: 3, scale: threePoint() },
   { id: 'effort', label: 'Effort', question: 'How little effort does this option require?', weight: 2, scale: inverseThreePoint() },
   { id: 'outcome_impact', label: 'Outcome impact', question: 'How much customer outcome does this option deliver?', weight: 3, scale: threePoint() },
-  { id: 'adr_conformance', label: 'ADR conformance', question: 'How well does this option conform to the recorded decisions?', weight: 2, scale: threePoint() },
   { id: 'files_touched', label: 'Files touched', question: 'How few files does this option touch?', weight: 1, scale: inverseThreePoint() },
 ];
 
@@ -281,6 +306,39 @@ export async function scoreOptions(brief: Brief, classifier: GateClassifier): Pr
     classify: classifier,
   });
   brief.scoring = result;
+  return brief;
+}
+
+/**
+ * ADR 0018 R3-R5: check every brief option against the accepted ADR rules at
+ * the design stage. The gate's per-option findings are stored on the brief so
+ * the manager sees them and `chooseBrief` can refuse a flagged option under
+ * enforce. A null or off gate returns the brief untouched.
+ */
+export async function gateBrief(opts: {
+  root: string;
+  brief: Brief;
+  config: AdrConfig | null;
+  deliverable?: string;
+  classify?: GateClassifier;
+  adrs?: Adr[];
+}): Promise<Brief> {
+  const { brief, config } = opts;
+  if (!config || config.gate === 'off') return brief;
+  const result = await runAdrGate({
+    root: opts.root,
+    stage: 'design',
+    subjects: brief.options.map((option) => ({
+      target: `option:${option.id}`,
+      text: `${option.title}\n${option.approach}\n${option.tradeoffs}`,
+      files: option.files,
+    })),
+    config,
+    ...(opts.deliverable !== undefined ? { deliverable: opts.deliverable } : {}),
+    ...(opts.classify !== undefined ? { classify: opts.classify } : {}),
+    ...(opts.adrs !== undefined ? { adrs: opts.adrs } : {}),
+  });
+  brief.adrGate = result;
   return brief;
 }
 
@@ -432,6 +490,17 @@ export function chooseBrief(opts: {
   choice: BriefChoice;
   playbooks?: string[];
 }): { contract: any; history: PrepareHistoryEntry } {
+  const blocked = opts.brief.adrGate?.gate === 'enforce'
+    ? opts.brief.adrGate.findings.filter(
+        (finding) => finding.target === `option:${opts.choice.option}` && !finding.cleared && !overriddenSince(opts.cwd, finding),
+      )
+    : [];
+  if (blocked.length > 0) {
+    const findings = blocked.map((finding) => `${finding.adrId}/${finding.ruleId} ${finding.verdict}`).join('; ');
+    throw new Error(
+      `ADR conformance findings block option ${opts.choice.option}: ${findings}. Record a decision with \`junior adr decide\`.`,
+    );
+  }
   const contract = buildImplementationContract(opts.task, opts.brief, opts.choice);
   const history: PrepareHistoryEntry = {
     playbooks: opts.playbooks ?? opts.brief.playbooks ?? [],

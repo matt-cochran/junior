@@ -16,6 +16,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { run, validate, contractWarnings, status, type GateDeps } from './worker.ts';
 import { doctor, init, parseInitOptions, setupCompanions, summarizeInstall, checkCredentialsOnline, detectSlowMount, inspectSkill, type InitOptions } from './setup.ts';
+import { inspectDataPolicy, renderDataPolicyPosture } from './doctor-data-policy.ts';
 import { installationDisabled } from './companions.ts';
 import { compactHandoff, isSuccessOutcome } from './handoff.ts';
 import { refreshUpdateCache } from './update-check.ts';
@@ -122,6 +123,8 @@ const COMMANDS: Record<string, CommandSpec> = {
  },
  routes: { flags: ['--json'], valueFlags: [], min: 0, max: 1,
   help: 'Usage: junior routes [--json] [<query>]' },
+ adr: { flags: [], valueFlags: [], min: 0, max: Number.MAX_SAFE_INTEGER,
+  help: 'Usage: junior adr <init|check|decide|check-tickets|new|lint|sync> [options]' },
 };
 
 const INIT_TARGETS = ['codex', 'claude', 'both', 'none'];
@@ -248,6 +251,7 @@ async function main(argv: string[]): Promise<void> {
  if (command === 'mcp') { const mcp = await import('./mcp.ts'); process.exitCode = await mcp.main(rest); return; }
  if (command === 'auth') { const auth = await import('./auth.ts'); process.exitCode = await auth.main(rest); return; }
  if (command === 'matrix') { const matrix = await import('./matrix.ts'); process.exitCode = await matrix.main(rest); return; }
+ if (command === 'adr') { const { runAdrCli } = await import('./adr-cli.ts'); process.exitCode = await runAdrCli(rest); return; }
  if (command === 'report-issue') { const reportIssue = await import('./report-issue.ts'); process.exitCode = await reportIssue.main(rest); return; }
 
  const spec = COMMANDS[command];
@@ -464,6 +468,9 @@ async function main(argv: string[]): Promise<void> {
   const result:any = doctor({}, { harness: parsed.values['--harness'] });
   if (parsed.flags.has('--online')) {
    result.credentialsOnline = await checkCredentialsOnline();
+   const posture = await inspectDataPolicy({ cwd: process.cwd(), models: [result.model.id] });
+   result.dataPolicy = posture;
+   result.warnings.push(...renderDataPolicyPosture(posture).split('\n'));
   }
   if (parsed.flags.has('--check-updates')) {
    const collected = await updateCheck.collectUpdateCheck({

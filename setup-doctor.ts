@@ -12,6 +12,9 @@ import { GATEWAY_KINDS, GATEWAYS, validateJevProvider, resolveGatewayKey, resolv
 import { agentDir, compareSemver, checkPi, exists, loadDefaults, readText, SUPPORTED_NODE_MIN, DEFAULT_PROVIDER, PI_PACKAGE, TESTED_PI_VERSION, type SetupDeps } from './setup-env.ts';
 import { inspectSkill, skillMessageLines, type SkillReadiness } from './setup-skill.ts';
 import type { InitResult } from './setup-init.ts';
+import { resolveGateConfig } from './worker-adr-gate.ts';
+import { inspectAgentInstructions } from './agent-instructions.ts';
+import { readDataPolicy } from './data-policy.ts';
 
 export type CredentialCheck = { provider:string; present:boolean; sources:string[]; providers:string[] };
 
@@ -404,6 +407,30 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  }
  const slowMount=detectSlowMount(cwd,deps);
  if (slowMount) warnings.push(slowMount);
+ try {
+  const gate=resolveGateConfig(cwd);
+  if (gate && !gate.confirmed) {
+   warnings.push('ADR gate not confirmed (running advisory); run junior adr init --yes to confirm it');
+   remediation.push('junior adr init --yes');
+  }
+ } catch (error) {
+  warnings.push(`delivery.config.json: could not read the ADR gate (${(error as Error).message})`);
+ }
+ try {
+  for (const entry of inspectAgentInstructions(cwd,{ target:'both' })) {
+   if (entry.state === 'outdated') warnings.push(`${entry.path}: the Junior <junior> block is outdated; run junior update`);
+   else if (entry.state === 'conflict') warnings.push(`${entry.path}: <junior> block conflict at lines ${(entry.lines ?? []).join(', ')}; fix the tags by hand`);
+  }
+ } catch (error) {
+  warnings.push(`CLAUDE.md/AGENTS.md: could not inspect the Junior <junior> blocks (${(error as Error).message})`);
+ }
+ if (provider === 'openrouter') {
+  try {
+   if (readDataPolicy(cwd) === null) warnings.push('No models.dataPolicy is set; OpenRouter may route requests to any provider and fall back between them (see docs/data-destination.md)');
+  } catch (error) {
+   warnings.push(`delivery.config.json: could not read models.dataPolicy (${(error as Error).message})`);
+  }
+ }
  for (const update of model.newer ?? []) {
   const parity=update.comparable === false
    ? `; waiting for price parity (${update.inputRatio ?? '?'}x/${update.outputRatio ?? '?'}x)`
