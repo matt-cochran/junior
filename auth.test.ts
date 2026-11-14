@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { removeProviderKey, setProviderKey, recordExternalContextConsent, removeExternalContextConsent, readExternalContextConsent, verifyExternalContextConsentToken, doctorExternalContextAuthorization } from './auth.ts';
+import { removeProviderKey, setProviderKey, recordExternalContextConsent, removeExternalContextConsent, readExternalContextConsent, verifyExternalContextConsentToken, doctorExternalContextAuthorization, policyWidens } from './auth.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -254,4 +254,133 @@ test('external-context authorization stays separate from runtime readiness', () 
   const dir = workdir();
   const readiness = doctorExternalContextAuthorization(dir, 'openrouter', true);
   assert.equal(readiness.readyForDelegation, false);
+});
+
+// --- data-destination policy consent (ADR 0017 R6) -------------------------
+
+function writeProjectPolicy(project: string, dataPolicy: unknown): void {
+  writeFileSync(join(project, 'delivery.config.json'), JSON.stringify({ models: { dataPolicy } }));
+}
+
+test('consent policy hash is stable across object key and array element order', () => {
+  const first = recordExternalContextConsent(workdir(), 'openrouter', { dataPolicy: { regions: ['US', 'DE'], providers: { only: ['b', 'a'] }, zdr: true } });
+  const second = recordExternalContextConsent(workdir(), 'openrouter', { dataPolicy: { zdr: true, providers: { only: ['a', 'b'] }, regions: ['DE', 'US'] } });
+  assert.equal(first.dataPolicyHash, second.dataPolicyHash);
+});
+
+test('consent records a one-line policy summary', () => {
+  const record = recordExternalContextConsent(workdir(), 'openrouter', { dataPolicy: { dataCollection: 'deny', zdr: true, regions: ['US'], allowFallbacks: false } });
+  assert.equal(record.dataPolicySummary, 'dataCollection deny; zdr; regions US; fallbacks off');
+});
+
+test('consent without a policy records a null policy hash', () => {
+  assert.equal(recordExternalContextConsent(workdir(), 'openrouter').dataPolicyHash, null);
+});
+
+test('widening dataCollection from deny to allow widens the policy', () => {
+  assert.equal(policyWidens({ dataCollection: 'deny' }, { dataCollection: 'allow' }), true);
+});
+
+test('removing dataCollection deny widens the policy', () => {
+  assert.equal(policyWidens({ dataCollection: 'deny' }, {}), true);
+});
+
+test('disabling zdr widens the policy', () => {
+  assert.equal(policyWidens({ zdr: true }, { zdr: false }), true);
+});
+
+test('removing zdr widens the policy', () => {
+  assert.equal(policyWidens({ zdr: true }, {}), true);
+});
+
+test('adding a region widens the policy', () => {
+  assert.equal(policyWidens({ regions: ['US'] }, { regions: ['US', 'DE'] }), true);
+});
+
+test('removing regions widens the policy', () => {
+  assert.equal(policyWidens({ regions: ['US'] }, {}), true);
+});
+
+test('adding a provider to only widens the policy', () => {
+  assert.equal(policyWidens({ providers: { only: ['a'] } }, { providers: { only: ['a', 'b'] } }), true);
+});
+
+test('removing only widens the policy', () => {
+  assert.equal(policyWidens({ providers: { only: ['a'] } }, {}), true);
+});
+
+test('removing a provider from ignore widens the policy', () => {
+  assert.equal(policyWidens({ providers: { ignore: ['a'] } }, {}), true);
+});
+
+test('enabling fallbacks from an absent setting widens the policy', () => {
+  assert.equal(policyWidens({ dataCollection: 'deny' }, { dataCollection: 'deny', allowFallbacks: true }), true);
+});
+
+test('removing a policy widens the policy', () => {
+  assert.equal(policyWidens({ dataCollection: 'deny' }, null), true);
+});
+
+test('tightening a policy does not widen it', () => {
+  assert.equal(policyWidens({ dataCollection: 'allow' }, { dataCollection: 'deny', zdr: true, regions: ['US'], providers: { ignore: ['a'] } }), false);
+});
+
+test('moving from no policy to a policy does not widen it', () => {
+  assert.equal(policyWidens(null, { dataCollection: 'deny', regions: ['US'] }), false);
+});
+
+test('a policy opened after policy-free consent keeps consent', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter');
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'deny' } }).granted, true);
+});
+
+test('a tightened policy keeps consent', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'allow' } });
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'deny' } }).granted, true);
+});
+
+test('an unchanged policy keeps consent', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter', { dataPolicy: { regions: ['US'] } });
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: { regions: ['US'] } }).granted, true);
+});
+
+test('a widened dataCollection policy invalidates consent', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'deny' } });
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'allow' } }).granted, false);
+});
+
+test('a widened policy invalidates consent with a re-grant instruction', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter', { dataPolicy: { regions: ['US'] } });
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: { regions: ['US', 'DE'] } }).reason, 'data policy widened since consent; run junior auth consent grant <provider> again');
+});
+
+test('removing the policy after consent invalidates consent', () => {
+  const project = workdir();
+  recordExternalContextConsent(project, 'openrouter', { dataPolicy: { dataCollection: 'deny' } });
+  assert.equal(readExternalContextConsent(project, 'openrouter', { dataPolicy: null }).granted, false);
+});
+
+test('junior auth consent grant prints the effective policy summary', () => {
+  const dir = workdir();
+  const project = workdir();
+  writeProjectPolicy(project, { dataCollection: 'deny', regions: ['US'] });
+  const result = runAuth(['consent', 'grant', 'openrouter', '--project', project], dir);
+  assert.equal(JSON.parse(result.stdout).dataPolicySummary, 'dataCollection deny; regions US; fallbacks off');
+});
+
+test('junior auth consent grant records the effective policy summary', () => {
+  const dir = workdir();
+  const project = workdir();
+  writeProjectPolicy(project, { dataCollection: 'deny', regions: ['US'] });
+  runAuth(['consent', 'grant', 'openrouter', '--project', project], dir);
+  assert.equal(readExternalContextConsent(project, 'openrouter').record?.dataPolicySummary, 'dataCollection deny; regions US; fallbacks off');
+});
+
+test('policyWidens counts a newly allowed uncovered path as widening', () => {
+  assert.equal(policyWidens({ dataCollection: 'deny' }, { dataCollection: 'deny', allowUncovered: ['typesafe'] }), true);
 });
