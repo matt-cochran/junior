@@ -8,7 +8,8 @@
 // unparseable deny rule with a stderr warning, so those warnings fail the run
 // even when the model would otherwise behave. `--self-test` repeats the flow
 // against an offline fake binary, proving both the pass and fail verdicts
-// without a model or network call.
+// without a model or network call. The real run needs --live, calls a model,
+// and is never run in CI.
 // ---------------------------------------------------------------------------
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -281,6 +282,12 @@ async function main() {
     return;
   }
 
+  if (!process.argv.includes('--live')) {
+    console.error('usage: node scripts/claude-smoke.mjs --self-test | --live');
+    console.error('--live starts real Claude Code, which calls a model: run it only by hand with explicit approval, never in CI.');
+    process.exitCode = 2;
+    return;
+  }
   const outcome = await runSmoke();
   report('claude smoke', outcome);
   process.exitCode = outcome.ok ? 0 : 1;

@@ -1,9 +1,11 @@
 name: Claude smoke
+# Model-free checks of the Claude Code deny rules Junior writes (#214-#216).
+# No model is called and no secret is used: the live check (a real Claude Code
+# session attempting store reads) is done by the release manager in-session and
+# recorded as plan evidence.
 on:
+  pull_request:
   workflow_dispatch: null
-  schedule:
-    # Daily at 06:00 UTC: catch a Claude Code release that changes deny rules.
-    - cron: '0 6 * * *'
 
 permissions:
   contents: read
@@ -11,7 +13,6 @@ permissions:
 jobs:
   claude-smoke:
     runs-on: ubuntu-latest
-    environment: claude-smoke
     permissions:
       contents: read
     steps:
@@ -21,11 +22,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
-      - run: npm ci
-      - run: npm install -g @anthropic-ai/claude-code@2.1.325
-      - name: Self-test the smoke verdict offline
+      - name: Rule grammar and coverage
+        run: node --test harness-rule-grammar.test.ts
+      - name: Smoke verdict self-test (offline fake Claude)
         run: node scripts/claude-smoke.mjs --self-test
-      - name: Prove Claude Code loads the store deny rules
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: node scripts/claude-smoke.mjs
