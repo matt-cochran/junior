@@ -8,6 +8,7 @@ import { reportEvidence } from './worker-workflows.ts';
 import type { ReportEvidence } from './worker-workflows.ts';
 import { assessPostflight, raceSignal, resolveOpenRouterKey, OUTPUT_LIMIT_ERROR } from './worker-gates.ts';
 import { captureBilling, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture } from './billing.ts';
+import { verifyServedProviders } from './data-policy-run.ts';
 import { estimateCost } from './worker-receipt.ts';
 import { findUnwiredExports, type UnwiredSymbol } from './wiring-check.ts';
 import { verifyIsolation, DEFAULT_PI_TOOLS } from './pi-isolation.ts';
@@ -177,6 +178,39 @@ export async function finish(state:RunState):Promise<any> {
   }
  }
 
+ // ADR 0017 R5: verify the upstream providers that actually served the run.
+ // A provider outside the policy fails the run even when its checks passed. A
+ // policy that could not be verified is recorded as a limitation, never a
+ // silent pass.
+ let dataPolicyRecord:any;
+ const dataPolicyIssues:string[]=[];
+ if (state.dataPolicy) {
+  const routing=state.dataPolicyRouting ?? null;
+  const resolvedOnly=Array.isArray((routing as any)?.only)
+   ? ((routing as any).only as unknown[]).filter((value):value is string=>typeof value==='string')
+   : undefined;
+  const captured=Array.isArray(billing?.providers) ? billing.providers : [];
+  if (captured.length===0) {
+   dataPolicyRecord={ routing, providers:[], verified:false };
+   dataPolicyIssues.push('data policy: served providers could not be verified; set billing in the contract to capture them');
+  } else {
+   const verification=verifyServedProviders(
+    state.dataPolicy,
+    captured.map((entry:any)=>({ provider:typeof entry.provider==='string' ? entry.provider : null })),
+    Array.isArray(state.dataPolicyDirectory) ? state.dataPolicyDirectory : [],
+    resolvedOnly,
+   );
+   dataPolicyRecord={ routing, providers:verification.providers, verified:true };
+   if (!verification.ok) {
+    status='data_policy_violated';
+    for (const entry of verification.providers) {
+     if (!entry.allowed) dataPolicyIssues.push(`data policy: served provider ${entry.provider ?? 'unknown'} violated the policy: ${entry.reason ?? 'not allowed'}`);
+    }
+    heartbeat.setState('failed',{stopReason:'data_policy_violated'});
+   }
+  }
+ }
+
  const runtime=heartbeat.snapshot();
  const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null,unwired};
  result.checkTimeoutMs=settings.checkTimeoutMs;
@@ -194,10 +228,12 @@ export async function finish(state:RunState):Promise<any> {
  }
  if (piIsolation) result.piIsolation=piIsolation;
  if (externalContext) result.externalContext=externalContext;
+ if (dataPolicyRecord) result.dataPolicy=dataPolicyRecord;
  if (state.matrixContext) result.matrixContext=state.matrixContext;
  if (scopeResult) result.scope=scopeResult;
  if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
+ for (const issue of dataPolicyIssues) result.unresolved.push(issue);
  if (streamResult?.timedOut && streamResult.timedOutTool) {
   result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
   result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));

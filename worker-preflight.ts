@@ -23,6 +23,8 @@ import { contractFeature, matrixContextFor, type MatrixContext } from './matrix-
 import type { ReceiptModelSource } from './worker-contract.ts';
 import { analysisReportPath, decideWorkflow, isReportWorkflow, taskWorkflow, WORKFLOW_TEMPLATE_IDS } from './worker-workflows.ts';
 import { estimateCost, mockReceipt } from './worker-receipt.ts';
+import { dataPolicyPreflight } from './data-policy-run.ts';
+import { readDataPolicy } from './data-policy.ts';
 import type { JevProvider } from './gateway.ts';
 
 /** Shared error-message coercion, used across the worker modules. */
@@ -504,6 +506,44 @@ export async function preflight(state:RunState):Promise<RunState|any> {
   model:requested.model,
   approval:modelRoute.approval ?? null,
  });
+
+ // ADR 0017 R4: resolve the data-destination policy before the final disclosure
+ // and before Pi or any provider receives source text. A run whose policy leaves
+ // no upstream provider fails closed with zero model calls, following the same
+ // inspectable early-return shape as the consent refusal below.
+ let dataPolicy:any=null;
+ let dataPolicyRouting:Record<string,unknown>|null=null;
+ let dataPolicyDirectory:unknown[]=[];
+ if (requested.provider==='openrouter') {
+  // Keep the no-policy path synchronous (existing preflight/launch tests rely on
+  // Pi spawning in the same step); only a declared policy needs the async
+  // metadata resolution.
+  const configuredPolicy=readDataPolicy(sourceCwd);
+  if (configuredPolicy) {
+   const policyPreflight=await dataPolicyPreflight({
+    cwd:sourceCwd,
+    provider:requested.provider,
+    model:requested.model,
+    fetch:(deps as any).dataPolicyFetch,
+   });
+   if (!policyPreflight.ok) {
+    heartbeat.setState('failed',{stopReason:'data_policy_unsatisfied', error:policyPreflight.reason});
+    emit('finished data_policy_unsatisfied');
+    const out:any={ id:t.id, simulated:mock, status:'data_policy_unsatisfied', workerExitCode:null,
+     workerError:policyPreflight.reason, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+     sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+     modelRouting:modelRoute };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   }
+   dataPolicy=policyPreflight.policy;
+   dataPolicyRouting=policyPreflight.routing;
+   dataPolicyDirectory=policyPreflight.directory ?? [];
+  }
+ }
+ state.dataPolicy=dataPolicy;
+ state.dataPolicyRouting=dataPolicyRouting;
+ state.dataPolicyDirectory=dataPolicyDirectory;
 
  // Refresh the disclosure with the final model/provider that will receive the
  // source text. A routed provider still needs its own consent.

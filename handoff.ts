@@ -42,6 +42,8 @@ export type CompactHandoff = {
  /** External-context egress preflight and its recorded authorization, or null
   * when the result predates the check. */
  externalContext: any | null;
+ /** The data-destination routing and the verified served providers, or null. */
+ dataPolicy: { routing: Record<string, unknown> | null; providers: any[] } | null;
  unwired: { symbol: string; file: string }[];
  /** Scope classification when the contract named an owned list, else null. */
  scope: ScopeResult | null;
@@ -381,6 +383,10 @@ export function compactHandoff(result: any): CompactHandoff {
    outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
   } : null,
   externalContext: r.externalContext && typeof r.externalContext === 'object' ? r.externalContext : null,
+  dataPolicy: r.dataPolicy && typeof r.dataPolicy === 'object' ? {
+   routing: r.dataPolicy.routing && typeof r.dataPolicy.routing === 'object' ? r.dataPolicy.routing : null,
+   providers: Array.isArray(r.dataPolicy.providers) ? r.dataPolicy.providers : [],
+  } : null,
   // Advisory (#186): new exports with no production reference; review call sites before apply.
   unwired: Array.isArray(r.unwired) ? r.unwired : [],
   piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {

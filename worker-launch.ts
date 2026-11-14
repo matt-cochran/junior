@@ -37,8 +37,13 @@ export async function launch(state:RunState):Promise<RunState|any> {
  // ADR 0017 R3: the Pi worker carries the same routing preferences through
  // compat.openRouterRouting in its run-local models.json overlay.
  const policyRoot=sourceCwd ?? executionCwd;
- const dataPolicy=policyRoot ? readDataPolicy(policyRoot) : null;
- const policyRouting=dataPolicy ? toRoutingPreferences(dataPolicy) : undefined;
+ const dataPolicy=state.dataPolicyRouting === undefined && policyRoot ? readDataPolicy(policyRoot) : null;
+ // Preflight already resolved the policy, including any region-resolved `only`
+ // list (ADR 0017 R2, R4). Use that routing when present instead of recomputing,
+ // so the worker cannot loosen or bypass the fail-closed resolution.
+ const policyRouting=state.dataPolicyRouting !== undefined
+  ? state.dataPolicyRouting
+  : (dataPolicy ? toRoutingPreferences(dataPolicy) : undefined);
  const piOverlay=preparePiAgentOverlay(dir,piBashEnv, policyRouting ? {routing:policyRouting} : undefined);
  if (!piOverlay.dir) return blockedResult(state, `Pi worker was not started: ${piOverlay.error}. Ensure the repository .delivery directory is writable.`);
  piBashEnv.PI_CODING_AGENT_DIR=piOverlay.dir;
