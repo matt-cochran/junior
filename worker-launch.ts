@@ -7,6 +7,7 @@ import { buildContinuationCheckpoint, CONTINUATION_PROMPT_LEAD, OUTPUT_LIMIT_CON
 import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from './worker-receipt.ts';
 import { resolveCommandPolicy, type Receipt } from './worker-contract.ts';
 import { blockedResult, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
+import { readDataPolicy, toRoutingPreferences } from './data-policy.ts';
 
 /** Launch: Pi overlay/guard env, spawn or stream the worker, continuations and the receipt. */
 export async function launch(state:RunState):Promise<RunState|any> {
@@ -33,7 +34,12 @@ export async function launch(state:RunState):Promise<RunState|any> {
  // also confines writes to the execution checkout and keeps a worktree run out
  // of the source checkout.
  const piBashEnv:any = { ...(deps.env ?? process.env), JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
- const piOverlay=preparePiAgentOverlay(dir,piBashEnv);
+ // ADR 0017 R3: the Pi worker carries the same routing preferences through
+ // compat.openRouterRouting in its run-local models.json overlay.
+ const policyRoot=sourceCwd ?? executionCwd;
+ const dataPolicy=policyRoot ? readDataPolicy(policyRoot) : null;
+ const policyRouting=dataPolicy ? toRoutingPreferences(dataPolicy) : undefined;
+ const piOverlay=preparePiAgentOverlay(dir,piBashEnv, policyRouting ? {routing:policyRouting} : undefined);
  if (!piOverlay.dir) return blockedResult(state, `Pi worker was not started: ${piOverlay.error}. Ensure the repository .delivery directory is writable.`);
  piBashEnv.PI_CODING_AGENT_DIR=piOverlay.dir;
  if (isolation === 'worktree') {
