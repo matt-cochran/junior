@@ -425,3 +425,20 @@ test('renderGateMarkdown ends with BLOCKED when a finding is unresolved', async 
   assert.match(renderGateMarkdown(result), /BLOCKED\s*$/);
 });
 
+
+test('A file-less subject skips an ADR the relevance pass rules out', async (t) => {
+  const {root, config} = seed(t);
+  const {classify} = fakeClassifier({
+    'ADR-0002': {choice: 'no', confidence: 0.95},
+    'ADR-0002/R1': {choice: 'contradicts', confidence: 0.95},
+  });
+  const result = await run(root, config, classify);
+  assert.equal(result.findings.some((finding) => finding.adrId === 'ADR-0002'), false);
+});
+
+test('A low-confidence contradiction is reported as uncertain', async (t) => {
+  const {root, config} = seed(t);
+  const {classify} = fakeClassifier({'ADR-0001/R1': {choice: 'contradicts', confidence: 0.02}});
+  const result = await run(root, config, classify);
+  assert.deepEqual(result.findings.filter((f) => f.adrId === 'ADR-0001').map((f) => f.verdict), ['uncertain']);
+});

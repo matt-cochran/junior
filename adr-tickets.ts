@@ -276,6 +276,7 @@ export async function checkTicket(opts: CheckTicketOptions): Promise<TicketCheck
     root: opts.root,
     stage: 'ticket',
     subjects: [{target, text}],
+    relevance: false,
     config: opts.config,
     adrs: gateAdrs,
     classify: opts.classify,
