@@ -42,3 +42,8 @@ test('compact receipt reports null runtime settings when they are absent', () =>
  const receipt = compactHandoff({});
  assert.equal(receipt.runtime.checkTimeoutMs, null);
 });
+
+test('compactHandoff surfaces notes the run recorded in result.unresolved', () => {
+  const compact = compactHandoff({ id: 'n', status: 'ready_for_review', unresolved: ['data policy: served providers could not be verified'] });
+  assert.ok(compact.unresolved.includes('data policy: served providers could not be verified'));
+});

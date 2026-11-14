@@ -171,6 +171,14 @@ define a `litellm` provider in Pi's `models.json`. See
   `link`, `graph`, `qc`, `analyze`, `adr`, `jtbd`, `plan-from-spec`), the
   playbook/toolPlan routing, check-back and the managed `scientific-process`
   and `elicitation` tools.
+- **[ADR support](docs/adr-support.md)** — `junior adr init|check|decide|check-tickets`:
+  designs, tickets and code are checked against your architecture decision
+  records, and a human decides on every likely violation. `junior init` and
+  `junior update` write the checkpoints into a managed `<junior>` block in
+  `CLAUDE.md` and `AGENTS.md`.
+- **[Where your code goes](docs/data-destination.md)** — consent, the model
+  policy and `models.dataPolicy`: which OpenRouter providers and regions may
+  process your requests, failing closed before any spend.
 - **[Releasing](docs/releasing.md)** — packing, publishing and trusted-publisher
   setup.
 
@@ -186,7 +194,9 @@ define a `litellm` provider in Pi's `models.json`. See
 | [docs/planning.md](docs/planning.md) | Junior-ready cpm plans, `plan check` and `plan contracts`. |
 | [docs/tools.md](docs/tools.md) | Companion tools, `report-issue` and MCP registration. |
 | [docs/releasing.md](docs/releasing.md) | Packing and publishing. |
-| [docs/adr/](docs/adr/) | Architecture decision records (MADR) and their conformance rules, checked by `junior matrix adr`. |
+| [docs/adr-support.md](docs/adr-support.md) | ADR checkpoints, decisions and ticket checks (`junior adr`). |
+| [docs/data-destination.md](docs/data-destination.md) | Consent, model policy and the data-destination policy. |
+| [docs/adr/](docs/adr/) | Junior's own architecture decision records and their conformance rules, checked by `junior adr`. |
 | [skills/junior/SKILL.md](skills/junior/SKILL.md) | The agent instructions that `junior init` installs into your project. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history. |
 

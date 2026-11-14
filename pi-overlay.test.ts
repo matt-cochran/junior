@@ -292,3 +292,39 @@ test('importResumeSession returns a typed error when the prior session is malfor
     message: `session ${SESSION_ID} is malformed at ${path}`,
   });
 });
+
+// --- data-destination routing in the run-local models.json (ADR 0017 R3) ---
+
+test('preparePiAgentOverlay writes openRouterRouting into the run-local models.json', (t) => {
+  const root = tempRoot(t);
+  const source = sourceAgentDir(root);
+  writeFileSync(join(source, 'models.json'), JSON.stringify({ providers: { openrouter: { compat: { other: true } } } }));
+  const routing = { data_collection: 'deny', allow_fallbacks: false };
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source }, { routing });
+  const overlay = JSON.parse(readFileSync(join(result.dir!, 'models.json'), 'utf8'));
+
+  assert.deepEqual(overlay.providers.openrouter.compat.openRouterRouting, routing);
+});
+
+test('preparePiAgentOverlay leaves the ambient models.json unchanged when routing is applied', (t) => {
+  const root = tempRoot(t);
+  const source = sourceAgentDir(root);
+  const original = JSON.stringify({ providers: { openrouter: { compat: { other: true } } } });
+  writeFileSync(join(source, 'models.json'), original);
+
+  preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source }, { routing: { zdr: true } });
+
+  assert.equal(readFileSync(join(source, 'models.json'), 'utf8'), original);
+});
+
+test('preparePiAgentOverlay creates models.json when the ambient one is absent and routing is given', (t) => {
+  const root = tempRoot(t);
+  const source = sourceAgentDir(root, ['auth.json']);
+  const routing = { zdr: true, allow_fallbacks: false };
+
+  const result = preparePiAgentOverlay(join(root, 'run'), { PI_CODING_AGENT_DIR: source }, { routing });
+  const overlay = JSON.parse(readFileSync(join(result.dir!, 'models.json'), 'utf8'));
+
+  assert.deepEqual(overlay.providers.openrouter.compat.openRouterRouting, routing);
+});

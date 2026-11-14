@@ -14,6 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { openRouterAuthPath } from './billing.ts';
+import type { DataPolicy } from './data-policy.ts';
 
 export type GatewayKind = 'openrouter' | 'typesafe';
 
@@ -63,6 +64,8 @@ export type GatewayDeps = {
   readAuthFile?: (path: string) => string;
   /** Injected auth path; defaults to `openRouterAuthPath(env)`. */
   authPath?: string;
+  /** A validated data-destination policy; paths that cannot carry it are refused (ADR 0017 R3). */
+  policy?: DataPolicy | null;
 };
 
 /** Read one `auth.json` entry using the same shape rules as billing.ts's
@@ -123,18 +126,30 @@ function build(kind: GatewayKind, key: string): ResolvedJevGateway {
   return { kind, baseUrl: gateway.baseUrl, model: gateway.jevModel, transport: gateway.jevTransport, key };
 }
 
+/** A path that cannot express the routing preferences is refused while a
+ * policy is set, unless the policy explicitly lists it (ADR 0017 R3). */
+function assertPolicyCovers(kind: GatewayKind, policy: DataPolicy | null | undefined): void {
+  if (!policy || kind !== 'typesafe') return;
+  if (policy.allowUncovered?.includes('typesafe')) return;
+  throw new Error("data_policy_unsatisfied: TypeSafe direct path cannot carry the OpenRouter data policy; list 'typesafe' in allowUncovered to permit it");
+}
+
 /** Resolve the Jev gateway. `auto` prefers `typesafe` when its key resolves,
  * otherwise `openrouter`, otherwise null. An explicit provider without its key
  * throws GatewayError rather than silently switching paid paths (R4). */
 export function resolveJevGateway(provider: JevProvider = 'auto', deps: GatewayDeps = {}): ResolvedJevGateway | null {
   if (provider === 'auto') {
     const typesafe = resolveGatewayKey('typesafe', deps);
-    if (typesafe) return build('typesafe', typesafe);
+    if (typesafe) {
+      assertPolicyCovers('typesafe', deps.policy);
+      return build('typesafe', typesafe);
+    }
     const openrouter = resolveGatewayKey('openrouter', deps);
     return openrouter ? build('openrouter', openrouter) : null;
   }
   const key = resolveGatewayKey(provider, deps);
   if (!key) throw new GatewayError(provider, GATEWAYS[provider].keyEnv);
+  assertPolicyCovers(provider, deps.policy);
   return build(provider, key);
 }
 

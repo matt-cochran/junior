@@ -7,6 +7,7 @@ import { buildContinuationCheckpoint, CONTINUATION_PROMPT_LEAD, OUTPUT_LIMIT_CON
 import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from './worker-receipt.ts';
 import { resolveCommandPolicy, type Receipt } from './worker-contract.ts';
 import { blockedResult, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
+import { readDataPolicy, toRoutingPreferences } from './data-policy.ts';
 
 /** Launch: Pi overlay/guard env, spawn or stream the worker, continuations and the receipt. */
 export async function launch(state:RunState):Promise<RunState|any> {
@@ -33,7 +34,17 @@ export async function launch(state:RunState):Promise<RunState|any> {
  // also confines writes to the execution checkout and keeps a worktree run out
  // of the source checkout.
  const piBashEnv:any = { ...(deps.env ?? process.env), JUNIOR_PI_BASH_TIMEOUT_S: String(piBashTimeoutSeconds(settings.toolTimeoutMs)) };
- const piOverlay=preparePiAgentOverlay(dir,piBashEnv);
+ // ADR 0017 R3: the Pi worker carries the same routing preferences through
+ // compat.openRouterRouting in its run-local models.json overlay.
+ const policyRoot=sourceCwd ?? executionCwd;
+ const dataPolicy=state.dataPolicyRouting === undefined && policyRoot ? readDataPolicy(policyRoot) : null;
+ // Preflight already resolved the policy, including any region-resolved `only`
+ // list (ADR 0017 R2, R4). Use that routing when present instead of recomputing,
+ // so the worker cannot loosen or bypass the fail-closed resolution.
+ const policyRouting=state.dataPolicyRouting !== undefined
+  ? state.dataPolicyRouting
+  : (dataPolicy ? toRoutingPreferences(dataPolicy) : undefined);
+ const piOverlay=preparePiAgentOverlay(dir,piBashEnv, policyRouting ? {routing:policyRouting} : undefined);
  if (!piOverlay.dir) return blockedResult(state, `Pi worker was not started: ${piOverlay.error}. Ensure the repository .delivery directory is writable.`);
  piBashEnv.PI_CODING_AGENT_DIR=piOverlay.dir;
  if (isolation === 'worktree') {
@@ -45,7 +56,11 @@ export async function launch(state:RunState):Promise<RunState|any> {
  }
  if (affinityKey) piBashEnv.JUNIOR_PI_AFFINITY_KEY = affinityKey;
  else delete piBashEnv.JUNIOR_PI_AFFINITY_KEY;
- if (openrouterRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(openrouterRouting);
+ // The guard merges this over the request's provider object at request time,
+ // after Pi applies models.json compat, so the data policy is merged last: a
+ // profile's routing (order, affinity) can never loosen it (ADR 0017 R3).
+ const requestRouting=openrouterRouting || policyRouting ? { ...(openrouterRouting ?? {}), ...(policyRouting ?? {}) } : null;
+ if (requestRouting) piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING = JSON.stringify(requestRouting);
  else delete piBashEnv.JUNIOR_PI_OPENROUTER_ROUTING;
  // The guard enforces the contract's command placement on every bash call. The
  // policy is passed with manifest rules already merged, so the guard never
