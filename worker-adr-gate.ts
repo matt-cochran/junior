@@ -14,6 +14,7 @@
 // gate never records a decision on the user's behalf (R5).
 // ---------------------------------------------------------------------------
 
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readAdrConfig, proposeAdrConfig, type AdrConfig } from './adr-config.ts';
 import { loadAllAdrs } from './adr-foreign.ts';
@@ -95,12 +96,27 @@ export async function designGate(opts: {
  * No changed files or no configured gate means no classifier call. A blocked
  * result needs a human decision; an unattended run stops as needs_operator.
  */
+
+/** The changed file's content for the classifier, bounded; a gate that sees
+ * only a path cannot judge conformance. */
+export const CHANGED_FILE_TEXT_LIMIT = 6000;
+export function changedFileText(root: string, path: string): string {
+  try {
+    const text = readFileSync(join(root, path), 'utf8');
+    return text.length > CHANGED_FILE_TEXT_LIMIT ? `${text.slice(0, CHANGED_FILE_TEXT_LIMIT)}\n[truncated]` : text;
+  } catch {
+    return '(file deleted or unreadable)';
+  }
+}
+
 export async function implementationGate(opts: {
   cwd: string;
   changedFiles: string[];
   deliverable?: string;
   classify?: GateClassifier;
   unattended?: boolean;
+  /** Where the changed files' content lives (a handoff's worktree); defaults to cwd. */
+  contentRoot?: string;
 }): Promise<ImplementationGateResult> {
   const empty: ImplementationGateResult = {result: null, status: null, markdown: null};
   if (opts.changedFiles.length === 0) return empty;
@@ -111,7 +127,7 @@ export async function implementationGate(opts: {
   const result = await runAdrGate({
     root: opts.cwd,
     stage: 'implementation',
-    subjects: opts.changedFiles.map((path) => ({target: path, files: [path]})),
+    subjects: opts.changedFiles.map((path) => ({target: path, files: [path], text: changedFileText(opts.contentRoot ?? opts.cwd, path)})),
     config: resolved.config,
     adrs: loadGateAdrs(opts.cwd, resolved.config),
     ...(opts.deliverable !== undefined ? {deliverable: opts.deliverable} : {}),

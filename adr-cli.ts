@@ -49,6 +49,8 @@ import { createGithubAdapter } from './tickets-github.ts';
 import { createJiraAdapter, type JiraFetch } from './tickets-jira.ts';
 import type { GateClassifier } from './worker.ts';
 import { readExternalContextConsent } from './auth.ts';
+import { runSync } from './spawn-sync.ts';
+import { changedFileText } from './worker-adr-gate.ts';
 
 export type AdrGit = (args: string[]) => {status: number; stdout: string};
 
@@ -175,7 +177,7 @@ function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[]
     for (const path of changedPaths(gitOutput(deps, ['status', '--porcelain=v1']))) add(path);
   }
 
-  return paths.map((path) => ({target: path, files: [path]}));
+  return paths.map((path) => ({target: path, files: [path], text: changedFileText(deps.cwd ?? process.cwd(), path)}));
 }
 
 function printFindings(markdown: string, ids: readonly string[]): string {
@@ -526,7 +528,17 @@ async function runCheckTickets(argv: string[], deps: AdrCliDeps): Promise<number
 }
 
 /** ADR 0018 R1-R5: the `junior adr` command parser and dispatcher. */
+/** Real git through runSync (argv, no shell), in the project directory. */
+function defaultGit(cwd: string): NonNullable<AdrCliDeps['git']> {
+  return (args) => {
+    const result = runSync('git', args, {cwd, encoding: 'utf8'} as any);
+    return {status: typeof result.status === 'number' ? result.status : 1, stdout: String(result.stdout ?? '')};
+  };
+}
+
 export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<number> {
+  // The CLI entry passes no deps; tests inject them. Give production a real git.
+  if (!deps.git) deps = {...deps, git: defaultGit(deps.cwd ?? process.cwd())};
   const command = argv[0];
   const rest = argv.slice(1);
   const out = output(deps);

@@ -172,6 +172,7 @@ export async function finish(state:RunState):Promise<any> {
      deliverable:t.plan?.deliverable ?? t.id,
      classify,
      unattended:t.unattended === true,
+     contentRoot:executionCwd,
     });
     implementationAdrGate=gated.result;
     if (gated.markdown !== null) writeFileSync(join(dir,'adr-gate.md'),gated.markdown);
