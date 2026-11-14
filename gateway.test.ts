@@ -16,9 +16,10 @@ import {
   companionGatewayEnv,
   GatewayError,
 } from './gateway.ts';
+import type { DataPolicy } from './data-policy.ts';
 
 const auth = (entry: string, value: unknown) => JSON.stringify({ [entry]: value });
-const deps = (over: { env?: NodeJS.ProcessEnv; readAuthFile?: (path: string) => string } = {}) => ({
+const deps = (over: { env?: NodeJS.ProcessEnv; readAuthFile?: (path: string) => string; policy?: DataPolicy | null } = {}) => ({
   env: {},
   readAuthFile: () => '{}',
   ...over,
@@ -139,6 +140,35 @@ test('Explicit openrouter provider without its key raises a typed gateway error'
     () => resolveJevGateway('openrouter', deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' } })),
     (error: unknown) => error instanceof GatewayError,
   );
+});
+
+// --- data policy (ADR 0017 R3) ---
+test('Typesafe direct gateway is refused while a data policy is set', () => {
+  assert.throws(
+    () => resolveJevGateway('typesafe', deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' }, policy: { zdr: true } })),
+    (error: unknown) => error instanceof Error && error.message.startsWith('data_policy_unsatisfied:'),
+  );
+});
+test('Typesafe refusal names the TypeSafe direct path', () => {
+  assert.throws(
+    () => resolveJevGateway('typesafe', deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' }, policy: { zdr: true } })),
+    /TypeSafe direct path/,
+  );
+});
+test('Typesafe gateway is allowed when the policy lists it in allowUncovered', () => {
+  const resolved = resolveJevGateway(
+    'typesafe',
+    deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' }, policy: { zdr: true, allowUncovered: ['typesafe'] } }),
+  );
+  assert.equal(resolved?.kind, 'typesafe');
+});
+test('Auto provider resolves to openrouter under a policy when only its key is present', () => {
+  const resolved = resolveJevGateway('auto', deps({ env: { OPENROUTER_API_KEY: 'or-key' }, policy: { zdr: true } }));
+  assert.equal(resolved?.kind, 'openrouter');
+});
+test('Typesafe gateway is unchanged without a data policy', () => {
+  const resolved = resolveJevGateway('typesafe', deps({ env: { TYPESAFE_JEV_API_KEY: 'ts-key' } }));
+  assert.equal(resolved?.kind, 'typesafe');
 });
 
 // --- companion environment ---

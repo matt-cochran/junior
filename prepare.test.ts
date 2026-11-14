@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,8 +22,13 @@ import {
   loadPrepareHistory,
   prepareHistoryPath,
   briefPath,
+  gateBrief,
   type Brief,
 } from './prepare.ts';
+import { loadAdrs } from './adr.ts';
+import type { AdrConfig } from './adr-config.ts';
+import { recordGateDecision } from './adr-gate.ts';
+import { appendDecision } from './adr-ledger.ts';
 import { run, validate } from './worker.ts';
 
 // --- fixtures --------------------------------------------------------------
@@ -246,4 +251,117 @@ test('checkBack off disables the check-back for an auto workflow', async () => {
 
 test('validate rejects an unknown checkBack value', () => {
   assert.throws(() => validate({ id: 'x', deliverable: 'd', cwd: '/tmp', checkBack: 'sometimes' }));
+});
+
+
+// --- ADR conformance gate on brief options (ADR 0018 R3-R5) -----------------
+
+function adrProject(): {root: string; config: AdrConfig; adrs: ReturnType<typeof loadAdrs>} {
+  const root = workdir();
+  const dir = join(root, 'docs', 'adr');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '0001-widget.md'), [
+    '---',
+    'id: ADR-0001',
+    'title: Widget boundary',
+    'status: accepted',
+    'date: 2026-01-01',
+    'supersedes: []',
+    "applies_to: ['widget.ts']",
+    'rules:',
+    '  - id: R1',
+    '    text: Widgets live behind one boundary.',
+    '---',
+    '',
+    '## Context',
+    '',
+    'Context.',
+    '',
+    '## Decision',
+    '',
+    'Decision.',
+    '',
+    '## Consequences',
+    '',
+    'Consequences.',
+    '',
+  ].join('\n'));
+  return { root, config: { dir: 'docs/adr', format: 'junior', gate: 'enforce' }, adrs: loadAdrs(dir) };
+}
+
+function optionClassifier(contradicts: string[]): any {
+  return async ({ state }: any) => {
+    const items = Array.isArray(state.items) ? state.items : [];
+    const criteria = Array.isArray(state.criteria) ? state.criteria : [];
+    const answers: Record<string, unknown> = {};
+    for (const item of items) {
+      for (const criterion of criteria) {
+        const choice = contradicts.includes(criterion.id) ? 'contradicts' : 'conforms';
+        answers[`cell:${item.id}:${criterion.id}`] = { type: 'choice', choice, confidence: 0.95 };
+      }
+    }
+    return { answers };
+  };
+}
+
+test('gateBrief leaves the brief unchanged when the ADR gate is off', async () => {
+  const { root, config, adrs } = adrProject();
+  const brief = briefFixture();
+  const result = await gateBrief({ root, brief, config: { ...config, gate: 'off' }, adrs, classify: optionClassifier([]) });
+  assert.deepEqual(result, brief);
+});
+
+test('gateBrief stores an ADR finding for the contradicted option', async () => {
+  const { root, config, adrs } = adrProject();
+  const result = await gateBrief({ root, brief: briefFixture(), config, adrs, classify: optionClassifier(['option:A']) });
+  assert.deepEqual(result.adrGate?.findings.map((finding) => finding.target), ['option:A']);
+});
+
+test('chooseBrief refuses the flagged option under enforce', async () => {
+  const { root, config, adrs } = adrProject();
+  const brief = await gateBrief({ root, brief: briefFixture(), config, adrs, classify: optionClassifier(['option:A']) });
+  assert.throws(
+    () => chooseBrief({ cwd: root, task: taskFixture(root), brief, choice: { option: 'A' } }),
+    /ADR-0001\/R1 contradicts.*junior adr decide/,
+  );
+});
+
+test('chooseBrief allows an unflagged option under enforce', async () => {
+  const { root, config, adrs } = adrProject();
+  const brief = await gateBrief({ root, brief: briefFixture(), config, adrs, classify: optionClassifier(['option:A']) });
+  assert.doesNotThrow(() => chooseBrief({ cwd: root, task: taskFixture(root), brief, choice: { option: 'B' } }));
+});
+
+test('chooseBrief allows a flagged option under advisory', async () => {
+  const { root, config, adrs } = adrProject();
+  const brief = await gateBrief({ root, brief: briefFixture(), config: { ...config, gate: 'advisory' }, adrs, classify: optionClassifier(['option:A']) });
+  assert.doesNotThrow(() => chooseBrief({ cwd: root, task: taskFixture(root), brief, choice: { option: 'A' } }));
+});
+
+test('chooseBrief allows a flagged option after its override is recorded', async () => {
+  const { root, config, adrs } = adrProject();
+  const gated = await gateBrief({ root, brief: briefFixture(), config, adrs, classify: optionClassifier(['option:A']) });
+  recordGateDecision(root, gated.adrGate!.findings[0]!, {
+    by: 'reviewer',
+    decision: 'override',
+    rationale: 'the boundary lands next release',
+    stage: 'design',
+  });
+  const brief = await gateBrief({ root, brief: gated, config, adrs, classify: optionClassifier(['option:A']) });
+  assert.doesNotThrow(() => chooseBrief({ cwd: root, task: taskFixture(root), brief, choice: { option: 'A' } }));
+});
+
+test('renderBrief shows the ADR conformance section when the brief was gated', async () => {
+  const { root, config, adrs } = adrProject();
+  const brief = await gateBrief({ root, brief: briefFixture(), config, adrs, classify: optionClassifier(['option:A']) });
+  assert.match(renderBrief(brief), /## ADR conformance/);
+});
+
+test('chooseBrief allows a flagged option once an override is recorded after gating', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'junior-prepare-override-'));
+  const finding = { adrId: 'ADR-0001', ruleId: 'R1', rule: 'r', target: 'option:A', verdict: 'contradicts' as const, probability: 0.9, confidence: 'high' as const, adrHash: '', decision: null, lapsed: null, carried: null, cleared: false, stage: 'design' as const };
+  const brief: any = { ...briefFixture(), adrGate: { gate: 'enforce', blocked: true, findings: [finding], checked: 1, skipped: [] } };
+  appendDecision(cwd, { by: 'owner', stage: 'design', adrId: 'ADR-0001', ruleId: 'R1', target: 'option:A', verdict: 'contradicts', decision: 'override', rationale: 'accepted exception' });
+  const { contract } = chooseBrief({ cwd, task: { id: 't', deliverable: 'd', constraints: [] }, brief, choice: { option: 'A' } });
+  assert.equal(contract.preparedFrom, 't');
 });

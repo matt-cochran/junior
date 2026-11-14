@@ -23,6 +23,11 @@ import { contractFeature, matrixContextFor, type MatrixContext } from './matrix-
 import type { ReceiptModelSource } from './worker-contract.ts';
 import { analysisReportPath, decideWorkflow, isReportWorkflow, taskWorkflow, WORKFLOW_TEMPLATE_IDS } from './worker-workflows.ts';
 import { estimateCost, mockReceipt } from './worker-receipt.ts';
+import { dataPolicyPreflight } from './data-policy-run.ts';
+import { readDataPolicy } from './data-policy.ts';
+import { ticketGate } from './worker-adr-gate.ts';
+import { renderTicketReport } from './adr-tickets.ts';
+
 import type { JevProvider } from './gateway.ts';
 
 /** Shared error-message coercion, used across the worker modules. */
@@ -123,6 +128,11 @@ export async function preflight(state:RunState):Promise<RunState|any> {
   maxRepairs: typeof t.maxRepairs==='number' ? t.maxRepairs : 1,
   deadlineAt: typeof t.lineageDeadlineMs==='number' ? new Date(runStartedAt+t.lineageDeadlineMs).toISOString() : null };
  state.lineage=lineage;
+ // ADR 0018 R3: a ticket id must be a non-empty string. Reject it here, before
+ // the ticket adapter or any provider can make a network call.
+ if (t.ticket !== undefined && (typeof t.ticket!=='string' || !t.ticket.trim())) {
+  return blockedResult(state, 'Invalid ticket (expected a non-empty string)');
+ }
  // One absolute lineage deadline (when supplied) also bounds this root run, so
  // a whole recovery chain shares a single wall-clock budget.
  if (typeof t.lineageDeadlineMs==='number') {
@@ -504,6 +514,81 @@ export async function preflight(state:RunState):Promise<RunState|any> {
   model:requested.model,
   approval:modelRoute.approval ?? null,
  });
+
+ // ADR 0017 R4: resolve the data-destination policy before the final disclosure
+ // and before Pi or any provider receives source text. A run whose policy leaves
+ // no upstream provider fails closed with zero model calls, following the same
+ // inspectable early-return shape as the consent refusal below.
+ let dataPolicy:any=null;
+ let dataPolicyRouting:Record<string,unknown>|null=null;
+ let dataPolicyDirectory:unknown[]=[];
+ if (requested.provider==='openrouter') {
+  // Keep the no-policy path synchronous (existing preflight/launch tests rely on
+  // Pi spawning in the same step); only a declared policy needs the async
+  // metadata resolution.
+  const configuredPolicy=readDataPolicy(sourceCwd);
+  if (configuredPolicy) {
+   const policyPreflight=await dataPolicyPreflight({
+    cwd:sourceCwd,
+    provider:requested.provider,
+    model:requested.model,
+    fetch:(deps as any).dataPolicyFetch,
+   });
+   if (!policyPreflight.ok) {
+    heartbeat.setState('failed',{stopReason:'data_policy_unsatisfied', error:policyPreflight.reason});
+    emit('finished data_policy_unsatisfied');
+    const out:any={ id:t.id, simulated:mock, status:'data_policy_unsatisfied', workerExitCode:null,
+     workerError:policyPreflight.reason, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+     sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+     modelRouting:modelRoute };
+    writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+    return out;
+   }
+   dataPolicy=policyPreflight.policy;
+   dataPolicyRouting=policyPreflight.routing;
+   dataPolicyDirectory=policyPreflight.directory ?? [];
+  }
+ }
+ state.dataPolicy=dataPolicy;
+ state.dataPolicyRouting=dataPolicyRouting;
+ state.dataPolicyDirectory=dataPolicyDirectory;
+
+ // ADR 0018 R3/R5/R8: a contract that names a ticket is checked against the
+ // accepted ADRs before any worker or prepare run starts. The ticket-stage
+ // decision is carried to the later stages, so a flag stops for a human now.
+ if (typeof t.ticket==='string' && t.ticket.trim() && !mock) {
+  if (!classify) {
+   state.ticketGateUnresolved='ADR ticket gate skipped: classifier unavailable';
+  } else {
+   emit('ticket-adr-gate');
+   try {
+    const gated=await raceSignal(ticketGate({
+     cwd:sourceCwd,
+     ticketId:t.ticket,
+     deliverable:t.plan?.deliverable ?? t.id,
+     classify,
+     ...((deps as any).ticketAdapter ? {adapter:(deps as any).ticketAdapter} : {}),
+    }), signal);
+    if (gated.status === 'needs_adr_decision') {
+     writeFileSync(join(dir,'ticket-adr-gate.md'),renderTicketReport([gated.result]));
+     heartbeat.setState('failed',{stopReason:'needs_adr_decision'});
+     emit('finished needs_adr_decision');
+     const out:any={ id:t.id, simulated:mock, status:'needs_adr_decision', workerExitCode:null,
+      workerError:`ADR conformance findings on ticket ${t.ticket} need a human decision: junior adr decide`,
+      checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage,
+      sourceCwd, executionCwd, isolation:{ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) },
+      modelRouting:modelRoute, adrGate:gated.result.gate };
+     if (mode !== 'off') out.jev=jev;
+     writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+     return out;
+    }
+    state.ticketGate={ ticketId:t.ticket, fromCache:gated.result.fromCache,
+     irrelevant:gated.result.irrelevant, findings:gated.result.gate.findings.length };
+   } catch (e) {
+    state.ticketGateUnresolved=`ADR ticket gate skipped: ${msg(e)}`;
+   }
+  }
+ }
 
  // Refresh the disclosure with the final model/provider that will receive the
  // source text. A routed provider still needs its own consent.

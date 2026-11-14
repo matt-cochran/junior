@@ -266,3 +266,31 @@ test('Doctor reports no store-lockdown warning when the Claude deny rules are cu
  const d = doctor({ cwd, env: { PATH:'', HOME:cwd, PROCESSOR_ARCHITECTURE:'x64' }, toolsRoot: tmp('junior-doc-store-current-tools-') } as any);
  assert.doesNotMatch(d.warnings.join(' '), /\.crossmatrix/);
 });
+
+test('Doctor warns when the ADR gate is proposed but not confirmed', () => {
+ const { cwd, deps } = doctorFixture();
+ mkdirSync(join(cwd, 'docs', 'adr'), { recursive: true });
+ writeFileSync(join(cwd, 'docs', 'adr', '0001-use-a-gate.md'), '# 1. Use a gate\n\n## Status\n\nAccepted\n');
+ const d = doctor(deps);
+ assert.match(d.warnings.join('\n'), /ADR gate not confirmed \(running advisory\); run junior adr init --yes to confirm it/);
+});
+
+test('Doctor warns when the Junior agent instruction block is outdated', () => {
+ const { cwd, deps } = doctorFixture();
+ writeFileSync(join(cwd, 'CLAUDE.md'), '<junior>\nold guidance\n</junior>\n');
+ const d = doctor(deps);
+ assert.match(d.warnings.join('\n'), /CLAUDE\.md: the Junior <junior> block is outdated; run junior update/);
+});
+
+test('Doctor warns when the Junior agent instruction block has a tag conflict', () => {
+ const { cwd, deps } = doctorFixture();
+ writeFileSync(join(cwd, 'CLAUDE.md'), '<junior>\n</junior>\n<junior>\n</junior>\n');
+ const d = doctor(deps);
+ assert.match(d.warnings.join('\n'), /CLAUDE\.md: <junior> block conflict at lines 1, 3; fix the tags by hand/);
+});
+
+test('Doctor warns when OpenRouter has no models data policy', () => {
+ const { deps } = doctorFixture();
+ const d = doctor(deps);
+ assert.match(d.warnings.join('\n'), /No models\.dataPolicy is set; OpenRouter may route requests to any provider and fall back between them \(see docs\/data-destination\.md\)/);
+});

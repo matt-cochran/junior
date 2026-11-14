@@ -17,9 +17,11 @@ import {
   readdirSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { piAgentDir } from './model-updates.ts';
+import { applyRoutingToModelsJson } from './data-policy.ts';
 
 export { piAgentDir };
 
@@ -29,6 +31,11 @@ export interface OverlayError {
   code: 'resume_session_unavailable';
   missing: string;
   message: string;
+}
+
+export interface PrepareOverlayOptions {
+  /** OpenRouter provider routing to carry in the run-local models.json (ADR 0017 R3). */
+  routing?: Record<string, unknown>;
 }
 
 export interface PrepareOverlayResult {
@@ -46,6 +53,7 @@ export interface PrepareOverlayResult {
 export function preparePiAgentOverlay(
   artifactDir: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: PrepareOverlayOptions = {},
 ): PrepareOverlayResult {
   const source = piAgentDir(env);
   const dir = join(artifactDir, 'pi-agent');
@@ -60,6 +68,12 @@ export function preparePiAgentOverlay(
       copyFileSync(from, to);
       chmodSync(to, 0o600);
       copied.push(name);
+    }
+    if (options.routing !== undefined) {
+      const modelsPath = join(dir, 'models.json');
+      const existing = existsSync(modelsPath) ? JSON.parse(readFileSync(modelsPath, 'utf8')) : undefined;
+      writeFileSync(modelsPath, `${JSON.stringify(applyRoutingToModelsJson(existing, options.routing), null, 2)}\n`);
+      chmodSync(modelsPath, 0o600);
     }
     return { dir, copied, ambient: source };
   } catch (e: any) {

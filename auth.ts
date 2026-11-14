@@ -15,6 +15,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { checkCredentialsOnline, type SetupDeps } from './setup.ts';
+import { readDataPolicy, type DataPolicy } from './data-policy.ts';
 
 export const AUTH_USAGE = [
   'Usage: junior auth set <provider> [--verify]',
@@ -90,6 +91,12 @@ export type ExternalContextConsentRecord = {
   model: string | null;
   scope: string[] | null;
   recordedAt: string;
+  /** ADR 0017 R6: sha256 of the canonical policy at consent time. */
+  dataPolicyHash?: string | null;
+  /** ADR 0017 R6: one-line summary of the policy shown at consent time. */
+  dataPolicySummary?: string | null;
+  /** ADR 0017 R6: the policy itself, for a later widening comparison. */
+  dataPolicy?: DataPolicy | null;
 };
 
 export type ExternalContextConsentStatus = {
@@ -100,6 +107,8 @@ export type ExternalContextConsentStatus = {
   token: string | null;
   record: ExternalContextConsentRecord | null;
   path: string;
+  /** Why an existing consent no longer applies, if it was invalidated. */
+  reason?: string | null;
 };
 
 export type RecordExternalContextConsentOptions = {
@@ -107,7 +116,80 @@ export type RecordExternalContextConsentOptions = {
   model?: string | null;
   scope?: string[] | null;
   now?: Date;
+  dataPolicy?: DataPolicy | null;
 };
+
+export const WIDENED_POLICY_REASON = 'data policy widened since consent; run junior auth consent grant <provider> again';
+
+function canonicalPolicyValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalPolicyValue).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry !== undefined) out[key] = canonicalPolicyValue(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** ADR 0017 R6: hash the policy with sorted keys and sorted arrays. */
+function hashDataPolicy(policy: DataPolicy | null | undefined): string | null {
+  if (policy === null || policy === undefined) return null;
+  return createHash('sha256').update(JSON.stringify(canonicalPolicyValue(policy))).digest('hex');
+}
+
+/** ADR 0017 R6: a compact, human-readable effective policy description. */
+function summarizeDataPolicy(policy: DataPolicy | null | undefined): string | null {
+  if (policy === null || policy === undefined) return null;
+  const parts: string[] = [];
+  if (policy.dataCollection !== undefined) parts.push(`dataCollection ${policy.dataCollection}`);
+  if (policy.zdr !== undefined) parts.push(policy.zdr ? 'zdr' : 'zdr off');
+  if (policy.providers?.only !== undefined) parts.push(`only ${[...policy.providers.only].sort().join(', ')}`);
+  if (policy.providers?.ignore !== undefined) parts.push(`ignore ${[...policy.providers.ignore].sort().join(', ')}`);
+  if (policy.regions !== undefined) parts.push(`regions ${[...policy.regions].sort().join(', ')}`);
+  if (policy.allowUncovered !== undefined) parts.push(`allowUncovered ${[...policy.allowUncovered].sort().join(', ')}`);
+  parts.push(policy.allowFallbacks === true ? 'fallbacks on' : 'fallbacks off');
+  return parts.join('; ');
+}
+
+/**
+ * ADR 0017 R6: whether `next` widens the destination relative to `previous`.
+ * A widening removes a constraint (or leaves no policy); tightening is false.
+ */
+export function policyWidens(previous: DataPolicy | null, next: DataPolicy | null): boolean {
+  if (!previous) return false;
+  if (!next) return true;
+  if (previous.dataCollection === 'deny' && next.dataCollection !== 'deny') return true;
+  if (previous.zdr === true && next.zdr !== true) return true;
+  if (previous.regions) {
+    if (!next.regions) return true;
+    if (next.regions.some((region) => !previous.regions!.includes(region))) return true;
+  }
+  const previousOnly = previous.providers?.only;
+  const nextOnly = next.providers?.only;
+  if (previousOnly) {
+    if (!nextOnly) return true;
+    if (nextOnly.some((provider) => !previousOnly.includes(provider))) return true;
+  }
+  const previousIgnore = previous.providers?.ignore;
+  const nextIgnore = next.providers?.ignore;
+  if (previousIgnore) {
+    if (!nextIgnore) {
+      if (previousIgnore.length > 0) return true;
+    } else if (previousIgnore.some((provider) => !nextIgnore.includes(provider))) {
+      return true;
+    }
+  }
+  if (previous.allowFallbacks !== true && next.allowFallbacks === true) return true;
+  // Letting another path run uncovered (TypeSafe direct, companions) sends
+  // repository text somewhere the policy cannot constrain.
+  if ((next.allowUncovered ?? []).some((path) => !(previous.allowUncovered ?? []).includes(path))) return true;
+  return false;
+}
 
 /** The project-local consent file. The path itself contains no credential. */
 export function externalContextConsentPath(cwd: string): string {
@@ -142,6 +224,11 @@ function readConsentDocument(cwd: string): { version: number; providers: Record<
       model: typeof value.model === 'string' ? value.model : null,
       scope: Array.isArray(value.scope) ? value.scope.filter((p: unknown): p is string => typeof p === 'string') : null,
       recordedAt: typeof value.recordedAt === 'string' ? value.recordedAt : '',
+      dataPolicyHash: typeof value.dataPolicyHash === 'string' ? value.dataPolicyHash : null,
+      dataPolicySummary: typeof value.dataPolicySummary === 'string' ? value.dataPolicySummary : null,
+      dataPolicy: value.dataPolicy && typeof value.dataPolicy === 'object' && !Array.isArray(value.dataPolicy)
+        ? value.dataPolicy as DataPolicy
+        : null,
     };
   }
   return { version: EXTERNAL_CONTEXT_CONSENT_VERSION, providers };
@@ -159,6 +246,7 @@ export function recordExternalContextConsent(cwd: string, provider: string, opti
   const key = String(provider ?? '').trim();
   if (!key) throw Error('External-context consent requires a provider');
   const document = readConsentDocument(cwd);
+  const dataPolicy = options.dataPolicy ?? null;
   const record: ExternalContextConsentRecord = {
     provider: key,
     token: consentToken(cwd, key),
@@ -166,6 +254,9 @@ export function recordExternalContextConsent(cwd: string, provider: string, opti
     model: typeof options.model === 'string' && options.model.trim() ? options.model.trim() : null,
     scope: Array.isArray(options.scope) ? options.scope.filter((p): p is string => typeof p === 'string') : null,
     recordedAt: (options.now ?? new Date()).toISOString(),
+    dataPolicyHash: hashDataPolicy(dataPolicy),
+    dataPolicySummary: summarizeDataPolicy(dataPolicy),
+    dataPolicy: dataPolicy === null ? null : JSON.parse(JSON.stringify(dataPolicy)),
   };
   document.providers[key] = record;
   writeConsentDocument(cwd, document.providers);
@@ -181,11 +272,27 @@ export function removeExternalContextConsent(cwd: string, provider: string): str
 }
 
 /** Read the recorded decision without granting anything. */
-export function readExternalContextConsent(cwd: string, provider: string): ExternalContextConsentStatus {
+export function readExternalContextConsent(
+  cwd: string,
+  provider: string,
+  options: { dataPolicy?: DataPolicy | null } = {},
+): ExternalContextConsentStatus {
   const key = String(provider ?? '').trim();
   const path = externalContextConsentPath(cwd);
   const record = readConsentDocument(cwd).providers[key] ?? null;
-  return { provider: key, required: true, granted: !!record, source: record ? 'project' : null, token: record?.token ?? null, record, path };
+  let granted = !!record;
+  let reason: string | null = null;
+  if (record?.dataPolicyHash) {
+    // ADR 0017 R6: compare against the current project policy unless the
+    // caller injects one explicitly. A tightening or unchanged policy keeps
+    // consent; a widening policy requires a fresh grant.
+    const current = options.dataPolicy !== undefined ? options.dataPolicy : readDataPolicy(cwd);
+    if (hashDataPolicy(current) !== record.dataPolicyHash && policyWidens(record.dataPolicy ?? null, current)) {
+      granted = false;
+      reason = WIDENED_POLICY_REASON;
+    }
+  }
+  return { provider: key, required: true, granted, source: record ? 'project' : null, token: record?.token ?? null, record, path, reason };
 }
 
 /** True only when `token` was issued for this exact provider and project. */
@@ -435,14 +542,19 @@ export async function main(argv: string[], deps: SetupDeps = {}): Promise<number
       return 0;
     }
     if (positional.length !== 1 || !provider) return fail(AUTH_USAGE);
+    let dataPolicy: DataPolicy | null = null;
     try {
-      if (resolvedAction === 'remove') removeExternalContextConsent(project, provider);
-      else recordExternalContextConsent(project, provider, token ? { scope: [token] } : {});
+      if (resolvedAction === 'remove') {
+        removeExternalContextConsent(project, provider);
+      } else {
+        dataPolicy = readDataPolicy(project);
+        recordExternalContextConsent(project, provider, { ...(token ? { scope: [token] } : {}), dataPolicy });
+      }
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
-    const status = readExternalContextConsent(project, provider);
-    process.stdout.write(`${JSON.stringify({ ...status, removed: resolvedAction === 'remove' }, null, 2)}\n`);
+    const status = readExternalContextConsent(project, provider, { dataPolicy });
+    process.stdout.write(`${JSON.stringify({ ...status, dataPolicySummary: status.record?.dataPolicySummary ?? null, removed: resolvedAction === 'remove' }, null, 2)}\n`);
     return 0;
   }
   return fail(`Unknown auth command: ${command}\n${AUTH_USAGE}`);

@@ -42,6 +42,8 @@ export type CompactHandoff = {
  /** External-context egress preflight and its recorded authorization, or null
   * when the result predates the check. */
  externalContext: any | null;
+ /** The data-destination routing and the verified served providers, or null. */
+ dataPolicy: { routing: Record<string, unknown> | null; providers: any[]; verified: boolean } | null;
  unwired: { symbol: string; file: string }[];
  /** Scope classification when the contract named an owned list, else null. */
  scope: ScopeResult | null;
@@ -280,6 +282,11 @@ export function unresolvedIssues(result: any): string[] {
  if (Array.isArray(result?.scope?.outOfScope) && result.scope.outOfScope.length > 0) out.push(`out of scope: ${result.scope.outOfScope.join(', ')}`);
  const budget = result?.budget ?? result?.outputBreakdown?.budget;
  if (budget?.exceeded) out.push(`bounded context ${budget.stopReason ?? 'limit exceeded'}${budget.exceededField ? `: ${budget.exceededField}` : ''}`);
+ // Notes the run recorded itself (data-policy verification, ADR gate) must
+ // reach the compact receipt too, or a limitation reads as a clean pass.
+ for (const note of Array.isArray(result?.unresolved) ? result.unresolved : []) {
+  if (typeof note === 'string' && note && !out.includes(note)) out.push(note);
+ }
  return out;
 }
 
@@ -381,6 +388,11 @@ export function compactHandoff(result: any): CompactHandoff {
    outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
   } : null,
   externalContext: r.externalContext && typeof r.externalContext === 'object' ? r.externalContext : null,
+  dataPolicy: r.dataPolicy && typeof r.dataPolicy === 'object' ? {
+   routing: r.dataPolicy.routing && typeof r.dataPolicy.routing === 'object' ? r.dataPolicy.routing : null,
+   providers: Array.isArray(r.dataPolicy.providers) ? r.dataPolicy.providers : [],
+   verified: r.dataPolicy.verified === true,
+  } : null,
   // Advisory (#186): new exports with no production reference; review call sites before apply.
   unwired: Array.isArray(r.unwired) ? r.unwired : [],
   piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {
