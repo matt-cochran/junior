@@ -1,0 +1,80 @@
+# ADR support
+
+Junior can check designs, tickets and code against your architecture decision records (ADRs) and make a
+human decide whenever something looks like a violation. The rules are in ADR 0018
+(`docs/adr/0018-adr-conformance-gate.md`).
+
+## Setup
+
+```bash
+junior adr init            # no ADRs yet: scaffold docs/adr with a README index (asks before writing config)
+```
+
+Junior looks for an existing ADR folder: an `.adr-dir` file (adr-tools), then `docs/adr`, `docs/decisions`,
+`doc/architecture/decisions`, `adr/`, `architecture/decisions`. It proposes what it finds and writes the
+location to `delivery.config.json` only after you confirm:
+
+```json
+{ "adr": { "dir": "docs/adr", "format": "junior", "gate": "enforce" } }
+```
+
+| Field | Values | Meaning |
+|---|---|---|
+| `dir` | path | Where the ADRs live |
+| `format` | `junior`, `madr`, `nygard` | `junior` ADRs carry `applies_to` and `rules` front matter. MADR and Nygard ADRs are checked against their Decision section. |
+| `gate` | `enforce`, `advisory`, `off` | `enforce` blocks on findings. `advisory` only reports them. Defaults to `enforce` when accepted ADRs exist, and `off` otherwise. |
+| `minConfidence` | 0..1 (optional) | Also flags any check whose confidence is below this |
+
+ADRs without Junior front matter work as they are. Junior can draft `applies_to` and `rules` for them, but
+only as a proposal under `.delivery/adr-proposals/`. Your ADR files are never edited.
+
+## The checkpoints
+
+| When | Command |
+|---|---|
+| Before accepting a design, plan or brief | `junior adr check --stage design --input <file>` |
+| Before filing a ticket | `junior adr check --stage ticket --draft <file>` |
+| Before starting work on a ticket | `junior adr check --stage ticket --ticket <id>` |
+| Before opening a pull request | `junior adr check --stage implementation` |
+| Across open tickets (read-only report) | `junior adr check-tickets` |
+
+Junior also runs the gate automatically in two places. A prepare brief gates every option, and an option
+with uncleared findings cannot be chosen. A code handoff gates its changed files before it is ready for
+review.
+
+`junior init` and `junior update` write these checkpoints into a managed `<junior>…</junior>` block in
+`CLAUDE.md` (Claude Code) and `AGENTS.md` (Codex and Cursor), so the agents you use know to run them. Junior
+owns only that block. Everything else in those files is left exactly as you wrote it.
+
+## What a check does
+
+For each accepted ADR rule whose `applies_to` matches the work, Jev (on the commodity default model) rates
+the work as conforms, contradicts or not applicable. A **finding** is a contradiction, or any rating Jev is
+not confident about. Being cautious is cheap here: a low-confidence rating costs you one decision, while a
+missed violation can cost you a design.
+
+Jev never passes or fails anything by itself. With no findings the check passes. With findings under
+`enforce`, the stage stops until you decide.
+
+## Deciding
+
+```bash
+junior adr decide <finding> --override --reason "<why this exception is acceptable>"
+junior adr decide <finding> --amend      # Junior drafts an updated ADR (proposed); the finding clears once it is accepted
+junior adr decide <finding> --revise     # the work goes back to be changed
+```
+
+Every decision is appended to `.delivery/adr-overrides.jsonl`. Commit it so reviewers see each exception
+and its reason. An override covers one deliverable. A standing override (`--standing --expires <date>` or
+`--expires until-adr-change`) also applies to later work until it lapses, and the next run then flags the
+finding again, citing the lapsed decision. A ticket-stage decision is shown again at design and
+implementation for the same work, so you can confirm it in one step.
+
+Agents never record a decision. When a check reports findings, they stop and show them to you.
+
+## Tickets
+
+Ticket checks use GitHub Issues by default (through `gh`) or Jira (`tickets.provider: "jira"`, with
+credentials from `JIRA_EMAIL` and `JIRA_API_TOKEN`). Ticket text is treated as untrusted data and never as
+instructions. Set `tickets.redact` patterns to strip anything sensitive before it is sent. Junior posts or
+labels tickets only with `--post` or `tickets.writeBack: true`.
