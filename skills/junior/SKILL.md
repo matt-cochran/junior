@@ -511,11 +511,11 @@ never a number you invent.
    sensitivity and low-confidence review. Presets are `decision-matrix`,
    `house-of-quality`, `traceability` and `risk-matrix`; `--record` mirrors the
    result into the store, and nothing is written without it.
-8. Govern decisions with `matrix adr new|lint|sync|check`: `new` writes the next
-   numbered MADR record, `lint` checks id/status/supersedes and accepted-record
-   invariants, `sync` publishes accepted rules as an `adr` dimension, and
-   `check` scores rules against changed files or the code map (`--record` stores
-   proposed conformance observations).
+8. Govern decisions with `junior adr new|lint|sync|check` (`junior matrix adr`
+   is an alias): `new` writes the next numbered MADR record, `lint` checks
+   id/status/supersedes and accepted-record invariants, `sync` publishes accepted
+   rules as an `adr` dimension, and `check` runs the ADR conformance gate (see
+   "ADR compliance checkpoints").
 9. Bridge jobs with `matrix jtbd seed|evidence|draft`: `seed` turns a jevitate
    job into elicitation coverage and claims, `evidence` appends journey results
    as evidence, and `draft` turns an exported elicitation spec into unapproved
@@ -606,6 +606,30 @@ Preserve every byte outside the block. If the desired content already matches,
 leave the file unchanged. If tags are duplicated, nested, or unbalanced, stop and
 report the conflict instead of guessing or overwriting user instructions. Do not
 add Junior text outside the tags. Remove only the managed block when uninstalling
-an authorized integration. Junior init installs separate skill files; it does
-not itself add AGENTS.md or CLAUDE.md blocks (a companion installer such as
-jevitate's may add its own).
+an authorized integration. `junior init` writes this block itself, into `CLAUDE.md`
+for Claude Code and `AGENTS.md` for Codex and Cursor (`--no-agent-instructions`
+skips it). `junior update` refreshes it, or adds it to an existing file; it never
+creates a file. `junior doctor` reports a block that is outdated or in conflict.
+
+## ADR compliance checkpoints
+
+When the project has ADRs, run Junior's ADR check at each checkpoint, and stop
+when it reports findings:
+
+- Design: before accepting a design, plan or brief, run
+  `junior adr check --stage design --input <file>`.
+- Ticket proposal: before filing a ticket, run
+  `junior adr check --stage ticket --draft <file>`.
+- Ticket pickup: before starting work on a ticket, run
+  `junior adr check --stage ticket --ticket <id>`.
+- Implementation: before opening a pull request, run
+  `junior adr check --stage implementation`.
+
+Exit code 3 means a likely contradiction blocks under `enforce`. Show the findings
+to the human. The human records the decision with `junior adr decide <F#>`:
+`--override --reason`, `--amend --adr <id>` or `--revise`. Never record a decision
+yourself. Uncertain findings are advisory unless `adr.flagUncertain` is true.
+Decisions are kept in `.junior/adr-decisions.jsonl`; commit that file. Junior's
+own prepare briefs, code handoffs and ticket contracts (a contract `ticket` field)
+go through the same gate. With no ADRs, offer `junior adr init`, and run it with
+`--yes` only after the human agrees. See `docs/adr-support.md` and ADR 0018.

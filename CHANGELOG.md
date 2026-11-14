@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ADR compliance (#220, ADR 0018).** `junior adr init|check|decide|check-tickets`.
+  - Designs, tickets and code are checked against each accepted ADR rule with
+    Jev on the commodity model, at the design, ticket and implementation stages.
+  - Under `adr.gate: "enforce"`, a likely contradiction blocks until a human
+    records a decision: `junior adr decide F1 --override --reason …`,
+    `--amend --adr ADR-NNNN` or `--revise`.
+  - Decisions are appended to a committed ledger, `.junior/adr-decisions.jsonl`.
+    Standing exceptions expire by date or when the ADR changes.
+  - Low-confidence findings are advisory unless `adr.flagUncertain` is true.
+  - Work without files (designs, tickets) goes through a relevance pass first,
+    so unrelated ADRs are skipped.
+  - The gate also runs inside Junior: prepare briefs are gated per option, a
+    code handoff's changed files are gated before review, and the run ends at
+    `needs_adr_decision` (`needs_operator` when unattended).
+  - The gate runs advisory until confirmed with `junior adr init --yes`, so
+    upgrading never starts blocking work unannounced.
+  - MADR and Nygard ADRs are checked against their Decision text. Junior can
+    draft front matter for them as a proposal only.
+- **Ticket checks (#221).** GitHub (through `gh`) and Jira Cloud (credentials
+  from `JIRA_EMAIL`/`JIRA_API_TOKEN`) adapters, and `junior adr check-tickets`.
+  - A contract with a `ticket` field is checked before any worker starts.
+  - Ticket text is treated as untrusted data, and `tickets.redact` patterns are
+    applied before it is sent.
+  - Results are cached per ticket revision, gate mode and ledger.
+  - Write-back happens only with `--post`.
+- **Agent instruction blocks (#223).** `junior init` and `junior update` keep one
+  managed `<junior>` block in `CLAUDE.md` (Claude Code) and `AGENTS.md` (Codex,
+  Cursor) that routes agents through the ADR checkpoints.
+  - Every byte outside the block is preserved, and a rerun is byte-identical.
+  - `update` never creates a file.
+  - Duplicated or unbalanced tags are reported and not written.
+  - `--no-agent-instructions` skips the step.
+- **Data-destination policy (#218, ADR 0017).** `models.dataPolicy` sets
+  `dataCollection`, `zdr`, provider `only`/`ignore`, `regions` and
+  `allowFallbacks` (off by default under a policy). Junior sends it on every
+  OpenRouter path (Pi worker and Jev).
+  - A region list is resolved to an explicit provider list.
+  - A policy no provider can satisfy stops with `data_policy_unsatisfied` before
+    any model call.
+  - Served providers are verified after the run (`data_policy_violated`), or the
+    run is marked unverified, never silently passed.
+  - Consent records the posture, and widening the policy asks for consent again.
+  - `junior doctor` warns when no policy is set, and `doctor --online` shows the
+    candidate providers and what the policy keeps.
+  - The TypeSafe direct Jev path is refused under a policy unless listed in
+    `allowUncovered`.
+  - See `docs/data-destination.md`.
+
+### Fixed
+
+- The compact receipt now carries notes the run recorded itself, such as
+  data-policy verification and ADR-gate notes. Before, such a limitation could
+  read as a clean pass.
+- `junior doctor` warns when the ADR gate is unconfirmed, when a `<junior>`
+  block is outdated or in conflict, and when no data policy is set.
+
 ## [0.16.1] - 2026-11-14
 
 ### Fixed
