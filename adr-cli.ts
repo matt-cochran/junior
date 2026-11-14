@@ -48,6 +48,7 @@ import {
 import { createGithubAdapter } from './tickets-github.ts';
 import { createJiraAdapter, type JiraFetch } from './tickets-jira.ts';
 import type { GateClassifier } from './worker.ts';
+import { readExternalContextConsent } from './auth.ts';
 
 export type AdrGit = (args: string[]) => {status: number; stdout: string};
 
@@ -103,9 +104,17 @@ function latestPath(root: string): string {
   return join(root, '.delivery', 'adr-check', 'latest.json');
 }
 
-function classifierFor(deps: AdrCliDeps): Promise<GateClassifier> | GateClassifier {
+/** The Jev classifier for a check. A check sends ADR and design/ticket text to
+ * the gateway, so it needs the same recorded external-context consent a
+ * handoff needs; without it the command stops before any request. */
+async function classifierFor(deps: AdrCliDeps, root: string): Promise<GateClassifier | {consentRequired: string}> {
   if (deps.classify) return deps.classify;
-  return createJevClassifier().then((created) => created.classify);
+  const created = await createJevClassifier();
+  const consent = readExternalContextConsent(root, created.gateway);
+  if (!consent.granted) {
+    return {consentRequired: `external-context consent required: an ADR check sends ADR and work text to ${created.gateway}; run junior auth consent grant ${created.gateway} --project ${root}${consent.reason ? ` (${consent.reason})` : ''}`};
+  }
+  return created.classify;
 }
 
 function changedPaths(fromPorcelain: string): string[] {
@@ -258,7 +267,9 @@ async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
     return 0;
   }
 
-  const classify = await classifierFor(deps);
+  const classifier = await classifierFor(deps, root);
+  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
+  const classify = classifier;
   let gate: AdrGateResult;
   let markdown: string;
 
@@ -478,7 +489,9 @@ async function runCheckTickets(argv: string[], deps: AdrCliDeps): Promise<number
     adapter = adapterFor(config, root);
   }
 
-  const classify = await classifierFor(deps);
+  const classifier = await classifierFor(deps, root);
+  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
+  const classify = classifier;
   const query: TicketQuery = {
     ...(state !== undefined ? {state: state as TicketState} : {}),
     ...(limit !== undefined ? {limit} : {}),
