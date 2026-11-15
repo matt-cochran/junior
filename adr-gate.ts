@@ -16,12 +16,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CONFORMANCE_SCALE,
-  loadAdrs,
   matchesAppliesTo,
   type Adr,
   type AdrDeps,
   type AdrRule,
 } from './adr.ts';
+import { loadAllAdrs } from './adr-foreign.ts';
 import type { AdrConfig, AdrGate } from './adr-config.ts';
 import {
   activeDecision,
@@ -233,7 +233,7 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     return result;
   }
 
-  const allAdrs = opts.adrs ?? loadAdrs(join(opts.root, opts.config.dir));
+  const allAdrs = opts.adrs ?? loadAllAdrs(join(opts.root, opts.config.dir), opts.config);
   const adrs = allAdrs.filter((adr) => adr.status === 'accepted');
   const now = opts.now ?? new Date();
   const entries = readLedger(opts.root);

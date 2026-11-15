@@ -297,6 +297,59 @@ test('lint delegates to the existing adr lint command', async () => {
   assert.equal(status, 0);
 });
 
+const JUNIOR_WITHOUT_RULES = [
+  '---',
+  'id: ADR-001',
+  'title: A Junior record',
+  'status: accepted',
+  'date: 2026-01-01',
+  'supersedes: []',
+  'applies_to: []',
+  'rules: []',
+  '---',
+  '',
+  '## Decision',
+  '',
+  'Keep it.',
+  '',
+].join('\n');
+
+const FOREIGN_WITHOUT_DECISION = [
+  '# 2. A foreign record',
+  '',
+  'Status: Accepted',
+  '',
+  '## Context',
+  '',
+  'Context.',
+  '',
+].join('\n');
+
+function mixedPrefixProject(t: { after(fn: () => void): void }): string {
+  const root = project(t);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(join(root, 'docs', 'adr', 'ADR-001-junior.md'), JUNIOR_WITHOUT_RULES);
+  writeFileSync(join(root, 'docs', 'adr', 'ADR-002-foreign.md'), FOREIGN_WITHOUT_DECISION);
+  return root;
+}
+
+test('lint reports both records in a mixed ADR-NNN folder without adr config', async (t) => {
+  const root = mixedPrefixProject(test);
+  const out = capture();
+  await runAdrCli(['lint', '--json'], {cwd: root, stdout: out.stdout, stderr: () => {}});
+  assert.deepEqual(
+    [...new Set(JSON.parse(out.text()).findings.map((finding: {adrId: string}) => finding.adrId))].sort(),
+    ['ADR-001', 'ADR-002'],
+  );
+});
+
+test('init preview proposes enforce for a mixed folder without adr config', async (t) => {
+  const root = mixedPrefixProject(test);
+  const out = capture();
+  await runAdrCli(['init'], {cwd: root, stdout: out.stdout});
+  assert.match(out.text(), /"gate": "enforce"/);
+});
+
 test('init --yes with --record-decision writes the config file', async () => {
   const root = project(test);
   await runAdrCli(['init', '--yes', '--record-decision'], {cwd: root, stdout: capture().stdout});
