@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-15
+
+### Fixed
+
+- `junior adr scope` writes every proposal front-matter string as a YAML
+  double-quoted scalar, so standard YAML parsers can read the proposal. Junior's
+  front-matter parser now unescapes quoted values, so titles and rule text
+  survive the write/read round trip exactly.
+
 ## [0.18.0] - 2026-11-15
 
 ### Added

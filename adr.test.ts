@@ -109,6 +109,27 @@ function fakeDeps(writes: any[]) {
 
 // --- parsing and lint -------------------------------------------------------
 
+test('parseAdr unescapes a JSON double-quoted title', () => {
+  const title = 'Use "one" queue at C:\\temp';
+  const markdown = madr().replace('title: A decision', `title: ${JSON.stringify(title)}`);
+  assert.equal(parseAdr(markdown).title, title);
+});
+
+test('parseAdr replaces a doubled single quote in a single-quoted title', () => {
+  const markdown = madr().replace('title: A decision', "title: 'It''s a decision'");
+  assert.equal(parseAdr(markdown).title, "It's a decision");
+});
+
+test('parseAdr leaves an unquoted legacy title unchanged', () => {
+  const markdown = madr().replace('title: A decision', 'title: Keep C:\\temp path');
+  assert.equal(parseAdr(markdown).title, 'Keep C:\\temp path');
+});
+
+test('parseAdr strips the quotes when a double-quoted title is not valid JSON', () => {
+  const markdown = madr().replace('title: A decision', 'title: "back\\slash"');
+  assert.equal(parseAdr(markdown).title, 'back\\slash');
+});
+
 test('parseAdr reads the rules from the MADR front matter', () => {
   assert.deepEqual(parseAdr(madr()).rules, [{ id: 'R1', text: 'Store state exactly once.' }]);
 });
