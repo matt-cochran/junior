@@ -14,7 +14,14 @@
 
 import fs from 'node:fs';
 import { join } from 'node:path';
-import { loadAdrs } from './adr.ts';
+import {
+  ADR_PREFIX_FILE_PATTERN,
+  adrFilePattern,
+  adrIdFromFileName,
+  loadAdrs,
+} from './adr.ts';
+
+export { adrFilePattern, adrIdFromFileName } from './adr.ts';
 
 export type AdrFormat = 'junior' | 'madr' | 'nygard';
 export type AdrGate = 'enforce' | 'advisory' | 'off';
@@ -23,9 +30,15 @@ export interface AdrConfig {
   dir: string;
   format: AdrFormat;
   gate: AdrGate;
+  /** Regular expression selecting ADR files; the `number` named group supplies the id. */
+  filePattern?: string;
   minConfidence?: number;
   /** Uncertain (low-confidence) findings also block under enforce. Default false: only likely contradictions block. */
   flagUncertain?: boolean;
+}
+
+export interface AdrPatternConfig {
+  filePattern?: string;
 }
 
 export interface AdrDirDetection {
@@ -34,7 +47,6 @@ export interface AdrDirDetection {
   source: '.adr-dir' | 'default-path';
 }
 
-const ADR_FILE_PATTERN = /^\d{4}-.+\.md$/;
 const DEFAULT_ADR_DIRS = ['docs/adr', 'docs/decisions', 'doc/architecture/decisions', 'adr', 'architecture/decisions'];
 const FORMATS = new Set<AdrFormat>(['junior', 'madr', 'nygard']);
 const GATES = new Set<AdrGate>(['enforce', 'advisory', 'off']);
@@ -63,8 +75,9 @@ function markdownFiles(dir: string): string[] {
   }
 }
 
-function adrFiles(dir: string): string[] {
-  return markdownFiles(dir).filter((name) => ADR_FILE_PATTERN.test(name));
+function adrFiles(dir: string, config?: AdrPatternConfig): string[] {
+  const pattern = adrFilePattern(config);
+  return markdownFiles(dir).filter((name) => adrIdFromFileName(name, pattern) !== null);
 }
 
 function readIfPresent(path: string): string | null {
@@ -111,11 +124,37 @@ export function readAdrConfig(root: string): AdrConfig | null {
     }
     config.minConfidence = minConfidence;
   }
+  if (block.filePattern !== undefined) {
+    if (typeof block.filePattern !== 'string') {
+      throw new Error("adr.filePattern must be a regular expression with a named group 'number'");
+    }
+    adrFilePattern({filePattern: block.filePattern});
+    config.filePattern = block.filePattern;
+  }
   if (block.flagUncertain !== undefined) {
     if (typeof block.flagUncertain !== 'boolean') throw new Error('adr.flagUncertain must be a boolean');
     config.flagUncertain = block.flagUncertain;
   }
   return config;
+}
+
+/** The on-disk spelling of `relative` under `root`, matched case-insensitively per segment. */
+function actualDirectory(root: string, relative: string): string | null {
+  const normalized = normalizeRelative(relative);
+  if (normalized === '.') return isDirectory(root) ? '.' : null;
+  let current = '';
+  for (const part of normalized.split('/').filter((entry) => entry !== '' && entry !== '.')) {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(current === '' ? root : join(root, current));
+    } catch {
+      return null;
+    }
+    const actual = entries.find((entry) => entry.toLowerCase() === part.toLowerCase());
+    if (actual === undefined) return null;
+    current = current === '' ? actual : `${current}/${actual}`;
+  }
+  return current !== '' && isDirectory(join(root, current)) ? current : null;
 }
 
 /**
@@ -128,24 +167,25 @@ export function detectAdrDir(root: string): AdrDirDetection | null {
   if (marker !== null) {
     const firstLine = marker.split(/\r?\n/, 1)[0].trim();
     if (firstLine) {
-      const dir = normalizeRelative(firstLine);
-      if (isDirectory(join(root, dir))) return { dir, source: '.adr-dir' };
+      const dir = actualDirectory(root, firstLine);
+      if (dir !== null) return { dir, source: '.adr-dir' };
     }
   }
-  for (const dir of DEFAULT_ADR_DIRS) {
-    if (isDirectory(join(root, dir))) return { dir, source: 'default-path' };
+  for (const candidate of DEFAULT_ADR_DIRS) {
+    const dir = actualDirectory(root, candidate);
+    if (dir !== null) return { dir, source: 'default-path' };
   }
   return null;
 }
 
 /** `junior` for Junior front matter, `madr` for MADR headings, else `nygard`. */
-export function detectAdrFormat(dir: string): AdrFormat {
-  for (const name of adrFiles(dir)) {
+export function detectAdrFormat(dir: string, config?: AdrPatternConfig): AdrFormat {
+  for (const name of adrFiles(dir, config)) {
     const content = readIfPresent(join(dir, name)) ?? '';
     const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
-    if (front && /^\s*id\s*:\s*["']?ADR-\d+["']?\s*$/m.test(front[1])) return 'junior';
+    if (front && /^\s*id\s*:\s*["']?ADR-\d+[a-z]?["']?\s*$/m.test(front[1])) return 'junior';
   }
-  for (const name of markdownFiles(dir)) {
+  for (const name of adrFiles(dir, config)) {
     const content = readIfPresent(join(dir, name)) ?? '';
     if (/^##\s+(Decision Outcome|Considered Options)\s*$/im.test(content)) return 'madr';
   }
@@ -178,13 +218,12 @@ function statusSaysAccepted(content: string): boolean {
  * `off`. Junior records go through `loadAdrs`; MADR/Nygard records are read by
  * their status line or Status section because they have no Junior front matter.
  */
-export function defaultGate(dir: string): AdrGate {
-  const format = detectAdrFormat(dir);
+export function defaultGate(dir: string, config?: AdrPatternConfig): AdrGate {
+  const format = detectAdrFormat(dir, config);
   if (format === 'junior') {
-    return loadAdrs(dir).some((adr) => adr.status === 'accepted') ? 'enforce' : 'off';
+    return loadAdrs(dir, config).some((adr) => adr.status === 'accepted') ? 'enforce' : 'off';
   }
-  return markdownFiles(dir)
-    .filter((name) => name !== 'README.md')
+  return adrFiles(dir, config)
     .some((name) => {
       const content = readIfPresent(join(dir, name));
       return content !== null && statusSaysAccepted(content);
@@ -193,15 +232,34 @@ export function defaultGate(dir: string): AdrGate {
     : 'off';
 }
 
-/** Combine detection, format and gate without writing anything. */
+/** Propose a non-default pattern only when the folder uses `ADR-NNN-title` names. */
+export function detectFilePattern(dir: string): string | undefined {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  const defaultPattern = adrFilePattern();
+  if (names.some((name) => adrIdFromFileName(name, defaultPattern) !== null)) return undefined;
+  const prefixPattern = adrFilePattern({filePattern: ADR_PREFIX_FILE_PATTERN});
+  return names.some((name) => adrIdFromFileName(name, prefixPattern) !== null)
+    ? ADR_PREFIX_FILE_PATTERN
+    : undefined;
+}
+
+/** Combine detection, format, gate and file pattern without writing anything. */
 export function proposeAdrConfig(root: string): AdrConfig | null {
   const detection = detectAdrDir(root);
   if (!detection) return null;
   const dir = join(root, detection.dir);
+  const filePattern = detectFilePattern(dir);
+  const config: AdrPatternConfig = filePattern === undefined ? {} : {filePattern};
   return {
     dir: detection.dir,
-    format: detectAdrFormat(dir),
-    gate: defaultGate(dir),
+    format: detectAdrFormat(dir, config),
+    gate: defaultGate(dir, config),
+    ...(filePattern === undefined ? {} : {filePattern}),
   };
 }
 

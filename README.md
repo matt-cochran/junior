@@ -173,9 +173,10 @@ define a `litellm` provider in Pi's `models.json`. See
   and `elicitation` tools.
 - **[ADR support](docs/adr-support.md)** — `junior adr init|check|decide|check-tickets`:
   designs, tickets and code are checked against your architecture decision
-  records, and a human decides on every likely violation. `junior init` and
-  `junior update` write the checkpoints into a managed `<junior>` block in
-  `CLAUDE.md` and `AGENTS.md`.
+  records, and a human decides on every likely violation. `adr.filePattern`
+  supports other file names such as `ADR-001-title.md`, and detected folders
+  keep their real case. `junior init` and `junior update` write the checkpoints
+  into a managed `<junior>` block in `CLAUDE.md` and `AGENTS.md`.
 - **[Where your code goes](docs/data-destination.md)** — consent, the model
   policy and `models.dataPolicy`: which OpenRouter providers and regions may
   process your requests, failing closed before any spend.

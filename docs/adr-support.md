@@ -20,14 +20,49 @@ location to `delivery.config.json` only after you confirm:
 
 | Field | Values | Meaning |
 |---|---|---|
-| `dir` | path | Where the ADRs live |
+| `dir` | path | Where the ADRs live. Conventional folders are detected case-insensitively and reported in their real case (`Docs/adr`). |
 | `format` | `junior`, `madr`, `nygard` | `junior` ADRs carry `applies_to` and `rules` front matter. MADR and Nygard ADRs are checked against their Decision section. |
+| `filePattern` | regular expression (optional) | Selects which files are records and supplies the id from its `number` named group. The default is `^(?<number>\d{4})-(?<slug>.+)\.md$`; use `^ADR-(?<number>\d+[a-z]?)-(?<slug>.+)\.md$` for `ADR-001-title.md`. |
 | `gate` | `enforce`, `advisory`, `off` | `enforce` blocks on findings. `advisory` only reports them. Defaults to `enforce` when accepted ADRs exist, and `off` otherwise. |
 | `minConfidence` | 0..1 (optional) | Also flags any check whose confidence is below this |
 | `flagUncertain` | `true` / `false` (default `false`) | Let low-confidence findings block under `enforce` too. By default only likely contradictions block; uncertain ones are listed as advisory. |
 
 ADRs without Junior front matter work as they are. Junior can draft `applies_to` and `rules` for them, but
 only as a proposal under `.delivery/adr-proposals/`. Your ADR files are never edited.
+
+If your records use `ADR-001-title.md` instead of `0001-title.md`, `junior adr init` proposes:
+
+```json
+{ "adr": { "dir": "docs/adr", "format": "junior", "filePattern": "^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$", "gate": "enforce" } }
+```
+
+A folder with Markdown files but no records matching `adr.filePattern` is reported as a `discovery`
+object by `junior adr lint` and `junior adr check` (which exits 2, inconclusive) instead of silently
+checking nothing.
+
+## Scoping foreign ADRs
+
+When MADR or Nygard ADRs have no `applies_to`, an implementation check cannot tell whether they apply to a
+change. It reports the check as inconclusive (exit code 2) instead of clean, and points here. Run:
+
+```bash
+junior adr scope                          # every accepted foreign ADR
+junior adr scope --adr ADR-0007           # only named ADRs
+junior adr scope --max-candidates 50      # judge fewer candidate path globs
+junior adr scope --json                   # proposals and skipped ADRs as JSON
+```
+
+Junior lists candidate globs (`<dir>/**` for tracked directories at depth 1 to 3) from `git ls-files`, then
+asks Jev a yes/no judgment for each (ADR, candidate) pair: does this decision govern files under that path?
+The confident yeses become `applies_to`, reduced so a nested glob is dropped when its parent is already kept
+(`a/**` drops `a/b/**`). The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or
+rules itself. `--max-candidates` caps the candidate list (default 150).
+
+Junior writes one proposal per answered ADR under `.delivery/adr-proposals/`, for example
+`.delivery/adr-proposals/0007-front-matter.md`. Review the proposals, copy the front matter you accept into
+the ADR, then commit the ADR. An ADR with no confident yes, or one whose answers are all unknown, is skipped
+and gets no file. Rerunning overwrites that ADR's proposal. Junior never edits, commits or applies the
+original ADR itself.
 
 ## The checkpoints
 

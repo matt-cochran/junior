@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-15
+
+### Added
+
+- **Configurable ADR file names (#229).** `adr.filePattern` in
+  `delivery.config.json` selects ADR records and takes the id from its `number`
+  named group, so collections named `ADR-001-title.md` work with `junior adr`.
+  Every loader and scanner uses the pattern, `junior adr init` proposes the
+  pattern and the folder's real case, and `adr lint`/`adr check` report a
+  `discovery` object (with `adr check` exiting 2) when Markdown files match no
+  records instead of checking nothing.
+- **ADR scope proposals (ADR 0018 R9, #229).** `junior adr scope [--adr <ADR-id>]...
+  [--max-candidates <n>] [--json]` drafts `applies_to` for accepted MADR/Nygard
+  ADRs without Junior front matter. Junior lists candidate path globs from
+  tracked directories and asks Jev a yes/no judgment for each; confident yeses
+  become `applies_to`, and the ADR's own Decision text stays as rule `D`.
+  Proposals are written under `.delivery/adr-proposals/` for review. The
+  original ADR is never edited or committed.
+- **Foreign ADR lint (#229).** `junior adr lint` loads MADR/Nygard records through
+  the configured `adr.dir` and `adr.filePattern`, so `ADR-001-title.md`
+  collections lint without Junior front-matter errors while still reporting
+  duplicate ids and missing Decision rules.
+- **Inconclusive ADR checks.** An implementation check that judged nothing while
+  accepted ADRs were skipped now reports `inconclusive` and exits 2 instead of
+  looking clean; the message points to `junior adr scope`. A blocking
+  contradiction still exits 3, and an inconclusive worker gate does not block an
+  unattended run.
+
 ## [0.17.0] - 2026-11-14
 
 ### Added

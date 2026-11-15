@@ -37,6 +37,8 @@ export interface ImplementationGateResult {
   result: AdrGateResult | null;
   status: null | 'needs_adr_decision' | 'needs_operator';
   markdown: string | null;
+  /** ADR 0018 R9: the check judged nothing while accepted ADRs were skipped. */
+  inconclusive?: boolean;
 }
 
 export interface TicketGateResult {
@@ -69,7 +71,7 @@ export function resolveGateConfig(cwd: string): ResolvedGateConfig | null {
 
 /** ADR 0018 R9: read Junior and MADR/Nygard records into one collection. */
 export function loadGateAdrs(cwd: string, config: AdrConfig): Adr[] {
-  return loadAllAdrs(join(cwd, config.dir));
+  return loadAllAdrs(join(cwd, config.dir), config);
 }
 
 /** ADR 0018 R3/R5: gate the prepare brief at the design stage. */
@@ -138,6 +140,7 @@ export async function implementationGate(opts: {
     result,
     status: result.blocked ? (opts.unattended === true ? 'needs_operator' : 'needs_adr_decision') : null,
     markdown: renderGateMarkdown(result),
+    inconclusive: result.inconclusive === true,
   };
 }
 
