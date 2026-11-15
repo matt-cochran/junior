@@ -62,7 +62,7 @@ import { createJiraAdapter, type JiraFetch } from './tickets-jira.ts';
 import type { GateClassifier } from './worker.ts';
 import { readExternalContextConsent } from './auth.ts';
 import { runSync } from './spawn-sync.ts';
-import { changedFileText } from './worker-adr-gate.ts';
+import { boundedDiff, changedFileDiff, changedFileText } from './worker-adr-gate.ts';
 
 export type AdrGit = (args: string[]) => {status: number; stdout: string};
 
@@ -168,6 +168,16 @@ function resultChangedPaths(path: string): string[] {
   return paths;
 }
 
+function resultWorktree(path: string): string | undefined {
+  try {
+    const parsed: any = JSON.parse(readFileSync(path, 'utf8'));
+    const candidate = parsed?.isolation?.worktree ?? parsed?.executionCwd;
+    return typeof candidate === 'string' && candidate !== '' ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function gitOutput(deps: AdrCliDeps, args: string[]): string {
   if (!deps.git) throw new Error('this command needs deps.git');
   const result = deps.git(args);
@@ -175,27 +185,44 @@ function gitOutput(deps: AdrCliDeps, args: string[]): string {
   return result.stdout;
 }
 
+function implementationSubject(root: string, path: string, base: string): GateSubject {
+  const diff = changedFileDiff(root, path, base);
+  return diff === null
+    ? {target: path, files: [path], text: changedFileText(root, path), kind: 'file'}
+    : {target: path, files: [path], text: boundedDiff(diff), kind: 'diff'};
+}
+
 function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[] {
+  const root = deps.cwd ?? process.cwd();
+  const result = valueAfter(argv, '--result');
+  if (result) {
+    const worktree = resultWorktree(result);
+    const contentRoot = worktree !== undefined && existsSync(worktree) ? worktree : root;
+    return resultChangedPaths(result).map((path) => implementationSubject(contentRoot, path, 'HEAD'));
+  }
+
   const paths: string[] = [];
   const add = (path: string) => {
     if (path !== '' && !paths.includes(path)) paths.push(path);
   };
 
-  const result = valueAfter(argv, '--result');
-  if (result) {
-    for (const path of resultChangedPaths(result)) add(path);
-  } else {
-    const base = valueAfter(argv, '--base') ?? 'origin/main';
-    for (const path of gitOutput(deps, ['diff', '--name-only', `${base}...HEAD`])
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)) {
-      add(path);
-    }
-    for (const path of changedPaths(gitOutput(deps, ['status', '--porcelain=v1']))) add(path);
+  const base = valueAfter(argv, '--base') ?? 'origin/main';
+  for (const path of gitOutput(deps, ['diff', '--name-only', `${base}...HEAD`])
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)) {
+    add(path);
   }
+  for (const path of changedPaths(gitOutput(deps, ['status', '--porcelain=v1']))) add(path);
 
-  return paths.map((path) => ({target: path, files: [path], text: changedFileText(deps.cwd ?? process.cwd(), path)}));
+  let diffBase = base;
+  try {
+    const merged = gitOutput(deps, ['merge-base', base, 'HEAD']).trim();
+    if (merged !== '') diffBase = merged;
+  } catch {
+    // A missing merge base falls back to the requested ref.
+  }
+  return paths.map((path) => implementationSubject(root, path, diffBase));
 }
 
 function printFindings(markdown: string, ids: readonly string[]): string {

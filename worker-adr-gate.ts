@@ -26,6 +26,7 @@ import { createGithubAdapter } from './tickets-github.ts';
 import { createJiraAdapter, type JiraFetch } from './tickets-jira.ts';
 import type { Adr } from './adr.ts';
 import type { GateClassifier } from './worker.ts';
+import { runSync } from './spawn-sync.ts';
 
 export interface ResolvedGateConfig {
   config: AdrConfig;
@@ -111,6 +112,81 @@ export function changedFileText(root: string, path: string): string {
   }
 }
 
+const GIT_DIFF_MAX_BUFFER = 32 * 1024 * 1024;
+
+/**
+ * The changed hunks of one file against a base revision, for a classifier that
+ * must judge the change rather than the head of the file. An untracked new
+ * file has no diff, so its full text is labelled as new instead. A failed git
+ * call or an empty diff returns null so the caller can fall back to the file
+ * head.
+ */
+export function changedFileDiff(root: string, path: string, base: string): string | null {
+  if (base === '') return null;
+  const diff = runSync('git', ['diff', '--unified=15', '--no-color', base, '--', path], {
+    cwd: root,
+    maxBuffer: GIT_DIFF_MAX_BUFFER,
+  });
+  if (diff.status === 0 && diff.stdout.trim() !== '') return diff.stdout;
+
+  const status = runSync('git', ['status', '--porcelain=v1', '--', path], {
+    cwd: root,
+    maxBuffer: GIT_DIFF_MAX_BUFFER,
+  });
+  if (status.status !== 0 || !status.stdout.trimStart().startsWith('??')) return null;
+  try {
+    return `new file ${path}\n${readFileSync(join(root, path), 'utf8')}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep whole diff hunks from the start until the subject limit, then say how
+ * many were left out. A header that cannot share the limit with the marker is
+ * bounded too, so the marker is always present. */
+export function boundedDiff(diff: string): string {
+  if (diff.length <= CHANGED_FILE_TEXT_LIMIT) return diff;
+
+  const hunkStart = diff.startsWith('@@ ') ? 0 : diff.indexOf('\n@@ ') + 1;
+  if (hunkStart <= 0) {
+    const marker = '\n[truncated: 1 more hunk]';
+    return `${diff.slice(0, Math.max(0, CHANGED_FILE_TEXT_LIMIT - marker.length))}${marker}`;
+  }
+
+  const header = diff.slice(0, hunkStart);
+  const rest = diff.slice(hunkStart);
+  const starts = [0];
+  let offset = rest.indexOf('\n@@ ');
+  while (offset >= 0) {
+    starts.push(offset + 1);
+    offset = rest.indexOf('\n@@ ', offset + 1);
+  }
+
+  let kept = 0;
+  let body = header;
+  for (let index = 0; index < starts.length; index += 1) {
+    const end = index + 1 < starts.length ? starts[index + 1] : rest.length;
+    const next = header + rest.slice(0, end);
+    const marker = `\n[truncated: ${starts.length - index - 1} more hunks]`;
+    if (next.length + marker.length > CHANGED_FILE_TEXT_LIMIT) break;
+    body = next;
+    kept = index + 1;
+  }
+
+  const marker = `\n[truncated: ${starts.length - kept} more hunks]`;
+  if (body.length + marker.length > CHANGED_FILE_TEXT_LIMIT) {
+    body = body.slice(0, Math.max(0, CHANGED_FILE_TEXT_LIMIT - marker.length));
+  }
+  return `${body}${marker}`;
+}
+
+function implementationSubject(root: string, path: string, base: string): {target: string; files: string[]; text: string; kind: 'diff' | 'file'} {
+  const diff = changedFileDiff(root, path, base);
+  return diff === null
+    ? {target: path, files: [path], text: changedFileText(root, path), kind: 'file'}
+    : {target: path, files: [path], text: boundedDiff(diff), kind: 'diff'};
+}
+
 export async function implementationGate(opts: {
   cwd: string;
   changedFiles: string[];
@@ -126,10 +202,11 @@ export async function implementationGate(opts: {
   const resolved = resolveGateConfig(opts.cwd);
   if (!resolved) return empty;
 
+  const contentRoot = opts.contentRoot ?? opts.cwd;
   const result = await runAdrGate({
     root: opts.cwd,
     stage: 'implementation',
-    subjects: opts.changedFiles.map((path) => ({target: path, files: [path], text: changedFileText(opts.contentRoot ?? opts.cwd, path)})),
+    subjects: opts.changedFiles.map((path) => implementationSubject(contentRoot, path, 'HEAD')),
     config: resolved.config,
     adrs: loadGateAdrs(opts.cwd, resolved.config),
     ...(opts.deliverable !== undefined ? {deliverable: opts.deliverable} : {}),
