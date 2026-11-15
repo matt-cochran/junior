@@ -220,12 +220,16 @@ export const ADR_USAGE = [
 // ---------------------------------------------------------------------------
 
 function parseScalar(raw: string): string {
-  let value = raw.trim();
-  if (
-    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
-    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
-  ) {
-    value = value.slice(1, -1);
+  const value = raw.trim();
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+    return value.slice(1, -1).replace(/''/g, "'");
   }
   return value;
 }
