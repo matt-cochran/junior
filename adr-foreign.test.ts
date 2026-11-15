@@ -9,14 +9,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { parseAdr } from './adr.ts';
 import {
   draftFrontMatter,
-  draftFrontMatterRequest,
   loadAllAdrs,
   loadForeignAdrs,
   parseForeignAdr,
+  scopeCandidates,
+  scopeRequest,
   writeProposal,
 } from './adr-foreign.ts';
 
@@ -228,17 +230,81 @@ test('draftFrontMatter keeps an ADR id number text in the proposal path', (t) =>
   assert.equal(draftFrontMatter(adr, { rules: [] }).path, '.delivery/adr-proposals/008a-front-matter.md');
 });
 
+// --- scope candidates and judgments ----------------------------------------
+
+function git(root: string, args: string[]): void {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function trackedProject(t: any, files: string[]): string {
+  const root = project(t);
+  git(root, ['init', '-q']);
+  for (const name of files) foreignFile(root, name, 'tracked\n');
+  git(root, ['add', '.']);
+  return root;
+}
+
+test('scopeCandidates lists globs for tracked directories only', (t) => {
+  const root = trackedProject(t, ['src/tracked.ts']);
+  foreignFile(root, 'other/untracked.ts', 'untracked\n');
+  assert.deepEqual(scopeCandidates(root), ['src/**']);
+});
+
+test('scopeCandidates lists tracked directories only down to depth three', (t) => {
+  const root = trackedProject(t, ['a/b/c/d/file.ts']);
+  assert.deepEqual(scopeCandidates(root), ['a/**', 'a/b/**', 'a/b/c/**']);
+});
+
+test('scopeCandidates orders equal-depth directories by descending tracked-file count', (t) => {
+  const root = trackedProject(t, ['a/one.ts', 'b/one.ts', 'b/two.ts']);
+  assert.deepEqual(scopeCandidates(root), ['b/**', 'a/**']);
+});
+
+test('scopeCandidates excludes node_modules and the ADR folder', (t) => {
+  const root = trackedProject(t, ['src/app.ts', 'node_modules/pkg/index.js', 'docs/adr/0001-decision.md']);
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'nygard', gate: 'enforce'}}, null, 2) + '\n',
+  );
+  git(root, ['add', 'delivery.config.json']);
+  assert.deepEqual(scopeCandidates(root), ['src/**']);
+});
+
+test('scopeCandidates caps the candidate list at maxCandidates', (t) => {
+  const root = trackedProject(t, ['a/file.ts', 'b/file.ts']);
+  assert.deepEqual(scopeCandidates(root, { maxCandidates: 1 }), ['a/**']);
+});
+
+test('scopeCandidates returns no candidates outside a git repository', (t) => {
+  const root = project(t);
+  foreignFile(root, 'src/app.ts', 'tracked\n');
+  assert.deepEqual(scopeCandidates(root), []);
+});
+
+test('scopeRequest carries the ADR decision as untrusted context', () => {
+  const adr = parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md');
+  assert.match(scopeRequest(adr, ['src/**']).context ?? '', /untrusted[\s\S]*We will put work on one durable queue\./);
+});
+
+test('scopeRequest asks one yes-or-no governs criterion', () => {
+  const adr = parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md');
+  const criteria = scopeRequest(adr, ['src/**']).criteria ?? [];
+  assert.deepEqual(
+    criteria.map((criterion) => ({
+      id: criterion.id,
+      scale: criterion.scale.map((option) => [option.id, option.score]),
+    })),
+    [{ id: 'governs', scale: [['yes', 1], ['no', 0]] }],
+  );
+});
+
+test('scopeRequest lists every candidate as an item description', () => {
+  const adr = parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md');
+  assert.deepEqual(scopeRequest(adr, ['src/**', 'docs/**']).items.map((item) => item.description), ['src/**', 'docs/**']);
+});
+
 // --- drafting a proposal ---------------------------------------------------
-
-test('draftFrontMatterRequest carries the ADR decision as untrusted context', () => {
-  const adr = parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md');
-  assert.match(draftFrontMatterRequest(adr).context ?? '', /We will put work on one durable queue\./);
-});
-
-test('draftFrontMatterRequest asks for repository paths and testable rules', () => {
-  const adr = parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md');
-  assert.deepEqual(draftFrontMatterRequest(adr).criteria?.map((criterion) => criterion.id), ['applies_to', 'rules']);
-});
 
 test('draftFrontMatter keeps the original status', (t) => {
   const root = project(t);

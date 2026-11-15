@@ -40,10 +40,10 @@ import { loadGateAdrs, resolveGateConfig } from './worker-adr-gate.ts';
 import { createJevClassifier } from './worker-gates.ts';
 import { analyze } from './matrix-analyze.ts';
 import {
-  answerParts,
   draftFrontMatter,
-  draftFrontMatterRequest,
   hasJuniorFrontMatter,
+  scopeCandidates,
+  scopeRequest,
   writeProposal,
 } from './adr-foreign.ts';
 import type { Adr } from './adr.ts';
@@ -84,7 +84,7 @@ export const ADR_CLI_USAGE = [
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
   '  check-tickets [--state open|all] [--limit N] [--markdown <file>] [--post]',
-  '  scope [--adr <ADR-id>]... [--json]',
+  '  scope [--adr <ADR-id>]... [--max-candidates <n>] [--json]',
   '  new|lint|sync delegate to `junior matrix adr`',
 ].join('\n');
 
@@ -579,15 +579,6 @@ function adrFlags(argv: string[]): string[] {
   return ids;
 }
 
-function answerRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null) return {};
-  const record = value as Record<string, unknown>;
-  const nested = record.answer;
-  return typeof nested === 'object' && nested !== null
-    ? {...record, ...(nested as Record<string, unknown>)}
-    : record;
-}
-
 function isForeignRecord(adr: Adr): boolean {
   if (!adr.path) return false;
   try {
@@ -609,7 +600,13 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
   if (!config) return failure(out, 'no ADR directory found; run junior adr init');
 
   const requested = adrFlags(argv);
-  const candidates = loadGateAdrs(root, config)
+  const maxCandidatesRaw = valueAfter(argv, '--max-candidates');
+  const maxCandidates = maxCandidatesRaw === undefined ? undefined : Number(maxCandidatesRaw);
+  if (maxCandidates !== undefined && (!Number.isInteger(maxCandidates) || maxCandidates < 1)) {
+    return failure(out, '--max-candidates must be a positive integer');
+  }
+  const candidatesForRepo = scopeCandidates(root, maxCandidates === undefined ? undefined : {maxCandidates});
+  const adrs = loadGateAdrs(root, config)
     .filter((adr) => adr.status === 'accepted')
     .filter((adr) => requested.length === 0 || requested.includes(adr.id))
     .filter(isForeignRecord);
@@ -617,33 +614,37 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
   const classifier = await classifierFor(deps, root);
   if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
   const classify = classifier;
-  const proposals: Array<{adrId: string; path: string; appliesTo: string[]; rules: ReturnType<typeof answerParts>['rules']}> = [];
+  const proposals: Array<{adrId: string; path: string; appliesTo: string[]; rules: Array<{id: string; text: string}>}> = [];
   const skipped: Array<{adrId: string; reason: string}> = [];
 
-  for (const adr of candidates) {
-    const answers: Record<string, unknown> = {};
-    const capture: GateClassifier = async (context, options) => {
-      const result = await classify(context, options);
-      if (result.answers) Object.assign(answers, result.answers);
-      return result;
-    };
-    const result = await analyze({input: draftFrontMatterRequest(adr), classify: capture});
-    if (result.cells.some((cell) => cell.itemId === adr.id && !cell.known)) {
-      skipped.push({adrId: adr.id, reason: 'Jev answer was unknown'});
+  for (const adr of adrs) {
+    if (candidatesForRepo.length === 0) {
+      skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
       continue;
     }
-    const answer = {
-      ...answerRecord(answers[`cell:${adr.id}:applies_to`]),
-      ...answerRecord(answers[`cell:${adr.id}:rules`]),
-    };
-    const parts = answerParts(answer);
-    if (parts.appliesTo.length === 0) {
-      skipped.push({adrId: adr.id, reason: 'answer has no applies_to'});
+    const result = await analyze({input: scopeRequest(adr, candidatesForRepo), classify});
+    const cells = result.cells.filter((cell) => cell.criterionId === 'governs');
+    if (cells.every((cell) => !cell.known)) {
+      skipped.push({adrId: adr.id, reason: 'Jev answers were unknown'});
       continue;
     }
-    const draft = draftFrontMatter(adr, answer);
+    const yes = cells
+      .filter((cell) => cell.known && cell.optionId === 'yes')
+      .map((cell) => cell.itemId);
+    const appliesTo: string[] = [];
+    for (const candidate of yes) {
+      if (appliesTo.some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`))) continue;
+      appliesTo.push(candidate);
+    }
+    if (appliesTo.length === 0) {
+      skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
+      continue;
+    }
+    const ruleD = adr.rules.find((rule) => rule.id === 'D');
+    const rules = ruleD ? [{id: 'D', text: ruleD.text}] : [];
+    const draft = draftFrontMatter(adr, {appliesTo, rules});
     writeProposal(root, draft);
-    proposals.push({adrId: adr.id, path: draft.path, appliesTo: parts.appliesTo, rules: parts.rules});
+    proposals.push({adrId: adr.id, path: draft.path, appliesTo, rules});
   }
 
   if (flagSet(argv, '--json')) {

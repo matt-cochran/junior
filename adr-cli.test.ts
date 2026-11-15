@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { readAdrConfig } from './adr-config.ts';
 import { readLedger } from './adr-ledger.ts';
@@ -263,7 +264,11 @@ const FOREIGN = [
   '',
 ].join('\n');
 
-function foreignProject(t: { after(fn: () => void): void }, names: string[] = ['0002-queue.md']): string {
+function foreignProject(
+  t: { after(fn: () => void): void },
+  names: string[] = ['0002-queue.md'],
+  tracked: string[] = ['src/app.ts'],
+): string {
   const root = project(t);
   mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
   for (const name of names) writeFileSync(join(root, 'docs', 'adr', name), FOREIGN.replace(/^# 2\./, `# ${name.slice(0, 4)}.`));
@@ -271,6 +276,14 @@ function foreignProject(t: { after(fn: () => void): void }, names: string[] = ['
     join(root, 'delivery.config.json'),
     JSON.stringify({adr: {dir: 'docs/adr', format: 'nygard', gate: 'enforce'}}, null, 2) + '\n',
   );
+  for (const name of tracked) {
+    mkdirSync(join(root, name, '..'), {recursive: true});
+    writeFileSync(join(root, name), 'tracked\n');
+  }
+  const init = spawnSync('git', ['init', '-q'], {cwd: root, encoding: 'utf8'});
+  if (init.status !== 0) throw new Error(init.stderr);
+  const add = spawnSync('git', ['add', '.'], {cwd: root, encoding: 'utf8'});
+  if (add.status !== 0) throw new Error(add.stderr);
   return root;
 }
 
@@ -324,13 +337,16 @@ test('lint includes the discovery when Markdown files hold no ADRs', async () =>
   assert.equal(JSON.parse(out.text()).discovery.markdownFiles, 1);
 });
 
-function scoping(confidence = 0.95): GateClassifier {
+function scopeJudge(governed: readonly string[], confidence = 0.95): GateClassifier {
   return async ({questions}) => {
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(questions)) {
-      answers[id] = id.endsWith(':applies_to')
-        ? {type: 'choice', choice: 'complete', confidence, appliesTo: ['src/**']}
-        : {type: 'choice', choice: 'complete', confidence, rules: [{id: 'R1', text: 'Use one durable queue.'}]};
+      const candidate = /^cell:(.+):governs$/.exec(id)?.[1] ?? '';
+      answers[id] = {
+        type: 'choice',
+        choice: governed.includes(candidate) ? 'yes' : 'no',
+        confidence,
+      };
     }
     return {answers};
   };
@@ -338,7 +354,7 @@ function scoping(confidence = 0.95): GateClassifier {
 
 test('scope writes a proposal file for a foreign ADR', async () => {
   const root = foreignProject(test);
-  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  await runAdrCli(['scope'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
   assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), true);
 });
 
@@ -346,35 +362,88 @@ test('scope leaves the original foreign ADR byte-identical', async () => {
   const root = foreignProject(test);
   const path = join(root, 'docs', 'adr', '0002-queue.md');
   const before = readFileSync(path, 'utf8');
-  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  await runAdrCli(['scope'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
   assert.equal(readFileSync(path, 'utf8'), before);
 });
 
-test('scope skips an unknown answer and writes no proposal file', async () => {
+test('scope turns a confident yes on src/** into the proposal applies_to', async () => {
   const root = foreignProject(test);
-  await runAdrCli(['scope'], {cwd: root, classify: scoping(0.5), stdout: capture().stdout});
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge(['src/**']), stdout: out.stdout});
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['src/**']);
+});
+
+test('scope drops a nested yes under its kept parent glob', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'src/nested/app.ts']);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeJudge(['src/**', 'src/nested/**']),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['src/**']);
+});
+
+test('scope does not use low-confidence judgments', async () => {
+  const root = foreignProject(test);
+  await runAdrCli(['scope'], {cwd: root, classify: scopeJudge(['src/**'], 0.5), stdout: capture().stdout});
   assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), false);
+});
+
+test('scope skips an ADR with only no answers and reports its reason', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge([]), stdout: out.stdout});
+  assert.equal(JSON.parse(out.text()).skipped[0].reason, 'no candidate path judged governed');
+});
+
+test('scope skips an ADR whose answers are all unknown and reports its reason', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge(['src/**'], 0.5), stdout: out.stdout});
+  assert.equal(JSON.parse(out.text()).skipped[0].reason, 'Jev answers were unknown');
 });
 
 test('scope --adr limits the run to the named ADR', async () => {
   const root = foreignProject(test, ['0001-queue.md', '0002-queue.md']);
-  await runAdrCli(['scope', '--adr', 'ADR-0001'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  await runAdrCli(['scope', '--adr', 'ADR-0001'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
   assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), false);
 });
 
 test('scope --json reports the proposal path for an answered ADR', async () => {
   const root = foreignProject(test);
   const out = capture();
-  await runAdrCli(['scope', '--json'], {cwd: root, classify: scoping(), stdout: out.stdout});
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge(['src/**']), stdout: out.stdout});
   assert.equal(JSON.parse(out.text()).proposals[0].path, '.delivery/adr-proposals/0002-front-matter.md');
+});
+
+test('scope --max-candidates passes the limit to candidate selection', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['a/app.ts', 'b/app.ts']);
+  const out = capture();
+  await runAdrCli(['scope', '--json', '--max-candidates', '1'], {
+    cwd: root,
+    classify: scopeJudge(['a/**', 'b/**']),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['a/**']);
 });
 
 test('scope prints one review line per answered ADR', async () => {
   const root = foreignProject(test);
   const out = capture();
-  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: out.stdout});
+  await runAdrCli(['scope'], {cwd: root, classify: scopeJudge(['src/**']), stdout: out.stdout});
   assert.match(out.text(), /ADR-0002 -> \.delivery\/adr-proposals\/0002-front-matter\.md \(applies_to: 1 paths, rules: 1\)/);
 });
+
+function scoping(confidence = 0.95): GateClassifier {
+  return async ({questions}) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(questions)) {
+      answers[id] = {type: 'choice', choice: 'complete', confidence};
+    }
+    return {answers};
+  };
+}
 
 test('an implementation check exits 2 when it checked nothing but skipped accepted ADRs', async () => {
   const root = foreignProject(test);

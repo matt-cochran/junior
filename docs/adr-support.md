@@ -46,16 +46,23 @@ When MADR or Nygard ADRs have no `applies_to`, an implementation check cannot te
 change. It reports the check as inconclusive (exit code 2) instead of clean, and points here. Run:
 
 ```bash
-junior adr scope                      # every accepted foreign ADR
-junior adr scope --adr ADR-0007       # only named ADRs
-junior adr scope --json               # proposals and skipped ADRs as JSON
+junior adr scope                          # every accepted foreign ADR
+junior adr scope --adr ADR-0007           # only named ADRs
+junior adr scope --max-candidates 50      # judge fewer candidate path globs
+junior adr scope --json                   # proposals and skipped ADRs as JSON
 ```
 
-Junior asks Jev for paths and testable rules and writes one proposal per answered ADR under
-`.delivery/adr-proposals/`, for example `.delivery/adr-proposals/0007-front-matter.md`. Review the proposals,
-copy the front matter you accept into the ADR, then commit the ADR. An unknown answer, or an answer with no
-`applies_to`, is skipped and gets no file. Rerunning overwrites that ADR's proposal. Junior never edits,
-commits or applies the original ADR itself.
+Junior lists candidate globs (`<dir>/**` for tracked directories at depth 1 to 3) from `git ls-files`, then
+asks Jev a yes/no judgment for each (ADR, candidate) pair: does this decision govern files under that path?
+The confident yeses become `applies_to`, reduced so a nested glob is dropped when its parent is already kept
+(`a/**` drops `a/b/**`). The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or
+rules itself. `--max-candidates` caps the candidate list (default 150).
+
+Junior writes one proposal per answered ADR under `.delivery/adr-proposals/`, for example
+`.delivery/adr-proposals/0007-front-matter.md`. Review the proposals, copy the front matter you accept into
+the ADR, then commit the ADR. An ADR with no confident yes, or one whose answers are all unknown, is skipped
+and gets no file. Rerunning overwrites that ADR's proposal. Junior never edits, commits or applies the
+original ADR itself.
 
 ## The checkpoints
 
