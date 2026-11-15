@@ -158,6 +158,20 @@ test('defaultGate is off when the only Junior ADR is proposed', (t) => {
   assert.equal(defaultGate(join(root, 'docs', 'adr')), 'off');
 });
 
+test('defaultGate enforces on a mixed Junior and Nygard collection', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/0001-proposed.md', PROPOSED_JUNIOR_ADR);
+  touch(root, 'docs/adr/0002-accepted.md', '# 2. Use a queue\n\nStatus: Accepted\n\n## Decision\n\nUse a queue.\n');
+  assert.equal(defaultGate(join(root, 'docs', 'adr')), 'enforce');
+});
+
+test('defaultGate is off on a mixed collection with no accepted record', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/0001-proposed.md', PROPOSED_JUNIOR_ADR);
+  touch(root, 'docs/adr/0002-proposed.md', '# 2. Use a queue\n\nStatus: Proposed\n\n## Decision\n\nUse a queue.\n');
+  assert.equal(defaultGate(join(root, 'docs', 'adr')), 'off');
+});
+
 test('defaultGate enforces on an accepted MADR status line', (t) => {
   const root = project(t);
   touch(root, 'docs/adr/0001-store-state.md', '# Store state\n\nStatus: Accepted\n\n## Decision\n\nKeep one copy.\n');

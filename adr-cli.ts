@@ -817,7 +817,7 @@ export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<
 
   if (command === 'lint') {
     const root = deps.cwd ?? process.cwd();
-    const configured = readAdrConfig(root);
+    const configured = readAdrConfig(root) ?? proposeAdrConfig(root);
     const detection = configured ? null : detectAdrDir(root);
     let label = configured?.dir ?? detection?.dir ?? 'docs/adr';
     for (let i = 0; i < rest.length; i++) {
