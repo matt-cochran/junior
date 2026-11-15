@@ -43,11 +43,15 @@ import {
   draftFrontMatter,
   hasJuniorFrontMatter,
   loadAllAdrs,
+  readScopeCache,
+  scopeCacheKey,
   scopeCandidates,
   scopeRequest,
   writeProposal,
+  writeScopeCache,
 } from './adr-foreign.ts';
 import type { Adr } from './adr.ts';
+import { adrContentHash } from './adr-ledger.ts';
 import {
   extractAcceptance,
   readTicketsConfig,
@@ -85,7 +89,7 @@ export const ADR_CLI_USAGE = [
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
   '  check-tickets [--state open|all] [--limit N] [--markdown <file>] [--post]',
-  '  scope [--adr <ADR-id>]... [--max-candidates <n>] [--json]',
+  '  scope [--adr <ADR-id>]... [--max-candidates <n>] [--samples <k>] [--fresh] [--json]',
   '  new|lint|sync delegate to `junior matrix adr`',
 ].join('\n');
 
@@ -633,55 +637,164 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
   if (maxCandidates !== undefined && (!Number.isInteger(maxCandidates) || maxCandidates < 1)) {
     return failure(out, '--max-candidates must be a positive integer');
   }
+  const samplesFlag = argv.includes('--samples');
+  const samplesRaw = valueAfter(argv, '--samples');
+  const samples = samplesFlag && samplesRaw === undefined ? Number.NaN : samplesRaw === undefined ? 3 : Number(samplesRaw);
+  if (!Number.isInteger(samples) || samples < 1 || samples > 7 || samples % 2 === 0) {
+    return failure(out, '--samples must be an odd number from 1 to 7');
+  }
+  const fresh = flagSet(argv, '--fresh');
   const candidatesForRepo = scopeCandidates(root, maxCandidates === undefined ? undefined : {maxCandidates});
   const adrs = loadGateAdrs(root, config)
     .filter((adr) => adr.status === 'accepted')
     .filter((adr) => requested.length === 0 || requested.includes(adr.id))
     .filter(isForeignRecord);
 
-  const classifier = await classifierFor(deps, root);
-  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
-  const classify = classifier;
-  const proposals: Array<{adrId: string; path: string; appliesTo: string[]; rules: Array<{id: string; text: string}>}> = [];
-  const skipped: Array<{adrId: string; reason: string}> = [];
+  let classify: GateClassifier;
+  let model = 'injected';
+  if (deps.classify) {
+    classify = deps.classify;
+  } else {
+    const created = await createJevClassifier();
+    const consent = readExternalContextConsent(root, created.gateway);
+    if (!consent.granted) {
+      return failure(out, `external-context consent required: an ADR check sends ADR and work text to ${created.gateway}; run junior auth consent grant ${created.gateway} --project ${root}${consent.reason ? ` (${consent.reason})` : ''}`);
+    }
+    classify = created.classify;
+    model = created.model;
+  }
+
+  type UncertainPath = {path: string; votes: number; samples: number};
+  const proposals: Array<{
+    adrId: string;
+    path: string;
+    appliesTo: string[];
+    rules: Array<{id: string; text: string}>;
+    uncertain: UncertainPath[];
+    votes: Record<string, number>;
+  }> = [];
+  const skipped: Array<{adrId: string; reason: string; uncertain?: UncertainPath[]}> = [];
+  const cache = readScopeCache(root);
+  let judged = 0;
+  let cached = 0;
+
+  const candidateOf = (questionId: string): string =>
+    questionId.startsWith('cell:') && questionId.endsWith(':governs')
+      ? questionId.slice('cell:'.length, -':governs'.length)
+      : '';
+  const cacheEntry = (answer: unknown): Record<string, unknown> => {
+    const record = answer && typeof answer === 'object' ? (answer as Record<string, unknown>) : {};
+    const choice = typeof record.choice === 'string' ? record.choice : null;
+    const confidence =
+      typeof record.confidence === 'number' && Number.isFinite(record.confidence) ? record.confidence : null;
+    if (choice === null) return {};
+    return {type: 'choice', choice, ...(confidence === null ? {} : {confidence})};
+  };
+  const depthOf = (candidate: string): number => candidate.replace(/\/\*\*$/, '').split('/').length;
 
   for (const adr of adrs) {
     if (candidatesForRepo.length === 0) {
       skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
       continue;
     }
-    const result = await analyze({input: scopeRequest(adr, candidatesForRepo), classify});
-    const cells = result.cells.filter((cell) => cell.criterionId === 'governs');
-    if (cells.every((cell) => !cell.known)) {
-      skipped.push({adrId: adr.id, reason: 'Jev answers were unknown'});
+    const adrHash = adrContentHash(readFileSync(adr.path, 'utf8'));
+    const counts = new Map<string, number>(candidatesForRepo.map((candidate) => [candidate, 0]));
+    const levels = new Map<number, string[]>();
+    for (const candidate of candidatesForRepo) {
+      const depth = depthOf(candidate);
+      levels.set(depth, [...(levels.get(depth) ?? []), candidate]);
+    }
+    const majority = new Set<string>();
+    let anyKnown = false;
+
+    for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
+      const eligible = (levels.get(depth) ?? []).filter(
+        (candidate) =>
+          ![...majority].some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`)),
+      );
+      if (eligible.length === 0) continue;
+
+      for (let sample = 0; sample < samples; sample += 1) {
+        const replay: GateClassifier = async ({state, questions}, options) => {
+          const answers: Record<string, unknown> = {};
+          const missing: Record<string, typeof questions[string]> = {};
+          for (const [id, question] of Object.entries(questions)) {
+            const candidate = candidateOf(id);
+            const key = scopeCacheKey({adrHash, candidate, sample, model});
+            if (!fresh && Object.prototype.hasOwnProperty.call(cache, key)) {
+              answers[id] = cache[key];
+              cached += 1;
+            } else {
+              missing[id] = question;
+            }
+          }
+          if (Object.keys(missing).length > 0) {
+            const result = await classify({state, questions: missing}, options);
+            for (const id of Object.keys(missing)) {
+              const candidate = candidateOf(id);
+              const key = scopeCacheKey({adrHash, candidate, sample, model});
+              const entry = cacheEntry(result.answers?.[id]);
+              cache[key] = entry;
+              answers[id] = entry;
+              judged += 1;
+            }
+          }
+          return {answers};
+        };
+        const result = await analyze({input: scopeRequest(adr, eligible), classify: replay});
+        for (const cell of result.cells.filter((entry) => entry.criterionId === 'governs')) {
+          if (!cell.known) continue;
+          anyKnown = true;
+          if (cell.optionId === 'yes') counts.set(cell.itemId, (counts.get(cell.itemId) ?? 0) + 1);
+        }
+      }
+
+      for (const candidate of eligible) {
+        if ((counts.get(candidate) ?? 0) > samples / 2) majority.add(candidate);
+      }
+    }
+
+    const voted = candidatesForRepo.filter((candidate) => (counts.get(candidate) ?? 0) > 0);
+    const majorityPaths = candidatesForRepo.filter((candidate) => majority.has(candidate));
+    const uncertain: UncertainPath[] = voted
+      .filter((candidate) => !majority.has(candidate))
+      .map((candidate) => ({path: candidate, votes: counts.get(candidate) ?? 0, samples}));
+    const votes = Object.fromEntries(voted.map((candidate) => [candidate, counts.get(candidate) ?? 0]));
+
+    if (majorityPaths.length === 0) {
+      if (uncertain.length > 0) {
+        skipped.push({adrId: adr.id, reason: `only uncertain paths (${uncertain.length})`, uncertain});
+      } else if (!anyKnown) {
+        skipped.push({adrId: adr.id, reason: 'Jev answers were unknown'});
+      } else {
+        skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
+      }
       continue;
     }
-    const yes = cells
-      .filter((cell) => cell.known && cell.optionId === 'yes')
-      .map((cell) => cell.itemId);
+
     const appliesTo: string[] = [];
-    for (const candidate of yes) {
+    for (const candidate of majorityPaths) {
       if (appliesTo.some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`))) continue;
       appliesTo.push(candidate);
     }
-    if (appliesTo.length === 0) {
-      skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
-      continue;
-    }
     const ruleD = adr.rules.find((rule) => rule.id === 'D');
     const rules = ruleD ? [{id: 'D', text: ruleD.text}] : [];
-    const draft = draftFrontMatter(adr, {appliesTo, rules});
+    const draft = draftFrontMatter(adr, {appliesTo, rules, uncertain});
     writeProposal(root, draft);
-    proposals.push({adrId: adr.id, path: draft.path, appliesTo, rules});
+    proposals.push({adrId: adr.id, path: draft.path, appliesTo, rules, uncertain, votes});
   }
 
+  if (judged > 0) writeScopeCache(root, cache);
+
   if (flagSet(argv, '--json')) {
-    out(`${JSON.stringify({proposals, skipped}, null, 2)}\n`);
+    out(`${JSON.stringify({proposals, skipped, judged, cached}, null, 2)}\n`);
   } else {
     for (const proposal of proposals) {
-      out(`${proposal.adrId} -> ${proposal.path} (applies_to: ${proposal.appliesTo.length} paths, rules: ${proposal.rules.length})\n`);
+      const marginal = proposal.uncertain.length > 0 ? `, uncertain: ${proposal.uncertain.length}` : '';
+      out(`${proposal.adrId} -> ${proposal.path} (applies_to: ${proposal.appliesTo.length} paths, rules: ${proposal.rules.length}${marginal})\n`);
     }
     for (const entry of skipped) out(`${entry.adrId} skipped: ${entry.reason}\n`);
+    out(`judged: ${judged}, cached: ${cached}\n`);
   }
   return 0;
 }

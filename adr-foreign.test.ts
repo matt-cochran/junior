@@ -393,6 +393,30 @@ test('draftFrontMatter takes rules from the answer', (t) => {
   assert.deepEqual(parseAdr(draft.markdown).rules, [{ id: 'R1', text: 'Use one queue.' }]);
 });
 
+test('draftFrontMatter places uncertain comments directly after applies_to', (t) => {
+  const root = project(t);
+  const adr = parseForeignAdr(NYGARD, foreignFile(root, '0002-nygard.md', NYGARD));
+  const draft = draftFrontMatter(adr, {
+    appliesTo: ['src/**'],
+    rules: [],
+    uncertain: [{ path: 'docs/**', votes: 1, samples: 3 }],
+  });
+  const lines = draft.markdown.split(/\r?\n/);
+  assert.equal(lines[lines.indexOf('applies_to:') + 2], '  # uncertain: docs/** (1/3 yes)');
+});
+
+test('a proposal with an uncertain comment still parses with loadAllAdrs', (t) => {
+  const root = project(t);
+  const adr = parseForeignAdr(NYGARD, foreignFile(root, 'foreign/0002-nygard.md', NYGARD));
+  const draft = draftFrontMatter(adr, {
+    appliesTo: ['src/**'],
+    rules: [],
+    uncertain: [{ path: 'docs/**', votes: 1, samples: 3 }],
+  });
+  writeFileSync(join(root, '0002-front-matter.md'), draft.markdown);
+  assert.deepEqual(loadAllAdrs(root)[0].appliesTo, ['src/**']);
+});
+
 test('draftFrontMatter proposes a path under .delivery/adr-proposals', (t) => {
   const root = project(t);
   const path = foreignFile(root, '0002-nygard.md', NYGARD);

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-11-15
+
+### Fixed
+
+- `junior adr scope` proposals are stable from run to run (#235). Each candidate
+  path is judged `--samples <k>` times (an odd number from 1 to 7, default 3),
+  and `applies_to` keeps only paths with a majority of confident yes votes.
+  Paths with at least one yes but no majority are reported as uncertain instead
+  of silently appearing and disappearing: `--json` includes `uncertain` and
+  per-path `votes`, the review line appends `uncertain: <n>`, and proposal files
+  list marginal paths as YAML comments after `applies_to`. An ADR with only
+  uncertain paths is skipped with `only uncertain paths (<n>)`. `--samples 1`
+  preserves the previous single-run behavior.
+- `junior adr scope` now judges candidate paths hierarchically and caches each
+  sample answer (#235). All depth-1 candidates are judged first; a deeper
+  candidate is judged only when no level-n parent reached a majority, so a kept
+  parent covers its children instead of the coverage flipping shape between
+  runs. Answers are stored per ADR text hash, candidate, criterion, sample and
+  model in `.delivery/adr-scope-cache.json` (sorted keys, atomic temp-file
+  rename), and a rerun reuses them instead of re-sampling. An edited ADR is
+  re-judged; `--fresh` ignores the cache for one run while keeping other
+  entries. Text and `--json` output report the run's `judged` and `cached`
+  counts.
+
 ## [0.18.2] - 2026-11-15
 
 ### Fixed
