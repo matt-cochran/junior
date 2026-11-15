@@ -138,7 +138,7 @@ function ticketText(ticket: Ticket, patterns: readonly string[]): string {
 }
 
 function acceptedAdrs(opts: CheckTicketOptions): Adr[] {
-  const all = opts.adrs ?? loadAdrs(join(opts.root, opts.config.dir));
+  const all = opts.adrs ?? loadAdrs(join(opts.root, opts.config.dir), opts.config);
   return all.filter((adr) => adr.status === 'accepted');
 }
 

@@ -73,6 +73,9 @@ export interface AdrGateResult {
   findings: AdrGateFinding[];
   checked: number;
   skipped: string[];
+  /** ADR 0018 R9: checked nothing while at least one accepted ADR was skipped. */
+  inconclusive?: boolean;
+  inconclusiveReason?: string;
 }
 
 export interface RunAdrGateOptions {
@@ -218,7 +221,11 @@ export async function relevantAdrs(
  */
 export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult> {
   if (opts.config.gate === 'off') {
-    return {gate: 'off', blocked: false, findings: [], checked: 0, skipped: []};
+    const result: AdrGateResult = {gate: 'off', blocked: false, findings: [], checked: 0, skipped: []};
+    // An off gate never checks and never skips, but callers still read the
+    // boolean; keep it out of the legacy serialized shape.
+    Object.defineProperty(result, 'inconclusive', {value: false, enumerable: false});
+    return result;
   }
 
   const allAdrs = opts.adrs ?? loadAdrs(join(opts.root, opts.config.dir));
@@ -325,6 +332,16 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     }
   }
 
+  // ADR 0018 R9: an implementation check that judged nothing because every
+  // accepted ADR was skipped is inconclusive, not clean.
+  const inconclusive = checked === 0 && skippedSet.size > 0;
+  const unscoped = adrs.filter((adr) => skippedSet.has(adr.id) && adr.appliesTo.length === 0).length;
+  const inconclusiveReason = inconclusive
+    ? unscoped > 0
+      ? `${unscoped} accepted ADR${unscoped === 1 ? ' has' : 's have'} no applies_to; run \`junior adr scope\` to draft front matter.`
+      : `${skippedSet.size} accepted ADR${skippedSet.size === 1 ? '' : 's'} were skipped because no applies_to matched the subject; run \`junior adr scope\` to review their scope.`
+    : undefined;
+
   return {
     gate: opts.config.gate,
     // ADR 0018 R4: by default only a likely contradiction blocks; uncertain
@@ -333,6 +350,8 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     findings,
     checked,
     skipped: [...skippedSet],
+    inconclusive,
+    ...(inconclusiveReason !== undefined ? {inconclusiveReason} : {}),
   };
 }
 
@@ -421,6 +440,13 @@ export function renderGateMarkdown(result: AdrGateResult): string {
       `| ${cell(`${finding.adrId}/${finding.ruleId}`)} | ${cell(finding.target)} | ${cell(finding.verdict)} | ${cell(finding.probability)} | ${cell(decisionState(finding))} |`,
     );
   }
-  lines.push('', result.blocked ? 'BLOCKED' : 'PASS');
+  lines.push(
+    '',
+    result.inconclusive
+      ? `INCONCLUSIVE${result.inconclusiveReason ? `: ${result.inconclusiveReason}` : ''}`
+      : result.blocked
+        ? 'BLOCKED'
+        : 'PASS',
+  );
   return lines.join('\n');
 }

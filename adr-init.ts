@@ -12,7 +12,14 @@
 import fs from 'node:fs';
 import { basename, join } from 'node:path';
 import { createAdr, parseAdr } from './adr.ts';
-import { defaultGate, detectAdrFormat, type AdrConfig } from './adr-config.ts';
+import {
+  adrFilePattern,
+  adrIdFromFileName,
+  defaultGate,
+  detectAdrFormat,
+  detectFilePattern,
+  type AdrConfig,
+} from './adr-config.ts';
 
 export interface InitAdrsOptions {
   /** Directory relative to the project root; defaults to `docs/adr`. */
@@ -31,7 +38,6 @@ export interface InitAdrsResult {
   config: AdrConfig;
 }
 
-const ADR_FILE_PATTERN = /^\d{4}-.+\.md$/;
 const RECORD_DECISION_TITLE = 'Record architecture decisions';
 const RECORD_DECISION_RULE = (dir: string) => `Significant architecture decisions are recorded as ADRs in ${dir}`;
 
@@ -66,8 +72,12 @@ function recordLabel(absoluteDir: string, name: string): string {
   return heading ? heading[1] : name.replace(/\.md$/, '');
 }
 
-function renderReadme(absoluteDir: string): string {
-  const records = fs.readdirSync(absoluteDir).filter((name) => ADR_FILE_PATTERN.test(name)).sort();
+function renderReadme(absoluteDir: string, config?: {filePattern?: string}): string {
+  const pattern = adrFilePattern(config);
+  const records = fs
+    .readdirSync(absoluteDir)
+    .filter((name) => adrIdFromFileName(name, pattern) !== null)
+    .sort();
   const lines = [
     '# Architecture decision records',
     '',
@@ -110,6 +120,8 @@ export function initAdrs(root: string, options: InitAdrsOptions = {}): InitAdrsR
   const dir = normalizeDir(options.dir ?? 'docs/adr');
   const absoluteDir = join(root, dir);
   fs.mkdirSync(absoluteDir, { recursive: true });
+  const filePattern = detectFilePattern(absoluteDir);
+  const patternConfig = filePattern === undefined ? undefined : {filePattern};
 
   const created: string[] = [];
   // A second init must not add a duplicate 000N record when one exists.
@@ -120,7 +132,7 @@ export function initAdrs(root: string, options: InitAdrsOptions = {}): InitAdrsR
 
   const readmePath = join(absoluteDir, 'README.md');
   if (!fs.existsSync(readmePath)) {
-    fs.writeFileSync(readmePath, renderReadme(absoluteDir));
+    fs.writeFileSync(readmePath, renderReadme(absoluteDir, patternConfig));
     created.push(relativePath(dir, 'README.md'));
   }
 
@@ -129,8 +141,9 @@ export function initAdrs(root: string, options: InitAdrsOptions = {}): InitAdrsR
     created,
     config: {
       dir,
-      format: detectAdrFormat(absoluteDir),
-      gate: defaultGate(absoluteDir),
+      format: detectAdrFormat(absoluteDir, patternConfig),
+      gate: defaultGate(absoluteDir, patternConfig),
+      ...(filePattern === undefined ? {} : {filePattern}),
     },
   };
 }
