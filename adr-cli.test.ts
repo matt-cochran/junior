@@ -142,6 +142,75 @@ test('an implementation check reads changed files from fake git', async () => {
   assert.equal(latest(root).findings[0].target, 'src/from-git.ts');
 });
 
+function gitProject(t: {after(fn: () => void): void}): {root: string; git: (args: string[]) => any} {
+  const root = seed(t);
+  const git = (args: string[]) => spawnSync('git', args, {cwd: root, encoding: 'utf8'});
+  git(['init', '-q']);
+  git(['config', 'user.email', 'test@example.test']);
+  git(['config', 'user.name', 'Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  return {root, git};
+}
+
+function recordingClassifier(choice: string): {classify: GateClassifier; questions: () => string} {
+  const seen: string[] = [];
+  return {
+    questions: () => seen.join('\n'),
+    classify: async ({questions}) => {
+      seen.push(...Object.values(questions).map((question) => question.instructions));
+      return {answers: Object.fromEntries(Object.keys(questions).map((id) => [id, {type: 'choice', choice, confidence: 0.95}]))};
+    },
+  };
+}
+
+test('an implementation check diffs against the merge base so committed and uncommitted changes are both judged', async (t) => {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'src'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const base = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const committedMarker = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'committed change']);
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const committedMarker = true;\nexport const uncommittedMarker = true;\n');
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.match(recorder.questions(), /committedMarker[\s\S]*uncommittedMarker/);
+});
+
+test('an implementation check with --result diffs against HEAD in the recorded worktree', async (t) => {
+  const {root} = gitProject(t);
+  const worktree = project(t);
+  const git = (args: string[]) => spawnSync('git', args, {cwd: worktree, encoding: 'utf8'});
+  git(['init', '-q']);
+  git(['config', 'user.email', 'test@example.test']);
+  git(['config', 'user.name', 'Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  mkdirSync(join(worktree, 'src'), {recursive: true});
+  writeFileSync(join(worktree, 'src', 'app.ts'), 'export const base = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  writeFileSync(join(worktree, 'src', 'app.ts'), 'export const resultWorktreeMarker = true;\n');
+  const result = join(root, 'result.json');
+  writeFileSync(result, JSON.stringify({
+    isolation: {mode: 'worktree', worktree},
+    executionCwd: worktree,
+    evidence: {runChangedFiles: [{path: 'src/app.ts'}]},
+  }));
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--result', result], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.match(recorder.questions(), /resultWorktreeMarker/);
+});
+
 test('a ticket draft check stores a ticket-stage finding', async () => {
   const root = seed(test);
   const draft = join(root, 'draft.md');
