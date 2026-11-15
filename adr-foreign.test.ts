@@ -120,6 +120,25 @@ test('parseForeignAdr reads a MADR Decision Outcome section as the decision', ()
   assert.equal(adr.decision, 'Chosen option: "Use the public API", because duplicate entry points drift.');
 });
 
+for (const heading of [
+  '## Decision (owner-approved 2026-08-11)',
+  '## Decision: use a queue',
+  '## Decision - use a queue',
+  '## Decision — final',
+]) {
+  test(`parseForeignAdr reads a Decision section headed ${heading}`, () => {
+    const markdown = `# 3. A decision\n\n${heading}\n\nChoose it.\n`;
+    assert.deepEqual(parseForeignAdr(markdown, 'docs/adr/0003-a-decision.md').rules, [
+      { id: 'D', text: 'Choose it.' },
+    ]);
+  });
+}
+
+test('parseForeignAdr does not read a Decision Drivers section as the decision', () => {
+  const markdown = '# 3. A decision\n\n## Decision Drivers\n\nSpeed and safety.\n';
+  assert.deepEqual(parseForeignAdr(markdown, 'docs/adr/0003-a-decision.md').rules, []);
+});
+
 test('parseForeignAdr reads a MADR Context and Problem Statement section as context', () => {
   const adr = parseForeignAdr(MADR, 'docs/adr/0001-use-the-public-api.md');
   assert.equal(adr.context, 'Callers need one supported entry point.');
@@ -127,6 +146,50 @@ test('parseForeignAdr reads a MADR Context and Problem Statement section as cont
 
 test('parseForeignAdr reads a Date line', () => {
   assert.equal(parseForeignAdr(NYGARD, 'docs/adr/0002-use-a-queue.md').date, '2024-03-04');
+});
+
+for (const dateLine of [
+  '**Date:** 2026-11-14',
+  '**Date**: 2026-11-14',
+  '- **Date:** 2026-11-14',
+  'Date: 2026-11-14',
+]) {
+  test(`parseForeignAdr reads the date from ${dateLine}`, () => {
+    const markdown = `# 3. A dated decision\n\n${dateLine}\n\n## Decision\n\nChoose it.\n`;
+    assert.equal(parseForeignAdr(markdown, 'docs/adr/0003-a-dated-decision.md').date, '2026-11-14');
+  });
+}
+
+test('parseForeignAdr keeps a longer Date value without leading emphasis', () => {
+  const markdown = [
+    '# 3. A dated decision',
+    '',
+    '**Date:** **2026-08-10 (proposed) · 2026-08-11 (accepted)**',
+    '',
+    '## Decision',
+    '',
+    'Choose it.',
+    '',
+  ].join('\n');
+  assert.equal(
+    parseForeignAdr(markdown, 'docs/adr/0003-a-dated-decision.md').date,
+    '2026-08-10 (proposed) · 2026-08-11 (accepted)',
+  );
+});
+
+test('parseForeignAdr reads a date from the status line when no Date line exists', () => {
+  const markdown = '# 3. A dated decision\n\nStatus: **Accepted** - 2024-12-19\n\n## Decision\n\nChoose it.\n';
+  assert.equal(parseForeignAdr(markdown, 'docs/adr/0003-a-dated-decision.md').date, '2024-12-19');
+});
+
+test('parseForeignAdr reads a date from the Status section when no Date line exists', () => {
+  const markdown = '# 3. A dated decision\n\n## Status\n\n**Accepted** - 2024-12-19\n\n## Decision\n\nChoose it.\n';
+  assert.equal(parseForeignAdr(markdown, 'docs/adr/0003-a-dated-decision.md').date, '2024-12-19');
+});
+
+test('parseForeignAdr leaves the date empty when no date line or status date exists', () => {
+  const markdown = '# 3. An undated decision\n\nStatus: Accepted\n\n## Decision\n\nChoose it.\n';
+  assert.equal(parseForeignAdr(markdown, 'docs/adr/0003-an-undated-decision.md').date, '');
 });
 
 test('parseForeignAdr reads a Date from MADR front matter', () => {
