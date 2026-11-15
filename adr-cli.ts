@@ -7,8 +7,8 @@
 // ---------------------------------------------------------------------------
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { adrDiscovery, adrDiscoveryMessage, runAdr } from './adr.ts';
+import { dirname, isAbsolute, join } from 'node:path';
+import { adrDiscovery, adrDiscoveryMessage, lintAdrs, runAdr } from './adr.ts';
 import {
   defaultGate,
   detectAdrDir,
@@ -42,6 +42,7 @@ import { analyze } from './matrix-analyze.ts';
 import {
   draftFrontMatter,
   hasJuniorFrontMatter,
+  loadAllAdrs,
   scopeCandidates,
   scopeRequest,
   writeProposal,
@@ -678,14 +679,25 @@ export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<
     const root = deps.cwd ?? process.cwd();
     const configured = readAdrConfig(root);
     const detection = configured ? null : detectAdrDir(root);
-    const dir = configured?.dir ?? detection?.dir;
-    return runAdr(['lint', ...rest], {
-      cwd: root,
-      ...(dir === undefined ? {} : {dir}),
-      ...(configured?.filePattern === undefined ? {} : {filePattern: configured.filePattern}),
-      stdout: out,
-      stderr: errorOutput(deps),
-    });
+    let label = configured?.dir ?? detection?.dir ?? 'docs/adr';
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === '--dir') label = rest[++i] ?? label;
+      else if (arg.startsWith('--dir=')) label = arg.slice('--dir='.length);
+    }
+    const dir = isAbsolute(label) ? label : join(root, label);
+    const config = configured?.filePattern === undefined ? undefined : {filePattern: configured.filePattern};
+    try {
+      const adrs = loadAllAdrs(dir, config);
+      const foreignPaths = new Set(adrs.filter(isForeignRecord).map((adr) => adr.path));
+      const findings = lintAdrs(adrs, {foreignPaths});
+      const discovery = adrDiscovery(dir, adrs.length, {...config, dir: label});
+      if (discovery) errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
+      out(`${JSON.stringify(discovery ? {findings, discovery} : {findings}, null, 2)}\n`);
+      return findings.some((entry) => entry.severity === 'error') ? 1 : 0;
+    } catch (err) {
+      return failure(errorOutput(deps), err instanceof Error ? err.message : String(err));
+    }
   }
   if (command === 'new' || command === 'sync') {
     return runAdr([command, ...rest]);

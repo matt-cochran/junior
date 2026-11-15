@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   become `applies_to`, and the ADR's own Decision text stays as rule `D`.
   Proposals are written under `.delivery/adr-proposals/` for review. The
   original ADR is never edited or committed.
+- **Foreign ADR lint (#229).** `junior adr lint` loads MADR/Nygard records through
+  the configured `adr.dir` and `adr.filePattern`, so `ADR-001-title.md`
+  collections lint without Junior front-matter errors while still reporting
+  duplicate ids and missing Decision rules.
 - **Inconclusive ADR checks.** An implementation check that judged nothing while
   accepted ADRs were skipped now reports `inconclusive` and exits 2 instead of
   looking clean; the message points to `junior adr scope`. A blocking

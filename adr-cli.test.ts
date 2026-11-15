@@ -337,6 +337,94 @@ test('lint includes the discovery when Markdown files hold no ADRs', async () =>
   assert.equal(JSON.parse(out.text()).discovery.markdownFiles, 1);
 });
 
+const NYGARD_ADR = [
+  '# 1. Use a queue',
+  '',
+  'Status: Accepted',
+  '',
+  '## Context',
+  '',
+  'Work arrives in bursts.',
+  '',
+  '## Decision',
+  '',
+  'We will put work on one durable queue.',
+  '',
+  '## Consequences',
+  '',
+  'Work waits instead of failing.',
+  '',
+].join('\n');
+
+function nygardLintProject(
+  t: { after(fn: () => void): void },
+  records: Array<{name: string; content: string}>,
+): string {
+  const root = project(t);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  for (const record of records) writeFileSync(join(root, 'docs', 'adr', record.name), record.content);
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify(
+      {adr: {dir: 'docs/adr', format: 'nygard', gate: 'enforce', filePattern: ADR_PREFIX_PATTERN}},
+      null,
+      2,
+    ) + '\n',
+  );
+  return root;
+}
+
+test('lint exits 0 for a well-formed Nygard ADR- collection', async () => {
+  const root = nygardLintProject(test, [{name: 'ADR-001-queue.md', content: NYGARD_ADR}]);
+  const status = await runAdrCli(['lint'], {cwd: root, stdout: capture().stdout, stderr: () => {}});
+  assert.equal(status, 0);
+});
+
+test('lint --json reports no error findings for a well-formed Nygard ADR- collection', async () => {
+  const root = nygardLintProject(test, [{name: 'ADR-001-queue.md', content: NYGARD_ADR}]);
+  const out = capture();
+  await runAdrCli(['lint', '--json'], {cwd: root, stdout: out.stdout, stderr: () => {}});
+  assert.equal(JSON.parse(out.text()).findings.filter((finding: {severity: string}) => finding.severity === 'error').length, 0);
+});
+
+test('lint reports a duplicate id across foreign records', async () => {
+  const root = nygardLintProject(test, [
+    {name: 'ADR-001-queue.md', content: NYGARD_ADR},
+    {name: 'ADR-001-topics.md', content: NYGARD_ADR.replace('# 1. Use a queue', '# 1. Use topics')},
+  ]);
+  const out = capture();
+  await runAdrCli(['lint', '--json'], {cwd: root, stdout: out.stdout, stderr: () => {}});
+  assert.equal(JSON.parse(out.text()).findings.some((finding: {code: string}) => finding.code === 'duplicate-id'), true);
+});
+
+test('lint reports missing rules for an accepted foreign record with no Decision section', async () => {
+  const root = nygardLintProject(test, [
+    {
+      name: 'ADR-002-empty.md',
+      content: [
+        '# 2. Leave it unspecified',
+        '',
+        'Status: Accepted',
+        '',
+        '## Context',
+        '',
+        'The team has not decided.',
+        '',
+        '## Consequences',
+        '',
+        'Nothing changes yet.',
+        '',
+      ].join('\n'),
+    },
+  ]);
+  const out = capture();
+  await runAdrCli(['lint', '--json'], {cwd: root, stdout: out.stdout, stderr: () => {}});
+  assert.equal(
+    JSON.parse(out.text()).findings.find((finding: {code: string}) => finding.code === 'missing-rules')?.adrId,
+    'ADR-002',
+  );
+});
+
 function scopeJudge(governed: readonly string[], confidence = 0.95): GateClassifier {
   return async ({questions}) => {
     const answers: Record<string, unknown> = {};

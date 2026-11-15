@@ -372,7 +372,10 @@ function finding(severity: AdrFindingSeverity, adrId: string | null, code: strin
 }
 
 /** All structural problems in a set of records, in a stable order. */
-export function lintAdrs(adrs: Adr[]): AdrLintFinding[] {
+export function lintAdrs(
+  adrs: Adr[],
+  options: {foreignPaths?: ReadonlySet<string>} = {},
+): AdrLintFinding[] {
   const findings: AdrLintFinding[] = [];
   const byId = new Map<string, Adr>();
   for (const adr of adrs) {
@@ -384,6 +387,7 @@ export function lintAdrs(adrs: Adr[]): AdrLintFinding[] {
   }
 
   for (const adr of adrs) {
+    const foreign = adr.path !== '' && (options.foreignPaths?.has(adr.path) ?? false);
     if (!VALID_STATUSES.has(adr.status)) {
       findings.push(finding('error', adr.id, 'invalid-status', `invalid status '${adr.status}'`));
     }
@@ -401,7 +405,7 @@ export function lintAdrs(adrs: Adr[]): AdrLintFinding[] {
       if (adr.rules.length === 0) {
         findings.push(finding('error', adr.id, 'missing-rules', `${adr.id} is accepted but has no rules`));
       }
-      if (adr.appliesTo.length === 0) {
+      if (!foreign && adr.appliesTo.length === 0) {
         findings.push(finding('error', adr.id, 'missing-applies-to', `${adr.id} is accepted but has no applies_to`));
       }
     }
