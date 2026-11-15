@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-15
+
 ### Fixed
 
 - Implementation-stage ADR checks now judge the change instead of the first 6,000
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unavailable, or a result worktree no longer exists, the check falls back to the
   file head as before. `junior adr check --stage implementation` now accepts
   `--base` and `--result` for this lookup.
+- Foreign MADR/Nygard ADRs parse real-world headings and dates: a `## Decision`
+  heading with a trailing annotation still yields rule `D`, `**Date:**` emphasis
+  is stripped from dates, and a missing Date line falls back to the first ISO
+  date in the status line or Status section.
 
 ## [0.18.1] - 2026-11-15
 
