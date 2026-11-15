@@ -77,7 +77,8 @@ function stripTitleNumber(title: string): string {
 function section(body: string, headings: readonly string[]): string {
   for (const heading of headings) {
     const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = new RegExp(`^##\\s+${escaped}\\s*:?\\s*$`, 'im').exec(body);
+    const suffix = '(?:\\s*(?:\\(|:|\u2014).*|\\s+-\\s+.*)?';
+    const match = new RegExp(`^##\\s+${escaped}${suffix}\\s*$`, 'im').exec(body);
     if (!match) continue;
     const rest = body.slice(match.index + match[0].length);
     const next = /^##\s+/m.exec(rest);
@@ -121,10 +122,33 @@ function readStatus(markdown: string, body: string, block: string | null): AdrSt
   return yaml === null ? 'proposed' : cleanStatus(yaml);
 }
 
+function cleanDateValue(raw: string): string {
+  let value = raw.replace(/^["']|["']$/g, '').trim();
+  value = value.replace(/^(?:\*\*|__|\*|_)+/, '').replace(/(?:\*\*|__|\*|_)+$/, '').trim();
+  return value.replace(/^["']|["']$/g, '').trim();
+}
+
 function readDate(body: string, block: string | null): string {
-  const line = /^\s*(?:[-*]\s*)?(?:\*\*)?Date(?:\*\*)?\s*:\s*(.+?)\s*$/im.exec(body);
-  if (line) return line[1].replace(/^["']|["']$/g, '').trim();
-  return block === null ? '' : frontMatterValue(block, 'date') ?? '';
+  const line = /^\s*(?:[-*]\s*)?(?:\*\*|__|\*|_)?Date(?:\*\*|__|\*|_)?\s*:\s*(?:\*\*|__|\*|_)?\s*(.+?)\s*$/im.exec(body);
+  if (line) return cleanDateValue(line[1]);
+  const yaml = block === null ? null : frontMatterValue(block, 'date');
+  if (yaml !== null) return cleanDateValue(yaml);
+
+  const status = bodyStatus(body);
+  if (status !== null) {
+    const iso = /\b(\d{4}-\d{2}-\d{2})\b/.exec(status);
+    if (iso) return iso[1];
+  }
+
+  const heading = /^##\s+Status(?:\s*:\s*(.*))?\s*$/im.exec(body);
+  if (heading) {
+    const rest = body.slice(heading.index + heading[0].length);
+    const next = /^##\s+/m.exec(rest);
+    const statusSection = heading[1]?.trim() || (next ? rest.slice(0, next.index) : rest);
+    const iso = /\b(\d{4}-\d{2}-\d{2})\b/.exec(statusSection);
+    if (iso) return iso[1];
+  }
+  return '';
 }
 
 function collapse(text: string, maximum = MAX_RULE_CHARS): string {

@@ -14,6 +14,9 @@ import type { AdrConfig } from './adr-config.ts';
 import type { GateClassifier } from './worker.ts';
 import type { Ticket, TicketAdapter } from './tickets.ts';
 import {
+  CHANGED_FILE_TEXT_LIMIT,
+  boundedDiff,
+  changedFileDiff,
   designGate,
   implementationGate,
   loadGateAdrs,
@@ -207,6 +210,75 @@ test('loadGateAdrs reads a MADR record from the configured directory', (t) => {
 });
 
 // --- implementationGate ----------------------------------------------------
+
+function longSource(markerAtHead: string, markerAtLine292: string): string {
+  return Array.from({length: 320}, (_, index) => {
+    if (index === 0) return `export const head = '${markerAtHead}';`;
+    if (index === 291) return `export const deep = '${markerAtLine292}';`;
+    return `export const line${index + 1} = ${index + 1};`;
+  }).join('\n') + '\n';
+}
+
+function adrGitProject(t: { after(fn: () => void): void }): {root: string; git: (args: string[]) => any} {
+  const repo = gitRepo();
+  t.after(() => rmSync(repo.dir, {recursive: true, force: true}));
+  mkdirSync(join(repo.dir, 'docs', 'adr'), {recursive: true});
+  mkdirSync(join(repo.dir, 'src'), {recursive: true});
+  commitFile(repo, 'delivery.config.json', JSON.stringify({adr: {dir: 'docs/adr', format: 'junior', gate: 'enforce'}}));
+  commitFile(repo, 'docs/adr/0001-src.md', adrMarkdown());
+  return {root: repo.dir, git: repo.git};
+}
+
+test('implementationGate sends a change deep in a long file to the classifier', async (t) => {
+  const {root, git} = adrGitProject(t);
+  commitFile({dir: root, git}, 'src/long.ts', longSource('old-head', 'old-deep'));
+  writeFileSync(join(root, 'src', 'long.ts'), longSource('old-head', 'deep-change-marker'));
+  const {classify, calls} = fakeGateClassifier('conforms');
+  await implementationGate({cwd: root, changedFiles: ['src/long.ts'], classify});
+  assert.match(JSON.stringify(calls), /deep-change-marker/);
+});
+
+test('implementationGate leaves unchanged code beyond the diff context out of the subject', async (t) => {
+  const {root, git} = adrGitProject(t);
+  commitFile({dir: root, git}, 'src/long.ts', longSource('old-head-marker', 'old-deep'));
+  writeFileSync(join(root, 'src', 'long.ts'), longSource('old-head-marker', 'deep-change-marker'));
+  const {classify, calls} = fakeGateClassifier('conforms');
+  await implementationGate({cwd: root, changedFiles: ['src/long.ts'], classify});
+  assert.doesNotMatch(JSON.stringify(calls), /old-head-marker/);
+});
+
+test('changedFileDiff sends an untracked new file whole with a new file prefix', (t) => {
+  const {root} = adrGitProject(t);
+  writeFileSync(join(root, 'src', 'new.ts'), 'export const fresh = true;\n');
+  assert.equal(changedFileDiff(root, 'src/new.ts', 'HEAD'), 'new file src/new.ts\nexport const fresh = true;\n');
+});
+
+test('an oversized diff is truncated at a hunk boundary with a marker', (t) => {
+  const {root, git} = adrGitProject(t);
+  const base = Array.from({length: 500}, (_, index) => `export const v${index} = ${index};`).join('\n') + '\n';
+  commitFile({dir: root, git}, 'src/wide.ts', base);
+  const changed = Array.from({length: 500}, (_, index) => index % 40 === 0 ? `export const v${index} = 'changed-${index}';` : `export const v${index} = ${index};`).join('\n') + '\n';
+  writeFileSync(join(root, 'src', 'wide.ts'), changed);
+  assert.match(boundedDiff(changedFileDiff(root, 'src/wide.ts', 'HEAD') ?? ''), /\[truncated: \d+ more hunks\]$/);
+});
+
+test('a bounded oversized diff stays within the subject limit', (t) => {
+  const {root, git} = adrGitProject(t);
+  const base = Array.from({length: 500}, (_, index) => `export const v${index} = ${index};`).join('\n') + '\n';
+  commitFile({dir: root, git}, 'src/wide.ts', base);
+  const changed = Array.from({length: 500}, (_, index) => index % 40 === 0 ? `export const v${index} = 'changed-${index}';` : `export const v${index} = ${index};`).join('\n') + '\n';
+  writeFileSync(join(root, 'src', 'wide.ts'), changed);
+  assert.ok(boundedDiff(changedFileDiff(root, 'src/wide.ts', 'HEAD') ?? '').length <= CHANGED_FILE_TEXT_LIMIT);
+});
+
+test('implementationGate falls back to the file head when git is unavailable', async (t) => {
+  const root = adrProject(t);
+  mkdirSync(join(root, 'src'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const fallbackHeadMarker = true;\n');
+  const {classify, calls} = fakeGateClassifier('conforms');
+  await implementationGate({cwd: root, changedFiles: ['src/app.ts'], classify});
+  assert.match(JSON.stringify(calls), /fallbackHeadMarker/);
+});
 
 test('implementationGate returns an empty outcome when there are no changed files', async (t) => {
   const root = adrProject(t);
