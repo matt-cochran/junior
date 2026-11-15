@@ -327,23 +327,30 @@ function proposalNumber(adr: Adr): string {
   throw new Error(`cannot build a proposal path for ADR id: ${adr.id}`);
 }
 
+function yamlScalar(value: string): string {
+  return JSON.stringify(value);
+}
+
 function yamlList(key: string, values: readonly string[]): string[] {
   if (values.length === 0) return [`${key}: []`];
-  return [`${key}:`, ...values.map((value) => `  - ${value}`)];
+  return [`${key}:`, ...values.map((value) => `  - ${yamlScalar(value)}`)];
 }
 
 function proposalFrontMatter(adr: Adr, appliesTo: readonly string[], rules: readonly AdrRule[]): string {
   const lines = [
     '---',
-    `id: ${adr.id}`,
-    `title: ${adr.title}`,
-    `status: ${adr.status}`,
-    `date: ${adr.date}`,
+    `id: ${yamlScalar(adr.id)}`,
+    `title: ${yamlScalar(adr.title)}`,
+    `status: ${yamlScalar(adr.status)}`,
+    `date: ${yamlScalar(adr.date)}`,
     'supersedes: []',
     ...yamlList('applies_to', appliesTo),
     ...(rules.length === 0
       ? ['rules: []']
-      : ['rules:', ...rules.flatMap((rule) => [`  - id: ${rule.id}`, `    text: ${rule.text}`])]),
+      : [
+          'rules:',
+          ...rules.flatMap((rule) => [`  - id: ${yamlScalar(rule.id)}`, `    text: ${yamlScalar(rule.text)}`]),
+        ]),
     '---',
     '',
   ];
