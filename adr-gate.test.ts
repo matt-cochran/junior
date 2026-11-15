@@ -456,3 +456,46 @@ test('An uncertain finding blocks enforce when flagUncertain is true', async (t)
   const result = await run(root, {...config, flagUncertain: true}, classify);
   assert.equal(result.blocked, true);
 });
+
+// --- inconclusive implementation checks (ADR 0018 R9) ----------------------
+
+function unscopedAdr(): Adr {
+  return {
+    id: 'ADR-0003',
+    number: 3,
+    title: 'A foreign record',
+    status: 'accepted',
+    date: '2024-03-04',
+    supersedes: [],
+    appliesTo: [],
+    rules: [{id: 'D', text: 'Use one durable queue.'}],
+    context: 'Work arrives in bursts.',
+    decision: 'Use one durable queue.',
+    consequences: '',
+    path: '',
+  };
+}
+
+test('a gate that checked nothing while skipping accepted ADRs is inconclusive', async (t) => {
+  const {root, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {
+    adrs: [unscopedAdr()],
+    subjects: [{target: 'implementation: change', files: ['src/a.ts']}],
+  });
+  assert.equal(result.inconclusive, true);
+});
+
+test('an inconclusive gate reason points at junior adr scope', async (t) => {
+  const {root, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {
+    adrs: [unscopedAdr()],
+    subjects: [{target: 'implementation: change', files: ['src/a.ts']}],
+  });
+  assert.match(result.inconclusiveReason ?? '', /junior adr scope/);
+});
+
+test('a gate that checked a rule is not inconclusive', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {adrs});
+  assert.equal(result.inconclusive, false);
+});

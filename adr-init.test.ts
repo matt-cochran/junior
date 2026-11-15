@@ -195,3 +195,16 @@ test('initAdrs scopes the record decision to a custom directory', (t) => {
   initAdrs(root, { dir: 'decisions', withRecordDecision: true, date: '2026-11-14' });
   assert.match(readFileSync(join(root, 'decisions/0001-record-architecture-decisions.md'), 'utf8'), /applies_to: \['decisions\/\*\*'\]/);
 });
+
+test('initAdrs proposes the ADR prefix pattern for ADR-named records', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-001-existing.md', EXISTING_ADR);
+  assert.equal(initAdrs(root).config.filePattern, '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$');
+});
+
+test('initAdrs lists ADR-named records using the proposed pattern', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-001-existing.md', EXISTING_ADR);
+  initAdrs(root);
+  assert.match(readme(root), /ADR-001-existing\.md/);
+});
