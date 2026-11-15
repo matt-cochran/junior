@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-15
+
 ### Fixed
 
 - `junior adr scope` writes every proposal front-matter string as a YAML
