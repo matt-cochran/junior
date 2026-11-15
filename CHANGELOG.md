@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Implementation-stage ADR checks now judge the change instead of the first 6,000
+  characters of each changed file. Each path is sent as a unified diff (with 15
+  lines of context) against the merge base, or against `HEAD` in a handoff
+  worktree; Jev is told to judge only added or changed lines. Untracked new files
+  are sent whole with a `new file <path>` label, and oversized diffs keep whole
+  hunks up to the limit with a `[truncated: <n> more hunks]` marker. When git is
+  unavailable, or a result worktree no longer exists, the check falls back to the
+  file head as before. `junior adr check --stage implementation` now accepts
+  `--base` and `--result` for this lookup.
+
 ## [0.18.1] - 2026-11-15
 
 ### Fixed

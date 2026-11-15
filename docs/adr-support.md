@@ -71,12 +71,19 @@ original ADR itself.
 | Before accepting a design, plan or brief | `junior adr check --stage design --input <file>` |
 | Before filing a ticket | `junior adr check --stage ticket --draft <file>` |
 | Before starting work on a ticket | `junior adr check --stage ticket --ticket <id>` |
-| Before opening a pull request | `junior adr check --stage implementation` |
+| Before opening a pull request | `junior adr check --stage implementation [--base <ref>] [--result <result.json>]` |
 | Across open tickets (read-only report) | `junior adr check-tickets` |
 
 Junior also runs the gate automatically in two places. A prepare brief gates every option, and an option
 with uncleared findings cannot be chosen. A code handoff gates its changed files before it is ready for
 review.
+
+An implementation check judges the change, not the head of the file. Each changed path is sent to Jev as a
+unified diff against the base (or against `HEAD` in a handoff worktree), with enough surrounding context to
+read the change. Jev is asked to judge only the added or changed lines; unchanged context is reference
+only. A new untracked file is sent whole with a `new file <path>` label so it is still checked. Large diffs
+keep whole hunks up to the subject limit and end with a `[truncated: <n> more hunks]` marker. When git is
+unavailable, or a recorded result worktree is gone, the check falls back to the file head as before.
 
 `junior init` and `junior update` write these checkpoints into a managed `<junior>…</junior>` block in
 `CLAUDE.md` (Claude Code) and `AGENTS.md` (Codex and Cursor), so the agents you use know to run them. Junior

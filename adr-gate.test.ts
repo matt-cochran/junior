@@ -163,6 +163,15 @@ test('an ADR is skipped for a subject whose files match none of its applies_to e
   assert.deepEqual(result.skipped, ['ADR-0002']);
 });
 
+test('a diff subject asks the classifier to judge only added or changed lines', async (t) => {
+  const {root, config} = seed(t);
+  const {classify, calls} = fakeClassifier();
+  await run(root, config, classify, {
+    subjects: [{target: 'src/a.ts', files: ['src/a.ts'], text: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n', kind: 'diff'}],
+  });
+  assert.match(calls.flat().map((question) => question.instructions).join('\n'), /Judge only the added or changed lines/);
+});
+
 test('a subject without files is checked against every accepted ADR', async (t) => {
   const {root, adrs, config} = seed(t);
   const result = await run(root, config, fakeClassifier().classify, {adrs});
