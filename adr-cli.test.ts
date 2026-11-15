@@ -723,6 +723,114 @@ test('scope replays an identical sample sequence to an identical proposal file',
   );
 });
 
+function scopeByCandidate(
+  choiceFor: (candidate: string, call: number) => 'yes' | 'no',
+  asked: string[] = [],
+): GateClassifier {
+  let call = 0;
+  return async ({questions}) => {
+    call += 1;
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(questions)) {
+      const candidate = /^cell:(.+):governs$/.exec(id)?.[1] ?? '';
+      if (!asked.includes(candidate)) asked.push(candidate);
+      answers[id] = {type: 'choice', choice: choiceFor(candidate, call), confidence: 0.95};
+    }
+    return {answers};
+  };
+}
+
+test('scope does not ask the classifier about children of a majority parent', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'src/nested/app.ts']);
+  const asked: string[] = [];
+  await runAdrCli(['scope'], {
+    cwd: root,
+    classify: scopeByCandidate(() => 'yes', asked),
+    stdout: capture().stdout,
+  });
+  assert.equal(asked.includes('src/nested/**'), false);
+});
+
+test('scope asks the classifier about children of an uncertain parent', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'src/nested/app.ts']);
+  const asked: string[] = [];
+  await runAdrCli(['scope'], {
+    cwd: root,
+    classify: scopeByCandidate(
+      (candidate, call) => (candidate === 'src/**' ? (call === 1 ? 'yes' : 'no') : 'yes'),
+      asked,
+    ),
+    stdout: capture().stdout,
+  });
+  assert.equal(asked.includes('src/nested/**'), true);
+});
+
+test('scope reproduces the first proposal when a later classifier answers the opposite', async () => {
+  const root = foreignProject(test);
+  const first = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge(['src/**']), stdout: first.stdout});
+  const second = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge([]), stdout: second.stdout});
+  assert.deepEqual(JSON.parse(second.text()).proposals, JSON.parse(first.text()).proposals);
+});
+
+test('scope reproduces the first skipped reason when a later classifier answers the opposite', async () => {
+  const root = foreignProject(test);
+  const first = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge([]), stdout: first.stdout});
+  const second = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scopeJudge(['src/**']), stdout: second.stdout});
+  assert.deepEqual(JSON.parse(second.text()).skipped, JSON.parse(first.text()).skipped);
+});
+
+test('scope re-judges an ADR whose text changed', async () => {
+  const root = foreignProject(test);
+  const path = join(root, 'docs', 'adr', '0002-queue.md');
+  await runAdrCli(['scope', '--samples', '1'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
+  writeFileSync(path, `${FOREIGN}\nA revised decision.\n`);
+  const asked: string[] = [];
+  await runAdrCli(['scope', '--samples', '1'], {
+    cwd: root,
+    classify: scopeByCandidate(() => 'yes', asked),
+    stdout: capture().stdout,
+  });
+  assert.deepEqual(asked, ['src/**']);
+});
+
+test('scope --fresh re-judges a cached answer', async () => {
+  const root = foreignProject(test);
+  await runAdrCli(['scope', '--samples', '1'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
+  const asked: string[] = [];
+  await runAdrCli(['scope', '--samples', '1', '--fresh'], {
+    cwd: root,
+    classify: scopeByCandidate(() => 'yes', asked),
+    stdout: capture().stdout,
+  });
+  assert.deepEqual(asked, ['src/**']);
+});
+
+test('scope reports how many sample answers came from the judgment cache', async () => {
+  const root = foreignProject(test);
+  await runAdrCli(['scope', '--samples', '1'], {cwd: root, classify: scopeJudge(['src/**']), stdout: capture().stdout});
+  const out = capture();
+  await runAdrCli(['scope', '--samples', '1', '--json'], {cwd: root, classify: scopeJudge([]), stdout: out.stdout});
+  assert.deepEqual(
+    {judged: JSON.parse(out.text()).judged, cached: JSON.parse(out.text()).cached},
+    {judged: 0, cached: 1},
+  );
+});
+
+test('scope writes the judgment cache with sorted JSON keys', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'docs/guide.md']);
+  await runAdrCli(['scope', '--samples', '1'], {
+    cwd: root,
+    classify: scopeJudge(['src/**', 'docs/**']),
+    stdout: capture().stdout,
+  });
+  const keys = Object.keys(JSON.parse(readFileSync(join(root, '.delivery', 'adr-scope-cache.json'), 'utf8')));
+  assert.deepEqual(keys, [...keys].sort());
+});
+
 function scoping(confidence = 0.95): GateClassifier {
   return async ({questions}) => {
     const answers: Record<string, unknown> = {};

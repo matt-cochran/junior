@@ -323,6 +323,59 @@ export function scopeRequest(adr: Adr, candidates: readonly string[]): AnalysisI
   };
 }
 
+const SCOPE_CACHE = '.delivery/adr-scope-cache.json';
+
+/** One cached `governs` answer for a scope judgment (ADR 0018 R9). */
+export type AdrScopeCacheEntry = Record<string, unknown>;
+export type AdrScopeCache = Record<string, AdrScopeCacheEntry>;
+
+/** The cache path is always under `.delivery/`; it never names an ADR file. */
+export function scopeCachePath(root: string): string {
+  return join(root, SCOPE_CACHE);
+}
+
+/** Cache identity: ADR text hash, candidate, criterion, sample and model. */
+export function scopeCacheKey(input: {
+  adrHash: string;
+  candidate: string;
+  sample: number;
+  model: string;
+}): string {
+  return JSON.stringify([input.adrHash, input.candidate, 'governs', input.sample, input.model]);
+}
+
+/** Read the judgment cache; a missing or malformed file is an empty cache. */
+export function readScopeCache(root: string): AdrScopeCache {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(scopeCachePath(root), 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const cache: AdrScopeCache = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        cache[key] = value as AdrScopeCacheEntry;
+      }
+    }
+    return cache;
+  } catch {
+    return {};
+  }
+}
+
+/** Write the cache with sorted keys through a temp file and rename. */
+export function writeScopeCache(root: string, cache: AdrScopeCache): string {
+  const path = scopeCachePath(root);
+  const sorted = Object.fromEntries(
+    Object.keys(cache)
+      .sort()
+      .map((key) => [key, cache[key]]),
+  );
+  fs.mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(sorted, null, 2)}\n`);
+  fs.renameSync(temporary, path);
+  return path;
+}
+
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => String(entry).trim()).filter((entry) => entry.length > 0) : [];
 }

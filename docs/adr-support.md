@@ -50,17 +50,31 @@ junior adr scope                          # every accepted foreign ADR
 junior adr scope --adr ADR-0007           # only named ADRs
 junior adr scope --max-candidates 50      # judge fewer candidate path globs
 junior adr scope --samples 5              # majority vote over five judgments (default 3)
+junior adr scope --fresh                  # ignore the judgment cache for this run
 junior adr scope --json                   # proposals and skipped ADRs as JSON
 ```
 
 Junior lists candidate globs (`<dir>/**` for tracked directories at depth 1 to 3) from `git ls-files`, then
-asks Jev a yes/no judgment for each (ADR, candidate) pair: does this decision govern files under that path?
-Jev has no temperature or seed, so the gateway can answer differently between runs. Junior therefore asks
-each pair `--samples <k>` times (an odd number from 1 to 7; default 3) and takes a majority vote. A candidate
-needs more than `k/2` confident yeses to become `applies_to`; the kept paths are then reduced so a nested glob
-is dropped when its parent is already kept (`a/**` drops `a/b/**`). With `--samples 1` the result is the
-single-run judgment. The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or rules
-itself. `--max-candidates` caps the candidate list (default 150).
+judges them level by level: all depth-1 candidates first, then deeper candidates only when no kept ancestor
+covers them. A depth-n+1 candidate is judged only when its depth-n parent did not reach a majority; children
+of a majority parent are neither judged nor proposed. The final `applies_to` is the majority candidates, and
+the nested-glob reduction stays as a safety net (`a/**` drops `a/b/**`). `--max-candidates` still caps the
+total number of candidates judged per ADR (default 150).
+
+For each candidate Junior asks Jev a yes/no judgment: does this decision govern files under that path? Jev has
+no temperature or seed, so the gateway can answer differently between runs. Junior therefore asks each pair
+`--samples <k>` times (an odd number from 1 to 7; default 3) and takes a majority vote. A candidate needs more
+than `k/2` confident yeses to become `applies_to`. With `--samples 1` the result is the single-run judgment.
+The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or rules itself.
+
+Each sample answer is cached in `.delivery/adr-scope-cache.json` under the ADR text hash, candidate path,
+criterion, sample index and classifier model. A later run with the same inputs reuses the cached answer and
+makes no classifier call for it, so two runs write the same proposal even if the gateway would answer
+differently the second time. An edited ADR has a new hash and is judged again. The file is one JSON object
+with sorted keys, written atomically through a temp file and rename; it stores answers only, never ADR text or
+credentials. `--fresh` ignores the cache for that run, overwrites the entries it re-judges and keeps other
+entries. Both outputs report the run's `judged: <n>, cached: <m>` counts; `--json` adds top-level `judged` and
+`cached` fields.
 
 A path with at least one yes vote but no majority is **uncertain**. It never enters `applies_to`, but it is
 reported instead of silently disappearing: `--json` adds `uncertain` and per-path vote counts to each
