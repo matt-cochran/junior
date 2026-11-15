@@ -346,6 +346,78 @@ test('draftFrontMatter keeps the original document after its new front matter', 
   assert.equal(draft.markdown.endsWith(NYGARD), true);
 });
 
+// --- YAML front matter round trip -------------------------------------------
+
+function proposalRoundTrip(t: any, markdown: string, ruleText: string) {
+  const root = project(t);
+  const source = foreignFile(root, 'foreign/0001-source.md', markdown);
+  const adr = parseForeignAdr(markdown, source);
+  const draft = draftFrontMatter(adr, { appliesTo: ['src/**'], rules: [{ id: 'R1', text: ruleText }] });
+  writeFileSync(join(root, '0002-front-matter.md'), draft.markdown);
+  return loadAllAdrs(root)[0];
+}
+
+const SPECIAL_TITLE = ['# 2. Choose a: title', '', '## Decision', '', 'Choose it.', ''].join('\n');
+
+test('draftFrontMatter round-trips a title containing a colon', (t) => {
+  const loaded = proposalRoundTrip(t, SPECIAL_TITLE, 'Choose it.');
+  assert.equal(loaded.title, 'Choose a: title');
+});
+
+test('draftFrontMatter round-trips rule text with Markdown, quotes and backslashes', (t) => {
+  const ruleText = '**We will use "one" # queue at C:\\temp\\path**';
+  const loaded = proposalRoundTrip(t, SPECIAL_TITLE, ruleText);
+  assert.equal(loaded.rules[0].text, ruleText);
+});
+
+test('draftFrontMatter round-trips id, title, status, applies_to and rule text', (t) => {
+  const markdown = ['# 2. Choose a: title', '', 'Status: Accepted', '', '## Decision', '', 'Choose it.', ''].join('\n');
+  const ruleText = '**We will use "one" # queue at C:\\temp\\path**';
+  const loaded = proposalRoundTrip(t, markdown, ruleText);
+  assert.deepEqual(
+    { id: loaded.id, title: loaded.title, status: loaded.status, date: loaded.date, appliesTo: loaded.appliesTo, rules: loaded.rules },
+    { id: 'ADR-0001', title: 'Choose a: title', status: 'accepted', date: '', appliesTo: ['src/**'], rules: [{ id: 'R1', text: ruleText }] },
+  );
+});
+
+test('draftFrontMatter writes an empty date as a quoted scalar', (t) => {
+  const root = project(t);
+  const markdown = '# 3. No date\n\n## Decision\n\nChoose it.\n';
+  const adr = parseForeignAdr(markdown, foreignFile(root, '0001-source.md', markdown));
+  assert.match(draftFrontMatter(adr, { appliesTo: [], rules: [] }).markdown, /^date: ""$/m);
+});
+
+test('draftFrontMatter quotes every applies_to entry', (t) => {
+  const root = project(t);
+  const adr = parseForeignAdr(NYGARD, foreignFile(root, '0001-source.md', NYGARD));
+  const draft = draftFrontMatter(adr, { appliesTo: ['src/**', 'docs/*.md'], rules: [] });
+  assert.deepEqual(
+    draft.markdown.split(/\r?\n/).filter((line) => line.startsWith('  - ')).map((line) => line.slice(4)),
+    ['"src/**"', '"docs/*.md"'],
+  );
+});
+
+test('draftFrontMatter leaves empty supersedes and rules as inline empty sequences', (t) => {
+  const root = project(t);
+  const adr = parseForeignAdr(NYGARD, foreignFile(root, '0001-source.md', NYGARD));
+  const draft = draftFrontMatter(adr, { appliesTo: [], rules: [] });
+  assert.deepEqual(draft.markdown.match(/^(?:supersedes|rules): \[\]$/gm), ['supersedes: []', 'rules: []']);
+});
+
+test('draftFrontMatter leaves no unquoted string scalar in its front matter', (t) => {
+  const root = project(t);
+  const adr = parseForeignAdr(SPECIAL_TITLE, foreignFile(root, '0001-source.md', SPECIAL_TITLE));
+  const draft = draftFrontMatter(adr, {
+    appliesTo: ['src/**'],
+    rules: [{ id: 'R1', text: '**Use "one" # queue at C:\\temp\\path**' }],
+  });
+  const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(draft.markdown)?.[1] ?? '';
+  const unquoted = block.split(/\r?\n/).filter((line) =>
+    /^\s*(?:-\s*)?(?:id|title|status|date|text):\s*(?![ \t]*"(?:[^"\\]|\\.)*"[ \t]*$).+/.test(line),
+  );
+  assert.deepEqual(unquoted, []);
+});
+
 // --- writing the proposal --------------------------------------------------
 
 test('writeProposal writes the draft under .delivery/adr-proposals', (t) => {
