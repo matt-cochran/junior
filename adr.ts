@@ -198,6 +198,8 @@ export interface AdrCheckResult {
 export interface AdrCheckOptions {
   /** Directory holding the `NNNN-*.md` ADR files. */
   dir: string;
+  /** File-name pattern override; detected from the directory when omitted. */
+  filePattern?: string;
   changedFiles?: readonly string[];
   resultPath?: string;
   hopPath?: string;
@@ -327,30 +329,35 @@ function stringList(value: unknown): string[] {
 
 /** Parse one MADR document. Throws when the front matter is malformed. */
 export function parseAdr(markdown: string, path = ''): Adr {
-  const { data, body } = parseFrontMatter(markdown);
-  const id = String(data.id ?? '').trim();
-  if (!id) throw new Error('ADR front matter requires an id');
-  const idMatch = ADR_ID_PATTERN.exec(id);
-  const rules = Array.isArray(data.rules)
-    ? (data.rules as Array<Record<string, unknown>>).map((rule) => ({
-        id: String(rule.id ?? '').trim(),
-        text: String(rule.text ?? '').trim(),
-      }))
-    : [];
-  return {
-    id,
-    number: idMatch ? Number(idMatch[1]) : Number.NaN,
-    title: String(data.title ?? '').trim(),
-    status: String(data.status ?? 'proposed').trim() as AdrStatus,
-    date: String(data.date ?? '').trim(),
-    supersedes: stringList(data.supersedes),
-    appliesTo: stringList(data.applies_to),
-    rules,
-    context: bodySection(body, 'Context'),
-    decision: bodySection(body, 'Decision'),
-    consequences: bodySection(body, 'Consequences'),
-    path,
-  };
+  try {
+    const { data, body } = parseFrontMatter(markdown);
+    const id = String(data.id ?? '').trim();
+    if (!id) throw new Error('ADR front matter requires an id');
+    const idMatch = ADR_ID_PATTERN.exec(id);
+    const rules = Array.isArray(data.rules)
+      ? (data.rules as Array<Record<string, unknown>>).map((rule) => ({
+          id: String(rule.id ?? '').trim(),
+          text: String(rule.text ?? '').trim(),
+        }))
+      : [];
+    return {
+      id,
+      number: idMatch ? Number(idMatch[1]) : Number.NaN,
+      title: String(data.title ?? '').trim(),
+      status: String(data.status ?? 'proposed').trim() as AdrStatus,
+      date: String(data.date ?? '').trim(),
+      supersedes: stringList(data.supersedes),
+      appliesTo: stringList(data.applies_to),
+      rules,
+      context: bodySection(body, 'Context'),
+      decision: bodySection(body, 'Decision'),
+      consequences: bodySection(body, 'Consequences'),
+      path,
+    };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(path ? `${path}: ${reason}` : reason);
+  }
 }
 
 /** Load and number-sort every record matching the configured pattern. */
@@ -705,6 +712,20 @@ function makeFinding(kind: QcFinding['kind'], action: QcFinding['suggestedAction
 }
 
 /**
+ * Read one ADR folder without requiring front matter in every file. The two
+ * imports are dynamic so `adr.ts` and `adr-foreign.ts` never depend on each
+ * other's exports at module initialisation.
+ */
+async function loadAllRecords(dir: string, filePattern?: string): Promise<Adr[]> {
+  const [{loadAllAdrs}, {detectFilePattern}] = await Promise.all([
+    import('./adr-foreign.ts'),
+    import('./adr-config.ts'),
+  ]);
+  const pattern = filePattern ?? detectFilePattern(dir);
+  return loadAllAdrs(dir, pattern === undefined ? undefined : {filePattern: pattern});
+}
+
+/**
  * Score every scoped (rule, code member) pair and turn contradictions and
  * low-confidence cells into review-queue findings. Nothing is written unless
  * `record` is set.
@@ -712,7 +733,7 @@ function makeFinding(kind: QcFinding['kind'], action: QcFinding['suggestedAction
 export async function adrCheck(options: AdrCheckOptions): Promise<AdrCheckResult> {
   const call = options.deps?.callHop ?? callHop;
   const load = options.deps?.loadHop ?? loadHop;
-  const adrs = loadAdrs(options.dir).filter((adr) => adr.status === 'accepted');
+  const adrs = (await loadAllRecords(options.dir, options.filePattern)).filter((adr) => adr.status === 'accepted');
 
   let changed: string[] | null = options.changedFiles ? [...options.changedFiles].map(normalizePath) : null;
   if (!changed && options.resultPath) changed = changedFilesFromResult(options.resultPath);
@@ -808,12 +829,14 @@ export interface AdrSyncOptions {
   hopPath: string;
   modelId: string;
   dir: string;
+  /** File-name pattern override; detected from the directory when omitted. */
+  filePattern?: string;
   deps?: AdrDeps;
 }
 
 /** Publish accepted ADR rules as an `adr` dimension. */
 export async function adrSync(options: AdrSyncOptions): Promise<SyncDimensionsResult> {
-  const adrs = loadAdrs(options.dir);
+  const adrs = await loadAllRecords(options.dir, options.filePattern);
   return syncDimensions({
     hopPath: options.hopPath,
     modelId: options.modelId,
@@ -972,7 +995,7 @@ export interface RunAdrOptions {
   stderr?: (s: string) => void;
 }
 
-function runAdrLint(argv: string[], options: RunAdrOptions = {}): number {
+async function runAdrLint(argv: string[], options: RunAdrOptions = {}): Promise<number> {
   const cwd = options.cwd ?? process.cwd();
   let label = options.dir ?? 'docs/adr';
   for (let i = 0; i < argv.length; i++) {
@@ -981,8 +1004,8 @@ function runAdrLint(argv: string[], options: RunAdrOptions = {}): number {
     else if (arg.startsWith('--dir=')) label = arg.slice('--dir='.length);
   }
   const dir = isAbsolute(label) ? label : join(cwd, label);
+  const adrs = await loadAllRecords(dir, options.filePattern);
   const config = options.filePattern === undefined ? undefined : {filePattern: options.filePattern};
-  const adrs = loadAdrs(dir, config);
   const findings = lintAdrs(adrs);
   const discovery = adrDiscovery(dir, adrs.length, {...config, dir: label});
   if (discovery) (options.stderr ?? ((s) => process.stderr.write(s)))(`${adrDiscoveryMessage(discovery, config)}\n`);
@@ -1081,7 +1104,7 @@ export async function runAdr(argv: string[], options: RunAdrOptions = {}): Promi
   const subcommand = argv[0];
   try {
     if (subcommand === 'new') return await runAdrNew(argv.slice(1));
-    if (subcommand === 'lint') return runAdrLint(argv.slice(1), options);
+    if (subcommand === 'lint') return await runAdrLint(argv.slice(1), options);
     if (subcommand === 'sync') return await runAdrSync(argv.slice(1));
     if (subcommand === 'check') return await runAdrCheck(argv.slice(1));
     process.stderr.write(`${ADR_USAGE}\n`);

@@ -14,7 +14,8 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
-import { loadAdrs, type Adr, type AdrDeps } from './adr.ts';
+import { type Adr, type AdrDeps } from './adr.ts';
+import { loadAllAdrs } from './adr-foreign.ts';
 import type { AdrConfig } from './adr-config.ts';
 import { renderGateMarkdown, runAdrGate, type AdrGateResult } from './adr-gate.ts';
 import { adrContentHash, LEDGER_PATH } from './adr-ledger.ts';
@@ -138,7 +139,7 @@ function ticketText(ticket: Ticket, patterns: readonly string[]): string {
 }
 
 function acceptedAdrs(opts: CheckTicketOptions): Adr[] {
-  const all = opts.adrs ?? loadAdrs(join(opts.root, opts.config.dir), opts.config);
+  const all = opts.adrs ?? loadAllAdrs(join(opts.root, opts.config.dir), opts.config);
   return all.filter((adr) => adr.status === 'accepted');
 }
 

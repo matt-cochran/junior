@@ -109,6 +109,13 @@ function fakeDeps(writes: any[]) {
 
 // --- parsing and lint -------------------------------------------------------
 
+test('parseAdr names the record path when the front matter is missing', () => {
+  assert.throws(
+    () => parseAdr('# No front matter', 'docs/adr/0001-broken.md'),
+    /docs\/adr\/0001-broken\.md: ADR is missing YAML front matter/,
+  );
+});
+
 test('parseAdr unescapes a JSON double-quoted title', () => {
   const title = 'Use "one" queue at C:\\temp';
   const markdown = madr().replace('title: A decision', `title: ${JSON.stringify(title)}`);

@@ -18,7 +18,7 @@ import {
   ADR_PREFIX_FILE_PATTERN,
   adrFilePattern,
   adrIdFromFileName,
-  loadAdrs,
+  parseAdr,
 } from './adr.ts';
 
 export { adrFilePattern, adrIdFromFileName } from './adr.ts';
@@ -215,19 +215,24 @@ function statusSaysAccepted(content: string): boolean {
 
 /**
  * `enforce` when the collection already contains an accepted decision, else
- * `off`. Junior records go through `loadAdrs`; MADR/Nygard records are read by
- * their status line or Status section because they have no Junior front matter.
+ * `off`. Each record is read by its own format: Junior front matter through
+ * `parseAdr`, MADR/Nygard through their status line or Status section, so a
+ * mixed folder never goes through the strict `loadAdrs` loader.
  */
 export function defaultGate(dir: string, config?: AdrPatternConfig): AdrGate {
-  const format = detectAdrFormat(dir, config);
-  if (format === 'junior') {
-    return loadAdrs(dir, config).some((adr) => adr.status === 'accepted') ? 'enforce' : 'off';
-  }
-  return adrFiles(dir, config)
-    .some((name) => {
-      const content = readIfPresent(join(dir, name));
-      return content !== null && statusSaysAccepted(content);
-    })
+  return adrFiles(dir, config).some((name) => {
+    const content = readIfPresent(join(dir, name));
+    if (content === null) return false;
+    const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+    if (front && /^\s*id\s*:\s*["']?ADR-\d+[a-z]?["']?\s*$/m.test(front[1])) {
+      try {
+        return parseAdr(content).status === 'accepted';
+      } catch {
+        return statusSaysAccepted(content);
+      }
+    }
+    return statusSaysAccepted(content);
+  })
     ? 'enforce'
     : 'off';
 }
