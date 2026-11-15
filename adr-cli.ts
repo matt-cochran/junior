@@ -8,12 +8,14 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { runAdr } from './adr.ts';
+import { adrDiscovery, adrDiscoveryMessage, runAdr } from './adr.ts';
 import {
   defaultGate,
   detectAdrDir,
   detectAdrFormat,
+  detectFilePattern,
   proposeAdrConfig,
+  readAdrConfig,
   writeAdrConfig,
   type AdrConfig,
 } from './adr-config.ts';
@@ -36,6 +38,15 @@ import {
 } from './adr-tickets.ts';
 import { loadGateAdrs, resolveGateConfig } from './worker-adr-gate.ts';
 import { createJevClassifier } from './worker-gates.ts';
+import { analyze } from './matrix-analyze.ts';
+import {
+  answerParts,
+  draftFrontMatter,
+  draftFrontMatterRequest,
+  hasJuniorFrontMatter,
+  writeProposal,
+} from './adr-foreign.ts';
+import type { Adr } from './adr.ts';
 import {
   extractAcceptance,
   readTicketsConfig,
@@ -60,6 +71,7 @@ export interface AdrCliDeps {
   git?: AdrGit;
   adapter?: TicketAdapter;
   stdout?: (s: string) => void;
+  stderr?: (s: string) => void;
   now?: Date;
 }
 
@@ -72,11 +84,16 @@ export const ADR_CLI_USAGE = [
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
   '  check-tickets [--state open|all] [--limit N] [--markdown <file>] [--post]',
+  '  scope [--adr <ADR-id>]... [--json]',
   '  new|lint|sync delegate to `junior matrix adr`',
 ].join('\n');
 
 function output(deps: AdrCliDeps): (s: string) => void {
   return deps.stdout ?? ((s) => process.stdout.write(s));
+}
+
+function errorOutput(deps: AdrCliDeps): (s: string) => void {
+  return deps.stderr ?? ((s) => process.stderr.write(s));
 }
 
 function failure(out: (s: string) => void, message: string): number {
@@ -265,8 +282,28 @@ async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
 
   const ready = preflight(root, deps);
   if (!ready) {
+    const config = readAdrConfig(root) ?? proposeAdrConfig(root);
+    if (config) {
+      const discovery = adrDiscovery(join(root, config.dir), loadGateAdrs(root, config).length, config);
+      if (discovery) {
+        errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
+        if (flagSet(argv, '--json')) {
+          out(`${JSON.stringify({stage, at: readingDate(deps).toISOString(), discovery}, null, 2)}\n`);
+        }
+        return 2;
+      }
+    }
     out('ADR gate off\n');
     return 0;
+  }
+
+  const discovery = adrDiscovery(join(root, ready.config.dir), ready.adrs.length, ready.config);
+  if (discovery) {
+    errorOutput(deps)(`${adrDiscoveryMessage(discovery, ready.config)}\n`);
+    if (flagSet(argv, '--json')) {
+      out(`${JSON.stringify({stage, at: readingDate(deps).toISOString(), discovery}, null, 2)}\n`);
+    }
+    return 2;
   }
 
   const classifier = await classifierFor(deps, root);
@@ -341,7 +378,8 @@ async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
     out(`${printFindings(markdown, findings.map((finding) => finding.id))}\n`);
   }
 
-  return gate.blocked ? 3 : 0;
+  if (gate.inconclusive && gate.inconclusiveReason) errorOutput(deps)(`${gate.inconclusiveReason}\n`);
+  return gate.blocked ? 3 : gate.inconclusive ? 2 : 0;
 }
 
 async function runDecide(argv: string[], deps: AdrCliDeps): Promise<number> {
@@ -419,10 +457,13 @@ function plannedInitFiles(root: string, dir: string, withRecordDecision: boolean
 
 function previewConfig(root: string, dir: string): AdrConfig {
   const absolute = join(root, dir);
+  const filePattern = detectFilePattern(absolute);
+  const patternConfig = filePattern === undefined ? undefined : {filePattern};
   return {
     dir,
-    format: detectAdrFormat(absolute),
-    gate: defaultGate(absolute),
+    format: detectAdrFormat(absolute, patternConfig),
+    gate: defaultGate(absolute, patternConfig),
+    ...(filePattern === undefined ? {} : {filePattern}),
   };
 }
 
@@ -527,6 +568,95 @@ async function runCheckTickets(argv: string[], deps: AdrCliDeps): Promise<number
   return results.some((result: TicketCheckResult) => result.gate.blocked) ? 3 : 0;
 }
 
+function adrFlags(argv: string[]): string[] {
+  const ids: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === '--adr' && argv[index + 1] !== undefined) {
+      ids.push(argv[index + 1]!);
+      index += 1;
+    }
+  }
+  return ids;
+}
+
+function answerRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return {};
+  const record = value as Record<string, unknown>;
+  const nested = record.answer;
+  return typeof nested === 'object' && nested !== null
+    ? {...record, ...(nested as Record<string, unknown>)}
+    : record;
+}
+
+function isForeignRecord(adr: Adr): boolean {
+  if (!adr.path) return false;
+  try {
+    return !hasJuniorFrontMatter(readFileSync(adr.path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ADR 0018 R9: draft `applies_to` and `rules` front matter for every accepted
+ * foreign ADR and write it only under `.delivery/adr-proposals/`. The original
+ * ADR is never edited or committed.
+ */
+async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
+  const root = deps.cwd ?? process.cwd();
+  const out = output(deps);
+  const config = readAdrConfig(root) ?? proposeAdrConfig(root);
+  if (!config) return failure(out, 'no ADR directory found; run junior adr init');
+
+  const requested = adrFlags(argv);
+  const candidates = loadGateAdrs(root, config)
+    .filter((adr) => adr.status === 'accepted')
+    .filter((adr) => requested.length === 0 || requested.includes(adr.id))
+    .filter(isForeignRecord);
+
+  const classifier = await classifierFor(deps, root);
+  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
+  const classify = classifier;
+  const proposals: Array<{adrId: string; path: string; appliesTo: string[]; rules: ReturnType<typeof answerParts>['rules']}> = [];
+  const skipped: Array<{adrId: string; reason: string}> = [];
+
+  for (const adr of candidates) {
+    const answers: Record<string, unknown> = {};
+    const capture: GateClassifier = async (context, options) => {
+      const result = await classify(context, options);
+      if (result.answers) Object.assign(answers, result.answers);
+      return result;
+    };
+    const result = await analyze({input: draftFrontMatterRequest(adr), classify: capture});
+    if (result.cells.some((cell) => cell.itemId === adr.id && !cell.known)) {
+      skipped.push({adrId: adr.id, reason: 'Jev answer was unknown'});
+      continue;
+    }
+    const answer = {
+      ...answerRecord(answers[`cell:${adr.id}:applies_to`]),
+      ...answerRecord(answers[`cell:${adr.id}:rules`]),
+    };
+    const parts = answerParts(answer);
+    if (parts.appliesTo.length === 0) {
+      skipped.push({adrId: adr.id, reason: 'answer has no applies_to'});
+      continue;
+    }
+    const draft = draftFrontMatter(adr, answer);
+    writeProposal(root, draft);
+    proposals.push({adrId: adr.id, path: draft.path, appliesTo: parts.appliesTo, rules: parts.rules});
+  }
+
+  if (flagSet(argv, '--json')) {
+    out(`${JSON.stringify({proposals, skipped}, null, 2)}\n`);
+  } else {
+    for (const proposal of proposals) {
+      out(`${proposal.adrId} -> ${proposal.path} (applies_to: ${proposal.appliesTo.length} paths, rules: ${proposal.rules.length})\n`);
+    }
+    for (const entry of skipped) out(`${entry.adrId} skipped: ${entry.reason}\n`);
+  }
+  return 0;
+}
+
 /** ADR 0018 R1-R5: the `junior adr` command parser and dispatcher. */
 /** Real git through runSync (argv, no shell), in the project directory. */
 function defaultGit(cwd: string): NonNullable<AdrCliDeps['git']> {
@@ -543,13 +673,27 @@ export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<
   const rest = argv.slice(1);
   const out = output(deps);
 
-  if (command === 'new' || command === 'lint' || command === 'sync') {
+  if (command === 'lint') {
+    const root = deps.cwd ?? process.cwd();
+    const configured = readAdrConfig(root);
+    const detection = configured ? null : detectAdrDir(root);
+    const dir = configured?.dir ?? detection?.dir;
+    return runAdr(['lint', ...rest], {
+      cwd: root,
+      ...(dir === undefined ? {} : {dir}),
+      ...(configured?.filePattern === undefined ? {} : {filePattern: configured.filePattern}),
+      stdout: out,
+      stderr: errorOutput(deps),
+    });
+  }
+  if (command === 'new' || command === 'sync') {
     return runAdr([command, ...rest]);
   }
   if (command === 'init') return runInit(rest, deps);
   if (command === 'check') return runCheck(rest, deps);
   if (command === 'decide') return runDecide(rest, deps);
   if (command === 'check-tickets') return runCheckTickets(rest, deps);
+  if (command === 'scope') return runScope(rest, deps);
 
   out(`${ADR_CLI_USAGE}\n`);
   return 1;

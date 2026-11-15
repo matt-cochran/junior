@@ -209,6 +209,25 @@ test('loadAllAdrs merges Junior and foreign records in number order', (t) => {
   assert.deepEqual(loadAllAdrs(root).map((adr) => adr.id), ['ADR-0002', 'ADR-0009']);
 });
 
+const ADR_PREFIX_CONFIG = { filePattern: '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$' };
+
+test('parseForeignAdr reads the id through a configured filePattern', () => {
+  assert.equal(parseForeignAdr(NYGARD, 'docs/adr/ADR-008a-use-a-queue.md', ADR_PREFIX_CONFIG).id, 'ADR-008a');
+});
+
+test('loadAllAdrs selects records with a configured filePattern', (t) => {
+  const root = project(t);
+  foreignFile(root, 'ADR-001-madr.md', MADR);
+  assert.deepEqual(loadAllAdrs(root, ADR_PREFIX_CONFIG).map((adr) => adr.id), ['ADR-001']);
+});
+
+test('draftFrontMatter keeps an ADR id number text in the proposal path', (t) => {
+  const root = project(t);
+  const path = foreignFile(root, 'ADR-008a-madr.md', MADR);
+  const adr = parseForeignAdr(MADR, path, ADR_PREFIX_CONFIG);
+  assert.equal(draftFrontMatter(adr, { rules: [] }).path, '.delivery/adr-proposals/008a-front-matter.md');
+});
+
 // --- drafting a proposal ---------------------------------------------------
 
 test('draftFrontMatterRequest carries the ADR decision as untrusted context', () => {

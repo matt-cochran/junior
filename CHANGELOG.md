@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable ADR file names (#229).** `adr.filePattern` in
+  `delivery.config.json` selects ADR records and takes the id from its `number`
+  named group, so collections named `ADR-001-title.md` work with `junior adr`.
+  Every loader and scanner uses the pattern, `junior adr init` proposes the
+  pattern and the folder's real case, and `adr lint`/`adr check` report a
+  `discovery` object (with `adr check` exiting 2) when Markdown files match no
+  records instead of checking nothing.
+- **ADR scope proposals (ADR 0018 R9, #229).** `junior adr scope [--adr <ADR-id>]... [--json]`
+  asks Jev for `applies_to` paths and testable rules on accepted MADR/Nygard ADRs
+  without Junior front matter, and writes proposals under `.delivery/adr-proposals/`
+  for review. It never edits or commits the original ADR.
+- **Inconclusive ADR checks.** An implementation check that judged nothing while
+  accepted ADRs were skipped now reports `inconclusive` and exits 2 instead of
+  looking clean; the message points to `junior adr scope`. A blocking
+  contradiction still exits 3, and an inconclusive worker gate does not block an
+  unattended run.
+
 ## [0.17.0] - 2026-11-14
 
 ### Added

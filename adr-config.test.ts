@@ -10,6 +10,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  adrFilePattern,
+  adrIdFromFileName,
   defaultGate,
   detectAdrDir,
   detectAdrFormat,
@@ -280,4 +282,79 @@ test('writeAdrConfig formats with two spaces and a trailing newline', (t) => {
   writeAdrConfig(root, adrBlock());
   const raw = readFileSync(join(root, 'delivery.config.json'), 'utf8');
   assert.equal(raw, JSON.stringify({ adr: adrBlock() }, null, 2) + '\n');
+});
+
+// --- configurable file patterns --------------------------------------------
+
+const ADR_PREFIX_PATTERN = '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$';
+
+test('readAdrConfig rejects a filePattern that is not a valid regular expression', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ filePattern: '[unclosed' }) }));
+  assert.throws(
+    () => readAdrConfig(root),
+    /adr\.filePattern must be a regular expression with a named group 'number'/,
+  );
+});
+
+test('readAdrConfig rejects a filePattern without a number named group', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ filePattern: '^ADR-(?<id>\\d+)-.*\\.md$' }) }));
+  assert.throws(
+    () => readAdrConfig(root),
+    /adr\.filePattern must be a regular expression with a named group 'number'/,
+  );
+});
+
+test('readAdrConfig keeps a valid filePattern', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ filePattern: ADR_PREFIX_PATTERN }) }));
+  assert.equal(readAdrConfig(root)?.filePattern, ADR_PREFIX_PATTERN);
+});
+
+test('adrIdFromFileName keeps the number group text as the id', () => {
+  assert.deepEqual(adrIdFromFileName('ADR-008a-title.md', adrFilePattern({ filePattern: ADR_PREFIX_PATTERN })), {
+    id: 'ADR-008a',
+    number: 8,
+  });
+});
+
+test('adrIdFromFileName uses the default NNNN prefix with no configuration', () => {
+  assert.equal(adrIdFromFileName('0007-title.md', adrFilePattern())?.id, 'ADR-0007');
+});
+
+test('detectAdrFormat uses the configured pattern to find Junior records', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-001-store-state.md', JUNIOR_ADR);
+  assert.equal(detectAdrFormat(join(root, 'docs', 'adr'), { filePattern: ADR_PREFIX_PATTERN }), 'junior');
+});
+
+test('detectAdrFormat recognises Junior front matter with a suffixed id', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-008a-store-state.md', JUNIOR_ADR.replace('id: ADR-0001', 'id: ADR-008a'));
+  assert.equal(detectAdrFormat(join(root, 'docs', 'adr'), { filePattern: ADR_PREFIX_PATTERN }), 'junior');
+});
+
+test('defaultGate uses the configured pattern to find accepted records', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-001-store-state.md', JUNIOR_ADR);
+  assert.equal(defaultGate(join(root, 'docs', 'adr'), { filePattern: ADR_PREFIX_PATTERN }), 'enforce');
+});
+
+test('detectAdrDir returns a conventional folder in its real case', (t) => {
+  const root = project(t);
+  mkdirSync(join(root, 'Docs', 'adr'), { recursive: true });
+  assert.equal(detectAdrDir(root)?.dir, 'Docs/adr');
+});
+
+test('proposeAdrConfig proposes the ADR prefix pattern for ADR-named records', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/ADR-001-store-state.md', JUNIOR_ADR);
+  assert.equal(proposeAdrConfig(root)?.filePattern, ADR_PREFIX_PATTERN);
+});
+
+test('proposeAdrConfig omits filePattern for default NNNN records', (t) => {
+  const root = project(t);
+  touch(root, 'docs/adr/0001-store-state.md', JUNIOR_ADR);
+  assert.equal(proposeAdrConfig(root)?.filePattern, undefined);
 });

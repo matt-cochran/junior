@@ -27,7 +27,7 @@ job, then follow its first command.
 | `improve-plan` | fork, simulate, compare and select plan variants | `junior tools call cpm plan.fork request.json` | cpm-improve |
 | `track-plan` | baseline, earned value and plan snapshots | `junior tools call cpm plan.baseline plan_id=<id> reason=<text>` | cpm-ev |
 | `risk` | what could go wrong; FMECA failure modes and readiness | `junior tools call fmeca session.open request.json` | fmeca |
-| `adr` | check designs, tickets and code against the ADRs (stage design, ticket or implementation); record a human decision on findings | `junior adr check --stage <stage>` | — |
+| `adr` | check designs, tickets and code against the ADRs (stage design, ticket or implementation); draft scope for foreign ADRs; record a human decision on findings | `junior adr check --stage <stage>` | — |
 | `matrix` | trace requirements to tests; crossmatrix graph and QC | `junior matrix init` | crossmatrix |
 | `discover` | turn a vague idea into acceptance criteria | `junior handoff <task.json>  # contract workflow: discover` | — |
 | `investigate` | find root cause; frame a scientific-process experiment | `junior handoff <task.json>  # contract workflow: investigate` | — |
@@ -625,6 +625,12 @@ when it reports findings:
 - Implementation: before opening a pull request, run
   `junior adr check --stage implementation`.
 
+When a MADR or Nygard ADR has no `applies_to`, an implementation check reports
+exit code 2 (inconclusive) instead of clean. Run `junior adr scope` to draft
+front matter for those foreign ADRs, ask the human to review the proposals under
+`.delivery/adr-proposals/`, and only then copy the accepted front matter into the
+ADR and commit it. Never edit or commit an ADR on the human's behalf.
+
 Exit code 3 means a likely contradiction blocks under `enforce`. Show the findings
 to the human. The human records the decision with `junior adr decide <F#>`:
 `--override --reason`, `--amend --adr <id>` or `--revise`. Never record a decision
@@ -632,4 +638,11 @@ yourself. Uncertain findings are advisory unless `adr.flagUncertain` is true.
 Decisions are kept in `.junior/adr-decisions.jsonl`; commit that file. Junior's
 own prepare briefs, code handoffs and ticket contracts (a contract `ticket` field)
 go through the same gate. With no ADRs, offer `junior adr init`, and run it with
-`--yes` only after the human agrees. See `docs/adr-support.md` and ADR 0018.
+`--yes` only after the human agrees.
+
+When records are not named `0001-title.md`, set `adr.filePattern` in
+`delivery.config.json`. For `ADR-001-title.md`, `junior adr init` proposes
+`^ADR-(?<number>\d+[a-z]?)-(?<slug>.+)\.md$`; the `number` group supplies the
+ADR id. If a folder has Markdown files but none match the pattern, `adr lint` and
+`adr check` report a `discovery` object and `adr check` exits 2 (inconclusive)
+rather than silently checking nothing. See `docs/adr-support.md` and ADR 0018.

@@ -232,3 +232,172 @@ test('init --yes with --record-decision writes the config file', async () => {
   await runAdrCli(['init', '--yes', '--record-decision'], {cwd: root, stdout: capture().stdout});
   assert.equal(existsSync(join(root, 'delivery.config.json')), true);
 });
+
+const ADR_PREFIX_PATTERN = '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$';
+
+function withFilePattern(t: { after(fn: () => void): void }): string {
+  const root = project(t);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(join(root, 'docs', 'adr', 'ADR-001-src.md'), ADR.replace('id: ADR-0001', 'id: ADR-001'));
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'junior', gate: 'enforce', filePattern: ADR_PREFIX_PATTERN}}, null, 2) + '\n',
+  );
+  return root;
+}
+
+// --- scope: draft front matter for foreign ADRs (ADR 0018 R9) --------------
+
+const FOREIGN = [
+  '# 2. Use a queue',
+  '',
+  'Status: Accepted',
+  '',
+  '## Context',
+  '',
+  'Work arrives in bursts.',
+  '',
+  '## Decision',
+  '',
+  'We will put work on one durable queue.',
+  '',
+].join('\n');
+
+function foreignProject(t: { after(fn: () => void): void }, names: string[] = ['0002-queue.md']): string {
+  const root = project(t);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  for (const name of names) writeFileSync(join(root, 'docs', 'adr', name), FOREIGN.replace(/^# 2\./, `# ${name.slice(0, 4)}.`));
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'nygard', gate: 'enforce'}}, null, 2) + '\n',
+  );
+  return root;
+}
+
+test('a design check loads ADR-named records through adr.filePattern', async () => {
+  const root = withFilePattern(test);
+  await designCheck(root);
+  assert.equal(latest(root).findings[0].adrId, 'ADR-001');
+});
+
+test('a check exits 2 when Markdown files hold no parsed ADRs', async () => {
+  const root = project(test);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(join(root, 'docs', 'adr', 'notes.md'), 'Project notes.\n');
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'junior', gate: 'enforce'}}, null, 2) + '\n',
+  );
+  assert.equal(await designCheck(root), 2);
+});
+
+test('a check --json includes the discovery for an unparsed ADR folder', async () => {
+  const root = project(test);
+  const out = capture();
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(join(root, 'docs', 'adr', 'notes.md'), 'Project notes.\n');
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'junior', gate: 'enforce'}}, null, 2) + '\n',
+  );
+  const input = join(root, 'brief.md');
+  writeFileSync(input, 'Change src/widget.ts.\n');
+  await runAdrCli(['check', '--stage', 'design', '--input', input, '--json'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(),
+    stdout: out.stdout,
+  });
+  assert.equal(JSON.parse(out.text()).discovery.parsed, 0);
+});
+
+test('lint includes the discovery when Markdown files hold no ADRs', async () => {
+  const root = project(test);
+  const out = capture();
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(join(root, 'docs', 'adr', 'notes.md'), 'Project notes.\n');
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({adr: {dir: 'docs/adr', format: 'junior', gate: 'enforce'}}, null, 2) + '\n',
+  );
+  await runAdrCli(['lint'], {cwd: root, stdout: out.stdout, stderr: () => {}});
+  assert.equal(JSON.parse(out.text()).discovery.markdownFiles, 1);
+});
+
+function scoping(confidence = 0.95): GateClassifier {
+  return async ({questions}) => {
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(questions)) {
+      answers[id] = id.endsWith(':applies_to')
+        ? {type: 'choice', choice: 'complete', confidence, appliesTo: ['src/**']}
+        : {type: 'choice', choice: 'complete', confidence, rules: [{id: 'R1', text: 'Use one durable queue.'}]};
+    }
+    return {answers};
+  };
+}
+
+test('scope writes a proposal file for a foreign ADR', async () => {
+  const root = foreignProject(test);
+  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), true);
+});
+
+test('scope leaves the original foreign ADR byte-identical', async () => {
+  const root = foreignProject(test);
+  const path = join(root, 'docs', 'adr', '0002-queue.md');
+  const before = readFileSync(path, 'utf8');
+  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
+test('scope skips an unknown answer and writes no proposal file', async () => {
+  const root = foreignProject(test);
+  await runAdrCli(['scope'], {cwd: root, classify: scoping(0.5), stdout: capture().stdout});
+  assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), false);
+});
+
+test('scope --adr limits the run to the named ADR', async () => {
+  const root = foreignProject(test, ['0001-queue.md', '0002-queue.md']);
+  await runAdrCli(['scope', '--adr', 'ADR-0001'], {cwd: root, classify: scoping(), stdout: capture().stdout});
+  assert.equal(existsSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md')), false);
+});
+
+test('scope --json reports the proposal path for an answered ADR', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {cwd: root, classify: scoping(), stdout: out.stdout});
+  assert.equal(JSON.parse(out.text()).proposals[0].path, '.delivery/adr-proposals/0002-front-matter.md');
+});
+
+test('scope prints one review line per answered ADR', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope'], {cwd: root, classify: scoping(), stdout: out.stdout});
+  assert.match(out.text(), /ADR-0002 -> \.delivery\/adr-proposals\/0002-front-matter\.md \(applies_to: 1 paths, rules: 1\)/);
+});
+
+test('an implementation check exits 2 when it checked nothing but skipped accepted ADRs', async () => {
+  const root = foreignProject(test);
+  const status = await runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: scoping(),
+    git: fakeGit(['src/changed.ts']),
+    stdout: capture().stdout,
+  });
+  assert.equal(status, 2);
+});
+
+test('an inconclusive implementation check names junior adr scope on stderr', async () => {
+  const root = foreignProject(test);
+  let stderr = '';
+  await runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: scoping(),
+    git: fakeGit(['src/changed.ts']),
+    stdout: capture().stdout,
+    stderr: (s) => {
+      stderr += s;
+    },
+  });
+  assert.match(stderr, /junior adr scope/);
+});

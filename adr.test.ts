@@ -263,6 +263,12 @@ test('Junior seed ADRs lint clean', () => {
   assert.equal(lintAdrs(loadAdrs(SEED_DIR)).filter((finding) => finding.severity === 'error').length, 0);
 });
 
+test('loadAdrs selects records with a configured filePattern', () => {
+  const dir = adrDir();
+  writeAdr(dir, 'ADR-001-title.md', madr({ id: 'ADR-001' }));
+  assert.deepEqual(loadAdrs(dir, { filePattern: '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$' }).map((adr) => adr.id), ['ADR-001']);
+});
+
 // --- CLI --------------------------------------------------------------------
 
 test('junior matrix adr new creates the next numbered file', () => {

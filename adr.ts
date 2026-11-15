@@ -23,7 +23,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { analyze, type AnalysisInput } from './matrix-analyze.ts';
 import {
   CROSSMATRIX_WRITE_SCHEMA_VERSION,
@@ -37,10 +37,102 @@ import type { QcFinding, QcLink } from './link-qc.ts';
 import { callHop, loadHop, type CallOutcome } from './tools/tools.ts';
 import { createPiClassifier, type GateClassifier } from './worker.ts';
 
-const ADR_ID_PATTERN = /^ADR-(\d+)$/;
-const ADR_FILE_PATTERN = /^(\d{4})-(.+)\.md$/;
+const ADR_ID_PATTERN = /^ADR-(\d+)[a-z]?$/;
 const VALID_STATUSES = new Set<AdrStatus>(['proposed', 'accepted', 'superseded', 'deprecated']);
 const MEMBER_PREFIXES = ['feature', 'cpm', 'job', 'journey', 'fm', 'outcome', 'loc', 'test'];
+
+export const DEFAULT_ADR_FILE_PATTERN = '^(?<number>\\d{4})-(?<slug>.+)\\.md$';
+export const ADR_PREFIX_FILE_PATTERN = '^ADR-(?<number>\\d+[a-z]?)-(?<slug>.+)\\.md$';
+
+function hasNumberGroup(source: string): boolean {
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === '[') {
+      index += 1;
+      while (index < source.length && source[index] !== ']') {
+        if (source[index] === '\\') index += 1;
+        index += 1;
+      }
+      continue;
+    }
+    if (source.startsWith('(?<', index)) {
+      const nameEnd = source.indexOf('>', index + 3);
+      if (nameEnd > index + 3) {
+        const name = source.slice(index + 3, nameEnd);
+        if (name === 'number') return true;
+        index = nameEnd;
+      }
+    }
+  }
+  return false;
+}
+
+export type AdrPatternInput = {filePattern?: string} | string | RegExp;
+
+function patternSource(config?: AdrPatternInput): string {
+  if (typeof config === 'string') return config;
+  if (config instanceof RegExp) return config.source;
+  return config?.filePattern ?? DEFAULT_ADR_FILE_PATTERN;
+}
+
+/** The one file-name pattern used by every ADR loader and scanner. */
+export function adrFilePattern(config?: AdrPatternInput): RegExp {
+  const source = patternSource(config);
+  const flags = config instanceof RegExp ? config.flags : '';
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(source, flags);
+  } catch {
+    throw new Error("adr.filePattern must be a regular expression with a named group 'number'");
+  }
+  if (!hasNumberGroup(pattern.source)) {
+    throw new Error("adr.filePattern must be a regular expression with a named group 'number'");
+  }
+  return pattern;
+}
+
+/** The ADR id and numeric sort key a file name carries, or `null`. */
+export function adrIdFromFileName(name: string, pattern: RegExp): {id: string; number: number} | null {
+  pattern.lastIndex = 0;
+  const match = pattern.exec(name);
+  pattern.lastIndex = 0;
+  const numberText = match?.groups?.number;
+  if (typeof numberText !== 'string' || numberText === '') return null;
+  return {id: `ADR-${numberText}`, number: Number.parseInt(numberText, 10)};
+}
+
+export interface AdrDiscovery {
+  dir: string;
+  markdownFiles: number;
+  parsed: number;
+}
+
+/** Report a folder that holds Markdown but no parsed ADR records. */
+export function adrDiscovery(
+  dir: string,
+  parsed: number,
+  config?: {filePattern?: string; dir?: string},
+): AdrDiscovery | null {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const markdownFiles = names.filter(
+    (name) => name.toLowerCase().endsWith('.md') && name.toLowerCase() !== 'readme.md',
+  ).length;
+  if (markdownFiles === 0 || parsed > 0) return null;
+  return {dir: config?.dir ?? dir, markdownFiles, parsed};
+}
+
+export function adrDiscoveryMessage(discovery: AdrDiscovery, config?: AdrPatternInput): string {
+  return `no ADRs parsed in ${discovery.dir}: ${discovery.markdownFiles} Markdown files, none match adr.filePattern ${patternSource(config)}`;
+}
 
 export type AdrStatus = 'proposed' | 'accepted' | 'superseded' | 'deprecated';
 
@@ -257,12 +349,13 @@ export function parseAdr(markdown: string, path = ''): Adr {
   };
 }
 
-/** Load and number-sort every `NNNN-*.md` record in `dir` (empty when absent). */
-export function loadAdrs(dir: string): Adr[] {
+/** Load and number-sort every record matching the configured pattern. */
+export function loadAdrs(dir: string, config?: {filePattern?: string}): Adr[] {
   if (!fs.existsSync(dir)) return [];
+  const pattern = adrFilePattern(config);
   const adrs: Adr[] = [];
   for (const name of fs.readdirSync(dir).sort()) {
-    if (!ADR_FILE_PATTERN.test(name)) continue;
+    if (!adrIdFromFileName(name, pattern)) continue;
     const path = join(dir, name);
     adrs.push(parseAdr(fs.readFileSync(path, 'utf8'), path));
   }
@@ -380,10 +473,11 @@ export interface CreateAdrOptions {
 /** Write the next numbered `NNNN-<slug>.md` record into `dir`. */
 export function createAdr(dir: string, title: string, options: CreateAdrOptions = {}): CreateAdrResult {
   fs.mkdirSync(dir, { recursive: true });
+  const pattern = adrFilePattern();
   let next = 1;
   for (const name of fs.readdirSync(dir)) {
-    const match = ADR_FILE_PATTERN.exec(name);
-    if (match) next = Math.max(next, Number(match[1]) + 1);
+    const record = adrIdFromFileName(name, pattern);
+    if (record && Number.isFinite(record.number)) next = Math.max(next, record.number + 1);
   }
   const padded = String(next).padStart(4, '0');
   const id = `ADR-${padded}`;
@@ -861,15 +955,32 @@ async function runAdrNew(argv: string[]): Promise<number> {
   return 0;
 }
 
-function runAdrLint(argv: string[]): number {
-  let dir = defaultAdrDir();
+export interface RunAdrOptions {
+  cwd?: string;
+  /** Default ADR directory relative to `cwd`; `--dir` still overrides it. */
+  dir?: string;
+  filePattern?: string;
+  stdout?: (s: string) => void;
+  stderr?: (s: string) => void;
+}
+
+function runAdrLint(argv: string[], options: RunAdrOptions = {}): number {
+  const cwd = options.cwd ?? process.cwd();
+  let label = options.dir ?? 'docs/adr';
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--dir') dir = argv[++i] ?? dir;
-    else if (arg.startsWith('--dir=')) dir = arg.slice('--dir='.length);
+    if (arg === '--dir') label = argv[++i] ?? label;
+    else if (arg.startsWith('--dir=')) label = arg.slice('--dir='.length);
   }
-  const findings = lintAdrs(loadAdrs(dir));
-  process.stdout.write(`${JSON.stringify({ findings }, null, 2)}\n`);
+  const dir = isAbsolute(label) ? label : join(cwd, label);
+  const config = options.filePattern === undefined ? undefined : {filePattern: options.filePattern};
+  const adrs = loadAdrs(dir, config);
+  const findings = lintAdrs(adrs);
+  const discovery = adrDiscovery(dir, adrs.length, {...config, dir: label});
+  if (discovery) (options.stderr ?? ((s) => process.stderr.write(s)))(`${adrDiscoveryMessage(discovery, config)}\n`);
+  (options.stdout ?? ((s) => process.stdout.write(s)))(
+    `${JSON.stringify(discovery ? {findings, discovery} : {findings}, null, 2)}\n`,
+  );
   return findings.some((entry) => entry.severity === 'error') ? 1 : 0;
 }
 
@@ -958,11 +1069,11 @@ async function runAdrCheck(argv: string[]): Promise<number> {
 }
 
 /** Thin CLI shell for `junior matrix adr <new|lint|sync|check>`. */
-export async function runAdr(argv: string[]): Promise<number> {
+export async function runAdr(argv: string[], options: RunAdrOptions = {}): Promise<number> {
   const subcommand = argv[0];
   try {
     if (subcommand === 'new') return await runAdrNew(argv.slice(1));
-    if (subcommand === 'lint') return runAdrLint(argv.slice(1));
+    if (subcommand === 'lint') return runAdrLint(argv.slice(1), options);
     if (subcommand === 'sync') return await runAdrSync(argv.slice(1));
     if (subcommand === 'check') return await runAdrCheck(argv.slice(1));
     process.stderr.write(`${ADR_USAGE}\n`);

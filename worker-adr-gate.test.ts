@@ -388,3 +388,41 @@ test('a code run with an ADR config records an unavailable classifier instead of
   );
   assert.ok(result.unresolved.includes('ADR gate skipped: classifier unavailable'));
 });
+
+// --- inconclusive implementation gate (ADR 0018 R9) ------------------------
+
+function foreignAdrProject(t: { after(fn: () => void): void }): string {
+  const root = project(t);
+  const dir = join(root, 'docs', 'adr');
+  mkdirSync(dir, {recursive: true });
+  writeFileSync(
+    join(dir, '0002-queue.md'),
+    ['# 2. Use a queue', '', 'Status: Accepted', '', '## Decision', '', 'Use one durable queue.', ''].join('\n'),
+  );
+  writeFileSync(
+    join(root, 'delivery.config.json'),
+    JSON.stringify({ adr: { dir: 'docs/adr', format: 'nygard', gate: 'enforce' } }),
+  );
+  return root;
+}
+
+test('implementationGate carries inconclusive when every accepted ADR was skipped', async (t) => {
+  const root = foreignAdrProject(t);
+  const { classify } = fakeGateClassifier('conforms');
+  const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify });
+  assert.equal(outcome.result?.inconclusive, true);
+});
+
+test('implementationGate does not render an inconclusive check as PASS', async (t) => {
+  const root = foreignAdrProject(t);
+  const { classify } = fakeGateClassifier('conforms');
+  const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify });
+  assert.match(outcome.markdown ?? '', /INCONCLUSIVE/);
+});
+
+test('implementationGate does not stop an unattended inconclusive run', async (t) => {
+  const root = foreignAdrProject(t);
+  const { classify } = fakeGateClassifier('conforms');
+  const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify, unattended: true });
+  assert.equal(outcome.status, null);
+});
