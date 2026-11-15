@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- ADR folders that mix Junior-format records (YAML front matter with an `id`)
+  and Nygard/MADR records load every record instead of failing on the first
+  file without front matter (#245). `adr check`, `adr lint`, `adr init`,
+  `adr scope`, `adr sync` and ticket checks now parse each record by its own
+  format, `defaultGate` sees accepted decisions in either format, and a parse
+  error names the record path. `adr lint` also resolves its configuration the
+  same way `adr check` does, so an `ADR-NNN-slug.md` collection is read through
+  the detected file pattern without an `adr` config block.
+
 ## [0.18.3] - 2026-11-15
 
 ### Fixed
