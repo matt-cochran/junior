@@ -46,11 +46,18 @@ export interface AdrFrontMatterDraft {
  * are accepted as aliases so the caller may keep the natural Junior spelling
  * or the ADR spelling.
  */
+export interface AdrUncertainPath {
+  path: string;
+  votes: number;
+  samples: number;
+}
+
 export interface AdrFrontMatterAnswer {
   appliesTo?: unknown;
   applies_to?: unknown;
   paths?: unknown;
   rules?: unknown;
+  uncertain?: unknown;
   answer?: AdrFrontMatterAnswer;
 }
 
@@ -360,7 +367,30 @@ function yamlList(key: string, values: readonly string[]): string[] {
   return [`${key}:`, ...values.map((value) => `  - ${yamlScalar(value)}`)];
 }
 
-function proposalFrontMatter(adr: Adr, appliesTo: readonly string[], rules: readonly AdrRule[]): string {
+function answerUncertainty(value: unknown): AdrUncertainPath[] {
+  if (!Array.isArray(value)) return [];
+  const uncertain: AdrUncertainPath[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    const path = String(record.path ?? '').trim();
+    const votes = Number(record.votes);
+    const samples = Number(record.samples);
+    if (!path || !Number.isInteger(votes) || !Number.isInteger(samples) || votes < 1 || samples < 1) continue;
+    uncertain.push({ path, votes, samples });
+  }
+  return uncertain;
+}
+
+function proposalFrontMatter(
+  adr: Adr,
+  appliesTo: readonly string[],
+  rules: readonly AdrRule[],
+  uncertain: readonly AdrUncertainPath[] = [],
+): string {
+  const uncertainComments = uncertain.map(
+    (entry) => `  # uncertain: ${entry.path.replace(/[\r\n]+/g, ' ')} (${entry.votes}/${entry.samples} yes)`,
+  );
   const lines = [
     '---',
     `id: ${yamlScalar(adr.id)}`,
@@ -369,6 +399,7 @@ function proposalFrontMatter(adr: Adr, appliesTo: readonly string[], rules: read
     `date: ${yamlScalar(adr.date)}`,
     'supersedes: []',
     ...yamlList('applies_to', appliesTo),
+    ...uncertainComments,
     ...(rules.length === 0
       ? ['rules: []']
       : [
@@ -389,9 +420,10 @@ export function draftFrontMatter(adr: Adr, answer: AdrFrontMatterAnswer): AdrFro
   if (!adr.path) throw new Error('draftFrontMatter requires an ADR loaded from a file');
   const original = fs.readFileSync(adr.path, 'utf8');
   const parts = answerParts(answer);
+  const source = typeof answer.answer === 'object' && answer.answer !== null ? answer.answer : answer;
   return {
     path: `${PROPOSAL_DIR}/${proposalNumber(adr)}-front-matter.md`,
-    markdown: proposalFrontMatter(adr, parts.appliesTo, parts.rules) + original,
+    markdown: proposalFrontMatter(adr, parts.appliesTo, parts.rules, answerUncertainty(source.uncertain)) + original,
   };
 }
 

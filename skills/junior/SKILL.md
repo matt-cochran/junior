@@ -628,12 +628,15 @@ when it reports findings:
 When a MADR or Nygard ADR has no `applies_to`, an implementation check reports
 exit code 2 (inconclusive) instead of clean. Run `junior adr scope` to draft
 front matter for those foreign ADRs: Junior lists candidate path globs from
-tracked directories, Jev answers yes/no per candidate, and the confident yeses
-become `applies_to`. The ADR's own Decision text stays as rule `D`. Use
-`--max-candidates <n>` to judge fewer globs. Ask the human to review the
-proposals under `.delivery/adr-proposals/`, and only then copy the accepted
-front matter into the ADR and commit it. Never edit or commit an ADR on the
-human's behalf.
+tracked directories, Jev answers yes/no per candidate, and a majority of
+`--samples <k>` judgments (odd, 1-7, default 3) becomes `applies_to`. Paths with
+some yes votes but no majority are reported as uncertain and never become
+`applies_to`; they appear in `--json`, the review line and YAML comments in the
+proposal, and an ADR with only uncertain paths is skipped with that reason. The
+ADR's own Decision text stays as rule `D`. Use `--max-candidates <n>` to judge
+fewer globs. Ask the human to review the proposals under
+`.delivery/adr-proposals/`, and only then copy the accepted front matter into the
+ADR and commit it. Never edit or commit an ADR on the human's behalf.
 
 Exit code 3 means a likely contradiction blocks under `enforce`. Show the findings
 to the human. The human records the decision with `junior adr decide <F#>`:

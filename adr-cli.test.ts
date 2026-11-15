@@ -592,6 +592,137 @@ test('scope prints one review line per answered ADR', async () => {
   assert.match(out.text(), /ADR-0002 -> \.delivery\/adr-proposals\/0002-front-matter\.md \(applies_to: 1 paths, rules: 1\)/);
 });
 
+function scopeSequence(samples: ReadonlyArray<readonly string[]>, confidence = 0.95): GateClassifier {
+  let call = 0;
+  return async ({questions}) => {
+    const governed = samples[call] ?? [];
+    call += 1;
+    const answers: Record<string, unknown> = {};
+    for (const id of Object.keys(questions)) {
+      const candidate = /^cell:(.+):governs$/.exec(id)?.[1] ?? '';
+      answers[id] = {
+        type: 'choice',
+        choice: governed.includes(candidate) ? 'yes' : 'no',
+        confidence,
+      };
+    }
+    return {answers};
+  };
+}
+
+test('scope keeps a path that a majority of samples judge governed', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeSequence([['src/**'], [], ['src/**']]),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['src/**']);
+});
+
+test('scope reports a minority path as uncertain with its vote count', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'docs/guide.md']);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeSequence([['src/**', 'docs/**'], ['src/**'], ['src/**']]),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].uncertain, [{path: 'docs/**', votes: 1, samples: 3}]);
+});
+
+test('scope leaves a minority path out of applies_to', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'docs/guide.md']);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeSequence([['src/**', 'docs/**'], ['src/**'], ['src/**']]),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['src/**']);
+});
+
+test('scope includes the vote count for every path that got a vote', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'docs/guide.md']);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeSequence([['src/**', 'docs/**'], ['src/**'], ['src/**']]),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].votes, {'src/**': 3, 'docs/**': 1});
+});
+
+test('scope text output appends its uncertain path count', async () => {
+  const root = foreignProject(test, ['0002-queue.md'], ['src/app.ts', 'docs/guide.md']);
+  const out = capture();
+  await runAdrCli(['scope'], {
+    cwd: root,
+    classify: scopeSequence([['src/**', 'docs/**'], ['src/**'], ['src/**']]),
+    stdout: out.stdout,
+  });
+  assert.match(out.text(), /, uncertain: 1/);
+});
+
+test('scope --samples 1 takes one judgment per candidate', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  let calls = 0;
+  const classifier: GateClassifier = async ({questions}) => {
+    calls += 1;
+    const choice = calls === 1 ? 'yes' : 'no';
+    return {
+      answers: Object.fromEntries(
+        Object.keys(questions).map((id) => [id, {type: 'choice', choice, confidence: 0.95}]),
+      ),
+    };
+  };
+  await runAdrCli(['scope', '--json', '--samples', '1'], {cwd: root, classify: classifier, stdout: out.stdout});
+  assert.deepEqual(JSON.parse(out.text()).proposals[0].appliesTo, ['src/**']);
+});
+
+test('scope rejects an even --samples value', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--samples', '2'], {cwd: root, classify: scopeJudge(['src/**']), stdout: out.stdout});
+  assert.match(out.text(), /--samples must be an odd number from 1 to 7/);
+});
+
+test('scope rejects an out-of-range --samples value', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--samples', '9'], {cwd: root, classify: scopeJudge(['src/**']), stdout: out.stdout});
+  assert.match(out.text(), /--samples must be an odd number from 1 to 7/);
+});
+
+test('scope skips an ADR with only uncertain paths and reports them', async () => {
+  const root = foreignProject(test);
+  const out = capture();
+  await runAdrCli(['scope', '--json'], {
+    cwd: root,
+    classify: scopeSequence([['src/**'], [], []]),
+    stdout: out.stdout,
+  });
+  assert.deepEqual(JSON.parse(out.text()).skipped[0], {
+    adrId: 'ADR-0002',
+    reason: 'only uncertain paths (1)',
+    uncertain: [{path: 'src/**', votes: 1, samples: 3}],
+  });
+});
+
+test('scope replays an identical sample sequence to an identical proposal file', async () => {
+  const root = foreignProject(test);
+  const samples = [['src/**'], [], ['src/**']];
+  await runAdrCli(['scope'], {cwd: root, classify: scopeSequence(samples), stdout: capture().stdout});
+  const first = readFileSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md'), 'utf8');
+  await runAdrCli(['scope'], {cwd: root, classify: scopeSequence(samples), stdout: capture().stdout});
+  assert.equal(
+    readFileSync(join(root, '.delivery', 'adr-proposals', '0002-front-matter.md'), 'utf8'),
+    first,
+  );
+});
+
 function scoping(confidence = 0.95): GateClassifier {
   return async ({questions}) => {
     const answers: Record<string, unknown> = {};

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `junior adr scope` proposals are stable from run to run (#235). Each candidate
+  path is judged `--samples <k>` times (an odd number from 1 to 7, default 3),
+  and `applies_to` keeps only paths with a majority of confident yes votes.
+  Paths with at least one yes but no majority are reported as uncertain instead
+  of silently appearing and disappearing: `--json` includes `uncertain` and
+  per-path `votes`, the review line appends `uncertain: <n>`, and proposal files
+  list marginal paths as YAML comments after `applies_to`. An ADR with only
+  uncertain paths is skipped with `only uncertain paths (<n>)`. `--samples 1`
+  preserves the previous single-run behavior.
+
 ## [0.18.2] - 2026-11-15
 
 ### Fixed

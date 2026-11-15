@@ -49,20 +49,30 @@ change. It reports the check as inconclusive (exit code 2) instead of clean, and
 junior adr scope                          # every accepted foreign ADR
 junior adr scope --adr ADR-0007           # only named ADRs
 junior adr scope --max-candidates 50      # judge fewer candidate path globs
+junior adr scope --samples 5              # majority vote over five judgments (default 3)
 junior adr scope --json                   # proposals and skipped ADRs as JSON
 ```
 
 Junior lists candidate globs (`<dir>/**` for tracked directories at depth 1 to 3) from `git ls-files`, then
 asks Jev a yes/no judgment for each (ADR, candidate) pair: does this decision govern files under that path?
-The confident yeses become `applies_to`, reduced so a nested glob is dropped when its parent is already kept
-(`a/**` drops `a/b/**`). The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or
-rules itself. `--max-candidates` caps the candidate list (default 150).
+Jev has no temperature or seed, so the gateway can answer differently between runs. Junior therefore asks
+each pair `--samples <k>` times (an odd number from 1 to 7; default 3) and takes a majority vote. A candidate
+needs more than `k/2` confident yeses to become `applies_to`; the kept paths are then reduced so a nested glob
+is dropped when its parent is already kept (`a/**` drops `a/b/**`). With `--samples 1` the result is the
+single-run judgment. The rule stays the ADR's own Decision text as rule `D`; Jev never writes paths or rules
+itself. `--max-candidates` caps the candidate list (default 150).
+
+A path with at least one yes vote but no majority is **uncertain**. It never enters `applies_to`, but it is
+reported instead of silently disappearing: `--json` adds `uncertain` and per-path vote counts to each
+proposal, the text line appends `uncertain: <n>`, and the proposal file lists each marginal path as a YAML
+comment directly after `applies_to`. An ADR with no majority path but some uncertain paths is skipped as
+`only uncertain paths (<n>)`, with those paths in the skipped entry.
 
 Junior writes one proposal per answered ADR under `.delivery/adr-proposals/`, for example
 `.delivery/adr-proposals/0007-front-matter.md`. Review the proposals, copy the front matter you accept into
-the ADR, then commit the ADR. An ADR with no confident yes, or one whose answers are all unknown, is skipped
-and gets no file. Rerunning overwrites that ADR's proposal. Junior never edits, commits or applies the
-original ADR itself.
+the ADR, then commit the ADR. An ADR with no yes vote, or one whose answers are all unknown, is skipped and
+gets no file. Rerunning overwrites that ADR's proposal. Junior never edits, commits or applies the original
+ADR itself.
 
 ## The checkpoints
 
