@@ -15,7 +15,7 @@ import { readAdrConfig } from './adr-config.ts';
 import { readLedger } from './adr-ledger.ts';
 import type { GateClassifier } from './worker.ts';
 import type { Ticket, TicketAdapter, TicketQuery } from './tickets.ts';
-import { runAdrCli } from './adr-cli.ts';
+import { defaultBase, runAdrCli } from './adr-cli.ts';
 
 const ADR = [
   '---',
@@ -918,4 +918,69 @@ test('an inconclusive implementation check names junior adr scope on stderr', as
     },
   });
   assert.match(stderr, /junior adr scope/);
+});
+
+test('#252: --help on an adr subcommand prints its usage and writes nothing', async () => {
+  const root = seed(test);
+  for (const command of ['new', 'lint', 'sync', 'init', 'check', 'decide', 'scope', 'check-tickets']) {
+    for (const flag of ['--help', '-h']) {
+      const out = capture();
+      const before = existsSync(join(root, 'docs', 'adr')) ? readdirSync(join(root, 'docs', 'adr')).sort() : [];
+      const status = await runAdrCli([command, flag], {cwd: root, git: fakeGit(), stdout: out.stdout});
+      assert.equal(status, 0, `${command} ${flag}`);
+      assert.match(out.text(), /^Usage: junior adr/);
+      assert.match(out.text(), new RegExp(`^  (?:\\S+\\|)*${command}[\\s|]`, 'm'), `${command} ${flag} names its own usage`);
+      const after = existsSync(join(root, 'docs', 'adr')) ? readdirSync(join(root, 'docs', 'adr')).sort() : [];
+      assert.deepEqual(after, before, `${command} ${flag} wrote no ADR`);
+    }
+  }
+});
+
+test('#252: decide --help keeps its continuation line', async () => {
+  const root = seed(test);
+  const out = capture();
+  await runAdrCli(['decide', '--help'], {cwd: root, git: fakeGit(), stdout: out.stdout});
+  assert.match(out.text(), /--standing --expires/);
+  assert.doesNotMatch(out.text(), /check-tickets/);
+});
+
+test('#249: the default base is the remote default branch, then origin/main, then origin/master', () => {
+  const git = (refs: Record<string, string>, head?: string) => (args: string[]) => {
+    if (args[0] === 'symbolic-ref') return head === undefined ? {status: 1, stdout: ''} : {status: 0, stdout: `${head}\n`};
+    if (args[0] === 'rev-parse') return {status: refs[args[3]!.replace('^{commit}', '')] ? 0 : 1, stdout: ''};
+    return {status: 0, stdout: ''};
+  };
+  assert.equal(defaultBase({git: git({}, 'refs/remotes/origin/dev')}), 'origin/dev');
+  assert.equal(defaultBase({git: git({'origin/main': 'x'})}), 'origin/main');
+  assert.equal(defaultBase({git: git({'origin/master': 'x'})}), 'origin/master');
+  assert.throws(() => defaultBase({git: git({})}), /pass --base <ref>/);
+});
+
+test('#249: an implementation check with no --base diffs against origin/HEAD on a dev-only repository', async (t) => {
+  const {root, git} = gitProject(t);
+  const remote = project(t);
+  spawnSync('git', ['init', '-q', '--bare', '-b', 'dev', remote]);
+  mkdirSync(join(root, 'src'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const base = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  git(['branch', '-M', 'dev']);
+  git(['remote', 'add', 'origin', remote]);
+  git(['push', '-q', 'origin', 'dev']);
+  git(['remote', 'set-head', 'origin', 'dev']);
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const devOnlyMarker = true;\n');
+  git(['commit', '-qam', 'change']);
+  const recorder = recordingClassifier('conforms');
+  let stderr = '';
+  const status = await runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+    stderr: (s) => {
+      stderr += s;
+    },
+  });
+  assert.doesNotMatch(stderr, /origin\/main/);
+  assert.notEqual(status, 1, stderr);
+  assert.match(recorder.questions(), /devOnlyMarker/);
 });
