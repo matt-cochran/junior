@@ -109,3 +109,16 @@ test('--approve-model naming the requested model records a run approval', () => 
     { provider: 'openrouter', model: 'moonshotai/kimi-k2.7-code' }, undefined);
   assert.deepEqual(approval, { source: 'run', key: 'moonshotai/kimi-k2.7-code' });
 });
+
+test('#251: a credit-exhausted failure replaces "did not complete cleanly" on a clean Pi exit', async () => {
+  const summary = 'The provider refused the request for lack of credit (HTTP 402); add credit or raise the key limit, then rerun. Stop dispatching further lanes on this key.';
+  const state = outcomeState({
+    workerStatus: 0,
+    receiptOk: false,
+    receipt: { ...outcomeState().receipt, errored: true, assistantMessages: 1 },
+    workerFailure: { category: 'provider_credit_exhausted', summary, retryable: false, detail: '402', httpStatus: 402 },
+  });
+  const result = await finish(state);
+  assert.equal(result.workerError, summary);
+  assert.equal(result.workerFailure.category, 'provider_credit_exhausted');
+});
