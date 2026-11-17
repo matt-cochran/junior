@@ -16,6 +16,8 @@ import { PassThrough } from 'node:stream';
 import { executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
+import { createManualClock, systemClock } from './clock.ts';
+import { KILL_GRACE_MS } from './runtime-settings.ts';
 
 const fakeChild = () => {
   const ee = new EventEmitter();
@@ -343,18 +345,109 @@ test('A real captured child stderr reaches the worker result', async () => {
   assert.equal(res.stderr, 'captured stderr\n');
 });
 
+// The deadline, watchdog and SIGKILL grace below run on a manual clock; the
+// tests wait only on real events (the child closing, a line being persisted).
+const CLOCK_START = Date.parse('2026-01-01T00:00:00.000Z');
+
+/** spawnChildDetached plus a promise that settles when the direct child closes. */
+const watchedSpawn = () => {
+  let closed!: () => void;
+  const childClosed = new Promise<void>((resolve) => { closed = resolve; });
+  const spawnChild = (command: string, args: string[], opts: any) => {
+    const child = spawnChildDetached(command, args, opts);
+    child.on('close', () => closed());
+    return child;
+  };
+  return { spawnChild, childClosed };
+};
+
+const settledFlag = (promise: Promise<unknown>) => {
+  const state = { done: false };
+  promise.then(() => { state.done = true; }, () => { state.done = true; });
+  return state;
+};
+
+/** Resolve once `pred` holds. It polls a real condition (a file, a pending
+ * timer) and gives up after a generous bound; no assertion depends on how long
+ * the wait took. */
+const eventually = async (pred: () => boolean, what: string, tries = 3000) => {
+  for (let i = 0; i < tries; i++) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+};
+
 test('A real captured child is stopped at the output cap', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rt-real-cap-'));
+  const clock = createManualClock(CLOCK_START);
+  const { spawnChild, childClosed } = watchedSpawn();
   const script = `const fs=require('fs');for(let i=0;i<300;i++)fs.writeSync(1,'x'.repeat(1023)+'\\n');`;
-  const res = await realStreamRun(dir, script, { maxOutputBytes: 1024 });
+  const promise = realStreamRun(dir, script, { maxOutputBytes: 1024, spawnChild, clock, deadlineAt: CLOCK_START + 60000 });
+  const settled = settledFlag(promise);
+  await childClosed;
+  await clock.advanceAsync(KILL_GRACE_MS - 1);
+  assert.equal(settled.done, false, 'the stopped run waits for the kill grace');
+  await clock.advanceAsync(1);
+  const res = await promise;
   assert.equal(res.outputTruncated, true);
 });
 
 test('A real captured child killed by the deadline reports deadline_exceeded', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rt-real-deadline-'));
+  const clock = createManualClock(CLOCK_START);
+  const { spawnChild, childClosed } = watchedSpawn();
   const script = `const fs=require('fs');fs.writeSync(1,'{"type":"session","id":"s"}\\n');setInterval(()=>{},1000);`;
-  const res = await realStreamRun(dir, script, { deadlineAt: Date.now() + 300 });
+  const promise = realStreamRun(dir, script, { deadlineAt: CLOCK_START + 300, spawnChild, clock });
+  const settled = settledFlag(promise);
+  await eventually(() => { try { return readEvents(dir).includes('"session"'); } catch { return false; } }, 'the session line');
+  await clock.advanceAsync(299);
+  assert.equal(settled.done, false, 'the deadline has not fired one millisecond early');
+  await clock.advanceAsync(1);
+  await childClosed;
+  await clock.advanceAsync(KILL_GRACE_MS);
+  const res = await promise;
   assert.equal(res.deadlineExceeded, true);
+});
+
+test('A RuntimeHeartbeat defaults to the system clock', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-hb-clock-'));
+  const heartbeat = new RuntimeHeartbeat(join(dir, 'runtime.json'), { ...EXECUTION_DEFAULTS }, 0, 1000);
+  assert.equal(heartbeat.clock, systemClock);
+});
+
+test('A RuntimeHeartbeat stamps heartbeatAt from its injected clock', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-hb-clock-'));
+  const clock = createManualClock(CLOCK_START);
+  const heartbeat = new RuntimeHeartbeat(join(dir, 'runtime.json'), { ...EXECUTION_DEFAULTS }, CLOCK_START, CLOCK_START + 1000, 'worker', undefined, clock);
+  clock.advance(250);
+  heartbeat.begin();
+  assert.equal(JSON.parse(readFileSync(join(dir, 'runtime.json'), 'utf8')).heartbeatAt, new Date(CLOCK_START + 250).toISOString());
+});
+
+test('executeCheck falls back to the heartbeat clock for its timeout', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-check-hb-clock-'));
+  const clock = createManualClock(CLOCK_START);
+  const heartbeat = new RuntimeHeartbeat(join(dir, 'runtime.json'), { ...EXECUTION_DEFAULTS, heartbeatMs: 20 }, CLOCK_START, CLOCK_START + 60000, 'checks', undefined, clock);
+  const fake = fakeChild();
+  const promise = executeCheck({ spawnChild: () => fake.child, command: 'x', args: [], cwd: dir, timeoutMs: 100, deadlineAt: CLOCK_START + 60000, heartbeat });
+  await clock.advanceAsync(99);
+  assert.equal(fake.state.killed, false, 'no timeout one millisecond early');
+  await clock.advanceAsync(1);
+  const res = await promise;
+  assert.equal(res.timedOut, true);
+});
+
+test('executeWorkerStreaming times a tool from its injected clock', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-stream-clock-'));
+  const clock = createManualClock(CLOCK_START);
+  const { fake, promise } = runStream(dir, { clock, deadlineAt: CLOCK_START + 60000, settings: { ...EXECUTION_DEFAULTS, quietMs: 100000, heartbeatMs: 20, toolTimeoutMs: 500 } });
+  fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash' });
+  await clock.advanceAsync(499);
+  assert.equal(fake.state.killed, false, 'no tool timeout one millisecond early');
+  await clock.advanceAsync(1);
+  const res = await promise;
+  assert.equal(res.timedOut, true);
 });
 
 test('executeCheck captures caller-supplied stdout through a file', async () => {
