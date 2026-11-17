@@ -471,91 +471,118 @@ function fail(message: string): number {
   return 1;
 }
 
+async function runSet(rest: string[], deps: SetupDeps): Promise<number> {
+  const parsed = parseSetArgs(rest);
+  if (parsed.error) return fail(`${parsed.error}\n${AUTH_USAGE}`);
+  const key = await readKeyFromStdin();
+  if (!key) return fail('No key provided on stdin');
+  try {
+    setProviderKey(parsed.provider, key, deps);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  if (parsed.verify) {
+    // Only OpenRouter exposes a key-status endpoint; never probe another
+    // provider's key against it.
+    if (parsed.provider !== 'openrouter') {
+      process.stdout.write(`${JSON.stringify({ provider: parsed.provider, updated: true, verified: null, error: 'online verification is only available for openrouter' }, null, 2)}\n`);
+      return 0;
+    }
+    const result = await checkCredentialsOnline(deps);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(`${JSON.stringify({ provider: parsed.provider, updated: true }, null, 2)}\n`);
+  return 0;
+}
+
+function runRemove(rest: string[], deps: SetupDeps): number {
+  if (rest.length !== 1 || rest[0].startsWith('-')) return fail(AUTH_USAGE);
+  const provider = rest[0];
+  try {
+    removeProviderKey(provider, deps);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  process.stdout.write(`${JSON.stringify({ provider, removed: true }, null, 2)}\n`);
+  return 0;
+}
+
+interface ConsentArgs {
+  project: string;
+  token?: string;
+  positional: string[];
+  error?: string;
+}
+
+function parseConsentArgs(rest: string[]): ConsentArgs {
+  let project = process.cwd();
+  let token: string | undefined;
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === '--project') { project = rest[++i] ?? ''; continue; }
+    if (arg.startsWith('--project=')) { project = arg.slice('--project='.length); continue; }
+    if (arg === '--token') { token = rest[++i]; continue; }
+    if (arg.startsWith('--token=')) { token = arg.slice('--token='.length); continue; }
+    if (arg.startsWith('-')) return { project, token, positional, error: `Unknown option for auth consent: ${arg}\n${AUTH_USAGE}` };
+    positional.push(arg);
+  }
+  return { project, token, positional };
+}
+
+function consentAction(positional: string[]): 'set' | 'remove' | 'status' {
+  const first = positional[0];
+  let resolvedAction: 'set' | 'remove' | 'status' = 'set';
+  if (first === 'remove' || first === 'revoke' || first === 'deny') { resolvedAction = 'remove'; positional.shift(); }
+  else if (first === 'status') { resolvedAction = 'status'; positional.shift(); }
+  else if (first === 'set' || first === 'grant' || first === 'approve' || first === 'authorize') { resolvedAction = 'set'; positional.shift(); }
+  return resolvedAction;
+}
+
+function printConsentStatus(project: string, provider: string): number {
+  if (provider) {
+    process.stdout.write(`${JSON.stringify(readExternalContextConsent(project, provider), null, 2)}\n`);
+  } else {
+    const document = readConsentDocument(project);
+    process.stdout.write(`${JSON.stringify({ path: externalContextConsentPath(project), providers: Object.keys(document.providers).sort() }, null, 2)}\n`);
+  }
+  return 0;
+}
+
+function runConsent(rest: string[]): number {
+  const parsed = parseConsentArgs(rest);
+  if (parsed.error) return fail(parsed.error);
+  const { project, token, positional } = parsed;
+  if (!project) return fail(AUTH_USAGE);
+  const resolvedAction = consentAction(positional);
+  const provider = positional[0] ?? '';
+  if (resolvedAction === 'status') return printConsentStatus(project, provider);
+  if (positional.length !== 1 || !provider) return fail(AUTH_USAGE);
+  let dataPolicy: DataPolicy | null = null;
+  try {
+    if (resolvedAction === 'remove') {
+      removeExternalContextConsent(project, provider);
+    } else {
+      dataPolicy = readDataPolicy(project);
+      recordExternalContextConsent(project, provider, { ...(token ? { scope: [token] } : {}), dataPolicy });
+    }
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  const status = readExternalContextConsent(project, provider, { dataPolicy });
+  process.stdout.write(`${JSON.stringify({ ...status, dataPolicySummary: status.record?.dataPolicySummary ?? null, removed: resolvedAction === 'remove' }, null, 2)}\n`);
+  return 0;
+}
+
 export async function main(argv: string[], deps: SetupDeps = {}): Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
     process.stdout.write(`${AUTH_USAGE}\n`);
     return 0;
   }
-  if (command === 'set') {
-    const parsed = parseSetArgs(rest);
-    if (parsed.error) return fail(`${parsed.error}\n${AUTH_USAGE}`);
-    const key = await readKeyFromStdin();
-    if (!key) return fail('No key provided on stdin');
-    try {
-      setProviderKey(parsed.provider, key, deps);
-    } catch (err) {
-      return fail(err instanceof Error ? err.message : String(err));
-    }
-    if (parsed.verify) {
-      // Only OpenRouter exposes a key-status endpoint; never probe another
-      // provider's key against it.
-      if (parsed.provider !== 'openrouter') {
-        process.stdout.write(`${JSON.stringify({ provider: parsed.provider, updated: true, verified: null, error: 'online verification is only available for openrouter' }, null, 2)}\n`);
-        return 0;
-      }
-      const result = await checkCredentialsOnline(deps);
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    }
-    process.stdout.write(`${JSON.stringify({ provider: parsed.provider, updated: true }, null, 2)}\n`);
-    return 0;
-  }
-  if (command === 'remove') {
-    if (rest.length !== 1 || rest[0].startsWith('-')) return fail(AUTH_USAGE);
-    const provider = rest[0];
-    try {
-      removeProviderKey(provider, deps);
-    } catch (err) {
-      return fail(err instanceof Error ? err.message : String(err));
-    }
-    process.stdout.write(`${JSON.stringify({ provider, removed: true }, null, 2)}\n`);
-    return 0;
-  }
-  if (command === 'consent' || command === 'approve' || command === 'authorize') {
-    let project = process.cwd();
-    let token: string | undefined;
-    const positional: string[] = [];
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--project') { project = rest[++i] ?? ''; continue; }
-      if (arg.startsWith('--project=')) { project = arg.slice('--project='.length); continue; }
-      if (arg === '--token') { token = rest[++i]; continue; }
-      if (arg.startsWith('--token=')) { token = arg.slice('--token='.length); continue; }
-      if (arg.startsWith('-')) return fail(`Unknown option for auth consent: ${arg}\n${AUTH_USAGE}`);
-      positional.push(arg);
-    }
-    if (!project) return fail(AUTH_USAGE);
-    const first = positional[0];
-    let resolvedAction: 'set' | 'remove' | 'status' = 'set';
-    if (first === 'remove' || first === 'revoke' || first === 'deny') { resolvedAction = 'remove'; positional.shift(); }
-    else if (first === 'status') { resolvedAction = 'status'; positional.shift(); }
-    else if (first === 'set' || first === 'grant' || first === 'approve' || first === 'authorize') { resolvedAction = 'set'; positional.shift(); }
-    const provider = positional[0] ?? '';
-    if (resolvedAction === 'status') {
-      if (provider) {
-        process.stdout.write(`${JSON.stringify(readExternalContextConsent(project, provider), null, 2)}\n`);
-      } else {
-        const document = readConsentDocument(project);
-        process.stdout.write(`${JSON.stringify({ path: externalContextConsentPath(project), providers: Object.keys(document.providers).sort() }, null, 2)}\n`);
-      }
-      return 0;
-    }
-    if (positional.length !== 1 || !provider) return fail(AUTH_USAGE);
-    let dataPolicy: DataPolicy | null = null;
-    try {
-      if (resolvedAction === 'remove') {
-        removeExternalContextConsent(project, provider);
-      } else {
-        dataPolicy = readDataPolicy(project);
-        recordExternalContextConsent(project, provider, { ...(token ? { scope: [token] } : {}), dataPolicy });
-      }
-    } catch (err) {
-      return fail(err instanceof Error ? err.message : String(err));
-    }
-    const status = readExternalContextConsent(project, provider, { dataPolicy });
-    process.stdout.write(`${JSON.stringify({ ...status, dataPolicySummary: status.record?.dataPolicySummary ?? null, removed: resolvedAction === 'remove' }, null, 2)}\n`);
-    return 0;
-  }
+  if (command === 'set') return runSet(rest, deps);
+  if (command === 'remove') return runRemove(rest, deps);
+  if (command === 'consent' || command === 'approve' || command === 'authorize') return runConsent(rest);
   return fail(`Unknown auth command: ${command}\n${AUTH_USAGE}`);
 }
