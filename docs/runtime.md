@@ -289,8 +289,12 @@ continuation** in [contracts](contracts.md)).
 Every Pi failure is classified into `result.workerFailure`
 `{category, summary, retryable}`. The categories are `transport_dns`,
 `transport_tls`, `transport_http`, `transport_fetch`, `credential_lock`,
-`auth_missing`, `resume_session_unavailable`, `zero_messages` (Pi exited 0
-with no assistant message) and `unknown`. Secrets are redacted
+`auth_missing`, `provider_credit_exhausted`, `resume_session_unavailable`,
+`zero_messages` (Pi exited 0 with no assistant message) and `unknown`.
+`provider_credit_exhausted` is an HTTP 402 credit or key-limit refusal. It is
+detected even when Pi exits 0 after an errored assistant message, it is never
+retried, and its summary tells the manager to add credit and stop dispatching
+lanes on that key. Secrets are redacted
 from the summary, which replaces the generic `Pi failed` wording. A retryable
 transport failure that produced no assistant message is retried once per run,
 and the failure is then marked `retried: true`.

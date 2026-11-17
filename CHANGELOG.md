@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A provider HTTP 402 (out of credit or over the key limit) is now classified as
+  `workerFailure.category: provider_credit_exhausted`: it is not retryable, and
+  its summary names the remedy. Before, it ended as a generic `receipt_failed`
+  ("Pi assistant message did not complete cleanly"), because Pi exits 0 after
+  the errored assistant message (#251).
 - `junior adr <command> --help` (or `-h`) prints that command's usage and exits
   0 without running it. Before, `adr new --help` wrote an ADR titled `--help`
   (#252).
