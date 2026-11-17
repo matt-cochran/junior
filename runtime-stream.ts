@@ -24,12 +24,14 @@ import {
  type ReadScopeLimit,
  type WorkerStreamResult,
 } from './runtime-events.ts';
+import { systemClock, type Clock, type ClockTimer } from './clock.ts';
 
 type ToolResultEntry = { toolCallId: string; toolName: string | null; bytes: number };
 type ReadEntry = { toolCallId: string; toolName: string | null; path: string | null; bytes: number };
 
 type StreamRun = {
  opts: ExecuteWorkerOptions;
+ clock: Clock;
  settings: ExecutionSettings;
  eventsPath: string;
  logPath: string;
@@ -56,11 +58,11 @@ type StreamRun = {
  byType: Record<string, number>;
  largestToolResults: ToolResultEntry[];
  finished: boolean;
- killTimer: ReturnType<typeof setTimeout> | undefined;
+ killTimer: ClockTimer | undefined;
  killEscalationComplete: boolean;
  completionRequested: boolean;
  child: ChildProcessLike | undefined;
- monitor: ReturnType<typeof setInterval> | undefined;
+ monitor: ClockTimer | undefined;
  budgetLimits: BudgetLimits | undefined;
  readScope: ReadScopeLimit | null;
  readAllowedPaths: string[];
@@ -234,7 +236,7 @@ function finalize(run: StreamRun): void {
  run.completionRequested = true;
  if (run.killTimer && !run.killEscalationComplete) return;
  run.finished = true;
- if (run.monitor) clearInterval(run.monitor);
+ if (run.monitor) run.clock.clearInterval(run.monitor);
  // The kill-escalation timer is deliberately NOT cleared on direct child exit:
  // a descendant that ignores SIGTERM must still receive the bounded SIGKILL.
  run.opts.signal?.removeEventListener?.('abort', run.onAbort);
@@ -252,7 +254,7 @@ function requestStop(run: StreamRun, reason: StreamStopReason): void {
  else if (reason === 'scope') { run.scopeExceeded = true; run.outputTruncated = true; }
  if (run.child) {
   killChildGroup(run.child, 'SIGTERM');
-  run.killTimer = setTimeout(() => { if (run.child) killChildGroup(run.child, 'SIGKILL'); run.killEscalationComplete = true; if (run.completionRequested) finalize(run); }, KILL_GRACE_MS);
+  run.killTimer = run.clock.setTimeout(() => { if (run.child) killChildGroup(run.child, 'SIGKILL'); run.killEscalationComplete = true; if (run.completionRequested) finalize(run); }, KILL_GRACE_MS);
  }
  if (reason === 'startup_error' || reason === 'stream_error') finalize(run);
 }
@@ -292,7 +294,7 @@ function trackBudgetEvent(run: StreamRun, ev: any): void {
 
 function handleLine(run: StreamRun, line: string): void {
  const { watchdog, heartbeat } = run;
- const now = Date.now();
+ const now = run.clock.now();
  let ev: any = null;
  if (line.trim()) { try { ev = JSON.parse(line.endsWith('\r') ? line.slice(0, -1) : line); } catch { ev = null; } }
  if (ev && typeof ev === 'object') { watchdog.onEvent(ev, now); trackBudgetEvent(run, ev); }
@@ -402,7 +404,7 @@ function onClose(run: StreamRun, code: number | null, signal: string | null): vo
 // heartbeat but is explicitly not a stop condition.
 function monitorTick(run: StreamRun): void {
  const { watchdog } = run;
- const now = Date.now();
+ const now = run.clock.now();
  const longest = watchdog.longest(now);
  run.heartbeat.poll(now, watchdog.currentTool(), longest ? longest.elapsedMs : null);
  if (run.stopReason) return;
@@ -430,7 +432,7 @@ function attachStreamChild(run: StreamRun, stream: ChildProcessLike): void {
   run.exitSignal = signal ?? null;
  });
  stream.on('close', (code: number | null, signal: string | null) => onClose(run, code, signal));
- run.monitor = setInterval(() => monitorTick(run), 25);
+ run.monitor = run.clock.setInterval(() => monitorTick(run), 25);
 }
 
 function readAllowedPathsFor(opts: ExecuteWorkerOptions, readScope: ReadScopeLimit | null): string[] {
@@ -445,6 +447,7 @@ function readAllowedPathsFor(opts: ExecuteWorkerOptions, readScope: ReadScopeLim
 
 function createStreamRun(
  opts: ExecuteWorkerOptions,
+ clock: Clock,
  heartbeat: RuntimeHeartbeat,
  maxOutputBytes: number,
  resolveDone: (r: WorkerStreamResult) => void,
@@ -452,7 +455,7 @@ function createStreamRun(
  const budgetLimits = opts.budget;
  const readScope = opts.readScope ?? null;
  const run: StreamRun = {
-  opts, settings: opts.settings, eventsPath: opts.eventsPath, logPath: opts.logPath,
+  opts, clock, settings: opts.settings, eventsPath: opts.eventsPath, logPath: opts.logPath,
   heartbeat, watchdog: new ToolWatchdog(), maxOutputBytes,
   // The retained cap bounds what is persisted; a much higher raw ceiling stops
   // a runaway stream that produces only dropped events.
@@ -490,15 +493,16 @@ export async function executeWorkerStreaming(opts: ExecuteWorkerOptions): Promis
  const { settings, spawnChild, command, args, cwd, eventsPath, logPath, runtimePath } = opts;
  const captureStdoutPath = `${eventsPath}.stdout`;
  const captureStderrPath = `${logPath}.stderr`;
- const startedAt = Date.now();
- const heartbeat = opts.heartbeat ?? new RuntimeHeartbeat(runtimePath, settings, startedAt, opts.deadlineAt, opts.phase ?? 'worker');
+ const clock = opts.clock ?? opts.heartbeat?.clock ?? systemClock;
+ const startedAt = clock.now();
+ const heartbeat = opts.heartbeat ?? new RuntimeHeartbeat(runtimePath, settings, startedAt, opts.deadlineAt, opts.phase ?? 'worker', undefined, clock);
  const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : (settings.maxOutputBytes > 0 ? settings.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES);
  heartbeat.update({ phase: opts.phase ?? 'worker' });
  if (!opts.heartbeat) heartbeat.begin();
 
  let resolveDone!: (r: WorkerStreamResult) => void;
  const done = new Promise<WorkerStreamResult>((res) => { resolveDone = res; });
- const run = createStreamRun(opts, heartbeat, maxOutputBytes, resolveDone);
+ const run = createStreamRun(opts, clock, heartbeat, maxOutputBytes, resolveDone);
 
  // Both files are created up front so a startup failure still leaves an
  // inspectable events.jsonl / worker.log pair.

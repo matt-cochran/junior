@@ -78,6 +78,9 @@ type World = {
   integrations?: any;
 };
 
+/** #271: the project's HOP manifest under the fixtures' `/repo` cwd. */
+const REPO_HOP = '/repo/.delivery/setup/hop.json';
+
 function deps(world: World = {}): ReadinessDeps {
   const files: Record<string, string> = { '/pkg/SKILL.md': SOURCE, ...(world.files ?? {}) };
   const env: NodeJS.ProcessEnv = { PATH: '/bin', HOME: '/home/u', ...(world.env ?? {}) };
@@ -148,7 +151,7 @@ test('inspectReadiness finds the Junior skill in the harness skill root', () => 
 // --- MCP registration is recommended ---------------------------------------
 
 test('an unregistered MCP server leaves readiness ready', () => {
-  const result = inspectReadiness(deps({ files: { [CLAUDE_SKILL]: SOURCE } }), { cwd: '/repo', harness: 'claude' });
+  const result = inspectReadiness(deps({ files: { [CLAUDE_SKILL]: SOURCE, [REPO_HOP]: '{}' } }), { cwd: '/repo', harness: 'claude' });
   assert.equal(result.ready, true);
 });
 
@@ -188,7 +191,7 @@ test('a usable tool at a verified version reports a verified shape item', () => 
 
 test('a usable tool at an unverified version reports an unverified shape item', () => {
   const result = inspectReadiness(
-    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE, [REPO_HOP]: '{}' }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
     { cwd: '/repo', harness: 'claude' },
   );
   assert.equal(result.items.find((item) => item.id === 'shape:cpm')?.status, 'unverified');
@@ -207,7 +210,7 @@ test('an unverified shape item names the tool and version in its fix', () => {
 
 test('an unverified shape item leaves readiness ready', () => {
   const result = inspectReadiness(
-    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
+    shapeDeps({ files: { [CLAUDE_SKILL]: SOURCE, [REPO_HOP]: '{}' }, integrations: integrationsWith({ tool: 'cpm', version: '0.9.9' }) }),
     { cwd: '/repo', harness: 'claude' },
   );
   assert.equal(result.ready, true);
@@ -519,4 +522,19 @@ test('planSetup runs the given Junior command for its own actions', () => {
     { harness: 'claude', cwd: '/p', juniorCommand: ['/usr/bin/node', '/src/junior.ts'] },
   );
   assert.deepEqual(actions[0].command?.slice(0, 2), ['/usr/bin/node', '/src/junior.ts']);
+});
+
+// --- #271: the project's HOP manifest --------------------------------------
+
+test('#271: usable tools but no project hop is not ready, with a tool:hop item repaired by junior init', () => {
+  const result = inspectReadiness(deps({ files: { [CLAUDE_SKILL]: SOURCE } }), { cwd: '/repo', harness: 'claude' });
+  assert.equal(result.ready, false);
+  const hop = result.items.find((item) => item.id === 'tool:hop');
+  assert.deepEqual(hop, { id: 'tool:hop', kind: 'tool', name: 'hop', status: 'missing', required: true, fix: 'junior init' });
+});
+
+test('#271: a project with a hop has no tool:hop item', () => {
+  const result = inspectReadiness(deps({ files: { [CLAUDE_SKILL]: SOURCE, [REPO_HOP]: '{}' } }), { cwd: '/repo', harness: 'claude' });
+  assert.equal(result.items.some((item) => item.id === 'tool:hop'), false);
+  assert.equal(result.ready, true);
 });

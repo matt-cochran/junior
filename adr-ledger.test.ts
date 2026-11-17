@@ -19,6 +19,7 @@ import {
   toObservation,
   type AdrDecisionInput,
 } from './adr-ledger.ts';
+import { createManualClock } from './clock.ts';
 
 const NOW = new Date('2026-06-01T12:00:00.000Z');
 
@@ -251,4 +252,14 @@ test('toObservation maps an entry to an adr-conformance observation', () => {
     token: 'override',
     evidence: stored.id,
   });
+});
+
+test('appendDecision accepts a Clock as its clock', () => {
+  const stored = appendDecision(rootDir(), decision(), {clock: createManualClock(NOW)});
+  assert.equal(stored.at, '2026-06-01T12:00:00.000Z');
+});
+
+test('an explicit now wins over a Clock', () => {
+  const stored = appendDecision(rootDir(), decision(), {clock: createManualClock(0), now: NOW});
+  assert.equal(stored.at, '2026-06-01T12:00:00.000Z');
 });

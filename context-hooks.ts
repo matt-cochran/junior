@@ -9,6 +9,7 @@
 import * as fs from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ensureLocalExcludes } from './isolation.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** Command Junior installs as its compact-context SessionStart hook. */
 export const JUNIOR_HOOK_COMMAND = 'junior compact';
@@ -32,6 +33,8 @@ export type HarnessHooksOptions = {
   remove?: boolean;
   fs?: ContextHooksFileSystem;
   now?: () => Date;
+  /** Time source for the backup stamp when `now` is not given (default: the system clock). */
+  clock?: Clock;
 };
 
 export type HarnessHooksInstallResult = {
@@ -64,6 +67,8 @@ export type ContextHooksOptions = {
   remove?: boolean;
   fs?: ContextHooksFileSystem;
   now?: () => Date;
+  /** Time source for the backup stamp when `now` is not given (default: the system clock). */
+  clock?: Clock;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -260,7 +265,7 @@ export function installContextHooks(options: ContextHooksOptions): {
   const result = options.remove ? removeContextHooks(parsed) : mergeContextHooks(parsed, options.command);
   if (!result.changed) return { path, backup: null, changed: false };
 
-  const stamp = (options.now ?? (() => new Date()))();
+  const stamp = (options.now ?? (() => (options.clock ?? systemClock).date()))();
   if (!(stamp instanceof Date) || Number.isNaN(stamp.getTime())) {
     throw new TypeError('now must return a valid Date');
   }
@@ -416,7 +421,7 @@ export function installHarnessHooks(options: HarnessHooksOptions): HarnessHooksI
   const result = options.remove ? removeHarnessHooks(options.harness, parsed) : mergeHarnessHooks(options.harness, parsed);
   if (!result.changed) return { path, backup: null, changed: false, created: false, notes };
 
-  const stamp = (options.now ?? (() => new Date()))();
+  const stamp = (options.now ?? (() => (options.clock ?? systemClock).date()))();
   if (!(stamp instanceof Date) || Number.isNaN(stamp.getTime())) {
     throw new TypeError('now must return a valid Date');
   }

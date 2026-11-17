@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isHoldOutcome, runNeverStarted, withPlanLease } from './plan-handoff.ts';
+import { createManualClock } from './clock.ts';
 
 const fixturesRoot = join(import.meta.dirname, 'tools', 'test-fixtures', 'companions');
 function cpmFixture(name: string): unknown {
@@ -264,6 +265,23 @@ test('withPlanLease reports elapsed wall hours rounded to two decimals', async (
   const now = () => ticks[Math.min(i++, ticks.length - 1)];
   await withPlanLease(TASK, async () => 'ok', deps(callHop, { now }));
   assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 1.03);
+});
+
+test('withPlanLease measures elapsed hours on the injected clock when no now hook is given', async () => {
+  const { calls, callHop } = harness();
+  const clock = createManualClock(0);
+  await withPlanLease(TASK, async () => { clock.advance(5_400_000); return 'ok'; }, deps(callHop, { clock }));
+  assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 1.5);
+});
+
+test('withPlanLease prefers an explicit now hook over the injected clock', async () => {
+  const { calls, callHop } = harness();
+  const clock = createManualClock(0);
+  const ticks = [0, 3_600_000];
+  let i = 0;
+  const now = () => ticks[Math.min(i++, ticks.length - 1)];
+  await withPlanLease(TASK, async () => { clock.advance(36_000_000); return 'ok'; }, deps(callHop, { now, clock }));
+  assert.equal(markCall(calls)?.request.arguments.actual_effort_hours, 1);
 });
 
 test('withPlanLease never records less than a hundredth of an hour', async () => {

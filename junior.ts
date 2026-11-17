@@ -498,9 +498,30 @@ async function pruneCommand({ parsed }: CommandContext): Promise<void> {
  console.log(JSON.stringify(result, null, 2));
 }
 
+/** #271: the hop synced from the install state alone; a missing binary is skipped, never downloaded. */
+async function syncHopFromInstalledTools(): Promise<{ hopPath?: string; created?: boolean; updated?: string[]; missing?: string[]; error?: string }> {
+ try {
+  const state = await import('./installer-state.ts');
+  const fs = await import('node:fs');
+  const recorded = state.readInstallState().tools;
+  const installed: typeof recorded = {};
+  const missing: string[] = [];
+  for (const [tool, entry] of Object.entries(recorded)) {
+   if (entry && fs.existsSync(entry.path)) (installed as any)[tool] = entry;
+   else missing.push(tool);
+  }
+  const synced = await state.syncHopWithTools(installed, { cwd: process.cwd() }, installed);
+  return { hopPath: synced.hopPath, created: synced.created, updated: synced.updated, ...(missing.length ? { missing } : {}) };
+ } catch (err) {
+  return { error: err instanceof Error ? err.message : String(err) };
+ }
+}
+
 async function installInitTools(result: any, opts: InitOptions): Promise<void> {
  if (installationDisabled(process.env)) {
-  result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true };
+  // #271: JUNIOR_NO_INSTALL skips the installers, not project setup. Point the hop at the tools that
+  // are already installed (no download, no network), so `junior tools call` works after init.
+  result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true, hop: await syncHopFromInstalledTools() };
  } else {
   const installer = await import('./installer.ts');
   const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });

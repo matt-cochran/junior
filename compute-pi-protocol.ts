@@ -24,6 +24,7 @@ import {
   type PiTransportConnection,
   type PiTransportExecutionResult,
 } from './compute-pi-secrets.ts';
+import { systemClock, type Clock, type ClockTimer } from './clock.ts';
 
 type AbortScope = {
   signal: AbortSignal;
@@ -31,7 +32,11 @@ type AbortScope = {
   dispose(): void;
 };
 
-function createAbortScope(parent: AbortSignal | undefined, timeoutMs: number | undefined): AbortScope {
+function createAbortScope(
+  parent: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+  clock: Clock,
+): AbortScope {
   const controller = new AbortController();
   let reason: 'caller' | 'timeout' | null = null;
   const abortFromParent = () => {
@@ -42,19 +47,19 @@ function createAbortScope(parent: AbortSignal | undefined, timeoutMs: number | u
     if (parent.aborted) abortFromParent();
     else parent.addEventListener('abort', abortFromParent, { once: true });
   }
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ClockTimer | undefined;
   if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs >= 0) {
-    timer = setTimeout(() => {
+    timer = clock.setTimeout(() => {
       if (reason === null) reason = 'timeout';
       controller.abort(new Error(`Pi operation timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-    timer.unref?.();
+    timer.unref();
   }
   return {
     signal: controller.signal,
     getReason: () => reason,
     dispose: () => {
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== undefined) clock.clearTimeout(timer);
       parent?.removeEventListener('abort', abortFromParent);
     },
   };
@@ -97,8 +102,9 @@ async function raceWithAbort<T>(
   });
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
+/** The ISO timestamp source: an explicit `now` hook wins, the clock is the fallback. */
+function isoSource(now: (() => string) | undefined, clock: Clock): () => string {
+  return now ?? (() => clock.iso());
 }
 
 function redactorFor(request: Omit<PiExecuteRequest, 'expectedHost'>): (value: string) => string {
@@ -110,6 +116,7 @@ function cancellationResult(input: {
   expectedHost: PiHostIdentity;
   reason: 'caller' | 'timeout';
   startedAt: string;
+  timers: Clock;
 }): PiOperationResult {
   const redact = redactorFor(input.request);
   return {
@@ -130,7 +137,7 @@ function cancellationResult(input: {
       workspaceRoot: input.request.workspace.root,
     }),
     startedAt: input.startedAt,
-    completedAt: nowIso(),
+    completedAt: input.timers.iso(),
     exitCode: null,
     stdout: '',
     stderr: '',
@@ -145,6 +152,7 @@ function failedResult(input: {
   expectedHost: PiHostIdentity;
   startedAt: string;
   error: unknown;
+  timers: Clock;
 }): PiOperationResult {
   const error = input.error instanceof Error ? input.error : new Error(String(input.error));
   const redact = redactorFor(input.request);
@@ -166,7 +174,7 @@ function failedResult(input: {
       workspaceRoot: input.request.workspace.root,
     }),
     startedAt: input.startedAt,
-    completedAt: nowIso(),
+    completedAt: input.timers.iso(),
     exitCode: null,
     stdout: '',
     stderr: '',
@@ -183,14 +191,17 @@ type PiSessionContext = {
   expectedHost: PiHostIdentity;
   observedHost: PiHostIdentity;
   clock: () => string;
+  /** Timers for operation deadlines (and the completion stamp of aborted or failed runs). */
+  timers: Clock;
 };
 
 async function openPiTransportConnection(
   transport: PiTransport,
   expectedHost: PiHostIdentity,
   request: PiConnectRequest,
+  timers: Clock,
 ): Promise<PiTransportConnection> {
-  const scope = createAbortScope(request.signal, request.timeoutMs);
+  const scope = createAbortScope(request.signal, request.timeoutMs, timers);
   let connection: PiTransportConnection;
   try {
     let outcome: Awaited<ReturnType<typeof raceWithAbort<PiTransportConnection>>>;
@@ -229,7 +240,7 @@ async function runPiTransportExecution(
   executionScope: AbortScope,
   startedAt: string,
 ): Promise<{ result: PiOperationResult } | { execution: PiTransportExecutionResult }> {
-  const { connection, expectedHost } = ctx;
+  const { connection, expectedHost, timers } = ctx;
   let outcome: PiExecutionOutcome;
   try {
     outcome = await raceWithAbort(
@@ -253,10 +264,11 @@ async function runPiTransportExecution(
           expectedHost,
           reason: executionScope.getReason() ?? 'caller',
           startedAt,
+          timers,
         }),
       };
     }
-    return { result: failedResult({ request, expectedHost, startedAt, error }) };
+    return { result: failedResult({ request, expectedHost, startedAt, error, timers }) };
   }
   if (outcome.aborted) {
     return {
@@ -265,6 +277,7 @@ async function runPiTransportExecution(
         expectedHost,
         reason: executionScope.getReason() ?? 'caller',
         startedAt,
+        timers,
       }),
     };
   }
@@ -351,7 +364,7 @@ async function executeOnPiSession(
     throw new PiProtocolError('manifest.invalid', 'workspace manifest is not content-addressed');
   }
   const startedAt = ctx.clock();
-  const executionScope = createAbortScope(request.signal, request.timeoutMs);
+  const executionScope = createAbortScope(request.signal, request.timeoutMs, ctx.timers);
   try {
     const ran = await runPiTransportExecution(ctx, request, executionScope, startedAt);
     if ('result' in ran) return ran.result;
@@ -363,11 +376,12 @@ async function executeOnPiSession(
 
 async function connectPiSession(
   transport: PiTransport,
-  clock: () => string,
+  clocks: { clock: () => string; timers: Clock },
   request: PiConnectRequest,
 ): Promise<PiSession> {
+  const { clock, timers } = clocks;
   const expectedHost = assertVerifiedPiHost(request.expectedHost);
-  const connection = await openPiTransportConnection(transport, expectedHost, request);
+  const connection = await openPiTransportConnection(transport, expectedHost, request, timers);
 
   const verification = verifyPiHostIdentity(expectedHost, connection.identity);
   if (!verification.verified) {
@@ -376,7 +390,7 @@ async function connectPiSession(
   }
 
   const observedHost = inspectPiHostIdentity(connection.identity).identity as PiHostIdentity;
-  const ctx: PiSessionContext = { connection, expectedHost, observedHost, clock };
+  const ctx: PiSessionContext = { connection, expectedHost, observedHost, clock, timers };
 
   async function execute(request: Omit<PiExecuteRequest, 'expectedHost'>): Promise<PiOperationResult> {
     return executeOnPiSession(ctx, request);
@@ -392,15 +406,23 @@ async function connectPiSession(
   };
 }
 
-/** Build a protocol over an injected transport. The transport is never real SSH in tests. */
-export function createPiProtocol(transport: PiTransport, options: { now?: () => string } = {}): PiProtocol {
-  const clock = options.now ?? nowIso;
+/**
+ * Build a protocol over an injected transport. The transport is never real SSH in tests.
+ * `now` stamps startedAt/completedAt and wins over `clock`; `clock` (default the system
+ * clock) also drives operation deadlines.
+ */
+export function createPiProtocol(
+  transport: PiTransport,
+  options: { now?: () => string; clock?: Clock } = {},
+): PiProtocol {
+  const timers = options.clock ?? systemClock;
+  const clock = isoSource(options.now, timers);
   if (transport === null || typeof transport !== 'object' || typeof transport.connect !== 'function') {
     throw new PiProtocolError('transport.invalid', 'transport must implement connect()');
   }
 
   async function connect(request: PiConnectRequest): Promise<PiSession> {
-    return connectPiSession(transport, clock, request);
+    return connectPiSession(transport, { clock, timers }, request);
   }
 
   return {
@@ -450,8 +472,10 @@ export type PiRemoteJobRequest = Omit<PiExecuteRequest, 'jobId' | 'environment' 
   /** Secret names resolved through the broker immediately before execution. */
   secretNames?: readonly string[];
   secretBroker?: PiSecretBroker;
-  /** Clock used to timestamp the lease release. */
+  /** Clock used to timestamp the lease release (wins over `clock`). */
   now?: () => string;
+  /** Fallback clock for the lease release stamp; default the system clock. */
+  clock?: Clock;
 };
 
 export type PiRemoteJobLeaseOutcome = {
@@ -480,7 +504,7 @@ export async function executePiRemoteJob(
   protocol: PiProtocol,
   request: PiRemoteJobRequest,
 ): Promise<PiRemoteJobResult> {
-  const clock = request.now ?? nowIso;
+  const clock = isoSource(request.now, request.clock ?? systemClock);
   const broker = request.secretBroker ?? createPiSecretBroker();
   const secretNames = request.secretNames ?? [];
   let environment: Record<string, string> | undefined;

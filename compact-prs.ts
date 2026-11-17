@@ -9,6 +9,7 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { systemClock, type Clock } from './clock.ts';
 
 export type OpenPr = {
   repo: string;
@@ -28,7 +29,7 @@ export type PrSection = {
 
 export type RunGh = (
   args: string[],
-  opts: { cwd: string; timeoutMs: number },
+  opts: { cwd: string; timeoutMs: number; clock?: Clock },
 ) => Promise<{ code: number | null; stdout: string; stderr: string; error?: string }>;
 
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -46,19 +47,25 @@ function ghErrorMessage(error: any): string {
   return messageOf(error);
 }
 
-function defaultRunGh(args: string[], opts: { cwd: string; timeoutMs: number }): Promise<{
+function defaultRunGh(args: string[], opts: { cwd: string; timeoutMs: number; clock?: Clock }): Promise<{
   code: number | null;
   stdout: string;
   stderr: string;
   error?: string;
 }> {
+  const clock = opts.clock ?? systemClock;
   return new Promise((resolve) => {
     try {
-      execFile(
+      // The deadline runs on the injected clock instead of execFile's own
+      // `timeout` and does what that timeout does: drop the output streams (so
+      // a grandchild holding them cannot delay the callback) and SIGTERM.
+      let timer: ReturnType<Clock['setTimeout']> | null = null;
+      const child = execFile(
         'gh',
         args,
-        { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8' },
+        { cwd: opts.cwd, encoding: 'utf8' },
         (error, stdout, stderr) => {
+          clock.clearTimeout(timer);
           resolve({
             code: error ? (typeof (error as any).code === 'number' ? (error as any).code : null) : 0,
             stdout: typeof stdout === 'string' ? stdout : String(stdout ?? ''),
@@ -67,6 +74,13 @@ function defaultRunGh(args: string[], opts: { cwd: string; timeoutMs: number }):
           });
         },
       );
+      if (opts.timeoutMs > 0) {
+        timer = clock.setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.kill('SIGTERM');
+        }, opts.timeoutMs);
+      }
     } catch (error) {
       resolve({ code: null, stdout: '', stderr: '', error: ghErrorMessage(error) });
     }
@@ -105,11 +119,12 @@ async function queryRepo(
   runGh: RunGh,
   cwd: string,
   timeoutMs: number,
+  clock?: Clock,
 ): Promise<RepoResult> {
   const args = ['pr', 'list', '--state', 'open', '--limit', '20', '--json', PR_FIELDS];
   if (repo !== '.') args.push('--repo', repo);
   try {
-    const result = await runGh(args, { cwd, timeoutMs });
+    const result = await runGh(args, clock ? { cwd, timeoutMs, clock } : { cwd, timeoutMs });
     if (!result || result.error) {
       return { repo, prs: [], error: result?.error ?? 'gh failed' };
     }
@@ -132,6 +147,8 @@ export async function openPullRequests(deps: {
   runGh?: RunGh;
   readFile?: (p: string) => string;
   timeoutMs?: number;
+  /** Time source for the gh deadline (default: the system clock). */
+  clock?: Clock;
 }): Promise<PrSection> {
   try {
     const runGh = deps.runGh ?? defaultRunGh;
@@ -139,7 +156,7 @@ export async function openPullRequests(deps: {
     const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const repos = ['.', ...configuredRepos(deps.cwd, readFile)];
     const results = await Promise.all(
-      repos.map((repo) => queryRepo(repo, runGh, deps.cwd, timeoutMs)),
+      repos.map((repo) => queryRepo(repo, runGh, deps.cwd, timeoutMs, deps.clock)),
     );
     const prs = results.flatMap((result) => result.prs);
     const errors = results

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import { captureRequestBody, captureUserMessage, transcriptTail, parseCaptureResponse, runCapture, type CaptureDeps } from './precompact.ts';
 import { initHop } from './tools/tools.ts';
+import { createManualClock } from './clock.ts';
 
 const MODEL = { provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' };
 
@@ -197,4 +198,31 @@ test('The capture request quotes the transcript as data with the closing tag str
 test('The capture request disables model reasoning so the token budget goes to the answer', () => {
   const body = captureRequestBody({ model: 'deepseek/deepseek-v4.1-flash', system: 's', user: 'u', maxTokens: 1500 });
   assert.deepEqual(body.reasoning, { enabled: false });
+});
+
+test('runCapture stamps the capture from the injected clock', async () => {
+  const dir = root();
+  const record = await runCapture({ transcript_path: transcript(dir) }, deps(dir, {
+    clock: createManualClock('2026-10-25T12:00:00.000Z'),
+  }));
+  assert.equal(record.at, '2026-10-25T12:00:00.000Z');
+  assert.equal(record.captureId, 'c-2026-10-25T12-00-00-000Z');
+});
+
+test('runCapture lets an explicit now win over the clock', async () => {
+  const dir = root();
+  const record = await runCapture({ transcript_path: transcript(dir) }, deps(dir, {
+    clock: createManualClock('2026-10-25T12:00:00.000Z'),
+    now: () => new Date('2001-02-03T04:05:06.000Z'),
+  }));
+  assert.equal(record.at, '2001-02-03T04:05:06.000Z');
+});
+
+test('runCapture falls back to the clock when the now hook throws', async () => {
+  const dir = root();
+  const record = await runCapture({ transcript_path: transcript(dir) }, deps(dir, {
+    clock: createManualClock('2026-10-25T12:00:00.000Z'),
+    now: () => { throw new Error('broken clock'); },
+  }));
+  assert.equal(record.at, '2026-10-25T12:00:00.000Z');
 });

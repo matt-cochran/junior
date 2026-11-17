@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { isCommodity } from './model-policy.ts';
 import { cheapestToolPrice, fetchModelEndpoints, fetchOnlineCatalog, newerInLineage, readLocalCatalog, type CatalogFetch, type ModelPrice } from './models.ts';
 import type { ModelConfig } from './roster.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export type PriceSource = 'endpoint'|'headline';
 export type PriceProvenance = { priceSource:PriceSource; provider:string|null };
@@ -69,12 +70,12 @@ export function modelCatalogCachePath(env:NodeJS.ProcessEnv = process.env):strin
 
 /** Best-effort atomic write of the online catalog; a failure never breaks the
  * caller, which already has the ids in hand. */
-function writeCatalogCache(path:string, ids:string[], prices:Record<string,ModelPrice>):void {
+function writeCatalogCache(path:string, ids:string[], prices:Record<string,ModelPrice>, clock:Clock):void {
  if (!isAbsolute(path)) return; // no resolvable home: never cache into the cwd
  try {
   mkdirSync(dirname(path),{ recursive:true });
   const tmp=`${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ checkedAt:Date.now(), ids, prices }));
+  writeFileSync(tmp, JSON.stringify({ checkedAt:clock.now(), ids, prices }));
   renameSync(tmp, path);
  } catch { /* the online catalog still serves this run */ }
 }
@@ -95,7 +96,7 @@ function sanitizePrices(prices:any):Record<string,ModelPrice> {
 /** Read the cached online catalog when it is present, well-formed and no older
  * than `maxAgeMs` (default seven days). Missing, malformed and stale caches
  * all read as null. */
-export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ now?:()=>number; maxAgeMs?:number; cachePath?:string } = {}):{ ids:string[]; checkedAt:number; prices:Record<string,ModelPrice> }|null {
+export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ now?:()=>number; clock?:Clock; maxAgeMs?:number; cachePath?:string } = {}):{ ids:string[]; checkedAt:number; prices:Record<string,ModelPrice> }|null {
  const path=opts.cachePath ?? modelCatalogCachePath(env);
  let text:string;
  try { text=readFileSync(path,'utf8'); } catch { return null; }
@@ -103,7 +104,8 @@ export function readCachedCatalog(env:NodeJS.ProcessEnv = process.env, opts:{ no
  try { parsed=JSON.parse(text); } catch { return null; }
  if (!parsed || typeof parsed !== 'object') return null;
  if (typeof parsed.checkedAt !== 'number' || !Array.isArray(parsed.ids) || !parsed.ids.every((id:any)=>typeof id==='string')) return null;
- const now=(opts.now ?? Date.now)();
+ const clock=opts.clock ?? systemClock;
+ const now=(opts.now ?? (()=>clock.now()))();
  const maxAgeMs=opts.maxAgeMs ?? MODEL_CATALOG_CACHE_TTL_MS;
  if (now - parsed.checkedAt > maxAgeMs) return null;
  return { ids:parsed.ids, checkedAt:parsed.checkedAt, prices:sanitizePrices(parsed.prices) };
@@ -159,9 +161,10 @@ function endpointCandidates(config:ModelConfig, ids:string[]):string[] {
  * else the local Pi catalog, else none. With a config, the online path also
  * prices the bounded latest-candidate/current-pin set from every endpoint and
  * prefers the cheapest tools-capable endpoint over the headline price. */
-export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; timeoutMs?:number; env?:NodeJS.ProcessEnv; cachePath?:string; config?:ModelConfig } = {}):Promise<CatalogIds> {
+export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; timeoutMs?:number; env?:NodeJS.ProcessEnv; cachePath?:string; config?:ModelConfig; clock?:Clock } = {}):Promise<CatalogIds> {
+ const clock=opts.clock ?? systemClock;
  if (opts.online) {
-  const entries=await fetchOnlineCatalog({ fetch:opts.fetch, timeoutMs:opts.timeoutMs });
+  const entries=await fetchOnlineCatalog({ fetch:opts.fetch, timeoutMs:opts.timeoutMs, clock });
   if (entries) {
    const ids=entries.map((e)=>e.id);
    const prices=Object.fromEntries(entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
@@ -170,7 +173,7 @@ export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; ti
    if (opts.config) {
     const candidates=endpointCandidates(opts.config, ids);
     const fetched=await Promise.all(candidates.map(async (id)=>{
-     const endpoints=await fetchModelEndpoints(id,{ fetch:opts.fetch, timeoutMs:opts.timeoutMs });
+     const endpoints=await fetchModelEndpoints(id,{ fetch:opts.fetch, timeoutMs:opts.timeoutMs, clock });
      return { id, cheapest:cheapestToolPrice(endpoints) };
     }));
     for (const { id, cheapest } of fetched) {
@@ -179,7 +182,7 @@ export async function catalogIds(opts:{ online?:boolean; fetch?:CatalogFetch; ti
      sources[id]={ priceSource:'endpoint', provider:cheapest.provider };
     }
    }
-   writeCatalogCache(opts.cachePath ?? modelCatalogCachePath(opts.env), ids, prices);
+   writeCatalogCache(opts.cachePath ?? modelCatalogCachePath(opts.env), ids, prices, clock);
    return { ids, catalog:'online', prices, sources };
   }
  }

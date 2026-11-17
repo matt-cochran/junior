@@ -42,6 +42,14 @@ import {
   nativeAbsPath,
 } from "./tools-env.ts";
 import type { CallOutcome, CallRequest } from "./tools-env.ts";
+import { systemClock } from "../clock.ts";
+import type { Clock } from "../clock.ts";
+
+/** Optional collaborators for a Hop call (tests substitute a manual clock). */
+export interface HopCallOptions {
+  /** Time source for timestamps, the manifest lock and MCP deadlines (default: the system clock). */
+  clock?: Clock;
+}
 
 function findNote(value: unknown): string | null {
   if (isRecord(value) && typeof value.note === "string" && value.note.length > 0) {
@@ -86,6 +94,7 @@ function writeSnapshot(
   toolName: string,
   revision: number,
   value: unknown,
+  clock: Clock,
 ): SnapshotRef {
   const serialized = JSON.stringify(value, null, 2) + "\n";
   const digest = sha256Hex(serialized);
@@ -105,7 +114,7 @@ function writeSnapshot(
       throw new HopError("IO_ERROR", `immutable snapshot collision at ${abs}`);
     }
   }
-  return { id, tool, toolName, kind: "read", revision, path: rel, sha256: digest, createdAt: nowIso() };
+  return { id, tool, toolName, kind: "read", revision, path: rel, sha256: digest, createdAt: nowIso(clock) };
 }
 
 /**
@@ -219,6 +228,7 @@ type CallRecordContext = {
   hop: HopManifest;
   kind: CallKind;
   revision: number;
+  clock: Clock;
 };
 
 function callRuntimeFor(
@@ -246,7 +256,7 @@ function recordCallResult(
   env: Record<string, string>,
   mcp: McpSequenceResult,
 ): CallOutcome {
-  const { hopPath, tool, toolName, hop, kind, revision } = ctx;
+  const { hopPath, tool, toolName, hop, kind, revision, clock } = ctx;
   if (tool === "cpm" && env.CPM_PLANNER_DB) {
     assertCpmProjectDatabase(mcp.stderr, env.CPM_PLANNER_DB);
   }
@@ -256,7 +266,7 @@ function recordCallResult(
 
   let snapshot: SnapshotRef | null = null;
   if (kind === "read" && ok) {
-    snapshot = writeSnapshot(hopPath, tool, toolName, revision, mcp.value);
+    snapshot = writeSnapshot(hopPath, tool, toolName, revision, mcp.value, clock);
     hop.snapshots.push(snapshot);
   }
   if (tool === "crossmatrix" && toolName === "crossmatrix.command" && ok && !crossmatrixUsesStore(hop)) {
@@ -272,7 +282,7 @@ function recordCallResult(
     status: ok ? "ok" : unsupported ? "unsupported" : "error",
     snapshotId: snapshot?.id,
     note: note ?? undefined,
-    createdAt: nowIso(),
+    createdAt: nowIso(clock),
   });
   if (unsupported) {
     hop.unresolved.push({
@@ -282,7 +292,7 @@ function recordCallResult(
       toolName,
       reason: "unsupported-operation",
       detail: note ?? undefined,
-      createdAt: nowIso(),
+      createdAt: nowIso(clock),
     });
   }
 
@@ -301,7 +311,7 @@ function recordCallResult(
 }
 
 function recordCallError(ctx: CallRecordContext, err: unknown): CallOutcome {
-  const { tool, toolName, hop, kind, revision } = ctx;
+  const { tool, toolName, hop, kind, revision, clock } = ctx;
   const hopErr = toHopError(err);
   hop.evidence.push({
     id: `ev_${revision}_${randomUUID().slice(0, 8)}`,
@@ -311,7 +321,7 @@ function recordCallError(ctx: CallRecordContext, err: unknown): CallOutcome {
     kind,
     status: "error",
     note: hopErr.message,
-    createdAt: nowIso(),
+    createdAt: nowIso(clock),
   });
   hop.unresolved.push({
     id: `un_${revision}_${randomUUID().slice(0, 8)}`,
@@ -320,7 +330,7 @@ function recordCallError(ctx: CallRecordContext, err: unknown): CallOutcome {
     toolName,
     reason: hopErr.code,
     detail: hopErr.message,
-    createdAt: nowIso(),
+    createdAt: nowIso(clock),
   });
   return {
     ok: false,
@@ -352,6 +362,7 @@ async function processCall(
     timeoutMs: number;
     toolName: string;
   }) => Promise<McpSequenceResult>,
+  clock: Clock,
 ): Promise<CallOutcome> {
   const toolName = typeof request.tool === "string" ? request.tool : "";
   if (!toolName) throw new HopError("BAD_REQUEST", "request.tool is required");
@@ -370,7 +381,7 @@ async function processCall(
     const kind: CallKind = isReadTool(tool, toolName) ? "read" : "command";
     const revision = hop.revision + 1;
     const { cfg, timeoutMs, env } = callRuntimeFor(hopPath, tool, hop, request);
-    const ctx: CallRecordContext = { hopPath, tool, toolName, hop, kind, revision };
+    const ctx: CallRecordContext = { hopPath, tool, toolName, hop, kind, revision, clock };
 
     let outcome: CallOutcome;
     try {
@@ -384,9 +395,9 @@ async function processCall(
     hop.acceptedRevision = null;
     hop.managerNote = null;
     hop.revision = revision;
-    saveHop(hopPath, hop);
+    saveHop(hopPath, hop, clock);
     return outcome;
-  });
+  }, clock);
 }
 
 /**
@@ -399,7 +410,9 @@ export function callHop(
   hopPath: string,
   tool: ToolName,
   request: CallRequest,
+  options: HopCallOptions = {},
 ): Promise<CallOutcome> {
+  const clock = options.clock ?? systemClock;
   if (!TOOL_NAMES.includes(tool)) {
     throw new HopError("UNKNOWN_TOOL", `unknown tool '${String(tool)}'`);
   }
@@ -412,8 +425,8 @@ export function callHop(
       request.arguments,
       request.prependModelOpen !== false,
     );
-    return mcpCallSequence({ command: cfg.command, args: cfg.args, env, timeoutMs }, calls);
-  });
+    return mcpCallSequence({ command: cfg.command, args: cfg.args, env, timeoutMs, clock }, calls);
+  }, clock);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +534,9 @@ function crossmatrixSessionCalls(
 export async function openHopSession(
   hopPath: string,
   tool: ToolName,
+  options: HopCallOptions = {},
 ): Promise<HopSession> {
+  const clock = options.clock ?? systemClock;
   if (!TOOL_NAMES.includes(tool)) {
     throw new HopError("UNKNOWN_TOOL", `unknown tool '${String(tool)}'`);
   }
@@ -535,13 +550,13 @@ export async function openHopSession(
   }
   const env = { ...companionKeyEnv(cfg.env), ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
   if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
-  const mcp = await openMcpSession({ command: cfg.command, args: cfg.args, env, timeoutMs: hop.timeoutMs });
+  const mcp = await openMcpSession({ command: cfg.command, args: cfg.args, env, timeoutMs: hop.timeoutMs, clock });
 
   const state: CrossmatrixSessionState = { openedModels: new Set<string>(), replayedImport: false };
 
   return {
     call(h, t, request) {
-      if (t !== tool) return callHop(h, t, request);
+      if (t !== tool) return callHop(h, t, request, { clock });
       return processCall(hopPath, tool, request, ({ hop: manifest, toolName, timeoutMs }) => {
         const actual: McpCallSpec = { name: toolName, arguments: request.arguments ?? {} };
         const calls = crossmatrixSessionCalls(
@@ -554,7 +569,7 @@ export async function openHopSession(
           state,
         );
         return mcp.call(calls, timeoutMs);
-      });
+      }, clock);
     },
     close() {
       return mcp.close();
@@ -654,14 +669,16 @@ export async function recordManagerAcceptance(
   hopPath: string,
   accepted: boolean,
   note?: string,
+  options: HopCallOptions = {},
 ): Promise<HopManifest> {
+  const clock = options.clock ?? systemClock;
   const preloaded = loadHop(hopPath);
   return withManifestLock(hopPath, preloaded.lockTimeoutMs, async () => {
     const hop = loadHop(hopPath);
     hop.managerAcceptance = accepted ? "accepted" : "rejected";
     hop.acceptedRevision = accepted ? hop.revision : null;
     hop.managerNote = note ?? null;
-    saveHop(hopPath, hop);
+    saveHop(hopPath, hop, clock);
     return hop;
-  });
+  }, clock);
 }
