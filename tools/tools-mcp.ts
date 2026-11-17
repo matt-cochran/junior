@@ -70,6 +70,148 @@ function extractStructured(result: unknown): unknown {
   return result;
 }
 
+type McpSequenceState = {
+  child: ChildProcess;
+  settled: boolean;
+  timer: NodeJS.Timeout | null;
+  stdoutBuf: Buffer;
+  stdoutBytes: number;
+  stderrText: string;
+  nextId: number;
+  pending: Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>;
+  resolve: (value: McpSequenceResult) => void;
+  reject: (err: unknown) => void;
+};
+
+function sequenceCleanup(st: McpSequenceState): void {
+  if (st.timer) {
+    clearTimeout(st.timer);
+    st.timer = null;
+  }
+}
+
+function sequenceFail(st: McpSequenceState, err: unknown): void {
+  if (st.settled) return;
+  st.settled = true;
+  sequenceCleanup(st);
+  killTree(st.child);
+  for (const p of st.pending.values()) p.reject(err);
+  st.pending.clear();
+  st.reject(err);
+}
+
+function sequenceSucceed(st: McpSequenceState, value: McpSequenceResult): void {
+  if (st.settled) return;
+  st.settled = true;
+  sequenceCleanup(st);
+  killTree(st.child);
+  st.resolve(value);
+}
+
+function sequenceWrite(st: McpSequenceState, obj: unknown): void {
+  const child = st.child;
+  if (!child.stdin || child.stdin.destroyed) return;
+  try {
+    child.stdin.write(JSON.stringify(obj) + "\n");
+  } catch (err) {
+    sequenceFail(st, new HopError("SPAWN_ERROR", `cannot write to MCP server: ${String(err)}`, err));
+  }
+}
+
+function sequenceRequest(st: McpSequenceState, method: string, params: unknown): Promise<unknown> {
+  const id = st.nextId++;
+  return new Promise<unknown>((res, rej) => {
+    st.pending.set(id, { resolve: res, reject: rej });
+    sequenceWrite(st, { jsonrpc: "2.0", id, method, params });
+  });
+}
+
+function sequenceNotify(st: McpSequenceState, method: string, params: unknown): void {
+  sequenceWrite(st, { jsonrpc: "2.0", method, params });
+}
+
+function sequenceHandleLine(st: McpSequenceState, line: string): void {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!isRecord(msg) || msg.id === undefined || msg.id === null) return;
+  const id = typeof msg.id === "number" ? msg.id : Number(msg.id);
+  const entry = st.pending.get(id);
+  if (!entry) return;
+  st.pending.delete(id);
+  if (isRecord(msg.error)) {
+    const message = typeof msg.error.message === "string" ? msg.error.message : "JSON-RPC error";
+    entry.reject(new HopError("RPC_ERROR", message, msg.error));
+  } else {
+    entry.resolve(msg.result);
+  }
+}
+
+function attachSequenceProcessListeners(st: McpSequenceState, command: string): void {
+  const child = st.child;
+  child.on("error", (err) => {
+    sequenceFail(st, new HopError("SPAWN_ERROR", `failed to spawn '${command}': ${err.message}`, err));
+  });
+  // A server that exits or closes stdin while a request is being written
+  // raises EPIPE asynchronously on the stdin stream; unhandled, it aborts the
+  // whole process (and strands any lock its caller holds). Report it as a
+  // failed call instead (#210).
+  child.stdin?.on("error", (err) => {
+    sequenceFail(st, new HopError("SPAWN_ERROR", `cannot write to MCP server '${command}': ${err.message}`, err));
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    if (st.stderrText.length < 8192) st.stderrText += chunk.toString("utf8");
+  });
+  child.on("exit", (code, signal) => {
+    if (st.settled) return;
+    if (st.pending.size > 0) {
+      const tail = st.stderrText.trim();
+      sequenceFail(
+        st,
+        new HopError(
+          "SPAWN_ERROR",
+          `MCP server exited before responding (code=${String(code)} signal=${String(signal)})${tail ? `: ${tail}` : ""}`,
+        ),
+      );
+    }
+  });
+}
+
+function attachSequenceStdout(st: McpSequenceState, maxOutputBytes: number): void {
+  st.child.stdout?.on("data", (chunk: Buffer) => {
+    st.stdoutBytes += chunk.length;
+    if (st.stdoutBytes > maxOutputBytes) {
+      sequenceFail(st, new HopError("OUTPUT_LIMIT", `MCP output exceeded ${maxOutputBytes} bytes`));
+      return;
+    }
+    st.stdoutBuf = Buffer.concat([st.stdoutBuf, chunk]);
+    let idx: number;
+    while ((idx = st.stdoutBuf.indexOf(0x0a)) !== -1) {
+      const line = st.stdoutBuf.subarray(0, idx).toString("utf8").trim();
+      st.stdoutBuf = st.stdoutBuf.subarray(idx + 1);
+      if (line) sequenceHandleLine(st, line);
+    }
+  });
+}
+
+async function runSequenceCalls(st: McpSequenceState, calls: McpCallSpec[]): Promise<void> {
+  await sequenceRequest(st, "initialize", {
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: "junior-tools", version: "0.1.0" },
+  });
+  sequenceNotify(st, "notifications/initialized", {});
+  let last: unknown;
+  for (const call of calls) {
+    last = await sequenceRequest(st, "tools/call", { name: call.name, arguments: call.arguments ?? {} });
+  }
+  const isError = isRecord(last) && last.isError === true;
+  sequenceSucceed(st, { value: extractStructured(last), isError, stderr: st.stderrText });
+}
+
 /**
  * Spawn an MCP server, run `initialize` + `notifications/initialized`, then
  * issue each `tools/call` in order, returning the LAST result. The connection
@@ -89,140 +231,29 @@ export async function mcpCallSequence(
   });
 
   return new Promise<McpSequenceResult>((resolve, reject) => {
-    let settled = false;
-    let timer: NodeJS.Timeout | null = null;
-    let stdoutBuf = Buffer.alloc(0);
-    let stdoutBytes = 0;
-    let stderrText = "";
-    let nextId = 1;
-    const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
-
-    const cleanup = (): void => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    };
-    const fail = (err: unknown): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      killTree(child);
-      for (const p of pending.values()) p.reject(err);
-      pending.clear();
-      reject(err);
-    };
-    const succeed = (value: McpSequenceResult): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      killTree(child);
-      resolve(value);
+    const st: McpSequenceState = {
+      child,
+      settled: false,
+      timer: null,
+      stdoutBuf: Buffer.alloc(0),
+      stdoutBytes: 0,
+      stderrText: "",
+      nextId: 1,
+      pending: new Map(),
+      resolve,
+      reject,
     };
 
-    timer = setTimeout(() => {
-      fail(new HopError("TIMEOUT", `MCP call exceeded ${timeoutMs}ms`));
+    st.timer = setTimeout(() => {
+      sequenceFail(st, new HopError("TIMEOUT", `MCP call exceeded ${timeoutMs}ms`));
     }, timeoutMs);
 
-    child.on("error", (err) => {
-      fail(new HopError("SPAWN_ERROR", `failed to spawn '${options.command}': ${err.message}`, err));
-    });
-    // A server that exits or closes stdin while a request is being written
-    // raises EPIPE asynchronously on the stdin stream; unhandled, it aborts the
-    // whole process (and strands any lock its caller holds). Report it as a
-    // failed call instead (#210).
-    child.stdin?.on("error", (err) => {
-      fail(new HopError("SPAWN_ERROR", `cannot write to MCP server '${options.command}': ${err.message}`, err));
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderrText.length < 8192) stderrText += chunk.toString("utf8");
-    });
-    child.on("exit", (code, signal) => {
-      if (settled) return;
-      if (pending.size > 0) {
-        const tail = stderrText.trim();
-        fail(
-          new HopError(
-            "SPAWN_ERROR",
-            `MCP server exited before responding (code=${String(code)} signal=${String(signal)})${tail ? `: ${tail}` : ""}`,
-          ),
-        );
-      }
-    });
+    attachSequenceProcessListeners(st, options.command);
+    attachSequenceStdout(st, maxOutputBytes);
 
-    function write(obj: unknown): void {
-      if (!child.stdin || child.stdin.destroyed) return;
-      try {
-        child.stdin.write(JSON.stringify(obj) + "\n");
-      } catch (err) {
-        fail(new HopError("SPAWN_ERROR", `cannot write to MCP server: ${String(err)}`, err));
-      }
-    }
-
-    function request(method: string, params: unknown): Promise<unknown> {
-      const id = nextId++;
-      return new Promise<unknown>((res, rej) => {
-        pending.set(id, { resolve: res, reject: rej });
-        write({ jsonrpc: "2.0", id, method, params });
-      });
-    }
-
-    function notify(method: string, params: unknown): void {
-      write({ jsonrpc: "2.0", method, params });
-    }
-
-    function handleLine(line: string): void {
-      let msg: unknown;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        return;
-      }
-      if (!isRecord(msg) || msg.id === undefined || msg.id === null) return;
-      const id = typeof msg.id === "number" ? msg.id : Number(msg.id);
-      const entry = pending.get(id);
-      if (!entry) return;
-      pending.delete(id);
-      if (isRecord(msg.error)) {
-        const message = typeof msg.error.message === "string" ? msg.error.message : "JSON-RPC error";
-        entry.reject(new HopError("RPC_ERROR", message, msg.error));
-      } else {
-        entry.resolve(msg.result);
-      }
-    }
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > maxOutputBytes) {
-        fail(new HopError("OUTPUT_LIMIT", `MCP output exceeded ${maxOutputBytes} bytes`));
-        return;
-      }
-      stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
-      let idx: number;
-      while ((idx = stdoutBuf.indexOf(0x0a)) !== -1) {
-        const line = stdoutBuf.subarray(0, idx).toString("utf8").trim();
-        stdoutBuf = stdoutBuf.subarray(idx + 1);
-        if (line) handleLine(line);
-      }
-    });
-
-    void (async () => {
-      await request("initialize", {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "junior-tools", version: "0.1.0" },
-      });
-      notify("notifications/initialized", {});
-      let last: unknown;
-      for (const call of calls) {
-        last = await request("tools/call", { name: call.name, arguments: call.arguments ?? {} });
-      }
-      const isError = isRecord(last) && last.isError === true;
-      succeed({ value: extractStructured(last), isError, stderr: stderrText });
-    })().catch((err) => fail(err));
+    void runSequenceCalls(st, calls).catch((err) => sequenceFail(st, err));
   });
 }
-
 /** Convenience wrapper for a single tool call. */
 export function mcpCallTool(
   options: McpSequenceOptions,

@@ -175,6 +175,222 @@ function failedResult(input: {
   };
 }
 
+type PiExecutionOutcome = Awaited<ReturnType<typeof raceWithAbort<PiTransportExecutionResult>>>;
+
+type PiSessionContext = {
+  connection: PiTransportConnection;
+  expectedHost: PiHostIdentity;
+  observedHost: PiHostIdentity;
+  clock: () => string;
+};
+
+async function openPiTransportConnection(
+  transport: PiTransport,
+  expectedHost: PiHostIdentity,
+  request: PiConnectRequest,
+): Promise<PiTransportConnection> {
+  const scope = createAbortScope(request.signal, request.timeoutMs);
+  let connection: PiTransportConnection;
+  try {
+    let outcome: Awaited<ReturnType<typeof raceWithAbort<PiTransportConnection>>>;
+    try {
+      outcome = await raceWithAbort(
+        Promise.resolve(transport.connect({
+          expectedHost,
+          signal: scope.signal,
+          ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+        })),
+        scope.signal,
+      );
+    } catch (error) {
+      throw new PiProtocolError('connect.failed', 'Pi transport connection failed', [{
+        code: 'connect.failed',
+        message: error instanceof Error ? error.message : String(error),
+      }]);
+    }
+    if (outcome.aborted) {
+      const reason = scope.getReason();
+      throw new PiProtocolError(
+        reason === 'timeout' ? 'connect.timeout' : 'connect.cancelled',
+        reason === 'timeout' ? 'Pi transport connection timed out' : 'Pi transport connection was cancelled',
+      );
+    }
+    connection = outcome.value;
+  } finally {
+    scope.dispose();
+  }
+  return connection;
+}
+
+async function runPiTransportExecution(
+  ctx: PiSessionContext,
+  request: Omit<PiExecuteRequest, 'expectedHost'>,
+  executionScope: AbortScope,
+  startedAt: string,
+): Promise<{ result: PiOperationResult } | { execution: PiTransportExecutionResult }> {
+  const { connection, expectedHost } = ctx;
+  let outcome: PiExecutionOutcome;
+  try {
+    outcome = await raceWithAbort(
+      Promise.resolve(connection.execute({
+        operation: request.operation,
+        requestId: request.requestId,
+        ...(request.jobId === undefined ? {} : { jobId: request.jobId }),
+        workspace: request.workspace,
+        ...(request.sourceCommit === undefined ? {} : { sourceCommit: request.sourceCommit }),
+        ...(request.environment === undefined ? {} : { environment: request.environment }),
+        signal: executionScope.signal,
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+      })),
+      executionScope.signal,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError' && executionScope.signal.aborted) {
+      return {
+        result: cancellationResult({
+          request,
+          expectedHost,
+          reason: executionScope.getReason() ?? 'caller',
+          startedAt,
+        }),
+      };
+    }
+    return { result: failedResult({ request, expectedHost, startedAt, error }) };
+  }
+  if (outcome.aborted) {
+    return {
+      result: cancellationResult({
+        request,
+        expectedHost,
+        reason: executionScope.getReason() ?? 'caller',
+        startedAt,
+      }),
+    };
+  }
+  return { execution: outcome.value };
+}
+
+function attachPiArtifacts(
+  request: Omit<PiExecuteRequest, 'expectedHost'>,
+  execution: PiTransportExecutionResult,
+  requestedCommit: string,
+) {
+  const artifacts = execution.artifacts ?? createPiArtifactManifest({
+    files: execution.files ?? [],
+    sourceCommit: request.sourceCommit,
+    workspaceRoot: request.workspace.root,
+  });
+  if (!verifyPiManifest(artifacts) || artifacts.kind !== 'artifact') {
+    throw new PiProtocolError('artifact.invalid', 'artifact manifest is not content-addressed');
+  }
+  if (request.sourceCommit !== undefined
+    && artifacts.sourceCommit !== 'unknown'
+    && artifacts.sourceCommit !== request.sourceCommit) {
+    throw new PiProtocolError(
+      'artifact.source-commit',
+      'artifact manifest does not match the requested source commit',
+    );
+  }
+  return artifacts.sourceCommit === requestedCommit
+    ? artifacts
+    : {
+      ...artifacts,
+      sourceCommit: requestedCommit,
+      root: manifestRoot('artifact', artifacts.entries, {
+        sourceCommit: requestedCommit,
+        workspaceRoot: artifacts.workspaceRoot,
+      }),
+    };
+}
+
+function completedPiResult(
+  ctx: PiSessionContext,
+  request: Omit<PiExecuteRequest, 'expectedHost'>,
+  execution: PiTransportExecutionResult,
+  startedAt: string,
+): PiOperationResult {
+  const { observedHost, clock } = ctx;
+  const requestedCommit = request.sourceCommit ?? 'unknown';
+  const attachedArtifacts = attachPiArtifacts(request, execution, requestedCommit);
+  const redact = redactorFor(request);
+  const stdout = redact(execution.stdout ?? '');
+  const stderr = redact(execution.stderr ?? '');
+  return {
+    schemaVersion: COMPUTE_PI_SCHEMA_VERSION,
+    requestId: request.requestId,
+    operation: request.operation,
+    jobId: request.jobId ?? null,
+    sourceCommit: requestedCommit,
+    status: (execution.exitCode ?? 0) === 0 ? 'succeeded' : 'failed',
+    host: {
+      resourceId: observedHost.resourceId,
+      resourceGeneration: observedHost.resourceGeneration,
+      hostKeyFingerprint: observedHost.hostKeyFingerprint,
+    },
+    workspaceRoot: request.workspace.root,
+    artifacts: attachedArtifacts,
+    startedAt,
+    completedAt: clock(),
+    exitCode: execution.exitCode ?? 0,
+    stdout,
+    stderr,
+    logs: redact([stdout, stderr].filter((value) => value !== '').join('\n')),
+    cancellation: null,
+    error: (execution.exitCode ?? 0) === 0
+      ? null
+      : { code: 'operation.exit', message: redact(`remote command exited with ${execution.exitCode}`) },
+  };
+}
+
+async function executeOnPiSession(
+  ctx: PiSessionContext,
+  request: Omit<PiExecuteRequest, 'expectedHost'>,
+): Promise<PiOperationResult> {
+  if (!verifyPiManifest(request.workspace) || request.workspace.kind !== 'workspace') {
+    throw new PiProtocolError('manifest.invalid', 'workspace manifest is not content-addressed');
+  }
+  const startedAt = ctx.clock();
+  const executionScope = createAbortScope(request.signal, request.timeoutMs);
+  try {
+    const ran = await runPiTransportExecution(ctx, request, executionScope, startedAt);
+    if ('result' in ran) return ran.result;
+    return completedPiResult(ctx, request, ran.execution, startedAt);
+  } finally {
+    executionScope.dispose();
+  }
+}
+
+async function connectPiSession(
+  transport: PiTransport,
+  clock: () => string,
+  request: PiConnectRequest,
+): Promise<PiSession> {
+  const expectedHost = assertVerifiedPiHost(request.expectedHost);
+  const connection = await openPiTransportConnection(transport, expectedHost, request);
+
+  const verification = verifyPiHostIdentity(expectedHost, connection.identity);
+  if (!verification.verified) {
+    await connection.close?.();
+    throw new PiProtocolError(verification.code, verification.message, verification.issues);
+  }
+
+  const observedHost = inspectPiHostIdentity(connection.identity).identity as PiHostIdentity;
+  const ctx: PiSessionContext = { connection, expectedHost, observedHost, clock };
+
+  async function execute(request: Omit<PiExecuteRequest, 'expectedHost'>): Promise<PiOperationResult> {
+    return executeOnPiSession(ctx, request);
+  }
+
+  return {
+    expectedHost,
+    observedHost,
+    execute,
+    close: async () => {
+      await connection.close?.();
+    },
+  };
+}
+
 /** Build a protocol over an injected transport. The transport is never real SSH in tests. */
 export function createPiProtocol(transport: PiTransport, options: { now?: () => string } = {}): PiProtocol {
   const clock = options.now ?? nowIso;
@@ -183,156 +399,7 @@ export function createPiProtocol(transport: PiTransport, options: { now?: () => 
   }
 
   async function connect(request: PiConnectRequest): Promise<PiSession> {
-    const expectedHost = assertVerifiedPiHost(request.expectedHost);
-    const scope = createAbortScope(request.signal, request.timeoutMs);
-    let connection: PiTransportConnection;
-    try {
-      let outcome: Awaited<ReturnType<typeof raceWithAbort<PiTransportConnection>>>;
-      try {
-        outcome = await raceWithAbort(
-          Promise.resolve(transport.connect({
-            expectedHost,
-            signal: scope.signal,
-            ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-          })),
-          scope.signal,
-        );
-      } catch (error) {
-        throw new PiProtocolError('connect.failed', 'Pi transport connection failed', [{
-          code: 'connect.failed',
-          message: error instanceof Error ? error.message : String(error),
-        }]);
-      }
-      if (outcome.aborted) {
-        const reason = scope.getReason();
-        throw new PiProtocolError(
-          reason === 'timeout' ? 'connect.timeout' : 'connect.cancelled',
-          reason === 'timeout' ? 'Pi transport connection timed out' : 'Pi transport connection was cancelled',
-        );
-      }
-      connection = outcome.value;
-    } finally {
-      scope.dispose();
-    }
-
-    const verification = verifyPiHostIdentity(expectedHost, connection.identity);
-    if (!verification.verified) {
-      await connection.close?.();
-      throw new PiProtocolError(verification.code, verification.message, verification.issues);
-    }
-
-    const observedHost = inspectPiHostIdentity(connection.identity).identity as PiHostIdentity;
-
-    async function execute(request: Omit<PiExecuteRequest, 'expectedHost'>): Promise<PiOperationResult> {
-      if (!verifyPiManifest(request.workspace) || request.workspace.kind !== 'workspace') {
-        throw new PiProtocolError('manifest.invalid', 'workspace manifest is not content-addressed');
-      }
-      const startedAt = clock();
-      const executionScope = createAbortScope(request.signal, request.timeoutMs);
-      try {
-        let outcome: Awaited<ReturnType<typeof raceWithAbort<PiTransportExecutionResult>>>;
-        try {
-          outcome = await raceWithAbort(
-            Promise.resolve(connection.execute({
-              operation: request.operation,
-              requestId: request.requestId,
-              ...(request.jobId === undefined ? {} : { jobId: request.jobId }),
-              workspace: request.workspace,
-              ...(request.sourceCommit === undefined ? {} : { sourceCommit: request.sourceCommit }),
-              ...(request.environment === undefined ? {} : { environment: request.environment }),
-              signal: executionScope.signal,
-              ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-            })),
-            executionScope.signal,
-          );
-        } catch (error) {
-          if (error instanceof Error && error.name === 'AbortError' && executionScope.signal.aborted) {
-            return cancellationResult({
-              request,
-              expectedHost,
-              reason: executionScope.getReason() ?? 'caller',
-              startedAt,
-            });
-          }
-          return failedResult({ request, expectedHost, startedAt, error });
-        }
-        if (outcome.aborted) {
-          return cancellationResult({
-            request,
-            expectedHost,
-            reason: executionScope.getReason() ?? 'caller',
-            startedAt,
-          });
-        }
-        const execution = outcome.value;
-        const artifacts = execution.artifacts ?? createPiArtifactManifest({
-          files: execution.files ?? [],
-          sourceCommit: request.sourceCommit,
-          workspaceRoot: request.workspace.root,
-        });
-        if (!verifyPiManifest(artifacts) || artifacts.kind !== 'artifact') {
-          throw new PiProtocolError('artifact.invalid', 'artifact manifest is not content-addressed');
-        }
-        const requestedCommit = request.sourceCommit ?? 'unknown';
-        if (request.sourceCommit !== undefined
-          && artifacts.sourceCommit !== 'unknown'
-          && artifacts.sourceCommit !== request.sourceCommit) {
-          throw new PiProtocolError(
-            'artifact.source-commit',
-            'artifact manifest does not match the requested source commit',
-          );
-        }
-        const attachedArtifacts = artifacts.sourceCommit === requestedCommit
-          ? artifacts
-          : {
-            ...artifacts,
-            sourceCommit: requestedCommit,
-            root: manifestRoot('artifact', artifacts.entries, {
-              sourceCommit: requestedCommit,
-              workspaceRoot: artifacts.workspaceRoot,
-            }),
-          };
-        const redact = redactorFor(request);
-        const stdout = redact(execution.stdout ?? '');
-        const stderr = redact(execution.stderr ?? '');
-        return {
-          schemaVersion: COMPUTE_PI_SCHEMA_VERSION,
-          requestId: request.requestId,
-          operation: request.operation,
-          jobId: request.jobId ?? null,
-          sourceCommit: requestedCommit,
-          status: (execution.exitCode ?? 0) === 0 ? 'succeeded' : 'failed',
-          host: {
-            resourceId: observedHost.resourceId,
-            resourceGeneration: observedHost.resourceGeneration,
-            hostKeyFingerprint: observedHost.hostKeyFingerprint,
-          },
-          workspaceRoot: request.workspace.root,
-          artifacts: attachedArtifacts,
-          startedAt,
-          completedAt: clock(),
-          exitCode: execution.exitCode ?? 0,
-          stdout,
-          stderr,
-          logs: redact([stdout, stderr].filter((value) => value !== '').join('\n')),
-          cancellation: null,
-          error: (execution.exitCode ?? 0) === 0
-            ? null
-            : { code: 'operation.exit', message: redact(`remote command exited with ${execution.exitCode}`) },
-        };
-      } finally {
-        executionScope.dispose();
-      }
-    }
-
-    return {
-      expectedHost,
-      observedHost,
-      execute,
-      close: async () => {
-        await connection.close?.();
-      },
-    };
+    return connectPiSession(transport, clock, request);
   }
 
   return {
