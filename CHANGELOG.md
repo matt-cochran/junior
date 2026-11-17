@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every module with timing logic reads the time and schedules timers through
+  an injectable clock (`clock.ts`: `Clock`, `systemClock`, `createManualClock`).
+  Each one takes an optional `clock` (for a run, `deps.clock`) that defaults
+  to the system clock, so behaviour is unchanged. The existing `now` hooks keep
+  working and still take precedence. A guard test keeps `Date.now()`,
+  `new Date()`, `performance.now()` and the global timers out of every other
+  production module (#265).
+- Timing tests are deterministic. They advance a manual clock and assert one
+  millisecond before and at each bound, so they no longer sleep or race real
+  deadlines. Tests that drive a real child process wait on its events. This
+  removes the load-dependent failures in `worker-checks` and `worker-runtime`
+  and shortens the kill-escalation, deadline and retry tests from seconds to
+  milliseconds (#265).
 - The build uses TypeScript 7.0.2, the native compiler, in place of 5.9.3.
   `scripts/build.mjs` now runs the native `tsc` once over every production
   module (transpile only, `--noCheck`), because TypeScript 7 no longer ships
