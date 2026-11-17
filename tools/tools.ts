@@ -74,7 +74,7 @@ export { buildToolEnv, companionKeyEnv, cpmModelEnv, cpmReviewStatus, crossmatri
 export type { CallRequest, CallOutcome } from "./tools-env.ts";
 
 export { callHop, inspectHop, openHopSession, recordManagerAcceptance } from "./tools-call.ts";
-export type { HopSession, InspectSnapshot, InspectReport } from "./tools-call.ts";
+export type { HopCallOptions, HopSession, InspectSnapshot, InspectReport } from "./tools-call.ts";
 
 export { main } from "./tools-cli.ts";
 

@@ -14,6 +14,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { systemClock, type Clock } from './clock.ts';
 
 export type AdrDecisionStage = 'design' | 'implementation' | 'ticket';
 export type AdrDecisionVerdict = 'contradicts' | 'uncertain' | 'conforms' | 'not_applicable';
@@ -59,8 +60,9 @@ export type AdrDecisionInput = Omit<
 };
 
 export type AppendDecisionOptions = {
-  /** Injected clock, used by tests and deterministic callers. */
-  clock?: () => Date;
+  /** Injected clock, used by tests and deterministic callers: a `() => Date`
+   * or a `Clock` (#265). */
+  clock?: (() => Date) | Clock;
   /** Alias for clock; a Date is also accepted. */
   now?: Date | (() => Date);
 };
@@ -132,7 +134,7 @@ function resolveNow(options: AppendDecisionOptions): Date {
   if (typeof options.clock === 'function') return options.clock();
   if (typeof options.now === 'function') return options.now();
   if (options.now instanceof Date) return options.now;
-  return new Date();
+  return (options.clock ?? systemClock).date();
 }
 
 function generatedId(): string {
