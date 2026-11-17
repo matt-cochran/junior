@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `junior init` with `JUNIOR_NO_INSTALL` writes the project's `.delivery/setup/hop.json` from the managed tools already installed, with no download. Before, it wrote no hop, so every `junior tools call` failed with `HOP_NOT_FOUND`. A recorded tool whose binary is gone is listed under `tools.hop.missing`. `junior doctor` now reports a project with usable tools but no hop as not ready (`tool:hop`), and `junior setup` repairs it with `junior init --install` (#271).
+
 ### Changed
 
 - Every module with timing logic reads the time and schedules timers through

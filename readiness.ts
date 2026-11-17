@@ -206,6 +206,17 @@ function toolItems(integrations: IntegrationsResult, fix: string): ReadinessItem
   return items;
 }
 
+// #271: the project's HOP manifest (.delivery/setup/hop.json) is what `junior tools call` reads. With the
+// managed tools installed but no hop, every companion call fails with HOP_NOT_FOUND, so a missing hop is
+// not ready. Only checked when the tools themselves are usable: a missing tool is already reported (and
+// `junior init --install` repairs both).
+function hopItems(deps: ReadinessDeps, cwd: string, integrations: IntegrationsResult): ReadinessItem[] {
+  if (!integrations.tools.length || !integrations.tools.every((t) => t.usable)) return [];
+  const exists = deps.exists ?? existsSync;
+  if (exists(join(cwd, '.delivery', 'setup', 'hop.json'))) return [];
+  return [{ id: 'tool:hop', kind: 'tool', name: 'hop', status: 'missing', required: true, fix: 'junior init' }];
+}
+
 // Whether this Junior release has verified the responses of an installed
 // companion version is advisory: an unverified version never gates readiness
 // and never becomes a `junior setup` action.
@@ -271,6 +282,7 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
     installRoot: deps.toolsRoot,
   } as InstallerDeps);
   items.push(...toolItems(integrations, fix));
+  items.push(...hopItems(deps, cwd, integrations));
   items.push(...shapeItems(integrations));
 
   const summary = readCachedSummary(deps, env, home);

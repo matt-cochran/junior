@@ -879,3 +879,25 @@ test('compute status fails closed when the resource status is missing', async ()
   const { exitCode } = await runComputeCommand(['status', '--resource', 'resource-1'], computeDeps(dir));
   assert.equal(exitCode, 3);
 });
+
+// #271: JUNIOR_NO_INSTALL skips the installers, not project setup. With the managed tools already
+// installed, `init` still writes the project's hop, pointing at them, so `junior tools call` works.
+test('#271: init under JUNIOR_NO_INSTALL writes the hop from the installed tools, with no download', () => {
+  const dir = workdir();
+  const home = mkdtempSync(join(tmpdir(), 'junior-271-home-'));
+  const toolsRoot = join(home, '.junior', 'tools');
+  mkdirSync(join(toolsRoot, 'cpm'), { recursive: true });
+  const cpm = join(toolsRoot, 'cpm', 'cpm');
+  writeFileSync(cpm, '#!/bin/sh\necho cpm-planner 0.8.0\n', { mode: 0o755 });
+  const gone = join(toolsRoot, 'fmeca', 'fmeca-mcp');
+  const entry = (path: string, version: string) => ({ tag: `v${version}`, version, asset: 'a', assetDigest: 'd', binaryDigest: 'b', path, installedAt: '2026-11-17T00:00:00.000Z' });
+  writeFileSync(join(toolsRoot, 'installed.json'), JSON.stringify({ schemaVersion: 1, tools: { cpm: entry(cpm, '0.8.0'), fmeca: entry(gone, '0.2.2') } }));
+  const result = runJunior(['init'], dir, { HOME: home, USERPROFILE: home });
+  assert.equal(result.status, 0, result.stderr);
+  const out = JSON.parse(result.stdout);
+  assert.equal(out.tools.skipped, 'JUNIOR_NO_INSTALL');
+  assert.deepEqual(out.tools.hop.missing, ['fmeca']);
+  const hop = loadHop(join(dir, '.delivery', 'setup', 'hop.json'));
+  assert.equal(hop.tools.cpm.command, cpm);
+  assert.equal(hop.tools.cpm.sourceVersion, '0.8.0');
+});
