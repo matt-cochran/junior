@@ -8,6 +8,7 @@ import {
   assertVerifiedPiHost,
   createPiArtifactManifest,
   inspectPiHostIdentity,
+  manifestRoot,
   verifyPiHostIdentity,
   verifyPiManifest,
   type PiHostIdentity,

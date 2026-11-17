@@ -41,6 +41,9 @@ const DEFAULT_OUT = join(REPO_ROOT, 'tools', 'test-fixtures', 'companions');
 // ---------------------------------------------------------------------------
 
 const PLAN_ID_RE = /\bplan_[0-9a-f]{32}\b/g;
+// The capture's mkdtemp project directory, which cpm 0.8 reports as
+// `durable_state.location`; it differs on every run.
+const TEMP_PROJECT_RE = /\S*junior-fixtures-[A-Za-z0-9]+/g;
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const TOKEN_FIELDS = new Set(['lease_token', 'token', 'lock_id', 'lease_id']);
 const FIXED_TIMESTAMP = '2026-01-01T00:00:00Z';
@@ -49,7 +52,7 @@ const FIXED_TIMESTAMP = '2026-01-01T00:00:00Z';
 export function normalizeValue(value) {
   if (typeof value === 'string') {
     if (ISO_TIMESTAMP_RE.test(value)) return FIXED_TIMESTAMP;
-    return value.replace(PLAN_ID_RE, 'plan_FIXTURE');
+    return value.replace(PLAN_ID_RE, 'plan_FIXTURE').replace(TEMP_PROJECT_RE, '<project>');
   }
   if (Array.isArray(value)) return value.map((item) => normalizeValue(item));
   if (value !== null && typeof value === 'object') {
