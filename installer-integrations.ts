@@ -86,6 +86,129 @@ function hopLocalCommand(hopPath: string | undefined, hop: any, tool: ToolName):
   return path.isAbsolute(command) ? command : path.resolve(path.dirname(hopPath ?? "."), command);
 }
 
+function loadIntegrationHop(hopPath: string | undefined): any {
+  let hop: any = null;
+  if (hopPath && fs.existsSync(hopPath)) {
+    try {
+      hop = loadHop(hopPath);
+    } catch {
+      hop = null;
+    }
+  }
+  return hop;
+}
+
+function unreadableStateResult(statePath: string, err: unknown): IntegrationsResult {
+  return {
+    ready: false,
+    statePath,
+    tools: TOOL_NAMES.map((tool) => ({
+      tool,
+      repo: TOOL_REPOS[tool].repo,
+      installed: false,
+      usable: false,
+      verified: false,
+      executable: false,
+      version: null,
+      tag: null,
+      path: null,
+      provenance: null,
+      note: err instanceof Error ? err.message : String(err),
+    })),
+    supported: SUPPORTED_MATRIX,
+  };
+}
+
+function managedToolReport(
+  tool: ToolName,
+  entry: NonNullable<InstallState["tools"][ToolName]>,
+  hopPath: string | undefined,
+  hop: any,
+): IntegrationReport {
+  const verdict = verifyManagedFile(entry.path, entry.binaryDigest, true);
+  if (verdict.usable) {
+    return {
+      tool,
+      repo: entry.repo,
+      installed: true,
+      usable: true,
+      verified: verdict.verified,
+      executable: verdict.executable,
+      version: entry.version,
+      tag: entry.tag,
+      path: entry.path,
+      provenance: `${entry.repo}@${entry.tag} (asset ${entry.assetDigest})`,
+      note: verdict.verified ? "verified prebuilt binary present" : "prebuilt binary present (digest not recorded)",
+    };
+  }
+  const note = !verdict.exists
+    ? `recorded binary is missing at ${entry.path}`
+    : !verdict.executable
+      ? `recorded binary is not executable at ${entry.path}`
+      : `recorded binary digest does not match at ${entry.path}`;
+  const local = hopLocalCommand(hopPath, hop, tool);
+  if (local && fs.existsSync(local)) {
+    return {
+      tool,
+      repo: entry.repo,
+      installed: true,
+      usable: true,
+      verified: false,
+      executable: true,
+      version: entry.version,
+      tag: entry.tag,
+      path: local,
+      provenance: `local hop.json (unverified); managed binary unavailable: ${note}`,
+      note: "configured local binary present (unverified provenance)",
+    };
+  }
+  return {
+    tool,
+    repo: entry.repo,
+    installed: true,
+    usable: false,
+    verified: false,
+    executable: verdict.executable,
+    version: entry.version,
+    tag: entry.tag,
+    path: entry.path,
+    provenance: `${entry.repo}@${entry.tag} (asset ${entry.assetDigest})`,
+    note,
+  };
+}
+
+function unmanagedToolReport(tool: ToolName, hopPath: string | undefined, hop: any): IntegrationReport {
+  const local = hopLocalCommand(hopPath, hop, tool);
+  if (local && fs.existsSync(local)) {
+    return {
+      tool,
+      repo: TOOL_REPOS[tool].repo,
+      installed: false,
+      usable: true,
+      verified: false,
+      executable: true,
+      version: null,
+      tag: null,
+      path: local,
+      provenance: "local hop.json (unverified)",
+      note: "configured local binary present (unverified provenance)",
+    };
+  }
+  return {
+    tool,
+    repo: TOOL_REPOS[tool].repo,
+    installed: false,
+    usable: false,
+    verified: false,
+    executable: false,
+    version: null,
+    tag: null,
+    path: null,
+    provenance: null,
+    note: `not installed; run \`junior.ts init --install\``,
+  };
+}
+
 /**
  * Offline integration readiness: reports managed tool versions, provenance and
  * paths separately from Pi execution/auth readiness. A recorded binary is only
@@ -98,120 +221,17 @@ export function inspectIntegrations(deps: InstallerDeps = {}): IntegrationsResul
   const installRoot = deps.installRoot ?? DEFAULT_INSTALL_ROOT;
   const statePath = defaultStatePath({ ...deps, installRoot });
   const hopPath = deps.hopPath ?? (deps.cwd ? path.join(deps.cwd, ".delivery", "setup", "hop.json") : undefined);
-  let hop: any = null;
-  if (hopPath && fs.existsSync(hopPath)) {
-    try {
-      hop = loadHop(hopPath);
-    } catch {
-      hop = null;
-    }
-  }
+  const hop: any = loadIntegrationHop(hopPath);
   let state: InstallState;
   try {
     state = readInstallState({ ...deps, installRoot, statePath });
   } catch (err) {
-    return {
-      ready: false,
-      statePath,
-      tools: TOOL_NAMES.map((tool) => ({
-        tool,
-        repo: TOOL_REPOS[tool].repo,
-        installed: false,
-        usable: false,
-        verified: false,
-        executable: false,
-        version: null,
-        tag: null,
-        path: null,
-        provenance: null,
-        note: err instanceof Error ? err.message : String(err),
-      })),
-      supported: SUPPORTED_MATRIX,
-    };
+    return unreadableStateResult(statePath, err);
   }
   const tools = TOOL_NAMES.map((tool): IntegrationReport => {
     const entry = state.tools[tool];
-    if (entry) {
-      const verdict = verifyManagedFile(entry.path, entry.binaryDigest, true);
-      if (verdict.usable) {
-        return {
-          tool,
-          repo: entry.repo,
-          installed: true,
-          usable: true,
-          verified: verdict.verified,
-          executable: verdict.executable,
-          version: entry.version,
-          tag: entry.tag,
-          path: entry.path,
-          provenance: `${entry.repo}@${entry.tag} (asset ${entry.assetDigest})`,
-          note: verdict.verified ? "verified prebuilt binary present" : "prebuilt binary present (digest not recorded)",
-        };
-      }
-      const note = !verdict.exists
-        ? `recorded binary is missing at ${entry.path}`
-        : !verdict.executable
-          ? `recorded binary is not executable at ${entry.path}`
-          : `recorded binary digest does not match at ${entry.path}`;
-      const local = hopLocalCommand(hopPath, hop, tool);
-      if (local && fs.existsSync(local)) {
-        return {
-          tool,
-          repo: entry.repo,
-          installed: true,
-          usable: true,
-          verified: false,
-          executable: true,
-          version: entry.version,
-          tag: entry.tag,
-          path: local,
-          provenance: `local hop.json (unverified); managed binary unavailable: ${note}`,
-          note: "configured local binary present (unverified provenance)",
-        };
-      }
-      return {
-        tool,
-        repo: entry.repo,
-        installed: true,
-        usable: false,
-        verified: false,
-        executable: verdict.executable,
-        version: entry.version,
-        tag: entry.tag,
-        path: entry.path,
-        provenance: `${entry.repo}@${entry.tag} (asset ${entry.assetDigest})`,
-        note,
-      };
-    }
-    const local = hopLocalCommand(hopPath, hop, tool);
-    if (local && fs.existsSync(local)) {
-      return {
-        tool,
-        repo: TOOL_REPOS[tool].repo,
-        installed: false,
-        usable: true,
-        verified: false,
-        executable: true,
-        version: null,
-        tag: null,
-        path: local,
-        provenance: "local hop.json (unverified)",
-        note: "configured local binary present (unverified provenance)",
-      };
-    }
-    return {
-      tool,
-      repo: TOOL_REPOS[tool].repo,
-      installed: false,
-      usable: false,
-      verified: false,
-      executable: false,
-      version: null,
-      tag: null,
-      path: null,
-      provenance: null,
-      note: `not installed; run \`junior.ts init --install\``,
-    };
+    if (entry) return managedToolReport(tool, entry, hopPath, hop);
+    return unmanagedToolReport(tool, hopPath, hop);
   });
   return { ready: tools.every((t) => t.usable), statePath, tools, supported: SUPPORTED_MATRIX, optional: { triz: trizReport(state) } };
 }

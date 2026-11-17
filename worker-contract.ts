@@ -519,7 +519,7 @@ export function acceptanceTexts(acceptance:any):string[] {
  return (Array.isArray(acceptance) ? acceptance : []).map(acceptanceText);
 }
 
-export function validate(t: any) {
+function validateIdentityAndAcceptance(t:any):void {
  for (const k of ['id','deliverable','cwd']) if (typeof t[k] !== 'string' || !t[k].trim()) throw Error(`Missing ${k}`);
  if (!/^[a-zA-Z0-9_-]+$/.test(t.id)) throw Error('Invalid id');
  if (t.thinking !== undefined && !['off','minimal','low','medium','high','xhigh','max'].includes(t.thinking)) throw Error('Invalid thinking level');
@@ -539,6 +539,9 @@ export function validate(t: any) {
   }
   if (a.when !== undefined && (typeof a.when !== 'string' || !a.when.trim())) throw Error('Invalid acceptance.when (expected a non-empty string)');
  }
+}
+
+function validateAssumptionsAndChecks(t:any):void {
  if (t.assumptions !== undefined) {
   if (!Array.isArray(t.assumptions)) throw Error('Invalid assumptions (expected an array)');
   for (const a of t.assumptions) {
@@ -563,6 +566,9 @@ export function validate(t: any) {
    if (!Array.isArray(a.checks) || a.checks.some((x:any)=>!Number.isInteger(x) || x < 0 || x >= t.checks.length)) throw Error('Invalid acceptance.checks');
   }
  }
+}
+
+function validateRunFields(t:any):void {
  if (t.pricing !== undefined && t.pricing !== null) validatePricing(t.pricing);
  if (t.billing !== undefined && t.billing !== null) validateBilling(t.billing);
  if (t.checkBack !== undefined && !['auto','always','off'].includes(t.checkBack)) throw Error('Invalid checkBack (expected auto, always or off)');
@@ -570,6 +576,9 @@ export function validate(t: any) {
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
  if (t.commandPolicy !== undefined) parseCommandPolicy(t.commandPolicy, t.cwd);
+}
+
+function validateLineageFields(t:any):void {
  if (t.resumeFrom !== undefined && (typeof t.resumeFrom !== 'string' || !t.resumeFrom.trim())) throw Error('Invalid resumeFrom (expected path to a prior result.json)');
  if (t.repairFrom !== undefined && (typeof t.repairFrom !== 'string' || !t.repairFrom.trim())) throw Error('Invalid repairFrom (expected path to a prior result.json)');
  if (t.reviewFrom !== undefined && (typeof t.reviewFrom !== 'string' || !t.reviewFrom.trim())) throw Error('Invalid reviewFrom (expected path to a prior result.json)');
@@ -577,6 +586,9 @@ export function validate(t: any) {
  if (t.lineageDeadlineMs !== undefined && (typeof t.lineageDeadlineMs !== 'number' || !Number.isFinite(t.lineageDeadlineMs) || t.lineageDeadlineMs <= 0)) throw Error('Invalid lineageDeadlineMs (expected a finite positive number)');
  if (t.preparedFrom !== undefined && (typeof t.preparedFrom !== 'string' || !t.preparedFrom.trim())) throw Error('Invalid preparedFrom (expected the contract id of the prepare brief)');
  if (t.approveModel !== undefined && (typeof t.approveModel !== 'string' || !t.approveModel.trim())) throw Error('Invalid approveModel (expected a profile id or model id)');
+}
+
+function validateRoutingAndContextFields(t:any):void {
  if (t.approvedProfiles !== undefined) {
   if (!Array.isArray(t.approvedProfiles) || t.approvedProfiles.some((k:any)=>typeof k !== 'string' || !k.trim())) throw Error('Invalid approvedProfiles (expected an array of profile ids or model ids)');
  }
@@ -596,6 +608,9 @@ export function validate(t: any) {
   const problem = validatePiContext(t.piContext);
   if (problem) throw Error(problem);
  }
+}
+
+function validateScopeAndJev(t:any):void {
  if (t.clarifiedFrom !== undefined && (typeof t.clarifiedFrom !== 'string' || !t.clarifiedFrom.trim())) throw Error('Invalid clarifiedFrom (expected a path to a clarify.json)');
  if (t.scope !== undefined) {
   if (!t.scope || typeof t.scope !== 'object' || Array.isArray(t.scope)) throw Error('Invalid scope.owned (expected a non-empty array of paths)');
@@ -616,6 +631,15 @@ export function validate(t: any) {
   if (t.jev.mode !== undefined && !['off','shadow','enforce'].includes(t.jev.mode)) throw Error('Invalid jev.mode (expected off, shadow or enforce)');
   if (t.jev.provider !== undefined) validateJevProvider(t.jev.provider);
  }
+}
+
+export function validate(t: any) {
+ validateIdentityAndAcceptance(t);
+ validateAssumptionsAndChecks(t);
+ validateRunFields(t);
+ validateLineageFields(t);
+ validateRoutingAndContextFields(t);
+ validateScopeAndJev(t);
  for (const k of Object.keys(t)) if (!(TASK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown contract field: ${k}`);
  return t;
 }
