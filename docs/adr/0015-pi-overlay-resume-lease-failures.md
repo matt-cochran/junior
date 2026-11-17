@@ -24,7 +24,7 @@ rules:
   - id: R4
     text: Every Pi failure is classified by classifyPiFailure into one typed category with a redacted summary. A retryable transport failure that produced no assistant message is retried once; nothing else is retried. Exit 0 with no assistant messages is a failure with its cause, never success.
   - id: R5
-    text: Report-only workflows (evaluate, qa, recon, investigate) run with an enforced default budget of 25 tool calls and 400000 total tokens (cache reads count) unless the contract budget overrides a field. A budget stop keeps the existing stopReason budget_exceeded and names the field.
+    text: Report-only workflows (evaluate, qa, recon, investigate) run with an enforced default budget of 25 tool calls and 400000 total tokens (cache reads count) unless the contract budget overrides a field. Every other workflow runs with an enforced default of 16000000 total tokens (cache reads count), overridable the same way. A budget stop keeps the existing stopReason budget_exceeded and names the field.
   - id: R6
     text: A contract commandPolicy is enforced where processes start (the Pi bash guard and the contract check runner), not only in the prompt. A refused command never runs and is never counted as passed validation. Contracts without commandPolicy behave exactly as before.
   - id: R7
@@ -110,9 +110,12 @@ export function classifyPiFailure(input: { exitCode: number | null; stderr: stri
 
 ```ts
 export const REPORT_WORKFLOW_BUDGET: BudgetLimits = { maxToolCalls: 25, maxTotalTokens: 400000, mode: 'enforce' };
-export function defaultWorkflowBudget(workflow: string): BudgetLimits | null; // evaluate|qa|recon|investigate -> copy of REPORT_WORKFLOW_BUDGET, else null
-export function effectiveBudget(workflow: string, contractBudget?: BudgetLimits): BudgetLimits | null; // field-wise: contract wins, defaults fill gaps
+export const CODE_WORKFLOW_BUDGET: BudgetLimits = { maxTotalTokens: 16000000, mode: 'enforce' };
+export function defaultWorkflowBudget(workflow: string): BudgetLimits; // evaluate|qa|recon|investigate -> copy of REPORT_WORKFLOW_BUDGET, else a copy of CODE_WORKFLOW_BUDGET
+export function effectiveBudget(workflow: string, contractBudget?: BudgetLimits): BudgetLimits; // field-wise: contract wins, defaults fill gaps
 ```
+
+- Amended 2026-11-17 (#251 item 1, owner decision): every non-report workflow gets an enforced default of 16M total tokens. In jevitate structural-splits-3, accepted code runs used 0.6M–3.2M tokens and the longest legitimate run 15.2M; the two runaway lanes used 18.4M and 22.1M.
 
 - The worker passes `effectiveBudget(selectedWorkflow, t.budget)` as the stream `budget`. Stop reason and accounting stay as they are (`budget_exceeded`, `exceededField`).
 - Report-workflow prompts tell the worker to write `analysis-report.md` after each acceptance criterion, so a budget stop or interrupt keeps a partial report.

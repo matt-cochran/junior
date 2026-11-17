@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory with `<project>`, so the `durable_state.location` paths cpm reports
   stay identical from run to run.
 
+- Code and other non-report workflows run with an enforced default budget of
+  16,000,000 total tokens (cache reads count). Before, they were unbounded
+  unless the contract set `budget`, so a runaway lane could spend 18M–22M
+  tokens. A contract `budget` overrides the default field by field; ADR 0015 R5
+  is amended (#251).
+
 ### Fixed
 
 - A remote Pi run whose transport returns an artifact manifest without a

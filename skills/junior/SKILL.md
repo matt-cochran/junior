@@ -323,7 +323,9 @@ output-limit stop as incomplete work, regardless of passing checks. Inspect
 - Report workflows (`evaluate`, `qa`, `recon`, `investigate`) default to a
   budget of 25 tool calls and 400,000 tokens (cache reads count); a contract
   `budget` overrides it field by field. Hitting it stops with
-  `budget_exceeded` and keeps the partial report.
+  `budget_exceeded` and keeps the partial report. Every other workflow
+  defaults to 16,000,000 total tokens (cache reads count), overridable the
+  same way.
 - Pi gets a run-local agent directory with copied credentials (0600), which are
   deleted when Pi exits. A resume imports the parent session into it; if the
   session is gone, code workflows stop with `resume_session_unavailable` at no
