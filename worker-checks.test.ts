@@ -28,7 +28,10 @@ const arena = (t: any): string => {
 
 const noopHeartbeat = { update: () => {}, poll: () => {} };
 
-/** A minimal RunState whose only job is to run the contract's checks. */
+/** A minimal RunState whose only job is to run the contract's checks. Its
+ * heartbeat carries a manual clock that never advances, so the check timeout
+ * cannot fire however slowly a loaded machine starts the child: the check
+ * ends when the real process exits. Timeout tests pass their own clock. */
 const checkState = (dir: string, checks: any[], overrides: Record<string, unknown> = {}) => ({
   t: { checks },
   mock: true,
@@ -37,7 +40,7 @@ const checkState = (dir: string, checks: any[], overrides: Record<string, unknow
   sourceCwd: dir,
   executionCwd: dir,
   dir,
-  heartbeat: noopHeartbeat,
+  heartbeat: { ...noopHeartbeat, clock: createManualClock(Date.now()) },
   emit: () => {},
   signal: undefined,
   deadlineAt: Date.now() + 60_000,
