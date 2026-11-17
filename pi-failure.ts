@@ -197,6 +197,12 @@ export function classifyPiFailure(input: ClassifyPiFailureInput): PiFailure | nu
     || (/(EROFS|EACCES|EPERM)/i.test(combined) && /\.lock\b/i.test(combined))) {
     return credentialFailure(combined, detail);
   }
+  return classifyStderrSetup(stderr, detail)
+    ?? classifyTransport(stderr, detail)
+    ?? classifyExit(exitCode, messages, detail);
+}
+
+function classifyStderrSetup(stderr: string, detail: string): PiFailure | null {
   if (/No session found matching/i.test(stderr)) {
     return result(
       'resume_session_unavailable',
@@ -213,6 +219,10 @@ export function classifyPiFailure(input: ClassifyPiFailureInput): PiFailure | nu
       detail,
     );
   }
+  return null;
+}
+
+function classifyTransport(stderr: string, detail: string): PiFailure | null {
   if (/\b(ENOTFOUND|EAI_AGAIN)\b/i.test(stderr)) {
     return result(
       'transport_dns',
@@ -251,7 +261,14 @@ export function classifyPiFailure(input: ClassifyPiFailureInput): PiFailure | nu
       detail,
     );
   }
+  return null;
+}
 
+function classifyExit(
+  exitCode: ClassifyPiFailureInput['exitCode'],
+  messages: ReturnType<typeof assistantCount>,
+  detail: string,
+): PiFailure | null {
   if (exitCode === 0 && messages === 0) {
     return result(
       'zero_messages',

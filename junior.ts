@@ -242,6 +242,427 @@ function resolveResultArg(arg: string, cwd: string): { file: string; runRef: str
  return undefined;
 }
 
+interface CommandContext {
+ command: string;
+ rest: string[];
+ parsed: ParsedCommand;
+ updateCheck?: any;
+}
+
+type CommandHandler = (ctx: CommandContext) => Promise<void>;
+
+async function modelCommand({ rest }: CommandContext): Promise<void> {
+ const modelCli = await import('./model-cli.ts');
+ const { exitCode, result } = await modelCli.runModelCommand(rest, { cwd: process.cwd(), env: process.env });
+ console.log(JSON.stringify(result, null, 2));
+ process.exitCode = exitCode;
+}
+
+async function planCommand({ rest }: CommandContext): Promise<void> {
+ const planCli = await import('./plan-junior.ts');
+ const withJev = rest.includes('--jev');
+ if (withJev) {
+  const args = rest.filter((arg) => arg !== '--jev');
+  if (args[0] !== 'check') throw Error('--jev is only valid for junior plan check');
+  const captured = planCli.runPlanCommand(args, { cwd: process.cwd(), out: () => {} });
+  const planFile = planFileArg(args);
+  const { createPiClassifier } = await import('./worker.ts');
+  const quality = await planCli.scorePlanFile(planFile, await createPiClassifier(), { cwd: process.cwd() });
+  console.log(JSON.stringify({ ...captured.result, quality }, null, 2));
+  process.exitCode = captured.exitCode;
+  return;
+ }
+ const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
+ process.exitCode = exitCode;
+}
+
+async function routesCommand({ rest }: CommandContext): Promise<void> {
+ const routes = await import('./routes.ts');
+ process.exitCode = await routes.main(rest);
+}
+
+/** Commands handled before the best-effort upgrade notice. */
+const PRE_NOTICE_COMMANDS = new Map<string, CommandHandler>([
+ ['model', modelCommand],
+ ['plan', planCommand],
+ ['routes', routesCommand],
+]);
+
+function printNoteList(open: any): void {
+ const noteLines = [...open.notes]
+  .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  .map((note) => `- [${note.kind}] ${note.text} (${note.id})`);
+ const proposalLines = [...open.proposals]
+  .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  .map((note) => `- [${note.kind}] ${note.text} (${note.id}, ${note.captureId ?? ''})`);
+ console.log('### Open notes');
+ console.log(noteLines.length ? noteLines.join('\n') : 'none');
+ console.log('### Capture proposals');
+ console.log(proposalLines.length ? proposalLines.join('\n') : 'none');
+}
+
+async function noteCommand({ parsed }: CommandContext): Promise<void> {
+ const [sub, ...words] = parsed.files;
+ const notes = await import('./notes.ts');
+ const kinds = ['note', 'decision', 'question', 'risk', 'hypothesis', 'todo'];
+ const kind = parsed.values['--kind'];
+ if (kind !== undefined && !kinds.includes(kind)) {
+  throw Error(`Invalid --kind value: ${kind} (expected ${kinds.join(', ')})`);
+ }
+ const root = process.cwd();
+ if (sub === 'add') {
+  const text = words.join(' ');
+  if (!text) throw Error(COMMANDS.note.help);
+  const note = notes.addNote(root, { text, ...(kind !== undefined ? { kind: kind as any } : {}) });
+  console.log(parsed.flags.has('--json') ? JSON.stringify(note, null, 2) : `added ${note.id}`);
+  return;
+ }
+ if (sub === 'list') {
+  if (words.length > 0) throw Error(COMMANDS.note.help);
+  const open = notes.listOpen(root);
+  if (parsed.flags.has('--json')) {
+   console.log(JSON.stringify(open, null, 2));
+   return;
+  }
+  printNoteList(open);
+  return;
+ }
+ if (sub === 'done' || sub === 'promote' || sub === 'dismiss') {
+  if (words.length !== 1) throw Error(COMMANDS.note.help);
+  const id = words[0];
+  const changed = sub === 'done' ? notes.markDone(root, id) : notes[sub](root, id);
+  if (!changed) {
+   console.error(`no matching open note or proposal: ${id}`);
+   process.exitCode = 1;
+   return;
+  }
+  console.log(`${sub} ${id}`);
+  return;
+ }
+ throw Error(COMMANDS.note.help);
+}
+
+async function fmecaCommand({ parsed }: CommandContext): Promise<void> {
+ const [sub, target] = parsed.files;
+ if (sub !== 'propose-verified') throw Error(COMMANDS.fmeca.help);
+ const cwd = process.cwd();
+ const resolved = resolveResultArg(target, cwd);
+ if (!resolved) {
+  console.error(`no result.json found: ${join(cwd, '.delivery', target)}`);
+  process.exitCode = 1;
+  return;
+ }
+ let result: unknown;
+ try {
+  result = JSON.parse(readFileSync(resolved.file, 'utf8'));
+ } catch {
+  console.error(`invalid result.json: ${resolved.file}`);
+  process.exitCode = 1;
+  return;
+ }
+ const { proposeVerified } = await import('./fmeca-verify.ts');
+ console.log(JSON.stringify(proposeVerified(result, resolved.runRef), null, 2));
+}
+
+async function compactCapture(): Promise<void> {
+ try {
+  let input: any = {};
+  try {
+   const rawInput = readFileSync(0, 'utf8');
+   if (rawInput.trim()) {
+    const parsedInput = JSON.parse(rawInput);
+    if (parsedInput && typeof parsedInput === 'object' && !Array.isArray(parsedInput)) input = parsedInput;
+   }
+  } catch { /* empty or invalid hook input becomes {} */ }
+  const { runCapture } = await import('./precompact.ts');
+  const record = await runCapture(input, {
+   root: typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd(),
+  });
+  const suffix = record.error ? ` (${record.error})` : '';
+  console.error(`junior capture: ${record.proposals} proposals, ${record.duplicates} duplicates${suffix}`);
+ } catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`junior capture: 0 proposals, 0 duplicates (${message})`);
+ }
+ process.exitCode = 0;
+}
+
+async function compactCommand({ parsed }: CommandContext): Promise<void> {
+ if (parsed.flags.has('--capture')) {
+  await compactCapture();
+  return;
+ }
+ const raw = parsed.values['--max-chars'];
+ let maxChars: number | undefined;
+ if (raw !== undefined) {
+  maxChars = Number(raw);
+  if (!Number.isInteger(maxChars) || maxChars <= 0) {
+   throw Error(`Invalid --max-chars value: ${raw} (expected a positive integer)`);
+  }
+ }
+ const rawHop = parsed.values['--hop'];
+ let hopPath: string | undefined;
+ if (rawHop !== undefined) {
+  const { loadHop } = await import('./tools/tools.ts');
+  hopPath = resolve(process.cwd(), rawHop);
+  loadHop(hopPath);
+ }
+ const { buildCompactBlock } = await import('./compact.ts');
+ const block = await buildCompactBlock({ cwd: process.cwd(), ...(hopPath !== undefined ? { hopPath } : {}), ...(maxChars !== undefined ? { maxChars } : {}) });
+ if (parsed.flags.has('--cursor')) {
+  console.log(JSON.stringify({ additional_context: block.markdown }));
+  return;
+ }
+ console.log(parsed.flags.has('--json') ? JSON.stringify(block, null, 2) : block.markdown);
+}
+
+async function setupContextHooks(parsed: ParsedCommand): Promise<void> {
+ const harness = parsed.values['--harness'];
+ if (harness !== undefined && !['claude', 'codex', 'cursor'].includes(harness)) {
+  throw Error(`Invalid --harness value: ${harness} (expected claude, codex or cursor)`);
+ }
+ const scope = parsed.values['--scope'];
+ if (scope !== undefined && scope !== 'local' && scope !== 'project') {
+  throw Error(`Invalid --scope value: ${scope} (expected local or project)`);
+ }
+ const contextHooks = await import('./context-hooks.ts');
+ if (harness === 'codex' || harness === 'cursor') {
+  const result = contextHooks.installHarnessHooks({
+   projectDir: process.cwd(),
+   harness,
+   remove: parsed.flags.has('--remove'),
+  });
+  console.log(JSON.stringify(result, null, 2));
+  for (const note of result.notes) console.error(note);
+  return;
+ }
+ const result = contextHooks.installContextHooks({
+  projectDir: process.cwd(),
+  ...(scope !== undefined ? { scope: scope as 'local' | 'project' } : {}),
+  remove: parsed.flags.has('--remove'),
+ });
+ console.log(JSON.stringify(result, null, 2));
+}
+
+async function setupCommand({ parsed }: CommandContext): Promise<void> {
+ if (parsed.flags.has('--context-hooks')) {
+  await setupContextHooks(parsed);
+  return;
+ }
+ const setup = await import('./readiness.ts');
+ const result = await setup.runSetup({}, {
+  cwd: process.cwd(),
+  harness: parsed.values['--harness'],
+  hopPath: parsed.values['--hop'],
+  yes: parsed.flags.has('--yes'),
+  dryRun: parsed.flags.has('--dry-run'),
+  juniorCommand: [process.execPath, process.argv[1]],
+ });
+ process.exitCode = result.exitCode;
+}
+
+async function doctorCommand({ parsed, updateCheck }: CommandContext): Promise<void> {
+ const result:any = doctor({}, { harness: parsed.values['--harness'] });
+ if (parsed.flags.has('--online')) {
+  result.credentialsOnline = await checkCredentialsOnline();
+  const posture = await inspectDataPolicy({ cwd: process.cwd(), models: [result.model.id] });
+  result.dataPolicy = posture;
+  result.warnings.push(...renderDataPolicyPosture(posture).split('\n'));
+ }
+ if (parsed.flags.has('--check-updates')) {
+  const collected = await updateCheck.collectUpdateCheck({
+   moduleUrl: import.meta.url,
+   onCompanions: (report:any) => { result.companions = report; },
+  });
+  result.updates = collected.updates;
+ }
+ console.log(JSON.stringify(result, null, 2));
+ if (!result.ok) process.exitCode = 1;
+}
+
+async function pruneCommand({ parsed }: CommandContext): Promise<void> {
+ const olderRaw = parsed.values['--older-than'];
+ let olderThanMs: number | undefined;
+ if (olderRaw !== undefined) {
+  const parsedMs = parseDuration(olderRaw);
+  if (parsedMs === null) throw Error(`Invalid --older-than duration: ${olderRaw} (use e.g. 30m, 24h, 7d)`);
+  olderThanMs = parsedMs;
+ }
+ const keepRaw = parsed.values['--keep-last'];
+ let keepLast: number | undefined;
+ if (keepRaw !== undefined) {
+  keepLast = Number(keepRaw);
+  if (!Number.isInteger(keepLast) || keepLast < 0) throw Error(`Invalid --keep-last count: ${keepRaw}`);
+ }
+ const result = pruneWorktrees(process.cwd(), { olderThanMs, keepLast, dryRun: parsed.flags.has('--dry-run') });
+ console.log(JSON.stringify(result, null, 2));
+}
+
+async function installInitTools(result: any, opts: InitOptions): Promise<void> {
+ if (installationDisabled(process.env)) {
+  result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true };
+ } else {
+  const installer = await import('./installer.ts');
+  const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
+  result.tools = report;
+  // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
+  result.installSummary = summarizeInstall(result.install, report);
+ }
+}
+
+function setupInitCompanions(result: any, opts: InitOptions): void {
+ result.companions = setupCompanions({}, { target: opts.target, scope: opts.scope, install: opts.install, update: opts.update });
+ if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
+ if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
+}
+
+async function initCommand({ command, rest, parsed }: CommandContext): Promise<void> {
+ const target = parsed.values['--target'];
+ if (target !== undefined && !INIT_TARGETS.includes(target)) throw Error(`Invalid --target value: ${target}`);
+ const scope = parsed.values['--scope'];
+ if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
+ const opts:InitOptions = parseInitOptions(rest);
+ // `update` adopts newer releases and replaces only skills Junior itself wrote.
+ if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true, command: 'update' });
+ // Adopt a newer Junior first, so the new release's own update logic runs.
+ let self: any | undefined;
+ if (command === 'update') {
+  const selfUpdate = await import('./self-update.ts');
+  const outcome = selfUpdate.selfUpdate({ argv: rest, deps: { moduleUrl: import.meta.url } });
+  if (outcome.exitCode !== undefined) { process.exitCode = outcome.exitCode; return; }
+  self = outcome.self;
+ }
+ const result:any = init({}, opts);
+ if (self) result.self = self;
+ if (opts.install) await installInitTools(result, opts);
+ if (opts.companions !== false) setupInitCompanions(result, opts);
+ // Adopt newer commodity models when the project opted in. A model-config
+ // failure must never fail the update.
+ if (command === 'update') {
+  try {
+   const modelCli = await import('./model-cli.ts');
+   result.models = await modelCli.adoptModelUpdates(process.cwd(), {});
+  } catch (e) {
+   result.models = { error: String(e) };
+  }
+ }
+ // Drop the stale update summary so the next startup notice stops reporting
+ // the components just adopted. Never fail an update because of the cache.
+ if (command === 'update') await refreshUpdateCache({});
+ console.log(JSON.stringify(result, null, 2));
+ if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;
+}
+
+async function validateCommand({ parsed }: CommandContext): Promise<void> {
+ const path = parsed.files[0];
+ const t = validate(JSON.parse(readFileSync(path, 'utf8')));
+ console.log(JSON.stringify({ valid: true, id: t.id, warnings: contractWarnings(t) }, null, 2));
+}
+
+async function statusCommand({ parsed }: CommandContext): Promise<void> {
+ const path = parsed.files[0];
+ if (parsed.flags.has('--live')) {
+  const snapshot = readRuntimeSnapshot(path);
+  console.log(JSON.stringify(snapshot, null, 2));
+  return;
+ }
+ if (parsed.flags.has('--full')) {
+  console.log(JSON.stringify(status(path), null, 2));
+ } else {
+  status(path); // Validate the full saved result before projecting a compact receipt.
+  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  console.log(JSON.stringify(compactHandoff(raw), null, 2));
+ }
+}
+
+async function applyCommand({ parsed }: CommandContext): Promise<void> {
+ const { applyHandoff } = await import('./apply.ts');
+ const result = applyHandoff(parsed.files[0], { cwd: process.cwd(), dryRun: parsed.flags.has('--dry-run'), force: parsed.flags.has('--force'), noLink: parsed.flags.has('--no-link') });
+ console.log(JSON.stringify(result, null, 2));
+ if (result.error) process.exitCode = 1;
+}
+
+async function applyClarificationAnswers(task: any, taskCwd: string, answersArg: string): Promise<void> {
+ const answersPath = resolve(process.cwd(), answersArg);
+ let answers: unknown;
+ try { answers = JSON.parse(readFileSync(answersPath, 'utf8')); }
+ catch { const error: any = new Error('Invalid clarification answers: answers file must contain JSON.'); error.exitCode = 64; throw error; }
+ const clarifyDeps = typeof task.hopFrom === 'string' && task.hopFrom.trim() ? { hopPath: resolve(taskCwd, task.hopFrom) } : {};
+ const { applyAnswers } = await import('./clarify.ts');
+ const outcome = await applyAnswers({ cwd: taskCwd, task, answers, deps: clarifyDeps });
+ console.log(JSON.stringify(outcome, null, 2));
+ if (outcome.outcome === 'escalated') process.exitCode = 3;
+}
+
+/** Run a plan-backed task under its plan lease; returns undefined when the lease is refused. */
+async function runWithPlanLease(task: any, taskCwd: string, mock: boolean, deps: GateDeps): Promise<{ result: any; plan: any } | undefined> {
+ validate(task);
+ const { withPlanLease, isHoldOutcome, runNeverStarted } = await import('./plan-handoff.ts');
+ const { callHop } = await import('./tools/tools.ts');
+ const hopPath = resolve(taskCwd, String(task.hopFrom));
+ const lease = await withPlanLease(task, () => run(task, mock, deps), {
+  callHop: (tool, request) => callHop(hopPath, tool, request),
+  deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
+  summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status) || runNeverStarted(r), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
+ });
+ if (!lease.plan.leased) {
+  console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));
+  process.exitCode = 1;
+  return undefined;
+ }
+ return { result: lease.result, plan: lease.plan };
+}
+
+async function runTaskCommand({ command, parsed }: CommandContext): Promise<void> {
+ if (parsed.values['--choose'] !== undefined && command !== 'handoff') throw Error('--choose is only valid for junior handoff');
+ const path = parsed.files[0];
+ const raw = JSON.parse(readFileSync(path, 'utf8'));
+ let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
+ if (parsed.values['--approve-model'] !== undefined) task = { ...task, approveModel: parsed.values['--approve-model'] };
+ const mock = parsed.flags.has('--mock');
+ const deps: GateDeps = {};
+ if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
+ const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
+ if (parsed.values['--answers'] !== undefined) {
+  await applyClarificationAnswers(task, taskCwd, parsed.values['--answers']);
+  return;
+ }
+ if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
+ const slowMount = detectSlowMount(taskCwd);
+ if (slowMount) deps.progress?.(slowMount);
+ let result: any;
+ let plan: any;
+ if (task.plan !== undefined && command !== 'qa') {
+  const leased = await runWithPlanLease(task, taskCwd, mock, deps);
+  if (!leased) return;
+  result = leased.result;
+  plan = leased.plan;
+ } else {
+  result = await run(task, mock, deps);
+ }
+ const receipt = parsed.flags.has('--full') ? result : compactHandoff(result);
+ console.log(JSON.stringify(plan ? { ...receipt, plan } : receipt, null, 2));
+ if (!isSuccessOutcome(result.status)) process.exitCode = 1;
+}
+
+/** Commands handled after the best-effort upgrade notice. */
+const COMMAND_HANDLERS = new Map<string, CommandHandler>([
+ ['note', noteCommand],
+ ['fmeca', fmecaCommand],
+ ['compact', compactCommand],
+ ['setup', setupCommand],
+ ['doctor', doctorCommand],
+ ['prune', pruneCommand],
+ ['init', initCommand],
+ ['update', initCommand],
+ ['validate', validateCommand],
+ ['status', statusCommand],
+ ['apply', applyCommand],
+ ['run', runTaskCommand],
+ ['handoff', runTaskCommand],
+ ['qa', runTaskCommand],
+]);
+
 async function main(argv: string[]): Promise<void> {
  const command = argv[0];
  const rest = argv.slice(1);
@@ -259,38 +680,8 @@ async function main(argv: string[]): Promise<void> {
  if (wantsHelp(rest)) { console.log(spec.help); return; }
  const parsed = parseCommand(command, spec, rest);
 
- if (command === 'model') {
-  const modelCli = await import('./model-cli.ts');
-  const { exitCode, result } = await modelCli.runModelCommand(rest, { cwd: process.cwd(), env: process.env });
-  console.log(JSON.stringify(result, null, 2));
-  process.exitCode = exitCode;
-  return;
- }
-
- if (command === 'plan') {
-  const planCli = await import('./plan-junior.ts');
-  const withJev = rest.includes('--jev');
-  if (withJev) {
-   const args = rest.filter((arg) => arg !== '--jev');
-   if (args[0] !== 'check') throw Error('--jev is only valid for junior plan check');
-   const captured = planCli.runPlanCommand(args, { cwd: process.cwd(), out: () => {} });
-   const planFile = planFileArg(args);
-   const { createPiClassifier } = await import('./worker.ts');
-   const quality = await planCli.scorePlanFile(planFile, await createPiClassifier(), { cwd: process.cwd() });
-   console.log(JSON.stringify({ ...captured.result, quality }, null, 2));
-   process.exitCode = captured.exitCode;
-   return;
-  }
-  const { exitCode } = planCli.runPlanCommand(rest, { cwd: process.cwd() });
-  process.exitCode = exitCode;
-  return;
- }
-
- if (command === 'routes') {
-  const routes = await import('./routes.ts');
-  process.exitCode = await routes.main(rest);
-  return;
- }
+ const preNotice = PRE_NOTICE_COMMANDS.get(command);
+ if (preNotice) { await preNotice({ command, rest, parsed }); return; }
 
  // Best-effort upgrade notice: must never throw and must never change the exit
  // code. It is skipped entirely for commands where an upgrade is not useful.
@@ -304,335 +695,8 @@ async function main(argv: string[]): Promise<void> {
   },
  });
 
- if (command === 'note') {
-  const [sub, ...words] = parsed.files;
-  const notes = await import('./notes.ts');
-  const kinds = ['note', 'decision', 'question', 'risk', 'hypothesis', 'todo'];
-  const kind = parsed.values['--kind'];
-  if (kind !== undefined && !kinds.includes(kind)) {
-   throw Error(`Invalid --kind value: ${kind} (expected ${kinds.join(', ')})`);
-  }
-  const root = process.cwd();
-  if (sub === 'add') {
-   const text = words.join(' ');
-   if (!text) throw Error(COMMANDS.note.help);
-   const note = notes.addNote(root, { text, ...(kind !== undefined ? { kind: kind as any } : {}) });
-   console.log(parsed.flags.has('--json') ? JSON.stringify(note, null, 2) : `added ${note.id}`);
-   return;
-  }
-  if (sub === 'list') {
-   if (words.length > 0) throw Error(COMMANDS.note.help);
-   const open = notes.listOpen(root);
-   if (parsed.flags.has('--json')) {
-    console.log(JSON.stringify(open, null, 2));
-    return;
-   }
-   const noteLines = [...open.notes]
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .map((note) => `- [${note.kind}] ${note.text} (${note.id})`);
-   const proposalLines = [...open.proposals]
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .map((note) => `- [${note.kind}] ${note.text} (${note.id}, ${note.captureId ?? ''})`);
-   console.log('### Open notes');
-   console.log(noteLines.length ? noteLines.join('\n') : 'none');
-   console.log('### Capture proposals');
-   console.log(proposalLines.length ? proposalLines.join('\n') : 'none');
-   return;
-  }
-  if (sub === 'done' || sub === 'promote' || sub === 'dismiss') {
-   if (words.length !== 1) throw Error(COMMANDS.note.help);
-   const id = words[0];
-   const changed = sub === 'done' ? notes.markDone(root, id) : notes[sub](root, id);
-   if (!changed) {
-    console.error(`no matching open note or proposal: ${id}`);
-    process.exitCode = 1;
-    return;
-   }
-   console.log(`${sub} ${id}`);
-   return;
-  }
-  throw Error(COMMANDS.note.help);
- }
- if (command === 'fmeca') {
-  const [sub, target] = parsed.files;
-  if (sub !== 'propose-verified') throw Error(COMMANDS.fmeca.help);
-  const cwd = process.cwd();
-  const resolved = resolveResultArg(target, cwd);
-  if (!resolved) {
-   console.error(`no result.json found: ${join(cwd, '.delivery', target)}`);
-   process.exitCode = 1;
-   return;
-  }
-  let result: unknown;
-  try {
-   result = JSON.parse(readFileSync(resolved.file, 'utf8'));
-  } catch {
-   console.error(`invalid result.json: ${resolved.file}`);
-   process.exitCode = 1;
-   return;
-  }
-  const { proposeVerified } = await import('./fmeca-verify.ts');
-  console.log(JSON.stringify(proposeVerified(result, resolved.runRef), null, 2));
-  return;
- }
- if (command === 'compact') {
-  if (parsed.flags.has('--capture')) {
-   try {
-    let input: any = {};
-    try {
-     const rawInput = readFileSync(0, 'utf8');
-     if (rawInput.trim()) {
-      const parsedInput = JSON.parse(rawInput);
-      if (parsedInput && typeof parsedInput === 'object' && !Array.isArray(parsedInput)) input = parsedInput;
-     }
-    } catch { /* empty or invalid hook input becomes {} */ }
-    const { runCapture } = await import('./precompact.ts');
-    const record = await runCapture(input, {
-     root: typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd(),
-    });
-    const suffix = record.error ? ` (${record.error})` : '';
-    console.error(`junior capture: ${record.proposals} proposals, ${record.duplicates} duplicates${suffix}`);
-   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`junior capture: 0 proposals, 0 duplicates (${message})`);
-   }
-   process.exitCode = 0;
-   return;
-  }
-  const raw = parsed.values['--max-chars'];
-  let maxChars: number | undefined;
-  if (raw !== undefined) {
-   maxChars = Number(raw);
-   if (!Number.isInteger(maxChars) || maxChars <= 0) {
-    throw Error(`Invalid --max-chars value: ${raw} (expected a positive integer)`);
-   }
-  }
-  const rawHop = parsed.values['--hop'];
-  let hopPath: string | undefined;
-  if (rawHop !== undefined) {
-   const { loadHop } = await import('./tools/tools.ts');
-   hopPath = resolve(process.cwd(), rawHop);
-   loadHop(hopPath);
-  }
-  const { buildCompactBlock } = await import('./compact.ts');
-  const block = await buildCompactBlock({ cwd: process.cwd(), ...(hopPath !== undefined ? { hopPath } : {}), ...(maxChars !== undefined ? { maxChars } : {}) });
-  if (parsed.flags.has('--cursor')) {
-   console.log(JSON.stringify({ additional_context: block.markdown }));
-   return;
-  }
-  console.log(parsed.flags.has('--json') ? JSON.stringify(block, null, 2) : block.markdown);
-  return;
- }
- if (command === 'setup') {
-  if (parsed.flags.has('--context-hooks')) {
-   const harness = parsed.values['--harness'];
-   if (harness !== undefined && !['claude', 'codex', 'cursor'].includes(harness)) {
-    throw Error(`Invalid --harness value: ${harness} (expected claude, codex or cursor)`);
-   }
-   const scope = parsed.values['--scope'];
-   if (scope !== undefined && scope !== 'local' && scope !== 'project') {
-    throw Error(`Invalid --scope value: ${scope} (expected local or project)`);
-   }
-   const contextHooks = await import('./context-hooks.ts');
-   if (harness === 'codex' || harness === 'cursor') {
-    const result = contextHooks.installHarnessHooks({
-     projectDir: process.cwd(),
-     harness,
-     remove: parsed.flags.has('--remove'),
-    });
-    console.log(JSON.stringify(result, null, 2));
-    for (const note of result.notes) console.error(note);
-    return;
-   }
-   const result = contextHooks.installContextHooks({
-    projectDir: process.cwd(),
-    ...(scope !== undefined ? { scope: scope as 'local' | 'project' } : {}),
-    remove: parsed.flags.has('--remove'),
-   });
-   console.log(JSON.stringify(result, null, 2));
-   return;
-  }
-  const setup = await import('./readiness.ts');
-  const result = await setup.runSetup({}, {
-   cwd: process.cwd(),
-   harness: parsed.values['--harness'],
-   hopPath: parsed.values['--hop'],
-   yes: parsed.flags.has('--yes'),
-   dryRun: parsed.flags.has('--dry-run'),
-   juniorCommand: [process.execPath, process.argv[1]],
-  });
-  process.exitCode = result.exitCode;
-  return;
- }
- if (command === 'doctor') {
-  const result:any = doctor({}, { harness: parsed.values['--harness'] });
-  if (parsed.flags.has('--online')) {
-   result.credentialsOnline = await checkCredentialsOnline();
-   const posture = await inspectDataPolicy({ cwd: process.cwd(), models: [result.model.id] });
-   result.dataPolicy = posture;
-   result.warnings.push(...renderDataPolicyPosture(posture).split('\n'));
-  }
-  if (parsed.flags.has('--check-updates')) {
-   const collected = await updateCheck.collectUpdateCheck({
-    moduleUrl: import.meta.url,
-    onCompanions: (report:any) => { result.companions = report; },
-   });
-   result.updates = collected.updates;
-  }
-  console.log(JSON.stringify(result, null, 2));
-  if (!result.ok) process.exitCode = 1;
-  return;
- }
- if (command === 'prune') {
-  const olderRaw = parsed.values['--older-than'];
-  let olderThanMs: number | undefined;
-  if (olderRaw !== undefined) {
-   const parsedMs = parseDuration(olderRaw);
-   if (parsedMs === null) throw Error(`Invalid --older-than duration: ${olderRaw} (use e.g. 30m, 24h, 7d)`);
-   olderThanMs = parsedMs;
-  }
-  const keepRaw = parsed.values['--keep-last'];
-  let keepLast: number | undefined;
-  if (keepRaw !== undefined) {
-   keepLast = Number(keepRaw);
-   if (!Number.isInteger(keepLast) || keepLast < 0) throw Error(`Invalid --keep-last count: ${keepRaw}`);
-  }
-  const result = pruneWorktrees(process.cwd(), { olderThanMs, keepLast, dryRun: parsed.flags.has('--dry-run') });
-  console.log(JSON.stringify(result, null, 2));
-  return;
- }
- if (command === 'init' || command === 'update') {
-  const target = parsed.values['--target'];
-  if (target !== undefined && !INIT_TARGETS.includes(target)) throw Error(`Invalid --target value: ${target}`);
-  const scope = parsed.values['--scope'];
-  if (scope !== undefined && !INIT_SCOPES.includes(scope)) throw Error(`Invalid --scope value: ${scope}`);
-  const opts:InitOptions = parseInitOptions(rest);
-  // `update` adopts newer releases and replaces only skills Junior itself wrote.
-  if (command === 'update') Object.assign(opts, { install: true, update: true, upgrade: true, command: 'update' });
-  // Adopt a newer Junior first, so the new release's own update logic runs.
-  let self: any | undefined;
-  if (command === 'update') {
-   const selfUpdate = await import('./self-update.ts');
-   const outcome = selfUpdate.selfUpdate({ argv: rest, deps: { moduleUrl: import.meta.url } });
-   if (outcome.exitCode !== undefined) { process.exitCode = outcome.exitCode; return; }
-   self = outcome.self;
-  }
-  const result:any = init({}, opts);
-  if (self) result.self = self;
-  if (opts.install) {
-   if (installationDisabled(process.env)) {
-    result.tools = { skipped: 'JUNIOR_NO_INSTALL', ok: true };
-   } else {
-    const installer = await import('./installer.ts');
-    const report = await installer.installTools({ update: opts.update, withTriz: opts.withTriz });
-    result.tools = report;
-    // Distinguish the Pi and prebuilt-tools attempts and report combined truthfully.
-    result.installSummary = summarizeInstall(result.install, report);
-   }
-  }
-  if (opts.companions !== false) {
-   result.companions = setupCompanions({}, { target: opts.target, scope: opts.scope, install: opts.install, update: opts.update });
-   if (!result.companions.ok) result.instructions = [...(result.instructions ?? []), 'A companion tool or skill install failed; see `companions` and rerun `junior update`.'];
-   if (result.companions.modifiedTracked.length) result.instructions = [...(result.instructions ?? []), `Companion skill installers edited tracked files (${result.companions.modifiedTracked.join(', ')}); review and commit them before a worktree handoff.`];
-  }
-  // Adopt newer commodity models when the project opted in. A model-config
-  // failure must never fail the update.
-  if (command === 'update') {
-   try {
-    const modelCli = await import('./model-cli.ts');
-    result.models = await modelCli.adoptModelUpdates(process.cwd(), {});
-   } catch (e) {
-    result.models = { error: String(e) };
-   }
-  }
-  // Drop the stale update summary so the next startup notice stops reporting
-  // the components just adopted. Never fail an update because of the cache.
-  if (command === 'update') await refreshUpdateCache({});
-  console.log(JSON.stringify(result, null, 2));
-  if (result.installSummary && !result.installSummary.ok) process.exitCode = 1;
-  return;
- }
- if (command === 'validate') {
-  const path = parsed.files[0];
-  const t = validate(JSON.parse(readFileSync(path, 'utf8')));
-  console.log(JSON.stringify({ valid: true, id: t.id, warnings: contractWarnings(t) }, null, 2));
-  return;
- }
- if (command === 'status') {
-  const path = parsed.files[0];
-  if (parsed.flags.has('--live')) {
-   const snapshot = readRuntimeSnapshot(path);
-   console.log(JSON.stringify(snapshot, null, 2));
-   return;
-  }
-  if (parsed.flags.has('--full')) {
-   console.log(JSON.stringify(status(path), null, 2));
-  } else {
-   status(path); // Validate the full saved result before projecting a compact receipt.
-   const raw = JSON.parse(readFileSync(path, 'utf8'));
-   console.log(JSON.stringify(compactHandoff(raw), null, 2));
-  }
-  return;
- }
- if (command === 'apply') {
-  const { applyHandoff } = await import('./apply.ts');
-  const result = applyHandoff(parsed.files[0], { cwd: process.cwd(), dryRun: parsed.flags.has('--dry-run'), force: parsed.flags.has('--force'), noLink: parsed.flags.has('--no-link') });
-  console.log(JSON.stringify(result, null, 2));
-  if (result.error) process.exitCode = 1;
-  return;
- }
- if (command === 'run' || command === 'handoff' || command === 'qa') {
-  if (parsed.values['--choose'] !== undefined && command !== 'handoff') throw Error('--choose is only valid for junior handoff');
-  const path = parsed.files[0];
-  const raw = JSON.parse(readFileSync(path, 'utf8'));
-  let task = withHandoffIsolation(command === 'qa' ? { ...raw, workflow: 'qa' } : raw);
-  if (parsed.values['--approve-model'] !== undefined) task = { ...task, approveModel: parsed.values['--approve-model'] };
-  const mock = parsed.flags.has('--mock');
-  const deps: GateDeps = {};
-  if (!parsed.flags.has('--quiet')) deps.progress = (line: string) => { process.stderr.write(`junior: ${line}\n`); };
-  const taskCwd = resolve(process.cwd(), typeof task.cwd === 'string' && task.cwd.trim() ? task.cwd : '.');
-  if (parsed.values['--answers'] !== undefined) {
-   const answersPath = resolve(process.cwd(), parsed.values['--answers']);
-   let answers: unknown;
-   try { answers = JSON.parse(readFileSync(answersPath, 'utf8')); }
-   catch { const error: any = new Error('Invalid clarification answers: answers file must contain JSON.'); error.exitCode = 64; throw error; }
-   const clarifyDeps = typeof task.hopFrom === 'string' && task.hopFrom.trim() ? { hopPath: resolve(taskCwd, task.hopFrom) } : {};
-   const { applyAnswers } = await import('./clarify.ts');
-   const outcome = await applyAnswers({ cwd: taskCwd, task, answers, deps: clarifyDeps });
-   console.log(JSON.stringify(outcome, null, 2));
-   if (outcome.outcome === 'escalated') process.exitCode = 3;
-   return;
-  }
-  if (parsed.values['--choose'] !== undefined) task = applyChooseOption(task, taskCwd, parsed);
-  const slowMount = detectSlowMount(taskCwd);
-  if (slowMount) deps.progress?.(slowMount);
-  let result: any;
-  let plan: any;
-  if (task.plan !== undefined && command !== 'qa') {
-   validate(task);
-   const { withPlanLease, isHoldOutcome, runNeverStarted } = await import('./plan-handoff.ts');
-   const { callHop } = await import('./tools/tools.ts');
-   const hopPath = resolve(taskCwd, String(task.hopFrom));
-   const lease = await withPlanLease(task, () => run(task, mock, deps), {
-    callHop: (tool, request) => callHop(hopPath, tool, request),
-    deadlineMs: task.deadlineMs ?? task.execution?.deadlineMs ?? 600000,
-    summarize: (r: any) => ({ success: isSuccessOutcome(r.status), hold: isHoldOutcome(r.status) || runNeverStarted(r), artifactDir: r.artifactDir, outcome: r.status, model: compactHandoff(r).model?.observed?.[0]?.model, reason: r.status }),
-   });
-   if (!lease.plan.leased) {
-    console.log(JSON.stringify({ status: 'plan_lease_refused', plan: lease.plan }, null, 2));
-    process.exitCode = 1;
-    return;
-   }
-   result = lease.result;
-   plan = lease.plan;
-  } else {
-   result = await run(task, mock, deps);
-  }
-  const receipt = parsed.flags.has('--full') ? result : compactHandoff(result);
-  console.log(JSON.stringify(plan ? { ...receipt, plan } : receipt, null, 2));
-  if (!isSuccessOutcome(result.status)) process.exitCode = 1;
-  return;
- }
+ const handler = COMMAND_HANDLERS.get(command);
+ if (handler) { await handler({ command, rest, parsed, updateCheck }); return; }
  throw Error(usage());
 }
 

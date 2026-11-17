@@ -169,6 +169,92 @@ function textToAdf(text: string): Record<string, unknown> {
   };
 }
 
+type JiraClient = {
+  deps: JiraAdapterDeps;
+  baseUrl: string;
+  authHeader: string;
+  secrets: string[];
+};
+
+/** Keep credential values out of every error message (ADR 0018 R10). */
+function jiraRedact(client: JiraClient, message: string): string {
+  let out = message;
+  for (const secret of client.secrets) {
+    if (secret !== '') out = out.split(secret).join('[redacted]');
+  }
+  return out;
+}
+
+function jiraFail(client: JiraClient, message: string): Error {
+  return new Error(jiraRedact(client, message));
+}
+
+async function jiraErrorDetail(response: JiraFetchResponse): Promise<string> {
+  try {
+    if (typeof response.text === 'function') {
+      const text = (await response.text()).trim();
+      if (text !== '') return text.slice(0, 500);
+    }
+    const parsed = await response.json();
+    if (parsed !== undefined) return JSON.stringify(parsed).slice(0, 500);
+  } catch {
+    // A missing or unreadable error body is not itself an error.
+  }
+  return '';
+}
+
+async function jiraRequest(client: JiraClient, method: string, path: string, body?: unknown): Promise<unknown> {
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    Authorization: client.authHeader,
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+  let response: JiraFetchResponse;
+  try {
+    response = await client.deps.fetch(`${client.baseUrl}${path}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    throw jiraFail(client, `Jira request failed: ${errorMessage(error)}`);
+  }
+
+  const status = typeof response.status === 'number' ? response.status : 0;
+  const ok = typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300;
+  if (!ok) {
+    const detail = await jiraErrorDetail(response);
+    throw jiraFail(client, `Jira request failed with HTTP status ${status}${detail === '' ? '' : `: ${detail}`}`);
+  }
+
+  if (status === 204 || status === 205) return undefined;
+  try {
+    return await response.json();
+  } catch (error) {
+    throw jiraFail(client, `Jira ${method} ${path} returned invalid JSON: ${errorMessage(error)}`);
+  }
+}
+
+function normalizeJiraIssue(client: JiraClient, raw: unknown): Ticket {
+  if (!isRecord(raw)) throw jiraFail(client, 'Jira returned an issue that is not an object');
+  const key = typeof raw.key === 'string' ? raw.key : '';
+  if (key === '') throw jiraFail(client, 'Jira returned an issue without a key');
+  const fields = isRecord(raw.fields) ? raw.fields : {};
+  const body = flattenDescription(fields.description);
+  return {
+    id: key,
+    url: `${client.baseUrl}/browse/${key}`,
+    title: typeof fields.summary === 'string' ? fields.summary : '',
+    body,
+    labels: Array.isArray(fields.labels)
+      ? fields.labels.filter((label): label is string => typeof label === 'string')
+      : [],
+    acceptance: extractAcceptance(body),
+    updatedAt: typeof fields.updated === 'string' ? fields.updated : '',
+  };
+}
+
 /**
  * Create a Jira Cloud-backed TicketAdapter. `baseUrl` and `project` come from
  * `tickets` configuration; credentials come only from the environment.
@@ -181,85 +267,11 @@ export function createJiraAdapter(config: JiraAdapterConfig, deps: JiraAdapterDe
   const project = config.project;
   const authHeader = `Basic ${Buffer.from(`${email}:${token}`, 'utf8').toString('base64')}`;
   const secrets = [email, token];
-
-  /** Keep credential values out of every error message (ADR 0018 R10). */
-  function redact(message: string): string {
-    let out = message;
-    for (const secret of secrets) {
-      if (secret !== '') out = out.split(secret).join('[redacted]');
-    }
-    return out;
-  }
-
-  function fail(message: string): Error {
-    return new Error(redact(message));
-  }
-
-  async function errorDetail(response: JiraFetchResponse): Promise<string> {
-    try {
-      if (typeof response.text === 'function') {
-        const text = (await response.text()).trim();
-        if (text !== '') return text.slice(0, 500);
-      }
-      const parsed = await response.json();
-      if (parsed !== undefined) return JSON.stringify(parsed).slice(0, 500);
-    } catch {
-      // A missing or unreadable error body is not itself an error.
-    }
-    return '';
-  }
-
-  async function request(method: string, path: string, body?: unknown): Promise<unknown> {
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      Authorization: authHeader,
-    };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-
-    let response: JiraFetchResponse;
-    try {
-      response = await deps.fetch(`${baseUrl}${path}`, {
-        method,
-        headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-    } catch (error) {
-      throw fail(`Jira request failed: ${errorMessage(error)}`);
-    }
-
-    const status = typeof response.status === 'number' ? response.status : 0;
-    const ok = typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300;
-    if (!ok) {
-      const detail = await errorDetail(response);
-      throw fail(`Jira request failed with HTTP status ${status}${detail === '' ? '' : `: ${detail}`}`);
-    }
-
-    if (status === 204 || status === 205) return undefined;
-    try {
-      return await response.json();
-    } catch (error) {
-      throw fail(`Jira ${method} ${path} returned invalid JSON: ${errorMessage(error)}`);
-    }
-  }
-
-  function normalizeIssue(raw: unknown): Ticket {
-    if (!isRecord(raw)) throw fail('Jira returned an issue that is not an object');
-    const key = typeof raw.key === 'string' ? raw.key : '';
-    if (key === '') throw fail('Jira returned an issue without a key');
-    const fields = isRecord(raw.fields) ? raw.fields : {};
-    const body = flattenDescription(fields.description);
-    return {
-      id: key,
-      url: `${baseUrl}/browse/${key}`,
-      title: typeof fields.summary === 'string' ? fields.summary : '',
-      body,
-      labels: Array.isArray(fields.labels)
-        ? fields.labels.filter((label): label is string => typeof label === 'string')
-        : [],
-      acceptance: extractAcceptance(body),
-      updatedAt: typeof fields.updated === 'string' ? fields.updated : '',
-    };
-  }
+  const client: JiraClient = { deps, baseUrl, authHeader, secrets };
+  const request = (method: string, path: string, body?: unknown): Promise<unknown> =>
+    jiraRequest(client, method, path, body);
+  const fail = (message: string): Error => jiraFail(client, message);
+  const normalizeIssue = (raw: unknown): Ticket => normalizeJiraIssue(client, raw);
 
   return {
     async list(query: TicketQuery = {}): Promise<Ticket[]> {

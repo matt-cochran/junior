@@ -121,7 +121,8 @@ export function promptParts(workflow:ExplicitWorkflow, resume?:ResumeInfo|null, 
  return {common:COMMON_PROMPT_BLOCK, workflow:WORKFLOW_PROMPT_BLOCKS[workflow], resume:resumeBlock, report:reportBlock, review:reviewBlock, context:contextBlock};
 }
 
-export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null, routing?:ToolRoute|null, executionCwd?:string|null):string {
+export function buildPrompt(t:any, workflow:ExplicitWorkflow, resume?:ResumeInfo|null, reportPath?:string|null, reviewContext?:string|null, codeContext?:ResolvedContextEntry[]|null, ...tail:[routing?:ToolRoute|null, executionCwd?:string|null]):string {
+ const [routing, executionCwd]=tail;
  const parts=promptParts(workflow, resume, reportPath, reviewContext, codeContext);
  const blocks=[parts.common, parts.workflow];
  const hop = (workflow === 'discover' || workflow === 'investigate') ? hopToolBlock(t, workflow) : null;

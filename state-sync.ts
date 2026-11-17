@@ -507,39 +507,51 @@ function relationVersion(relation: StateRelation): string {
   return `${relation.from}|${relation.to}|${relation.relationType}|${relation.scale}|${relation.coveragePolicy}`;
 }
 
-/**
- * Mirror every configured companion tool's state into crossmatrix. Each source
- * is optional; a missing flag or unavailable tool is skipped with a note.
- */
-export async function syncState(options: StateSyncOptions): Promise<StateSyncResult> {
-  const call = options.deps?.callHop ?? callHop;
-  const load = options.deps?.loadHop ?? loadHop;
-  const notes: string[] = [];
-  const failures: string[] = [];
-  const observations: StateObservation[] = [];
+/** Record a ShapeError as a note; any other error still fails the sync. */
+function mapOrNote(notes: string[], map: () => void): void {
+  try {
+    map();
+  } catch (error) {
+    if (!(error instanceof ShapeError)) throw error;
+    notes.push(error.message);
+  }
+}
 
-  /** Record a ShapeError as a note; any other error still fails the sync. */
-  const mapOrNote = (map: () => void): void => {
-    try {
-      map();
-    } catch (error) {
-      if (!(error instanceof ShapeError)) throw error;
-      notes.push(error.message);
-    }
-  };
+interface SyncWriter {
+  call: typeof callHop;
+  load: typeof loadHop;
+  hopPath: string;
+  modelId: string;
+  notes: string[];
+  failures: string[];
+  sent: CodemapSent[];
+}
 
+async function readPlanDeliverables(
+  options: StateSyncOptions,
+  call: typeof callHop,
+  notes: string[],
+): Promise<PlanDeliverable[]> {
   let deliverables: PlanDeliverable[] = [];
   if (options.planId) {
     const plan = await readState(call, options.hopPath, 'cpm', 'plan.get', { plan_id: options.planId }, notes);
     if (plan !== undefined) {
-      mapOrNote(() => {
+      mapOrNote(notes, () => {
         deliverables = planDeliverableAcceptance(plan);
       });
     }
   } else {
     notes.push('cpm plan.get skipped: no --plan');
   }
+  return deliverables;
+}
 
+async function readFmecaMitigations(
+  options: StateSyncOptions,
+  call: typeof callHop,
+  notes: string[],
+  observations: StateObservation[],
+): Promise<Map<string, Mitigation>> {
   let mitigations = new Map<string, Mitigation>();
   if (options.fmecaSession) {
     const state = await readState(
@@ -551,31 +563,20 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
       notes,
     );
     if (state !== undefined) {
-      mapOrNote(() => {
+      mapOrNote(notes, () => {
         observations.push(...failureModeObservations(state, options.fmecaSession!, options.planId, notes));
       });
-      mapOrNote(() => {
+      mapOrNote(notes, () => {
         mitigations = mitigationIndex(state);
       });
     }
   } else {
     notes.push('fmeca state.get skipped: no --fmeca-session');
   }
+  return mitigations;
+}
 
-  if (options.planId && options.fmecaSession) {
-    mapOrNote(() => {
-      observations.push(
-        ...mitigationObservations(
-          deliverables,
-          mitigations,
-          options.planId!,
-          options.fmecaSession!,
-          notes,
-        ),
-      );
-    });
-  }
-
+function unmirroredSourceNotes(options: StateSyncOptions, notes: string[]): void {
   if (options.elicitationSession) {
     notes.push('elicitation not mirrored: no dimension holds its members (ADR 0012 R5)');
   } else {
@@ -593,6 +594,142 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
   } else {
     notes.push('jevitate results skipped: no --jevitate-results');
   }
+}
+
+async function collectObservations(
+  options: StateSyncOptions,
+  call: typeof callHop,
+  notes: string[],
+): Promise<StateObservation[]> {
+  const observations: StateObservation[] = [];
+  const deliverables = await readPlanDeliverables(options, call, notes);
+  const mitigations = await readFmecaMitigations(options, call, notes, observations);
+
+  if (options.planId && options.fmecaSession) {
+    mapOrNote(notes, () => {
+      observations.push(
+        ...mitigationObservations(
+          deliverables,
+          mitigations,
+          options.planId!,
+          options.fmecaSession!,
+          notes,
+        ),
+      );
+    });
+  }
+
+  unmirroredSourceNotes(options, notes);
+  return observations;
+}
+
+async function declareScales(writer: SyncWriter, usedScales: Set<string>): Promise<Set<string>> {
+  const unavailableScales = new Set<string>();
+  for (const scale of STATE_SCALES) {
+    if (!usedScales.has(scale.id)) continue;
+    const requestId = requestIdFor(writer.modelId, 'scale.declare', scale.id, scale.mode);
+    const outcome = await send(
+      writer.call,
+      writer.load,
+      writer.hopPath,
+      command(writer.modelId, { kind: 'scale.declare', scale }, requestId),
+    );
+    if (outcome.ok) {
+      writer.sent.push({ requestId, kind: 'scale.declare' });
+    } else {
+      unavailableScales.add(scale.id);
+      writer.failures.push(`scale ${scale.id} declare failed: ${outcome.detail}`);
+    }
+  }
+  return unavailableScales;
+}
+
+async function declareRelation(writer: SyncWriter, relation: StateRelation): Promise<boolean> {
+  const requestId = requestIdFor(
+    writer.modelId,
+    'relation.declare',
+    relation.relationId,
+    relationVersion(relation),
+  );
+  const declaration = await send(
+    writer.call,
+    writer.load,
+    writer.hopPath,
+    command(
+      writer.modelId,
+      {
+        kind: 'relation.declare',
+        relationId: relation.relationId,
+        from: relation.from,
+        to: relation.to,
+        relationType: relation.relationType,
+        scale: relation.scale,
+        coveragePolicy: relation.coveragePolicy,
+      },
+      requestId,
+    ),
+  );
+  if (!declaration.ok) {
+    if (declaration.code === 'unknown_dimension') {
+      writer.notes.push(`${relation.relationId} not declared: ${declaration.detail}`);
+    } else {
+      writer.failures.push(`${relation.relationId} declare failed: ${declaration.detail}`);
+    }
+    return false;
+  }
+  writer.sent.push({ requestId, kind: 'relation.declare' });
+  return true;
+}
+
+async function sendObservation(writer: SyncWriter, observation: StateObservation): Promise<void> {
+  const version = `${observation.relationId}|${observation.from}|${observation.to}|${observation.observation}|${observation.contentVersion}`;
+  const observeId = requestIdFor(writer.modelId, 'observe', observation.relationId, version);
+  const outcome = await send(
+    writer.call,
+    writer.load,
+    writer.hopPath,
+    command(
+      writer.modelId,
+      {
+        kind: 'observe',
+        relationId: observation.relationId,
+        from: observation.from,
+        to: observation.to,
+        observation: observation.observation,
+        provenanceClass: 'observed',
+        confidence: observation.confidence,
+        evidence: observation.evidence,
+        rationale: observation.rationale,
+      },
+      observeId,
+    ),
+  );
+  if (outcome.ok) {
+    writer.sent.push({ requestId: observeId, kind: 'observe' });
+    return;
+  }
+  // A reference to a file or deliverable no longer in its roster is stale
+  // fmeca data, not a failed sync.
+  if (outcome.code === 'unknown_member' && observation.observation === 'references') {
+    writer.notes.push(`${observation.relationId} ${observation.from} -> ${observation.to} skipped: ${outcome.detail}`);
+  } else {
+    writer.failures.push(
+      `${observation.relationId} observe ${observation.from} -> ${observation.to} failed: ${outcome.detail}`,
+    );
+  }
+}
+
+/**
+ * Mirror every configured companion tool's state into crossmatrix. Each source
+ * is optional; a missing flag or unavailable tool is skipped with a note.
+ */
+export async function syncState(options: StateSyncOptions): Promise<StateSyncResult> {
+  const call = options.deps?.callHop ?? callHop;
+  const load = options.deps?.loadHop ?? loadHop;
+  const notes: string[] = [];
+  const failures: string[] = [];
+
+  const observations = await collectObservations(options, call, notes);
 
   const usedRelations = STATE_RELATIONS.filter((relation) =>
     observations.some((observation) => observation.relationId === relation.relationId),
@@ -600,97 +737,15 @@ export async function syncState(options: StateSyncOptions): Promise<StateSyncRes
   const usedScales = new Set(usedRelations.map((relation) => relation.scale));
 
   const sent: CodemapSent[] = [];
-  const unavailableScales = new Set<string>();
-
-  for (const scale of STATE_SCALES) {
-    if (!usedScales.has(scale.id)) continue;
-    const requestId = requestIdFor(options.modelId, 'scale.declare', scale.id, scale.mode);
-    const outcome = await send(
-      call,
-      load,
-      options.hopPath,
-      command(options.modelId, { kind: 'scale.declare', scale }, requestId),
-    );
-    if (outcome.ok) {
-      sent.push({ requestId, kind: 'scale.declare' });
-    } else {
-      unavailableScales.add(scale.id);
-      failures.push(`scale ${scale.id} declare failed: ${outcome.detail}`);
-    }
-  }
+  const writer: SyncWriter = { call, load, hopPath: options.hopPath, modelId: options.modelId, notes, failures, sent };
+  const unavailableScales = await declareScales(writer, usedScales);
 
   for (const relation of usedRelations) {
     if (unavailableScales.has(relation.scale)) continue;
-    const requestId = requestIdFor(
-      options.modelId,
-      'relation.declare',
-      relation.relationId,
-      relationVersion(relation),
-    );
-    const declaration = await send(
-      call,
-      load,
-      options.hopPath,
-      command(
-        options.modelId,
-        {
-          kind: 'relation.declare',
-          relationId: relation.relationId,
-          from: relation.from,
-          to: relation.to,
-          relationType: relation.relationType,
-          scale: relation.scale,
-          coveragePolicy: relation.coveragePolicy,
-        },
-        requestId,
-      ),
-    );
-    if (!declaration.ok) {
-      if (declaration.code === 'unknown_dimension') {
-        notes.push(`${relation.relationId} not declared: ${declaration.detail}`);
-      } else {
-        failures.push(`${relation.relationId} declare failed: ${declaration.detail}`);
-      }
-      continue;
-    }
-    sent.push({ requestId, kind: 'relation.declare' });
+    if (!(await declareRelation(writer, relation))) continue;
 
     for (const observation of observations.filter((item) => item.relationId === relation.relationId)) {
-      const version = `${observation.relationId}|${observation.from}|${observation.to}|${observation.observation}|${observation.contentVersion}`;
-      const observeId = requestIdFor(options.modelId, 'observe', observation.relationId, version);
-      const outcome = await send(
-        call,
-        load,
-        options.hopPath,
-        command(
-          options.modelId,
-          {
-            kind: 'observe',
-            relationId: observation.relationId,
-            from: observation.from,
-            to: observation.to,
-            observation: observation.observation,
-            provenanceClass: 'observed',
-            confidence: observation.confidence,
-            evidence: observation.evidence,
-            rationale: observation.rationale,
-          },
-          observeId,
-        ),
-      );
-      if (outcome.ok) {
-        sent.push({ requestId: observeId, kind: 'observe' });
-        continue;
-      }
-      // A reference to a file or deliverable no longer in its roster is stale
-      // fmeca data, not a failed sync.
-      if (outcome.code === 'unknown_member' && observation.observation === 'references') {
-        notes.push(`${observation.relationId} ${observation.from} -> ${observation.to} skipped: ${outcome.detail}`);
-      } else {
-        failures.push(
-          `${observation.relationId} observe ${observation.from} -> ${observation.to} failed: ${outcome.detail}`,
-        );
-      }
+      await sendObservation(writer, observation);
     }
   }
 

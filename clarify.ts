@@ -236,16 +236,18 @@ interface Seed {
   claims: any[];
 }
 
-function claimPayload(
-  sessionId: string,
-  claimId: string,
-  predicate: string,
-  value: string,
-  category: string,
-  modality: string,
-  dimension: string,
-  label: string,
-): any {
+interface ClaimPayloadInput {
+  sessionId: string;
+  claimId: string;
+  predicate: string;
+  value: string;
+  category: string;
+  modality: string;
+  dimension: string;
+  label: string;
+}
+
+function claimPayload({ sessionId, claimId, predicate, value, category, modality, dimension, label }: ClaimPayloadInput): any {
   return {
     variant: 'add_claim',
     session_id: sessionId,
@@ -276,29 +278,29 @@ export function seedFromContract(task: any, sessionId: string): Seed {
   const claims: any[] = [];
   acceptance.forEach((criterion, index) => {
     const value = isRecord(criterion) ? text(criterion.text ?? criterion.statement ?? criterion) : text(criterion);
-    claims.push(claimPayload(
+    claims.push(claimPayload({
       sessionId,
-      `clarify:${text(task?.id)}/acceptance:${index}`,
-      `acceptance_${index + 1}`,
+      claimId: `clarify:${text(task?.id)}/acceptance:${index}`,
+      predicate: `acceptance_${index + 1}`,
       value,
-      'requirement',
-      'goal',
-      'acceptance',
+      category: 'requirement',
+      modality: 'goal',
+      dimension: 'acceptance',
       label,
-    ));
+    }));
   });
   assumptions.forEach((assumption, index) => {
     const value = isRecord(assumption) ? text(assumption.text ?? assumption.statement ?? assumption) : text(assumption);
-    claims.push(claimPayload(
+    claims.push(claimPayload({
       sessionId,
-      `clarify:${text(task?.id)}/assumption:${index}`,
-      `assumption_${index + 1}`,
+      claimId: `clarify:${text(task?.id)}/assumption:${index}`,
+      predicate: `assumption_${index + 1}`,
       value,
-      'constraint',
-      'assumption',
-      'assumptions',
+      category: 'constraint',
+      modality: 'assumption',
+      dimension: 'assumptions',
       label,
-    ));
+    }));
   });
   return { sessionOpen: { session_id: sessionId, coverage_schema: { dimensions } }, claims };
 }
