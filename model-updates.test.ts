@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createManualClock } from './clock.ts';
 import { catalogIds, modelUpdates, piAgentDir, priceComparable, priceDelta, readCachedCatalog } from './model-updates.ts';
 
 const config=(roster:any[]):any=>({ provider:'openrouter', model:roster[0].model, source:'builtin', path:null, routing:'auto', autoUpgrade:false,
@@ -70,6 +71,27 @@ test('readCachedCatalog returns null for a cache older than maxAgeMs',()=>{
  const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
  writeFileSync(cachePath,JSON.stringify({ checkedAt:1000, ids:['deepseek/deepseek-v4.1-flash-1017'] }));
  assert.equal(readCachedCatalog({}, { cachePath, now:()=>1000+8*24*60*60*1000 }),null);
+});
+
+test('catalogIds stamps the cache checkedAt from the injected clock',async()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ const fetch=async()=>({ status:200, json:async()=>({ data:[{ id:'a/b' }] }) });
+ await catalogIds({ online:true, fetch, cachePath, clock:createManualClock(123_456) });
+ assert.equal(JSON.parse(readFileSync(cachePath,'utf8')).checkedAt,123_456);
+});
+
+test('readCachedCatalog measures cache age on the injected clock',()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ writeFileSync(cachePath,JSON.stringify({ checkedAt:1000, ids:['a/b'] }));
+ const week=7*24*60*60*1000;
+ assert.deepEqual(readCachedCatalog({}, { cachePath, clock:createManualClock(1000+week) })?.ids,['a/b']);
+ assert.equal(readCachedCatalog({}, { cachePath, clock:createManualClock(1000+week+1) }),null);
+});
+
+test('readCachedCatalog lets an explicit now win over the clock',()=>{
+ const cachePath=join(mkdtempSync(join(tmpdir(),'junior-mu-')),'model-catalog.json');
+ writeFileSync(cachePath,JSON.stringify({ checkedAt:1000, ids:['a/b'] }));
+ assert.deepEqual(readCachedCatalog({}, { cachePath, now:()=>1000, clock:createManualClock(1e15) })?.ids,['a/b']);
 });
 
 test('readCachedCatalog returns null for a malformed cache file',()=>{

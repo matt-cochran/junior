@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { executeCheck, spawnChildDetached } from './runtime.ts';
 import { resolveCheckCwd, resolveCommandPolicy } from './worker-contract.ts';
 import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandDecision } from './command-policy.ts';
-import { remainingMs, type RunState } from './worker-preflight.ts';
+import { remainingMs, runClock, type RunState } from './worker-preflight.ts';
 
 /** A refusal message names the reason, the matching rule and the wrapper so a
  * refused check can be corrected without guessing which policy line applied. */
@@ -57,7 +57,7 @@ export async function runChecks(state:RunState):Promise<RunState> {
    }
    const checkCwd=resolved.cwd!;
    const r=await executeCheck({ spawnChild:spawnChildDetached, command:c.command, args:c.args, cwd:checkCwd,
-    timeoutMs:timeout, deadlineAt, signal, maxOutputBytes:deps.maxOutputBytes, heartbeat });
+    timeoutMs:timeout, deadlineAt, signal, maxOutputBytes:deps.maxOutputBytes, heartbeat, clock:runClock(state) });
    writeFileSync(join(dir,`check-${i}.log`),`${r.stdout || ''}\n${r.stderr || ''}`);
    checks.push({...c,cwd:checkCwd,timeoutMs:timeout,placement:decision.placement,exitCode:r.exitCode,error:r.error,
     timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated});

@@ -27,6 +27,7 @@ import { inspectCompanions, type CompanionDeps, type CompanionsReport } from './
 import { catalogIds, formatRatio, modelUpdates as detectModelUpdates, type ModelUpdate } from './model-updates.ts';
 import type { CatalogFetch } from './models.ts';
 import { loadModelConfig } from './roster.ts';
+import { systemClock, type Clock, type ClockTimer } from './clock.ts';
 
 export const UPDATE_CHECK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_CHECK_REFRESH_TIMEOUT_MS = 3000;
@@ -65,7 +66,11 @@ export interface UpdateCheckDeps {
   home?: string;
   /** Explicit cache file path; wins over `home`/env resolution. */
   cachePath?: string;
+  /** Wins over `clock` for cache-age and checkedAt reads. */
   now?: () => number;
+  /** Clock for reads (when `now` is absent), the refresh deadline and probe
+   * budgets; default the system clock. */
+  clock?: Clock;
   fs?: UpdateCheckFs;
   ttlMs?: number;
   /** Hard budget for one refresh; also caps each probe. */
@@ -125,10 +130,10 @@ export function updateCheckDisabled(env: NodeJS.ProcessEnv = process.env): boole
 
 /** Total-budget exec for the companion probes: once the deadline passes every
  * later call returns immediately, so a refresh cannot chain slow registries. */
-function boundedCompanionExec(budgetMs: number): NonNullable<CompanionDeps['exec']> {
-  const deadline = Date.now() + budgetMs;
+function boundedCompanionExec(budgetMs: number, clock: Clock): NonNullable<CompanionDeps['exec']> {
+  const deadline = clock.now() + budgetMs;
   return (command, args, options = {}) => {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - clock.now();
     if (remaining <= 0) return { status: null, error: 'update check budget exceeded' };
     const spec = spawnSpec(command, args);
     const timeout = Math.max(1, Math.min(options.timeout ?? budgetMs, remaining));
@@ -173,6 +178,7 @@ async function collectModelUpdates(deps: UpdateCheckDeps): Promise<CollectedUpda
       timeoutMs: deps.budgetMs,
       env: deps.env,
       config,
+      clock: deps.clock ?? systemClock,
     });
     const updates = detectModelUpdates(config, ids, { prices, sources }).filter((update) => update.newer.length > 0);
     return { catalog, updates };
@@ -200,7 +206,7 @@ export async function collectUpdateCheck(deps: UpdateCheckDeps = {}): Promise<{ 
 
   const inspect = deps.inspect ?? inspectCompanions;
   const companionDeps: CompanionDeps = { ...(deps.companionDeps ?? {}) };
-  if (deps.budgetMs !== undefined && companionDeps.exec === undefined) companionDeps.exec = boundedCompanionExec(deps.budgetMs);
+  if (deps.budgetMs !== undefined && companionDeps.exec === undefined) companionDeps.exec = boundedCompanionExec(deps.budgetMs, deps.clock ?? systemClock);
   const report = inspect(companionDeps, { checkUpdates: true });
 
   deps.onCompanions?.(report);
@@ -276,18 +282,18 @@ function summarize(updates: CollectedUpdates, checkedAt: number): UpdateSummary 
   return summary;
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms: number, clock: Clock): Promise<T> {
   if (!Number.isFinite(ms) || ms <= 0) return promise;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ClockTimer | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('update check timed out')), ms);
+        timer = clock.setTimeout(() => reject(new Error('update check timed out')), ms);
       }),
     ]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer) clock.clearTimeout(timer);
   }
 }
 
@@ -299,7 +305,8 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export async function cachedUpdateSummary(deps: UpdateCheckDeps = {}): Promise<UpdateSummary | null> {
   const env = deps.env ?? process.env;
   const fs = deps.fs ?? nodeFs;
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
+  const now = deps.now ?? (() => clock.now());
   const path = deps.cachePath ?? updateCheckCachePath(env, deps.home);
   const ttl = deps.ttlMs ?? UPDATE_CHECK_CACHE_TTL_MS;
   const budget = deps.budgetMs ?? deps.refreshTimeoutMs ?? UPDATE_CHECK_REFRESH_TIMEOUT_MS;
@@ -309,7 +316,7 @@ export async function cachedUpdateSummary(deps: UpdateCheckDeps = {}): Promise<U
 
   const collect = deps.collect ?? ((collectDeps?: UpdateCheckDeps) => collectUpdates(collectDeps));
   try {
-    const updates = await withTimeout(collect({ ...deps, budgetMs: budget }), budget);
+    const updates = await withTimeout(collect({ ...deps, budgetMs: budget }), budget, clock);
     if (!collectionResolved(updates)) return null;
     const summary = summarize(updates, now());
     writeCache(fs, path, summary);
@@ -329,13 +336,14 @@ export async function cachedUpdateSummary(deps: UpdateCheckDeps = {}): Promise<U
 export async function refreshUpdateCache(deps: UpdateCheckDeps = {}): Promise<void> {
   const env = deps.env ?? process.env;
   const fs = deps.fs ?? nodeFs;
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
+  const now = deps.now ?? (() => clock.now());
   const path = deps.cachePath ?? updateCheckCachePath(env, deps.home);
   const budget = deps.budgetMs ?? deps.refreshTimeoutMs ?? UPDATE_CHECK_REFRESH_TIMEOUT_MS;
   const collect = deps.collect ?? ((collectDeps?: UpdateCheckDeps) => collectUpdates(collectDeps));
   removeCache(fs, path);
   try {
-    const updates = await withTimeout(collect({ ...deps, budgetMs: budget }), budget);
+    const updates = await withTimeout(collect({ ...deps, budgetMs: budget }), budget, clock);
     if (!collectionResolved(updates)) return;
     writeCache(fs, path, summarize(updates, now()));
   } catch {

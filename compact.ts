@@ -35,6 +35,7 @@ import { openPullRequests, prLines, type PrSection } from './compact-prs.ts';
 import { codemapStaleLinks } from './codemap.ts';
 import { resolveMatrixModel } from './matrix-defaults.ts';
 import { gitStaleness as defaultGitStaleness, type GitStalenessResult } from './matrix-staleness.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** Availability of one compact-context section. */
 export type CompactSectionStatus = 'ok' | 'none' | 'unavailable';
@@ -48,6 +49,8 @@ export type CompactDeps = {
   /** Runs whose latest attempt started longer ago than this are not in flight. Default 48. */
   inFlightMaxAgeHours?: number;
   now?: () => Date;
+  /** Time source when `now` is not given (default: the system clock). */
+  clock?: Clock;
   readDir?: (p: string) => string[];
   readFile?: (p: string) => string;
   exists?: (p: string) => boolean;
@@ -867,7 +870,8 @@ function fitToBudget(header: string[], blocks: Block[], maxChars: number): Compa
  */
 export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock> {
   const { maxChars, maxAgeHours } = validatedLimits(deps);
-  const now = deps.now ?? (() => new Date());
+  const clock = deps.clock ?? systemClock;
+  const now = deps.now ?? (() => clock.date());
   const readDir = deps.readDir ?? ((path: string) => readdirSync(path));
   const readFile = deps.readFile ?? ((path: string) => readFileSync(path, 'utf8'));
   const exists = deps.exists ?? ((path: string) => existsSync(path));
@@ -892,7 +896,7 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
     const completed = await completedFor(deps, planner, hopExists, callHop);
 
     const listNotes = deps.listNotes ?? (() => listOpen(deps.cwd));
-    const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd }));
+    const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd, clock }));
     const prsOutcome = startOpenPrs(openPrs);
 
     const cutoffMs = generated.getTime() - maxAgeHours * 3_600_000;

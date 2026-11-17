@@ -15,7 +15,7 @@ import { findUnwiredExports, type UnwiredSymbol } from './wiring-check.ts';
 import { verifyIsolation, DEFAULT_PI_TOOLS } from './pi-isolation.ts';
 import { timedOutToolLine } from './worker-pi.ts';
 import { REVIEW_CONTEXT_FILENAME } from './worker-resume.ts';
-import { classifierBudget, outOfTime, remainingMs, type RunState } from './worker-preflight.ts';
+import { classifierBudget, outOfTime, remainingMs, runClock, runNow, type RunState } from './worker-preflight.ts';
 
 /** Shared error-message coercion, used across the worker modules. */
 const msg=(e:unknown)=>e instanceof Error ? e.message : String(e);
@@ -74,7 +74,7 @@ async function runPostflight(state:RunState, after:any, evidence:any):Promise<vo
  }
  const allowed = reportPath && withinWorkspace(executionCwd, reportPath) ? [relative(executionCwd, reportPath)] : [];
  try {
-  const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(state), evidence, {report,allowed}), signal);
+  const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(state), evidence, {report,allowed,clock:runClock(state)}), signal);
   jev!.postflight = postflight;
   if (postflight.error) jev!.error = postflight.error;
  } catch (e) {
@@ -190,7 +190,7 @@ async function runImplementationGate(state:RunState, status:string, evidence:any
 function finalizeHeartbeat(state:RunState, status:string):void {
  const {heartbeat, streamResult, runStartedAt} = state;
  // Finalize the shared runtime heartbeat with the terminal state.
- heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs(state))});
+ heartbeat.update({phase:'done', elapsedMs:runNow(state)-runStartedAt, remainingMs:Math.max(0, remainingMs(state))});
  if (status === 'ready_for_review' || status === 'simulation_passed') heartbeat.setState('ready_for_review',{stopReason:status==='simulation_passed'?'simulation_passed':'ready_for_review'});
  else if (status === 'interrupted') heartbeat.setState('interrupted',{interrupted:true, stopReason:'interrupted'});
  else if (status === 'deadline_exceeded') heartbeat.setState('deadline_exceeded',{deadlineExceeded:true, stopReason:'deadline_exceeded'});

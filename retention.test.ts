@@ -24,6 +24,7 @@ import {
   retainedWorktreeSummary,
 } from './retention.ts';
 import { doctor } from './setup.ts';
+import { createManualClock, systemClock } from './clock.ts';
 
 const gitRepo = () => {
   const dir = mkdtempSync(join(tmpdir(), 'junior-retain-'));
@@ -272,16 +273,32 @@ test('prune --keep-last removes the older worktree', () => {
   assert.equal(existsSync(oldest), false);
 });
 
+const PRUNE_NOW = 1_800_000_000_000;
+
 test('prune --older-than retains a newer worktree', () => {
   const repo = gitRepo();
-  const { worktree: newer } = addWorktree(repo, 'd1', String(Date.now()));
-  pruneWorktrees(repo.dir, { olderThanMs: 3_600_000 });
+  const { worktree: newer } = addWorktree(repo, 'd1', String(PRUNE_NOW - 3_599_999));
+  pruneWorktrees(repo.dir, { olderThanMs: 3_600_000, clock: createManualClock(PRUNE_NOW) });
   assert.equal(existsSync(newer), true);
 });
 
 test('prune --older-than removes an older worktree', () => {
   const repo = gitRepo();
-  const { worktree: older } = addWorktree(repo, 'd1', String(Date.now() - 7_200_000));
+  const { worktree: older } = addWorktree(repo, 'd1', String(PRUNE_NOW - 3_600_000));
+  pruneWorktrees(repo.dir, { olderThanMs: 3_600_000, clock: createManualClock(PRUNE_NOW) });
+  assert.equal(existsSync(older), false);
+});
+
+test('prune --older-than prefers an explicit now over the clock', () => {
+  const repo = gitRepo();
+  const { worktree } = addWorktree(repo, 'd1', String(PRUNE_NOW - 7_200_000));
+  pruneWorktrees(repo.dir, { olderThanMs: 3_600_000, now: PRUNE_NOW - 7_200_000, clock: createManualClock(PRUNE_NOW) });
+  assert.equal(existsSync(worktree), true);
+});
+
+test('prune --older-than ages worktrees by the system clock by default', () => {
+  const repo = gitRepo();
+  const { worktree: older } = addWorktree(repo, 'd1', String(systemClock.now() - 7_200_000));
   pruneWorktrees(repo.dir, { olderThanMs: 3_600_000 });
   assert.equal(existsSync(older), false);
 });
@@ -319,6 +336,24 @@ test('directoryUsage reports truncation when an entry limit stops the walk', () 
   const repo = gitRepo();
   const { worktree } = addWorktree(repo, 'd1', '1000');
   assert.equal(directoryUsage(worktree, { maxEntries: 0 }).truncated, true);
+});
+
+test('directoryUsage reports truncation when its time budget runs out', () => {
+  const repo = gitRepo();
+  const { worktree } = addWorktree(repo, 'd1', '1000');
+  // Every clock read moves time on by one second, so a 1.5s budget lapses
+  // after the walk's first step.
+  let t = 0;
+  const ticking = { ...createManualClock(0), now: () => (t += 1000) };
+  assert.equal(directoryUsage(worktree, { maxMs: 1500, clock: ticking }).truncated, true);
+});
+
+test('directoryUsage finishes within a zero budget when no time passes', () => {
+  const repo = gitRepo();
+  const { worktree } = addWorktree(repo, 'd1', '1000');
+  const usage = directoryUsage(worktree, { maxMs: 0, clock: createManualClock(0) });
+  assert.equal(usage.truncated, false);
+  assert.ok(usage.bytes > 0);
 });
 
 test('retainedWorktreeSummary does not follow a symlinked worktree root outside the delivery directory', () => {

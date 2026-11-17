@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { checkCredentialsOnline, type SetupDeps } from './setup.ts';
 import { readDataPolicy, type DataPolicy } from './data-policy.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export const AUTH_USAGE = [
   'Usage: junior auth set <provider> [--verify]',
@@ -116,6 +117,8 @@ export type RecordExternalContextConsentOptions = {
   model?: string | null;
   scope?: string[] | null;
   now?: Date;
+  /** Time source when `now` is not given (default: the system clock). */
+  clock?: Clock;
   dataPolicy?: DataPolicy | null;
 };
 
@@ -253,7 +256,7 @@ export function recordExternalContextConsent(cwd: string, provider: string, opti
     destination: typeof options.destination === 'string' && options.destination.trim() ? options.destination.trim() : null,
     model: typeof options.model === 'string' && options.model.trim() ? options.model.trim() : null,
     scope: Array.isArray(options.scope) ? options.scope.filter((p): p is string => typeof p === 'string') : null,
-    recordedAt: (options.now ?? new Date()).toISOString(),
+    recordedAt: (options.now ?? (options.clock ?? systemClock).date()).toISOString(),
     dataPolicyHash: hashDataPolicy(dataPolicy),
     dataPolicySummary: summarizeDataPolicy(dataPolicy),
     dataPolicy: dataPolicy === null ? null : JSON.parse(JSON.stringify(dataPolicy)),

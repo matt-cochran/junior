@@ -25,6 +25,7 @@ import {
   effectiveTimeoutMs,
   expectedDigest,
   extractEntryToBuffer,
+  installerClock,
   listArchive,
   resolveLatestRelease,
   sha256Hex,
@@ -234,7 +235,7 @@ async function installTriz(
         binaryDigest: `sha256:${sha256Hex(jsBytes)}`,
         path: destPath,
         ...(release.sourceSha ? { sourceSha: release.sourceSha } : {}),
-        installedAt: new Date().toISOString(),
+        installedAt: installerClock(deps).iso(),
       },
     };
     return { status: "installed", changed: true, version: release.version, tag: release.tag, path: destPath };
@@ -447,7 +448,7 @@ async function installOne(
       binaryDigest: `sha256:${binaryDigest}`,
       path: destPath,
       ...(release.sourceSha ? { sourceSha: release.sourceSha } : {}),
-      installedAt: new Date().toISOString(),
+      installedAt: installerClock(deps).iso(),
     };
     if (hadExisting) fs.rmSync(backupPath, { force: true });
 
@@ -503,7 +504,8 @@ export async function installTools(
   const statePath = defaultStatePath({ ...deps, installRoot });
   const selected = opts.tools ?? [...TOOL_NAMES];
   const log = deps.logger ?? (() => {});
-  const deadlineAt = deps.deadlineAt ?? Date.now() + (deps.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS);
+  const clock = installerClock(deps);
+  const deadlineAt = deps.deadlineAt ?? clock.now() + (deps.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS);
   const runDeps: InstallerDeps = { ...deps, installRoot, statePath, deadlineAt };
   const outcomes: ToolInstallOutcome[] = [];
   let triz: TrizOutcome | undefined;
@@ -551,7 +553,7 @@ export async function installTools(
     if (triz?.status === "failed") {
       fatal = fatal ? `${fatal}; triz: ${triz.error}` : `triz: ${triz.error}`;
     }
-  });
+  }, clock);
 
   return {
     ok: !fatal,

@@ -9,6 +9,8 @@ import path from "node:path";
 import process from "node:process";
 import { runSync } from "../spawn-sync.ts";
 import { reapDeadHolderLock, writeLockHolder } from "../lock-holder.ts";
+import { systemClock } from "../clock.ts";
+import type { Clock } from "../clock.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -213,16 +215,12 @@ export function isReadTool(tool: ToolName, toolName: string): boolean {
 // Small utilities
 // ---------------------------------------------------------------------------
 
-export function nowIso(): string {
-  return new Date().toISOString();
+export function nowIso(clock: Clock = systemClock): string {
+  return clock.iso();
 }
 
 export function sha256Hex(data: string | Buffer): string {
   return createHash("sha256").update(data).digest("hex");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Atomic file write: temp file in the same dir, then rename over the target. */
@@ -327,8 +325,8 @@ export function loadHop(hopPath: string): HopManifest {
 }
 
 /** Persist a manifest atomically (updates `updatedAt`). */
-export function saveHop(hopPath: string, manifest: HopManifest): void {
-  manifest.updatedAt = nowIso();
+export function saveHop(hopPath: string, manifest: HopManifest, clock: Clock = systemClock): void {
+  manifest.updatedAt = nowIso(clock);
   writeFileAtomic(hopPath, JSON.stringify(manifest, null, 2) + "\n");
 }
 
@@ -343,9 +341,10 @@ export async function withManifestLock<T>(
   hopPath: string,
   lockTimeoutMs: number,
   fn: () => Promise<T>,
+  clock: Clock = systemClock,
 ): Promise<T> {
   const lockPath = `${hopPath}.lock`;
-  const deadline = Date.now() + lockTimeoutMs;
+  const deadline = clock.now() + lockTimeoutMs;
   let fd: number | null = null;
   while (fd === null) {
     try {
@@ -356,14 +355,14 @@ export async function withManifestLock<T>(
         throw new HopError("IO_ERROR", `cannot acquire lock ${lockPath}`, err);
       }
       if (reapDeadHolderLock(lockPath)) continue;
-      if (Date.now() >= deadline) {
+      if (clock.now() >= deadline) {
         throw new HopError("LOCKED", `manifest is locked: ${lockPath}`);
       }
-      await sleep(25);
+      await clock.sleep(25);
     }
   }
   try {
-    writeLockHolder(fd, nowIso());
+    writeLockHolder(fd, nowIso(clock));
     return await fn();
   } finally {
     try {
@@ -395,6 +394,8 @@ export interface InitOptions {
   /** Reports the version of a command that is not the managed binary
    * (default: `probeToolVersion`, which runs `<command> --version`). */
   probeVersion?: (command: string) => string | null;
+  /** Time source for the manifest timestamps (default: the system clock). */
+  clock?: Clock;
 }
 
 /** Default managed install state, honoring `JUNIOR_TOOLS_ROOT`. */
@@ -469,8 +470,8 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
     schemaVersion: HOP_SCHEMA_VERSION,
     projectId: options.projectId ?? `prj_${randomUUID()}`,
     revision: 0,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
+    createdAt: nowIso(options.clock),
+    updatedAt: nowIso(options.clock),
     managerAcceptance: "pending",
     acceptedRevision: null,
     managerNote: null,
@@ -482,6 +483,6 @@ export function initHop(hopPath: string, options: InitOptions = {}): HopManifest
     evidence: [],
     unresolved: [],
   };
-  saveHop(hopPath, manifest);
+  saveHop(hopPath, manifest, options.clock);
   return manifest;
 }

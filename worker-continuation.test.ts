@@ -24,6 +24,7 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
+import { createManualClock } from './clock.ts';
 import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
 
 // --- Step 3 automatic continuation (offline; fake segments that hit the cap) ---
@@ -243,3 +244,33 @@ test('Resume from a prior recon run never auto-approves test_first',async()=>{
 });
 
 
+
+// --- #265: the continuation time floor reads the run clock ---
+const continuationWithRemaining=async(remainingMs:number)=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const start=Date.now();
+ const clock=createManualClock(start);
+ const {t,p,fakes,argvs}=continuationFixture(repo,1,{},{clock});
+ const settings=resolveExecutionSettings(t);
+ await until(()=>fakes.length>=1);
+ // Jump the run clock (without firing timers) to leave `remainingMs` of worker time.
+ clock.set(start+settings.deadlineMs-settings.checkReserveMs-remainingMs);
+ fakes[0].emit({type:'session',id:'seg-one'});
+ firstAssistant(fakes[0],'work done in the first segment');
+ exhaustCap(fakes[0]);
+ const settled=p.then(()=>null);
+ const next=await Promise.race([until(()=>fakes.length>=2).then(()=>'continued',()=>null),settled]);
+ if(next==='continued') completeSegment(fakes[1]);
+ return {r:await p,argvs};
+};
+test('A capped segment continues when the run clock leaves exactly the 60 s floor',async()=>{
+ const {r,argvs}=await continuationWithRemaining(60000);
+ assert.equal(argvs.length,2);
+ assert.equal(r.segments.length,2);
+});
+test('A capped segment does not continue when the run clock leaves under 60 s',async()=>{
+ const {r,argvs}=await continuationWithRemaining(59999);
+ assert.equal(argvs.length,1);
+ assert.equal(r.segments.length,1);
+ assert.equal(r.status,'output_truncated');
+});

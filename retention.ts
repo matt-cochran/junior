@@ -18,6 +18,8 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { acquireLock, removeRegisteredWorktree, runGit, sourceDirty } from './isolation.ts';
+import { systemClock } from './clock.ts';
+import type { Clock } from './clock.ts';
 import { buildWorktreePatch } from './apply.ts';
 
 /** Parse a bounded `--older-than` duration such as `30m`, `24h` or `7d`. */
@@ -56,7 +58,7 @@ export type JuniorWorktree = {
 
 /** Registered worktrees that match the Junior run layout, newest stamp first is
  * left to the caller; this returns Git's registration order. */
-export function listJuniorWorktrees(sourceCwd: string, now: number = Date.now()): JuniorWorktree[] {
+export function listJuniorWorktrees(sourceCwd: string, now: number = systemClock.now()): JuniorWorktree[] {
  const r = runGit(sourceCwd, ['worktree', 'list', '--porcelain']);
  if (r.status !== 0) return [];
  const found: JuniorWorktree[] = [];
@@ -76,10 +78,11 @@ export function listJuniorWorktrees(sourceCwd: string, now: number = Date.now())
 /** Bounded recursive directory usage. Symlinked roots and entries are never
  * followed, so a traversal cannot escape through a link. `truncated` reports
  * honestly when an entry/time limit stopped the walk before completion. */
-export function directoryUsage(root: string, limits: { maxEntries?: number; maxMs?: number } = {}): { bytes: number; truncated: boolean } {
+export function directoryUsage(root: string, limits: { maxEntries?: number; maxMs?: number; clock?: Clock } = {}): { bytes: number; truncated: boolean } {
  const maxEntries = limits.maxEntries ?? 50_000;
  const maxMs = limits.maxMs ?? 2_000;
- const started = Date.now();
+ const clock = limits.clock ?? systemClock;
+ const started = clock.now();
  let bytes = 0;
  let entries = 0;
  let truncated = false;
@@ -88,12 +91,12 @@ export function directoryUsage(root: string, limits: { maxEntries?: number; maxM
  if (rootStat.isSymbolicLink()) return { bytes: 0, truncated: false };
  const stack = [root];
  while (stack.length) {
-  if (entries >= maxEntries || Date.now() - started > maxMs) { truncated = true; break; }
+  if (entries >= maxEntries || clock.now() - started > maxMs) { truncated = true; break; }
   const dir = stack.pop()!;
   let items;
   try { items = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
   for (const item of items) {
-   if (entries >= maxEntries || Date.now() - started > maxMs) { truncated = true; break; }
+   if (entries >= maxEntries || clock.now() - started > maxMs) { truncated = true; break; }
    entries += 1;
    const full = join(dir, item.name);
    if (item.isSymbolicLink()) continue;
@@ -106,7 +109,7 @@ export function directoryUsage(root: string, limits: { maxEntries?: number; maxM
 }
 
 /** Bounded recursive directory size in bytes. Symlinks are never followed. */
-export function directoryBytes(root: string, limits: { maxEntries?: number; maxMs?: number } = {}): number {
+export function directoryBytes(root: string, limits: { maxEntries?: number; maxMs?: number; clock?: Clock } = {}): number {
  return directoryUsage(root, limits).bytes;
 }
 
@@ -156,7 +159,7 @@ export function retainedWorktreeSummary(sourceCwd: string): RetentionSummary {
  };
 }
 
-export type PruneOptions = { olderThanMs?: number; keepLast?: number; dryRun?: boolean; now?: number };
+export type PruneOptions = { olderThanMs?: number; keepLast?: number; dryRun?: boolean; now?: number; clock?: Clock };
 export type PruneResult = {
  ok: boolean;
  dryRun: boolean;
@@ -214,7 +217,7 @@ function removeAppliedWorktree(sourceCwd: string, worktree: string): { ok: boole
  * would acquire, so a live run and a prune can never race; the lock is released
  * in `finally` and an existing active lock is never removed. */
 export function pruneWorktrees(sourceCwd: string, options: PruneOptions = {}): PruneResult {
- const now = options.now ?? Date.now();
+ const now = options.now ?? (options.clock ?? systemClock).now();
  const deliveryRoot = resolve(sourceCwd, '.delivery');
  const lockDir = join(deliveryRoot, 'locks');
  const entries = listJuniorWorktrees(sourceCwd, now);

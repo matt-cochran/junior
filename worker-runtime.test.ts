@@ -24,7 +24,35 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
+import { createManualClock, type ManualClock } from './clock.ts';
+import { KILL_GRACE_MS } from './runtime-settings.ts';
 import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
+
+// Real-child runtime tests put the deadline, tool watchdog and SIGKILL grace on
+// a manual clock and wait only on real events (a file appearing, the child
+// closing), never on a fixed delay.
+const CLOCK_START=Date.parse('2026-01-01T00:00:00.000Z');
+/** Resolve once `pred` holds. It polls a real condition (a file, a pending
+ * timer) and gives up after a generous bound; no assertion depends on how long
+ * the wait took. */
+const eventually=async(pred:()=>boolean,what:string,tries=3000)=>{for(let i=0;i<tries;i++){if(pred())return;await new Promise((r)=>setTimeout(r,5));}throw new Error(`timed out waiting for ${what}`);};
+const fileIncludes=(path:string,text:string)=>{try{return readFileSync(path,'utf8').includes(text);}catch{return false;}};
+/** spawnChildDetached plus a promise that settles when the direct child closes. */
+const watchedSpawn=()=>{let closed!:()=>void;const childClosed=new Promise<void>((r)=>{closed=r;});const spawnChild=(c:string,a:string[],o:any)=>{const ch=spawnChildDetached(c,a,o);ch.on('close',()=>closed());return ch;};return {spawnChild,childClosed};};
+const settledFlag=(p:Promise<unknown>)=>{const s={done:false};p.then(()=>{s.done=true;},()=>{s.done=true;});return s;};
+/** A descendant that ignores SIGTERM/SIGINT and writes `<pidFile>.ready` only
+ * once its handlers are installed, so a test never signals it too early. */
+const readyTermIgnorer=(pidFile:string)=>`process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('fs').writeFileSync(${JSON.stringify(pidFile+'.ready')},'1');setInterval(()=>{},1000)`;
+const advanceTo=async(clock:ManualClock,ms:number)=>{await clock.advanceAsync(ms);};
+/** A fake-child spawn hook plus a promise that settles once run() has spawned
+ * it; awaiting it lands after the runtime has attached its listeners. */
+const gatedSpawn=(child:any)=>{let spawnedNow!:()=>void;const spawned=new Promise<void>((r)=>{spawnedNow=r;});return {spawned,spawnChild:()=>{spawnedNow();return child;}};};
+/** True once the run's events.jsonl contains `text` (the runtime has handled that line). */
+const eventsInclude=(repo:any,id:string,text:string)=>{try{return fileIncludes(join(artifactFor(repo,id),'events.jsonl'),text);}catch{return false;}};
+// run() tests drive the worker monitor, quiet threshold, deadlines and kill
+// grace from `deps.clock`. The monitor ticks every 25 ms of clock time from the
+// moment the child is attached, so a bound is observed on the first tick at or
+// past it.
 
 // --- D08 runtime handoff: streaming lifecycle, deadlines, repair lineage (offline; no paid calls) ---
 test('Validated execution settings default and reject out-of-bound values',()=>{
@@ -58,15 +86,24 @@ test('Common prompt restricts searches to the checkout and forbids broad filesys
 test('Streaming runtime reports running -> quiet -> running and quiet never kills',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
- const t=okTask(repo,{id:'quiet',execution:{quietMs:80,heartbeatMs:15,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
+ // quietMs 100 lands on a monitor tick, so the threshold is exact.
+ const t=okTask(repo,{id:'quiet',execution:{quietMs:100,heartbeatMs:15,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
  fake.emit({type:'agent_start'});
- await delay(220);
+ await eventually(()=>eventsInclude(repo,'quiet','agent_start'),'the agent_start line');
  const art=artifactFor(repo,'quiet');
+ await clock.advanceAsync(99);
+ assert.notEqual(readRuntime(art).state,'quiet','not quiet one millisecond before quietMs');
+ await clock.advanceAsync(1);
  assert.equal(readRuntime(art).state,'quiet','idle past quietMs is reported quiet');
+ await clock.advanceAsync(1000);
  assert.equal(fake.state.killed,false,'quiet must not kill the child');
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
- await delay(40);
+ await eventually(()=>eventsInclude(repo,'quiet','tool_execution_start'),'the tool start line');
+ await clock.advanceAsync(25);
  assert.equal(readRuntime(art).state,'running','activity returns state to running');
  assert.equal(readRuntime(art).currentTool,'bash');
  fake.emit({type:'tool_execution_end',toolCallId:'c1',toolName:'bash'});
@@ -82,10 +119,15 @@ test('Streaming runtime reports running -> quiet -> running and quiet never kill
 test('Streaming runtime exposes live heartbeat and log visibility',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'live',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
- await delay(80);
+ await eventually(()=>eventsInclude(repo,'live','tool_execution_start'),'the tool start line');
+ // One monitor tick past heartbeatMs rewrites runtime.json with the live tool.
+ await clock.advanceAsync(25);
  const art=artifactFor(repo,'live');
  assert.ok(existsSync(join(art,'runtime.json')),'runtime heartbeat exists while running');
  assert.equal(readRuntime(art).state,'running');
@@ -103,9 +145,17 @@ test('Tool timeout stops the process group with TERM and produces a failed recei
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  let spawns=0;
- const t=okTask(repo,{id:'tool-timeout',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:80,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>{spawns++;return fake.child;}});
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
+ const t=okTask(repo,{id:'tool-timeout',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:100,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>{spawns++;return gate.spawnChild();},clock});
+ await gate.spawned;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
+ await eventually(()=>eventsInclude(repo,'tool-timeout','tool_execution_start'),'the tool start line');
+ await clock.advanceAsync(99);
+ assert.equal(fake.state.killed,false,'the tool has not timed out one millisecond early');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the tool times out at toolTimeoutMs');
  const r=await p;
  assert.equal(spawns,1,'no automatic retry/restart');
  assert.equal(r.status,'worker_failed');
@@ -120,9 +170,19 @@ test('Tool timeout stops the process group with TERM and produces a failed recei
 
 test('Total wall deadline covers checks and no success is reported after it',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
- const slowCheck={command:process.execPath,args:['-e','setTimeout(()=>{},1000)']};
+ // The check never exits on its own; it writes a marker once it is running.
+ const marker=join(mkdtempSync(join(tmpdir(),'junior-slow-check-')),'started');
+ const slowCheck={command:process.execPath,args:['-e',`require('fs').writeFileSync(${JSON.stringify(marker)},'1');setInterval(()=>{},1000)`]};
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'deadline',checks:[slowCheck],execution:{deadlineMs:300,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:10000}});
- const r=await run(t,false,{spawnPi:okSpawn()});
+ const p=run(t,false,{spawnPi:okSpawn(),clock});
+ const settled=settledFlag(p);
+ await eventually(()=>existsSync(marker),'the slow check to start');
+ await clock.advanceAsync(299);
+ assert.equal(settled.done,false,'the run is not stopped one millisecond before its deadline');
+ await clock.advanceAsync(1);
+ await clock.advanceAsync(KILL_GRACE_MS);
+ const r=await p;
  assert.equal(r.status,'deadline_exceeded');
  assert.equal(r.runtime.deadlineExceeded,true);
  assert.equal(r.runtime.state,'deadline_exceeded');
@@ -132,19 +192,28 @@ test('Descendant shell processes are cancelled with the process group',async()=>
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const pidFile=join(repo.dir,'grandchild.pid');
  const script="const {spawn}=require('child_process');const fs=require('fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[1],String(c.pid));console.log(JSON.stringify({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'}));setInterval(()=>{},1000);";
- const res=await executeWorkerStreaming({
-  spawnChild:spawnChildDetached,command:process.execPath,args:['-e',script,pidFile],cwd:repo.dir,
-  eventsPath:join(repo.dir,'events.jsonl'),logPath:join(repo.dir,'worker.log'),runtimePath:join(repo.dir,'runtime.json'),
+ const clock=createManualClock(CLOCK_START);
+ const {spawnChild,childClosed}=watchedSpawn();
+ const eventsPath=join(repo.dir,'events.jsonl');
+ const p=executeWorkerStreaming({
+  spawnChild,command:process.execPath,args:['-e',script,pidFile],cwd:repo.dir,
+  eventsPath,logPath:join(repo.dir,'worker.log'),runtimePath:join(repo.dir,'runtime.json'),
   settings:{...EXECUTION_DEFAULTS,toolTimeoutMs:800,quietMs:100000,heartbeatMs:20},
-  deadlineAt:Date.now()+10000,
+  deadlineAt:clock.now()+10000,clock,
  });
- assert.equal(res.timedOut,true);
- let gpid=0;
- for(let i=0;i<20 && !gpid;i++){try{gpid=Number(readFileSync(pidFile,'utf8'));}catch{await delay(25);}}
+ const settled=settledFlag(p);
+ // The tool clock starts when the runtime sees tool_execution_start.
+ await eventually(()=>fileIncludes(eventsPath,'tool_execution_start'),'the tool start event');
+ const gpid=await waitForPid(pidFile);
  assert.ok(gpid>0,'grandchild pid recorded');
- let alive=true;
- for(let i=0;i<30 && alive;i++){try{process.kill(gpid,0);await delay(50);}catch{alive=false;}}
- assert.equal(alive,false,'grandchild was killed with the process group');
+ await advanceTo(clock,799);
+ assert.equal(settled.done,false,'the tool has not timed out one millisecond early');
+ await advanceTo(clock,1);
+ await childClosed;
+ await advanceTo(clock,KILL_GRACE_MS);
+ const res=await p;
+ assert.equal(res.timedOut,true);
+ assert.equal(await aliveAfter(gpid),false,'grandchild was killed with the process group');
 });
 
 test('SIGINT-style interruption yields an interrupted handback, preserves artifacts and releases locks',async()=>{
@@ -152,11 +221,8 @@ test('SIGINT-style interruption yields an interrupted handback, preserves artifa
  const fake=makeFakeChild();
  const controller=new AbortController();
  const t=okTask(repo,{id:'interrupt',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child,signal:controller.signal});
- fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
- await delay(60);
- controller.abort();
- const r=await p;
+ // Abort right after the runtime attaches to the child, while the tool runs.
+ const r=await run(t,false,{spawnChild:()=>{queueMicrotask(()=>{fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});controller.abort();});return fake.child;},signal:controller.signal});
  assert.equal(r.status,'interrupted');
  assert.equal(r.runtime.interrupted,true);
  assert.equal(r.runtime.state,'interrupted');
@@ -345,21 +411,35 @@ test('Process-group cancellation SIGKILLs a TERM-ignoring descendant after the p
  const pidFile=join(repo.dir,'parent-term-descendant.pid');
  const parentScript=[
   "const {spawn}=require('child_process');const fs=require('fs');",
-  `const d=spawn(process.execPath,['-e',${JSON.stringify(termIgnoringDescendant())}],{stdio:'ignore'});`,
+  `const d=spawn(process.execPath,['-e',${JSON.stringify(readyTermIgnorer(pidFile))}],{stdio:'ignore'});`,
   "fs.writeFileSync(process.argv[1],String(d.pid));",
   "process.on('SIGTERM',()=>process.exit(0));",
   "console.log(JSON.stringify({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'}));",
   "setInterval(()=>{},1000);",
  ].join('');
- const res=await executeWorkerStreaming({
-  spawnChild:spawnChildDetached,command:process.execPath,args:['-e',parentScript,pidFile],cwd:repo.dir,
-  eventsPath:join(repo.dir,'events.jsonl'),logPath:join(repo.dir,'worker.log'),runtimePath:join(repo.dir,'runtime.json'),
+ const clock=createManualClock(CLOCK_START);
+ const {spawnChild,childClosed}=watchedSpawn();
+ const eventsPath=join(repo.dir,'events.jsonl');
+ const p=executeWorkerStreaming({
+  spawnChild,command:process.execPath,args:['-e',parentScript,pidFile],cwd:repo.dir,
+  eventsPath,logPath:join(repo.dir,'worker.log'),runtimePath:join(repo.dir,'runtime.json'),
   settings:{...EXECUTION_DEFAULTS,toolTimeoutMs:600,quietMs:100000,heartbeatMs:20},
-  deadlineAt:Date.now()+10000,
+  deadlineAt:clock.now()+10000,clock,
  });
- assert.equal(res.timedOut,true);
+ const settled=settledFlag(p);
+ await eventually(()=>fileIncludes(eventsPath,'tool_execution_start'),'the tool start event');
  const gpid=await waitForPid(pidFile);
  assert.ok(gpid>0,'TERM-ignoring descendant pid recorded');
+ await eventually(()=>existsSync(pidFile+'.ready'),'the descendant to ignore SIGTERM');
+ await advanceTo(clock,600);
+ // SIGTERM: the parent exits, the descendant ignores it.
+ await childClosed;
+ await advanceTo(clock,KILL_GRACE_MS-1);
+ assert.equal(settled.done,false,'the handback waits for the full kill grace');
+ assert.doesNotThrow(()=>process.kill(gpid,0),'the TERM-ignoring descendant outlives SIGTERM until the grace ends');
+ await advanceTo(clock,1);
+ const res=await p;
+ assert.equal(res.timedOut,true);
  assert.equal(await aliveAfter(gpid),false,'descendant that ignores TERM must still be SIGKILLed after the parent exits');
 });
 
@@ -368,20 +448,28 @@ test('An interrupted run cancels a hung check process tree and keeps the heartbe
  const pidFile=join(repo.dir,'hung-check.pid');
  const checkScript=[
   "const {spawn}=require('child_process');const fs=require('fs');",
-  `const d=spawn(process.execPath,['-e',${JSON.stringify(termIgnoringDescendant())}],{stdio:'ignore'});`,
+  `const d=spawn(process.execPath,['-e',${JSON.stringify(readyTermIgnorer(pidFile))}],{stdio:'ignore'});`,
   "fs.writeFileSync(process.argv[1],String(d.pid));",
   "setInterval(()=>{},1000);",
  ].join('');
  const controller=new AbortController();
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'check-interrupt',checks:[{command:process.execPath,args:['-e',checkScript,pidFile]}],
   execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:3000,checkTimeoutMs:3000}});
- const p=run(t,false,{spawnPi:okSpawn(),signal:controller.signal});
+ const p=run(t,false,{spawnPi:okSpawn(),signal:controller.signal,clock});
+ const settled=settledFlag(p);
  const cpid=await waitForPid(pidFile);
  assert.ok(cpid>0,'hung check started');
+ await eventually(()=>existsSync(pidFile+'.ready'),'the descendant to ignore SIGTERM');
  // Heartbeat must advance to the checks phase while the check is running.
  const art=artifactFor(repo,'check-interrupt');
  assert.equal(readRuntime(art).phase,'checks','heartbeat stays live during checks');
  controller.abort();
+ // SIGTERM went to the group at once; the descendant ignores it until the grace ends.
+ await clock.advanceAsync(KILL_GRACE_MS-1);
+ assert.equal(settled.done,false,'the handback waits for the full kill grace');
+ assert.doesNotThrow(()=>process.kill(cpid,0),'the TERM-ignoring descendant outlives SIGTERM until the grace ends');
+ await clock.advanceAsync(1);
  const r=await p;
  assert.equal(r.status,'interrupted');
  assert.equal(r.runtime.interrupted,true);
@@ -417,11 +505,27 @@ test('Unbounded worker output is capped and classified as truncated, not a valid
 test('An expired wall deadline skips worker startup',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  let workerStarted=false;
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'expired',execution:{deadlineMs:10,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
- const r=await run(t,false,{spawnChild:()=>{workerStarted=true;return makeFakeChild().child;}});
+ // Readiness consumes the whole 10 ms wall budget before the worker would start.
+ const progress=(line:string)=>{if(line==='readiness')clock.advance(10);};
+ const r=await run(t,false,{spawnChild:()=>{workerStarted=true;return makeFakeChild().child;},clock,progress});
  assert.equal(workerStarted,false,'worker must not start after the wall deadline');
  assert.equal(r.status,'deadline_exceeded');
  assert.ok(existsSync(join(r.artifactDir,'evidence.json')),'evidence still captured without a worker');
+});
+
+test('A worker deadline one millisecond away still starts the worker',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const t=okTask(repo,{id:'not-expired',execution:{deadlineMs:10,checkReserveMs:1,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ // Worker deadline = 10 ms wall - 1 ms reserve = 9 ms; readiness uses 8 of them.
+ const progress=(line:string)=>{if(line==='readiness')clock.advance(8);};
+ let workerStarted=false;
+ const r=await run(t,false,{spawnChild:()=>{workerStarted=true;queueMicrotask(()=>{fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});fake.emit({type:'agent_settled'});fake.end(0);});return fake.child;},clock,progress});
+ assert.equal(workerStarted,true,'the worker starts while wall time remains');
+ assert.notEqual(r.status,'deadline_exceeded');
 });
 
 test('Disk persistence failure is surfaced without aborting the run',async()=>{
@@ -448,7 +552,6 @@ test('Output stream errors are surfaced as a recoverable failure',async()=>{
   eventsPath:join(repo.dir,'events.jsonl'),logPath:join(repo.dir,'worker.log'),runtimePath:join(repo.dir,'runtime.json'),
   settings:{...EXECUTION_DEFAULTS,quietMs:100000,heartbeatMs:20},deadlineAt:Date.now()+10000,
  });
- await delay(10);
  try { fake.stdout.emit('error',new Error('stream boom')); } catch { /* baseline has no handler; the fix must consume it */ }
  const res=await p;
  assert.match(String(res.streamError),/boom/);
@@ -461,18 +564,31 @@ test('Async check executor enforces its deadline and kills a TERM-ignoring desce
  const pidFile=join(repo.dir,'hung-check-exec.pid');
  const checkScript=[
   "const {spawn}=require('child_process');const fs=require('fs');",
-  `const d=spawn(process.execPath,['-e',${JSON.stringify(termIgnoringDescendant())}],{stdio:'ignore'});`,
+  `const d=spawn(process.execPath,['-e',${JSON.stringify(readyTermIgnorer(pidFile))}],{stdio:'ignore'});`,
   "fs.writeFileSync(process.argv[1],String(d.pid));",
   "setInterval(()=>{},1000);",
  ].join('');
- const res=await executeCheck({
-  spawnChild:spawnChildDetached,command:process.execPath,args:['-e',checkScript,pidFile],cwd:repo.dir,
-  timeoutMs:600,deadlineAt:Date.now()+10000,
+ const clock=createManualClock(CLOCK_START);
+ const {spawnChild,childClosed}=watchedSpawn();
+ const p=executeCheck({
+  spawnChild,command:process.execPath,args:['-e',checkScript,pidFile],cwd:repo.dir,
+  timeoutMs:600,deadlineAt:clock.now()+10000,clock,
  });
- assert.equal(res.timedOut,true);
- assert.equal(res.exitCode,null);
+ const settled=settledFlag(p);
  const cpid=await waitForPid(pidFile);
  assert.ok(cpid>0,'hung check descendant pid recorded');
+ await eventually(()=>existsSync(pidFile+'.ready'),'the descendant to ignore SIGTERM');
+ await advanceTo(clock,599);
+ assert.equal(settled.done,false,'the check has not timed out one millisecond early');
+ await advanceTo(clock,1);
+ await childClosed;
+ await advanceTo(clock,KILL_GRACE_MS-1);
+ assert.equal(settled.done,false,'the check result waits for the full kill grace');
+ assert.doesNotThrow(()=>process.kill(cpid,0),'the TERM-ignoring descendant outlives SIGTERM until the grace ends');
+ await advanceTo(clock,1);
+ const res=await p;
+ assert.equal(res.timedOut,true);
+ assert.equal(res.exitCode,null);
  assert.equal(await aliveAfter(cpid),false,'check executor must kill the whole process tree');
 });
 
@@ -506,26 +622,44 @@ test('A check reserve at least the deadline is rejected',()=>{
 test('A worker stopped by its reserved deadline still records check results',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'reserve-checks',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
- const r=await run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
+ // The worker deadline is the wall deadline minus the 1000 ms check reserve.
+ await clock.advanceAsync(499);
+ assert.equal(fake.state.killed,false,'the worker is not stopped one millisecond before its reserved deadline');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the worker is stopped at its reserved deadline');
+ const r=await p;
  assert.equal(r.checks.length,1);
 });
 test('A worker stopped by its reserved deadline keeps the run deadline_exceeded',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'reserve-status',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
- const r=await run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
+ // The worker deadline is the wall deadline minus the 1000 ms check reserve.
+ await clock.advanceAsync(499);
+ assert.equal(fake.state.killed,false,'the worker is not stopped one millisecond before its reserved deadline');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the worker is stopped at its reserved deadline');
+ const r=await p;
  assert.equal(r.status,'deadline_exceeded');
 });
 test('An interrupted run still records no checks',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  const controller=new AbortController();
- const t=okTask(repo,{id:'reserve-interrupt',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
- const p=run(t,false,{spawnChild:()=>fake.child,signal:controller.signal});
- await delay(60);
- controller.abort();
- const r=await p;
+ // A long deadline keeps the reserve configured without letting a real worker
+ // deadline race the interrupt; the abort fires right after the child attaches.
+ const t=okTask(repo,{id:'reserve-interrupt',execution:{deadlineMs:60000,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
+ const r=await run(t,false,{spawnChild:()=>{queueMicrotask(()=>controller.abort());return fake.child;},signal:controller.signal});
+ assert.equal(r.status,'interrupted');
  assert.equal(r.checks.length,0);
 });
 test('The compact handoff reports the total wall deadline',()=>{

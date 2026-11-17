@@ -8,6 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openPullRequests, prLines, type RunGh } from './compact-prs.ts';
+import { createManualClock } from './clock.ts';
 
 function workspace(t: any): string {
   const dir = mkdtempSync(join(tmpdir(), 'junior-compact-prs-'));
@@ -155,7 +156,35 @@ test(
     t.after(() => {
       process.env.PATH = oldPath;
     });
-    const section = await openPullRequests({ cwd: dir, timeoutMs: 200 });
+    // The deadline is on a manual clock; only the kill it triggers (and the
+    // real process exit that follows) can settle the query.
+    const clock = createManualClock(0);
+    let settled = false;
+    const query = openPullRequests({ cwd: dir, timeoutMs: 200, clock });
+    query.then(() => { settled = true; });
+    assert.equal(clock.pending(), 1, 'the gh deadline is scheduled on the injected clock');
+    await clock.advanceAsync(199);
+    assert.equal(settled, false, 'gh is not killed 1ms early');
+    await clock.advanceAsync(1);
+    const section = await query;
     assert.equal(section.status, 'unavailable');
+    assert.deepEqual(section.errors, ['.: gh timed out']);
   },
+);
+
+test('a gh call that finishes in time clears its deadline', async (t) => {
+  const dir = workspace(t);
+  const fakeGh = join(dir, 'gh');
+  writeFileSync(fakeGh, '#!/bin/sh\necho "[]"\n');
+  chmodSync(fakeGh, 0o755);
+  const oldPath = process.env.PATH;
+  process.env.PATH = dir;
+  t.after(() => {
+    process.env.PATH = oldPath;
+  });
+  const clock = createManualClock(0);
+  const section = await openPullRequests({ cwd: dir, timeoutMs: 200, clock });
+  assert.equal(section.status, 'none');
+  assert.equal(clock.pending(), 0);
+}
 );

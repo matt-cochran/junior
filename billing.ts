@@ -17,6 +17,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { systemClock, type Clock } from './clock.ts';
 
 /** The only supported billing mode. */
 export const BILLING_MODES = ['openrouter'] as const;
@@ -71,8 +72,11 @@ export type BillingDeps = {
  /** Injected credential seam. Receives no arguments and returns a key or null.
   * The resolved key is never logged. */
  resolveApiKey?: () => string | null | Promise<string | null>;
- /** Injected clock for deterministic bounding. */
+ /** Injected clock for deterministic bounding (wins over `clock` for reads). */
  now?: () => number;
+ /** Clock for reads (when `now` is absent), request timers and retry waits;
+  * default the system clock. */
+ clock?: Clock;
  /** Injected wait between not-yet-recorded (404) retries. */
  sleep?: (ms: number) => Promise<void>;
  /** Delay between 404 retries (default BILLING_NOT_READY_DELAY_MS). */
@@ -145,14 +149,14 @@ function finiteNonnegative(v: any): v is number {
 
 /** Race `p` against an absolute deadline. The timer is unref'd so a completed
  * lookup never holds the process open. */
-function withDeadline<T>(p: Promise<T>, endAt: number, now: () => number): Promise<T> {
+function withDeadline<T>(p: Promise<T>, endAt: number, now: () => number, clock: Clock): Promise<T> {
  const remaining = endAt - now();
  if (remaining <= 0) return Promise.reject(Error('deadline'));
  return new Promise<T>((resolve, reject) => {
-  const timer = setTimeout(() => reject(Error('deadline')), remaining);
+  const timer = clock.setTimeout(() => reject(Error('deadline')), remaining);
   p.then(
-   (v) => { clearTimeout(timer); resolve(v); },
-   (e) => { clearTimeout(timer); reject(e); },
+   (v) => { clock.clearTimeout(timer); resolve(v); },
+   (e) => { clock.clearTimeout(timer); reject(e); },
   );
  });
 }
@@ -252,7 +256,8 @@ export async function captureBilling(
  deps: BillingDeps = {},
 ): Promise<BillingCapture> {
  if (!config || config.mode !== 'openrouter') return fail(REASONS.notEnabled);
- const now = deps.now ?? (() => Date.now());
+ const clock = deps.clock ?? systemClock;
+ const now = deps.now ?? (() => clock.now());
  const selected = selectGenerations(receipt ?? {});
  if ('billedUsd' in selected && 'generationCount' in selected) return selected;
  const { ids, modelById } = selected;
@@ -264,14 +269,14 @@ export async function captureBilling(
  let key: string | null;
  try {
   const resolver = deps.resolveApiKey ?? (() => resolveOpenRouterApiKey());
-  key = await withDeadline(Promise.resolve().then(() => resolver()), endAt, now);
+  key = await withDeadline(Promise.resolve().then(() => resolver()), endAt, now, clock);
  } catch {
   return fail(REASONS.deadline, ids.length);
  }
  if (!key) return fail(REASONS.noKey, ids.length);
 
  const doFetch: BillingFetch = deps.fetch ?? ((url, init) => (globalThis.fetch as any)(url, init));
- const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+ const sleep = deps.sleep ?? ((ms: number) => clock.sleep(ms));
  const retryDelayMs = deps.retryDelayMs ?? BILLING_NOT_READY_DELAY_MS;
  const providers = new Map<string, BillingProvider>();
  const failed = (reason: string, generationCount: number, capturedCount: number): BillingCapture =>
@@ -288,7 +293,7 @@ export async function captureBilling(
   const fetchOnce = () => new Promise<{ response?: BillingResponse; timeout: boolean; failed: boolean }>((resolve) => {
    controller = new AbortController();
    let settled = false;
-   const timer = setTimeout(() => {
+   const timer = clock.setTimeout(() => {
     if (settled) return;
     settled = true;
     controller.abort();
@@ -298,8 +303,8 @@ export async function captureBilling(
     headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
     signal: controller.signal,
    }).then(
-    (response) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ response, timeout: false, failed: false }); } },
-    () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ timeout: controller.signal.aborted, failed: true }); } },
+    (response) => { if (!settled) { settled = true; clock.clearTimeout(timer); resolve({ response, timeout: false, failed: false }); } },
+    () => { if (!settled) { settled = true; clock.clearTimeout(timer); resolve({ timeout: controller.signal.aborted, failed: true }); } },
    );
   });
   let outcome = await fetchOnce();
@@ -312,7 +317,7 @@ export async function captureBilling(
   const response = outcome.response;
   if (!response || response.ok !== true) return failed(REASONS.requestFailed, ids.length, captured);
   let body: any;
-  try { body = await withDeadline(Promise.resolve().then(() => response.json()), endAt, now); } catch { controller.abort(); return failed(endAt <= now() ? REASONS.timeout : REASONS.badResponse, ids.length, captured); }
+  try { body = await withDeadline(Promise.resolve().then(() => response.json()), endAt, now, clock); } catch { controller.abort(); return failed(endAt <= now() ? REASONS.timeout : REASONS.badResponse, ids.length, captured); }
   const data = body?.data;
   if (!data || data.id !== id) return failed(REASONS.idMismatch, ids.length, captured);
   if (!sameBilledModel(data.model, modelById.get(id))) return failed(REASONS.modelMismatch, ids.length, captured);

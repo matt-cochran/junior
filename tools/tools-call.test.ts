@@ -6,6 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import { ROOT, TOOLS, FAKE, NODE, tmpdir, toolEntry, writeConfig, writeJson, runCli, cliJson, initHop, defaultHop, nestedProjectHop, legacyHop, STORED_MODEL, crossmatrixHop, storeHop, commandRequest, readWrites, scientificHop, readScientificCalls, crossmatrixManifest, buildToolEnv, initHopManifest, crossmatrixUsesStore, callHop } from "./tools-helpers.test.ts";
 import { openHopSession } from "./tools.ts";
+import { createManualClock } from "../clock.ts";
+
+/** Track whether a promise has settled without consuming its outcome. */
+function track(promise) {
+  const state = { settled: false };
+  promise.then(() => { state.settled = true; }, () => { state.settled = true; });
+  return state;
+}
 
 // --- call ergonomics ----------------------------------------------------------
 //
@@ -207,7 +215,7 @@ test("stale expected revision is rejected", () => {
   assert.equal(out.error.code, "STALE_REVISION");
 });
 
-test("a timed-out MCP call is reported as a timeout", () => {
+test("a timed-out MCP call is reported as a timeout", async () => {
   const dir = tmpdir();
   const hop = initHop(dir, {
     timeoutMs: 1200,
@@ -217,12 +225,19 @@ test("a timed-out MCP call is reported as a timeout", () => {
       crossmatrix: toolEntry("crossmatrix"),
     },
   });
-  const req = writeJson(path.join(dir, "req.json"), {
-    tool: "state.get",
-    arguments: { session_id: "s1" },
-  });
-  const out = cliJson(runCli(["call", hop, "fmeca", req]));
+  const clock = createManualClock("2026-03-04T05:06:07.000Z");
+  const call = callHop(hop, "fmeca", { tool: "state.get", arguments: { session_id: "s1" } }, { clock });
+  const state = track(call);
+  assert.equal(clock.pending(), 1, "the call deadline is scheduled on the injected clock");
+  await clock.advanceAsync(1199);
+  assert.equal(state.settled, false, "not timed out 1ms early");
+  await clock.advanceAsync(1);
+  const out = await call;
   assert.equal(out.error.code, "TIMEOUT");
+  const manifest = JSON.parse(fs.readFileSync(hop, "utf8"));
+  assert.equal(manifest.updatedAt, "2026-03-04T05:06:08.200Z", "the manifest is stamped from the injected clock");
+  assert.equal(manifest.unresolved.at(-1).reason, "TIMEOUT");
+  assert.equal(manifest.unresolved.at(-1).createdAt, "2026-03-04T05:06:08.200Z");
 });
 
 test("upstream tool isError is propagated", () => {
@@ -254,8 +269,10 @@ test("unsupported operation note is surfaced even when upstream ok is true", () 
 });
 
 test("a held manifest lock blocks a concurrent call", () => {
+  // lockTimeoutMs 0 fails on the first contended attempt, so the CLI's LOCKED
+  // envelope is checked without waiting; the deadline itself is covered below.
   const dir = tmpdir();
-  const hop = initHop(dir, { lockTimeoutMs: 250 });
+  const hop = initHop(dir, { lockTimeoutMs: 0 });
   fs.writeFileSync(hop + ".lock", JSON.stringify({ pid: 999999 }));
   const req = writeJson(path.join(dir, "req.json"), {
     tool: "state.get",
@@ -263,6 +280,20 @@ test("a held manifest lock blocks a concurrent call", () => {
   });
   const out = cliJson(runCli(["call", hop, "fmeca", req]));
   assert.equal(out.error.code, "LOCKED");
+});
+
+test("a held manifest lock blocks a concurrent call until the lock deadline", async () => {
+  const dir = tmpdir();
+  const hop = initHop(dir, { lockTimeoutMs: 250 });
+  fs.writeFileSync(hop + ".lock", JSON.stringify({ pid: 999999 }));
+  const clock = createManualClock(0);
+  const call = callHop(hop, "fmeca", { tool: "state.get", arguments: { session_id: "s1" } }, { clock });
+  const state = track(call);
+  await clock.advanceAsync(249);
+  assert.equal(state.settled, false, "still retrying 249ms in");
+  await clock.advanceAsync(1);
+  await assert.rejects(call, (err) => err.code === "LOCKED");
+  assert.equal(JSON.parse(fs.readFileSync(hop, "utf8")).revision, 0, "the blocked call changes nothing");
 });
 // --- crossmatrix persistence --------------------------------------------------
 

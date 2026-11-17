@@ -14,6 +14,7 @@ import { resolveGatewayKey } from './gateway.ts';
 import { isCommodity } from './model-policy.ts';
 import { writeProposal as notesWriteProposal } from './notes.ts';
 import { loadModelConfig } from './roster.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export type HookInput = {
   transcript_path?: string | null;
@@ -60,7 +61,10 @@ export type CaptureDeps = {
   writeRecord?: (path: string, json: string) => void;
   apiKey?: () => string | null;
   modelConfig?: () => { provider: string; model: string };
+  /** Capture timestamp source; wins over `clock`. */
   now?: () => Date;
+  /** Fallback clock for the capture timestamp; default the system clock. */
+  clock?: Clock;
 };
 
 const KINDS = new Set<CaptureItem['kind']>(['decision', 'question', 'risk', 'hypothesis', 'todo']);
@@ -413,11 +417,12 @@ async function captureFromTranscript(
 
 /** Run one fail-open capture attempt and always return a capture record. */
 export async function runCapture(input: HookInput, deps: CaptureDeps): Promise<CaptureRecord> {
+  const clock = deps.clock ?? systemClock;
   let at: Date;
   try {
-    at = (deps.now ?? (() => new Date()))();
+    at = (deps.now ?? (() => clock.date()))();
   } catch {
-    at = new Date();
+    at = clock.date();
   }
   const captureId = `c-${at.toISOString().replace(/[:.]/g, '-')}`;
   const transcriptPath = typeof input.transcript_path === 'string' && input.transcript_path

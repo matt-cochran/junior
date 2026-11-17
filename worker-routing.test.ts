@@ -24,6 +24,7 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
+import { createManualClock } from './clock.ts';
 import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
 
 // --- commodity-only executor policy and Jev model routing ---
@@ -343,6 +344,16 @@ test('A run writes a sticky route record for its task id',async()=>{
  const cwd=stickyCwd();
  await run(task(0,{cwd}),true);
  assert.equal(existsSync(join(cwd,'.delivery','smoke','route.json')),true);
+});
+test('The sticky route record is stamped from the run clock',async()=>{
+ const cwd=stickyCwd();
+ const start=Date.now();
+ const clock=createManualClock(start);
+ const r=await run(task(0,{cwd}),true,{clock});
+ assert.equal(stickyFile(cwd).decidedAt,new Date(start).toISOString());
+ // The run's start time, artifact stamp and heartbeat all read the same clock.
+ assert.equal(r.artifactDir.endsWith(String(start)),true);
+ assert.equal(r.runtime.startedAt,new Date(start).toISOString());
 });
 test('The sticky route record names the model the run used',async()=>{
  const cwd=stickyCwd();

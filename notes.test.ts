@@ -18,6 +18,7 @@ import {
   writeProposal,
   type NotesDeps,
 } from './notes.ts';
+import { createManualClock } from './clock.ts';
 
 function workspace(t: any): string {
   const dir = mkdtempSync(join(tmpdir(), 'junior-notes-'));
@@ -206,4 +207,19 @@ test('listOpen returns open notes oldest first', (t) => {
   const first = addNote(root, { text: 'First' }, fixedDeps(['n-first']));
   const second = addNote(root, { text: 'Second' }, fixedDeps(['n-second']));
   assert.deepEqual(listOpen(root).notes.map((note) => note.id), [first.id, second.id]);
+});
+
+test('addNote stamps the note and its default id from an injected clock', (t) => {
+  const root = workspace(t);
+  const clock = createManualClock('2026-10-23T15:49:11.000Z');
+  addNote(root, { text: 'Call Bob' }, { clock });
+  const note = listOpen(root).notes[0];
+  assert.equal(note?.createdAt, '2026-10-23T15:49:11.000Z');
+  assert.match(note?.id ?? '', new RegExp(`^n-${clock.now().toString(36)}-[0-9a-f]{4}$`));
+});
+
+test('an explicit now wins over the injected clock', (t) => {
+  const root = workspace(t);
+  addNote(root, { text: 'Call Bob' }, { now: () => new Date('2026-01-01T00:00:00.000Z'), clock: createManualClock(0) });
+  assert.equal(listOpen(root).notes[0]?.createdAt, '2026-01-01T00:00:00.000Z');
 });
