@@ -50,6 +50,13 @@ process). Three forms:
 - Stdin: `echo '{"tool":"plan.lint","arguments":{"path":"..."}}' | junior tools call cpm -`
 - Request file: `junior tools call cpm request.json`
 
+The hop is found from `.delivery/setup/hop.json` in the current checkout. When
+it is missing (for example, in a fresh worktree, which fails with
+`HOP_NOT_FOUND`) or ambiguous (`Multiple nested Hops`), pass it as the first
+argument: `junior tools call <hop.json> elicitation request.json`. For the
+`append` payloads of each companion, see that companion's skill (for example,
+the elicitation skill's "`append` payloads" section).
+
 ## Planning with Junior
 
 1. `junior doctor` to confirm readiness.
