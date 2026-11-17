@@ -591,6 +591,112 @@ function featureOf(dimensionId: string, member: string): string {
   return `${dimensionId}:${memberId}`;
 }
 
+type FeatureCall = typeof callHop;
+
+/** Keep the strongest observation seen per feature. */
+function rememberFeature(
+  strongest: Map<string, CodemapObservation>,
+  rawMember: unknown,
+  dimensionId: string,
+  raw: Record<string, any>,
+): void {
+  if (typeof rawMember !== 'string' || !rawMember || rawMember.startsWith(LOC_PREFIX)) return;
+  const observation = observationOf(raw);
+  if (observation === null) return;
+  const feature = featureOf(dimensionId, rawMember);
+  const previous = strongest.get(feature);
+  if (!previous || OBSERVATION_RANK[observation] > OBSERVATION_RANK[previous]) {
+    strongest.set(feature, observation);
+  }
+}
+
+function sortedFeatures(strongest: Map<string, CodemapObservation>): CodemapFeature[] {
+  return [...strongest.entries()]
+    .map(([feature, observation]) => ({ feature, observation }))
+    .sort((a, b) => a.feature.localeCompare(b.feature));
+}
+
+/** Reverse-trace the exact `loc:` member and remember every inbound codemap hop. */
+async function traceExactFeatures(
+  call: FeatureCall,
+  options: CodemapFeaturesOptions,
+  exact: string,
+  strongest: Map<string, CodemapObservation>,
+): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const q: CrossmatrixQuery = { kind: 'trace', member: `${LOC_PREFIX}${exact}` };
+    if (cursor !== undefined) q.cursor = cursor;
+    const page = await query(call, options.hopPath, options.modelId, q);
+    const hops = isRecord(page) && Array.isArray(page.hops) ? page.hops : [];
+    for (const raw of hops) {
+      if (!isRecord(raw)) continue;
+      if (raw.direction === 'out') continue;
+      if (typeof raw.relation !== 'string' || !raw.relation.startsWith('codemap-')) continue;
+      rememberFeature(strongest, raw.member, raw.relation.slice('codemap-'.length), raw);
+    }
+    cursor = nextCursorOf(page);
+  } while (cursor !== undefined);
+}
+
+/** Remember one slice cell when its code endpoint is the path or sits under it. */
+function rememberCell(
+  strongest: Map<string, CodemapObservation>,
+  cell: Record<string, any>,
+  relationId: string,
+  exact: string,
+  directory: string,
+): void {
+  const from = typeof cell.from === 'string' ? cell.from : '';
+  const to = typeof cell.to === 'string' ? cell.to : '';
+  const fromLoc = from.startsWith(LOC_PREFIX) ? from.slice(LOC_PREFIX.length) : null;
+  const toLoc = to.startsWith(LOC_PREFIX) ? to.slice(LOC_PREFIX.length) : null;
+  const loc = toLoc ?? fromLoc;
+  if (loc === null) return;
+  if (loc !== exact && !loc.startsWith(directory)) return;
+  const member = toLoc !== null ? from : to;
+  rememberFeature(strongest, member, relationId.slice('codemap-'.length), cell);
+}
+
+async function sliceRelationFeatures(
+  call: FeatureCall,
+  options: CodemapFeaturesOptions,
+  relationId: string,
+  exact: string,
+  directory: string,
+  strongest: Map<string, CodemapObservation>,
+): Promise<void> {
+  let sliceCursor: string | undefined;
+  do {
+    const q: CrossmatrixQuery = { kind: 'slice', relationId };
+    if (sliceCursor !== undefined) q.cursor = sliceCursor;
+    const page = await query(call, options.hopPath, options.modelId, q);
+    const cells = isRecord(page) && Array.isArray(page.cells) ? page.cells : [];
+    for (const cell of cells) {
+      if (!isRecord(cell)) continue;
+      rememberCell(strongest, cell, relationId, exact, directory);
+    }
+    sliceCursor = nextCursorOf(page);
+  } while (sliceCursor !== undefined);
+}
+
+/** Enumerate each codemap relation's cells and remember the path's endpoints. */
+async function scanDirectoryFeatures(
+  call: FeatureCall,
+  options: CodemapFeaturesOptions,
+  exact: string,
+  directory: string,
+  strongest: Map<string, CodemapObservation>,
+): Promise<void> {
+  const described = await query(call, options.hopPath, options.modelId, { kind: 'describe' });
+  const doc = isRecord(described) && isRecord(described.describe) ? described.describe : {};
+  const relations = Array.isArray(doc.relations) ? doc.relations : [];
+  for (const relation of relations) {
+    if (!isRecord(relation) || typeof relation.id !== 'string' || !relation.id.startsWith('codemap-')) continue;
+    await sliceRelationFeatures(call, options, relation.id, exact, directory, strongest);
+  }
+}
+
 /** List the features whose `codemap-*` links point at a path (or under a directory). */
 export async function codemapFeatures(options: CodemapFeaturesOptions): Promise<CodemapFeature[]> {
   const load = options.deps?.loadHop ?? loadHop;
@@ -602,81 +708,29 @@ export async function codemapFeatures(options: CodemapFeaturesOptions): Promise<
 
   return withCrossmatrixSession(options, async (call) => {
     const strongest = new Map<string, CodemapObservation>();
-    const remember = (rawMember: unknown, dimensionId: string, raw: Record<string, any>): void => {
-      if (typeof rawMember !== 'string' || !rawMember || rawMember.startsWith(LOC_PREFIX)) return;
-      const observation = observationOf(raw);
-      if (observation === null) return;
-      const feature = featureOf(dimensionId, rawMember);
-      const previous = strongest.get(feature);
-      if (!previous || OBSERVATION_RANK[observation] > OBSERVATION_RANK[previous]) {
-        strongest.set(feature, observation);
-      }
-    };
 
     // A file is its own member. This also gives the fake/transport path a direct
     // reverse lookup; directories discovered below are handled by describe/slice.
     try {
-      let cursor: string | undefined;
-      do {
-        const q: CrossmatrixQuery = { kind: 'trace', member: `${LOC_PREFIX}${exact}` };
-        if (cursor !== undefined) q.cursor = cursor;
-        const page = await query(call, options.hopPath, options.modelId, q);
-        const hops = isRecord(page) && Array.isArray(page.hops) ? page.hops : [];
-        for (const raw of hops) {
-          if (!isRecord(raw)) continue;
-          if (raw.direction === 'out') continue;
-          if (typeof raw.relation !== 'string' || !raw.relation.startsWith('codemap-')) continue;
-          remember(raw.member, raw.relation.slice('codemap-'.length), raw);
-        }
-        cursor = nextCursorOf(page);
-      } while (cursor !== undefined);
+      await traceExactFeatures(call, options, exact, strongest);
     } catch {
       // A directory has no exact member; describe/slice below finds its files.
     }
 
     // A file answered by its own trace needs no relation scan.
     if (!options.path.endsWith('/') && strongest.size > 0) {
-      return [...strongest.entries()]
-        .map(([feature, observation]) => ({ feature, observation }))
-        .sort((a, b) => a.feature.localeCompare(b.feature));
+      return sortedFeatures(strongest);
     }
 
     // Directory lookup: enumerate each codemap relation's cells, then keep the
     // endpoints whose code member is the path itself or sits under it.
     try {
-      const described = await query(call, options.hopPath, options.modelId, { kind: 'describe' });
-      const doc = isRecord(described) && isRecord(described.describe) ? described.describe : {};
-      const relations = Array.isArray(doc.relations) ? doc.relations : [];
-      for (const relation of relations) {
-        if (!isRecord(relation) || typeof relation.id !== 'string' || !relation.id.startsWith('codemap-')) continue;
-        let sliceCursor: string | undefined;
-        do {
-          const q: CrossmatrixQuery = { kind: 'slice', relationId: relation.id };
-          if (sliceCursor !== undefined) q.cursor = sliceCursor;
-          const page = await query(call, options.hopPath, options.modelId, q);
-          const cells = isRecord(page) && Array.isArray(page.cells) ? page.cells : [];
-          for (const cell of cells) {
-            if (!isRecord(cell)) continue;
-            const from = typeof cell.from === 'string' ? cell.from : '';
-            const to = typeof cell.to === 'string' ? cell.to : '';
-            const fromLoc = from.startsWith(LOC_PREFIX) ? from.slice(LOC_PREFIX.length) : null;
-            const toLoc = to.startsWith(LOC_PREFIX) ? to.slice(LOC_PREFIX.length) : null;
-            const loc = toLoc ?? fromLoc;
-            if (loc === null) continue;
-            if (loc !== exact && !loc.startsWith(directory)) continue;
-            const member = toLoc !== null ? from : to;
-            remember(member, relation.id.slice('codemap-'.length), cell);
-          }
-          sliceCursor = nextCursorOf(page);
-        } while (sliceCursor !== undefined);
-      }
+      await scanDirectoryFeatures(call, options, exact, directory, strongest);
     } catch {
       // A server without describe/slice still serves the exact-file trace.
     }
 
-    return [...strongest.entries()]
-      .map(([feature, observation]) => ({ feature, observation }))
-      .sort((a, b) => a.feature.localeCompare(b.feature));
+    return sortedFeatures(strongest);
   });
 }
 
