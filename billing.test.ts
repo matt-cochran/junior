@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validate, run, parseReceipt, estimateCost } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
+import { createManualClock, type ManualClock } from './clock.ts';
 import { captureBilling, validateBilling, resolveOpenRouterApiKey, resolveApiKeyFromEnvironment, readOpenRouterAuthFile, BILLING_MAX_GENERATIONS, BILLING_MAX_TIMEOUT_MS, sameBilledModel } from './billing.ts';
 
 // --- fixtures and injected seams ---
@@ -31,6 +32,19 @@ const assistant = (over: any = {}) => JSON.stringify({ type: 'message_end', mess
 const stream = (...records: any[]) => records.map((r: any) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n';
 const task = (extra: any = {}) => ({ id: 'billing', deliverable: 'billing', cwd: mkdtempSync(join(tmpdir(), 'billing-')), acceptance: ['a'], checks: [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }], externalContextConsent: true, ...extra });
 const spawnOk = (responseId?: string) => (_c: string, _a: string[]) => ({ status: 0, stdout: stream({ type: 'session', id: 's' }, assistant(responseId ? { responseId } : {}), { type: 'agent_settled' }), stderr: '' });
+
+/** Let pending promise chains settle, then move the manual clock forward. */
+async function tick(clock: ManualClock, ms: number): Promise<void> {
+ await new Promise<void>((resolve) => setImmediate(resolve));
+ await clock.advanceAsync(ms);
+ await new Promise<void>((resolve) => setImmediate(resolve));
+}
+/** Track whether a promise has settled without awaiting it. */
+function track<T>(promise: Promise<T>): { settled: () => boolean; promise: Promise<T> } {
+ let done = false;
+ const tracked = promise.finally(() => { done = true; });
+ return { settled: () => done, promise: tracked };
+}
 
 // --- contract validation (offline) ---
 test('Billing accepts the openrouter mode with a bounded timeout', () => {
@@ -118,7 +132,19 @@ test('A mismatched model refuses the bill', async () => {
  assert.match(String(cap.reason), /model mismatch/i);
 });
 test('A lookup timeout is bounded and refuses the bill', async () => {
- const cap = await captureBilling(receiptFor([gen()]), { mode: 'openrouter', timeoutMs: 20 }, { timeoutMs: 20, deadlineAt: Date.now() + 20 }, { resolveApiKey: apiKey, fetch: () => new Promise(() => {}) as any });
+ const clock = createManualClock(1_000_000);
+ let signal: AbortSignal | undefined;
+ const capture = track(captureBilling(receiptFor([gen()]), { mode: 'openrouter', timeoutMs: 20 }, { timeoutMs: 20, deadlineAt: clock.now() + 20 }, {
+  resolveApiKey: apiKey, clock,
+  fetch: (_url, init) => { signal = init.signal; return new Promise(() => {}) as any; },
+ }));
+ await tick(clock, 19);
+ assert.equal(capture.settled(), false);
+ assert.equal(signal?.aborted, false);
+ await tick(clock, 1);
+ assert.equal(capture.settled(), true);
+ assert.equal(signal?.aborted, true);
+ const cap = await capture.promise;
  assert.match(String(cap.reason), /timed out/i);
 });
 test('An expired deadline refuses the bill without a request', async () => {
@@ -235,10 +261,41 @@ test('Compact handoff surfaces the billing limitation when capture fails', async
  assert.match(String(compactHandoff(r).model.cost.billingReason), /missing a response id/i);
 });
 test('Billing times out when response JSON never resolves', async () => {
- const result = await captureBilling(receiptFor([gen()]), config,
-  { timeoutMs: 20, deadlineAt: Date.now() + 1000 },
-  { resolveApiKey: apiKey, fetch: async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) }) });
+ const clock = createManualClock(1_000_000);
+ const capture = track(captureBilling(receiptFor([gen()]), config,
+  { timeoutMs: 20, deadlineAt: clock.now() + 1000 },
+  { resolveApiKey: apiKey, clock, fetch: async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) }) }));
+ await tick(clock, 19);
+ assert.equal(capture.settled(), false);
+ await tick(clock, 1);
+ const result = await capture.promise;
  assert.equal(result.billedUsd, null);
+ assert.match(String(result.reason), /timed out/i);
+ assert.equal(clock.pending(), 0);
+});
+
+test('An explicit now wins over the clock for deadline reads', async () => {
+ const clock = createManualClock(0);
+ let calls = 0;
+ const cap = await captureBilling(receiptFor([gen()]), config, { timeoutMs: 1000, deadlineAt: 5_000 }, {
+  resolveApiKey: apiKey, clock, now: () => 10_000,
+  fetch: async () => { calls++; return okBody('gen-1', 'm', 0.1); },
+ });
+ assert.match(String(cap.reason), /deadline/i);
+ assert.equal(calls, 0);
+});
+
+test('A not-yet-recorded generation waits the retry delay on the clock', async () => {
+ const clock = createManualClock(0);
+ let calls = 0;
+ const fetch = async () => (++calls === 1 ? { ok: false, status: 404, json: async () => ({}) } : okBody('gen-1', 'm', 0.5));
+ const capture = track(captureBilling(receiptFor([gen()]), config, { timeoutMs: 1000, deadlineAt: 5_000 }, { resolveApiKey: apiKey, fetch, clock, retryDelayMs: 100 }));
+ await tick(clock, 99);
+ assert.equal(calls, 1);
+ assert.equal(capture.settled(), false);
+ await tick(clock, 1);
+ assert.equal(calls, 2);
+ assert.equal((await capture.promise).billedUsd, 0.5);
 });
 
 test('Billing rejects one generation attributed to conflicting models', async () => {

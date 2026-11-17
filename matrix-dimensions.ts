@@ -12,6 +12,7 @@ import {
   type DimensionsDocument,
   type MatrixDimension,
 } from './matrix-adapters.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 // ---------------------------------------------------------------------------
 // Dimension set assembly + atomic writes
@@ -24,14 +25,18 @@ export function buildDimensionSet(dimensionSetId: string, dimensions: MatrixDime
 }
 
 /** Write `<dir>/dimensions/<dimensionSetId>@<version>.json` atomically. */
-export function writeDimensionSet(dir: string, doc: DimensionsDocument): { path: string; unchanged: boolean } {
+export function writeDimensionSet(
+  dir: string,
+  doc: DimensionsDocument,
+  options: { clock?: Clock } = {},
+): { path: string; unchanged: boolean } {
   const target = path.join(dir, 'dimensions', `${doc.dimensionSetId}@${doc.version}.json`);
   const bytes = `${canonicalJson(doc)}\n`;
   fs.mkdirSync(path.dirname(target), { recursive: true });
   if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') === bytes) {
     return { path: target, unchanged: true };
   }
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${target}.${process.pid}.${(options.clock ?? systemClock).now()}.tmp`;
   fs.writeFileSync(tmp, bytes);
   fs.renameSync(tmp, target);
   return { path: target, unchanged: false };

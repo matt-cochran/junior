@@ -14,7 +14,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureLocalExcludes, provisionIsolationSetup, validateIsolationSetup } from './isolation.ts';
+import { acquireLock, ensureLocalExcludes, provisionIsolationSetup, validateIsolationSetup } from './isolation.ts';
+import { createManualClock } from './clock.ts';
 import { parseCommandPolicy } from './command-policy.ts';
 
 const GENERATED = ['/.delivery/', '/delivery.config.json', '/tasks/example-task.json'];
@@ -171,7 +172,9 @@ test('a non-object commands entry names the command and args fields', () => {
 // Every fixture lives under os.tmpdir() and is removed by the arena helper.
 // ---------------------------------------------------------------------------
 
-const SETUP_OPTS = { deadlineAt: Date.now() + 60_000, checkTimeoutMs: 5_000 };
+// A fixed run clock: the setup deadline is 60 s after it, whenever the suite runs.
+const SETUP_START = Date.parse('2026-01-01T00:00:00.000Z');
+const SETUP_OPTS = { deadlineAt: SETUP_START + 60_000, checkTimeoutMs: 5_000, clock: createManualClock(SETUP_START) };
 
 /** Source and worktree directories plus a node_modules link source. */
 const setupFixture = (t: any) => {
@@ -316,4 +319,55 @@ test('worktreeWriteRemediation explains a read-only .git and stays silent otherw
   assert.match(hint, /isolation "none"/);
   assert.match(hint, /\.git directory is not writable/);
   assert.equal(worktreeWriteRemediation('fatal: invalid reference: HEAD'), '');
+});
+
+// --- #265: the setup deadline and lock timestamps read the injected clock -----
+
+test('a setup command is still attempted one millisecond before the deadline on the run clock', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  const clock = createManualClock(SETUP_START);
+  clock.advance(59_999);
+  const result = provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source, worktree, '', { ...SETUP_OPTS, clock },
+  );
+  // With 1 ms left the command is spawned (and bounded by that 1 ms), not skipped.
+  assert.doesNotMatch(result.error ?? '', /wall deadline exceeded/);
+  assert.equal(result.steps.filter((s: any) => s.kind === 'command').length, 1);
+});
+
+test('a setup command runs when the run clock leaves its check timeout', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  const clock = createManualClock(SETUP_START);
+  clock.advance(55_000);
+  const result = provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source, worktree, '', { ...SETUP_OPTS, clock },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(existsSync(marker), true);
+});
+
+test('a setup command is skipped once the run clock reaches the deadline', (t) => {
+  const { source, worktree, marker } = setupCommandFixture(t);
+  const clock = createManualClock(SETUP_START);
+  clock.advance(60_000);
+  const result = provisionIsolationSetup(
+    { commands: [{ command: process.execPath, args: ['setup.js', marker] }] },
+    source, worktree, '', { ...SETUP_OPTS, clock },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /wall deadline exceeded before setup command/);
+  assert.equal(existsSync(marker), false);
+});
+
+test('acquireLock records the injected clock time as startedAt', (t) => {
+  const root = arena(t);
+  const clock = createManualClock('2026-03-04T05:06:07.890Z');
+  const lock = acquireLock(join(root, 'locks'), 'checkout:/x', { id: 'a' }, clock);
+  t.after(() => lock.handle?.release());
+  const payload = JSON.parse(readFileSync(lock.lockPath, 'utf8'));
+  assert.equal(payload.startedAt, '2026-03-04T05:06:07.890Z');
+  assert.equal(payload.id, 'a');
+  assert.equal('clock' in payload, false);
 });

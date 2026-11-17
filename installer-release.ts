@@ -14,6 +14,15 @@ import {
   type FetchResponseLike,
   type InstallerDeps,
 } from "./installer-platform.ts";
+import { systemClock, type Clock } from "./clock.ts";
+
+/**
+ * The clock an install reads time and schedules request timers on: the
+ * optional `InstallerDeps.clock`, or the system clock when absent.
+ */
+export function installerClock(deps: InstallerDeps): Clock {
+  return deps.clock ?? systemClock;
+}
 
 export const APPROVED_HOSTS: ReadonlySet<string> = new Set([
   "api.github.com",
@@ -89,7 +98,7 @@ function assertApprovedUrl(url: string): void {
 export function effectiveTimeoutMs(deps: InstallerDeps, fallback: number): number {
   const request = deps.requestTimeoutMs ?? fallback;
   if (deps.deadlineAt === undefined) return request;
-  const remaining = deps.deadlineAt - Date.now();
+  const remaining = deps.deadlineAt - installerClock(deps).now();
   if (remaining <= 0) {
     throw new InstallerError("INSTALL_DEADLINE", "the overall install deadline has been exceeded");
   }
@@ -160,12 +169,13 @@ export async function boundedFetch(
   const fetchImpl = deps.fetch ?? (globalThis.fetch as unknown as FetchLike);
   if (!fetchImpl) throw new InstallerError("NO_FETCH", "no fetch implementation is available");
   const redirectLimit = deps.redirectLimit ?? DEFAULT_REDIRECT_LIMIT;
+  const clock = installerClock(deps);
   let current = url;
   for (let hop = 0; hop <= redirectLimit; hop++) {
     assertApprovedUrl(current);
     const timeoutMs = effectiveTimeoutMs(deps, DEFAULT_REQUEST_TIMEOUT_MS);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = clock.setTimeout(() => controller.abort(), timeoutMs);
     try {
       let res: FetchResponseLike;
       const token = new URL(current).host === "api.github.com" ? githubToken(deps) : undefined;
@@ -204,7 +214,7 @@ export async function boundedFetch(
       // a hard byte bound rather than buffering an over-limit response first.
       return await readBodyBounded(res, opts.maxBytes, controller.signal, current);
     } finally {
-      clearTimeout(timer);
+      clock.clearTimeout(timer);
     }
   }
   throw new InstallerError("TOO_MANY_REDIRECTS", `exceeded ${redirectLimit} redirects`);

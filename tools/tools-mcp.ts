@@ -6,6 +6,8 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import process from "node:process";
+import { systemClock } from "../clock.ts";
+import type { Clock, ClockTimer } from "../clock.ts";
 import {
   DEFAULT_MAX_OUTPUT_BYTES,
   DEFAULT_TIMEOUT_MS,
@@ -29,6 +31,8 @@ export interface McpSequenceOptions {
   env?: Record<string, string>;
   timeoutMs: number;
   maxOutputBytes?: number;
+  /** Time source for the call deadline (default: the system clock). */
+  clock?: Clock;
 }
 
 export interface McpSequenceResult {
@@ -73,7 +77,8 @@ function extractStructured(result: unknown): unknown {
 type McpSequenceState = {
   child: ChildProcess;
   settled: boolean;
-  timer: NodeJS.Timeout | null;
+  clock: Clock;
+  timer: ClockTimer | null;
   stdoutBuf: Buffer;
   stdoutBytes: number;
   stderrText: string;
@@ -85,7 +90,7 @@ type McpSequenceState = {
 
 function sequenceCleanup(st: McpSequenceState): void {
   if (st.timer) {
-    clearTimeout(st.timer);
+    st.clock.clearTimeout(st.timer);
     st.timer = null;
   }
 }
@@ -234,6 +239,7 @@ export async function mcpCallSequence(
     const st: McpSequenceState = {
       child,
       settled: false,
+      clock: options.clock ?? systemClock,
       timer: null,
       stdoutBuf: Buffer.alloc(0),
       stdoutBytes: 0,
@@ -244,7 +250,7 @@ export async function mcpCallSequence(
       reject,
     };
 
-    st.timer = setTimeout(() => {
+    st.timer = st.clock.setTimeout(() => {
       sequenceFail(st, new HopError("TIMEOUT", `MCP call exceeded ${timeoutMs}ms`));
     }, timeoutMs);
 
@@ -287,6 +293,7 @@ class McpClientSession implements McpSession {
   private readonly command: string;
   private readonly maxOutputBytes: number;
   private readonly defaultTimeoutMs: number;
+  private readonly clock: Clock;
   private stdoutBuf = Buffer.alloc(0);
   private stdoutBytes = 0;
   private stderrText = "";
@@ -295,8 +302,15 @@ class McpClientSession implements McpSession {
   private dead: HopError | null = null;
   private closed = false;
 
-  private constructor(child: ChildProcess, command: string, maxOutputBytes: number, defaultTimeoutMs: number) {
+  private constructor(
+    child: ChildProcess,
+    command: string,
+    maxOutputBytes: number,
+    defaultTimeoutMs: number,
+    clock: Clock,
+  ) {
     this.child = child;
+    this.clock = clock;
     this.command = command;
     this.maxOutputBytes = maxOutputBytes;
     this.defaultTimeoutMs = defaultTimeoutMs;
@@ -313,6 +327,7 @@ class McpClientSession implements McpSession {
       options.command,
       options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
       options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      options.clock ?? systemClock,
     );
     session.wire();
     await session.initialize();
@@ -410,7 +425,7 @@ class McpClientSession implements McpSession {
     if (this.dead !== null) return Promise.reject(this.dead);
     if (this.closed) return Promise.reject(new HopError("SPAWN_ERROR", "MCP session is closed"));
     return new Promise<McpSequenceResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = this.clock.setTimeout(() => {
         this.die(new HopError("TIMEOUT", `MCP call exceeded ${timeoutMs}ms`));
       }, timeoutMs);
       void (async () => {
@@ -421,9 +436,9 @@ class McpClientSession implements McpSession {
         const isError = isRecord(last) && last.isError === true;
         resolve({ value: extractStructured(last), isError, stderr: this.stderrText });
       })().then(
-        () => clearTimeout(timer),
+        () => this.clock.clearTimeout(timer),
         (err) => {
-          clearTimeout(timer);
+          this.clock.clearTimeout(timer);
           reject(err);
         },
       );

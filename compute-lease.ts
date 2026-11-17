@@ -7,6 +7,7 @@ import {
   resolveEpoch,
 } from './compute-schema.ts';
 import type { ComputeIssue, ComputeLease } from './compute-schema.ts';
+import type { Clock } from './clock.ts';
 
 export const COMPUTE_LEASE_STATE_VERSION = 1;
 
@@ -59,7 +60,7 @@ export function leaseIsExpired(lease: ComputeLease, now: number): boolean {
 
 export function inspectComputeLeaseState(
   input: unknown,
-  opts: { now?: string | number } = {},
+  opts: { now?: string | number; clock?: Clock } = {},
 ): ComputeLeaseStateInspection {
   const issues: ComputeIssue[] = [];
   if (!isRecord(input)) {
@@ -88,7 +89,7 @@ export function inspectComputeLeaseState(
     return { valid: !issues.some((issue) => issue.severity === 'invalid'), safe: false, issues };
   }
 
-  const now = resolveEpoch(opts.now);
+  const now = resolveEpoch(opts.now, opts.clock);
   let active = 0;
   const ids = new Set<string>();
   for (const [index, value] of leases.entries()) {

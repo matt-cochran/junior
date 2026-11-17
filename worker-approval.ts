@@ -6,6 +6,7 @@ import { readLocalCatalog, type ModelPrice } from './models.ts';
 import { priceDelta, readCachedCatalog, piAgentDir } from './model-updates.ts';
 import { findProfile } from './roster.ts';
 import type { ModelConfig, RoutingMode } from './roster.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 // ---------------------------------------------------------------------------
 // Optional Jev readiness/completion gates
@@ -200,8 +201,8 @@ export function stickyApprovalHolds(config:ModelConfig, t:any, sticky:StickyRout
 }
 
 /** Write the finalized model decision for a deliverable. */
-export function writeStickyRoute(cwd:string, id:string, route:{ profile:string|null; provider:string; model:string; approval:ModelApproval|null }):void {
- const record:StickyRoute={ profile:route.profile, provider:route.provider, model:route.model, approval:route.approval, decidedAt:new Date().toISOString() };
+export function writeStickyRoute(cwd:string, id:string, route:{ profile:string|null; provider:string; model:string; approval:ModelApproval|null }, clock:Clock=systemClock):void {
+ const record:StickyRoute={ profile:route.profile, provider:route.provider, model:route.model, approval:route.approval, decidedAt:clock.iso() };
  mkdirSync(join(cwd,'.delivery',id),{recursive:true});
  writeFileSync(stickyRoutePath(cwd,id),JSON.stringify(record,null,2));
 }
