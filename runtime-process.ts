@@ -356,25 +356,104 @@ export type ExecuteCheckOptions = {
  * TERM-ignoring descendant cannot survive. Always resolves; never throws. */
 let checkCaptureSequence = 0;
 
+type CheckStopReason = 'timeout' | 'deadline' | 'interrupt' | 'output_truncated';
+
+type CheckRun = {
+ opts: ExecuteCheckOptions;
+ startedAt: number;
+ maxOutputBytes: number;
+ stdout: string;
+ stderr: string;
+ exitCode: number | null;
+ exitSignal: string | null;
+ error: string | undefined;
+ interrupted: boolean;
+ timedOut: boolean;
+ deadlineExceeded: boolean;
+ outputTruncated: boolean;
+ rawBytes: number;
+ finished: boolean;
+ killTimer: ReturnType<typeof setTimeout> | undefined;
+ killEscalationComplete: boolean;
+ completionRequested: boolean;
+ child: ChildProcessLike | undefined;
+ monitor: ReturnType<typeof setInterval> | undefined;
+ resolveDone: (r: CheckResult) => void;
+ onAbort: () => void;
+};
+
+function pushCheckOutput(run: CheckRun, kind: 'stdout' | 'stderr', chunk: any): void {
+ const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+ if (kind === 'stdout') run.rawBytes += text.length;
+ const current = kind === 'stdout' ? run.stdout : run.stderr;
+ if (current.length >= run.maxOutputBytes) { run.outputTruncated = true; requestCheckStop(run, 'output_truncated'); return; }
+ const remaining = run.maxOutputBytes - current.length;
+ let accepted = text;
+ if (accepted.length > remaining) { accepted = accepted.slice(0, remaining); run.outputTruncated = true; }
+ if (kind === 'stdout') run.stdout += accepted; else run.stderr += accepted;
+ if (run.outputTruncated) requestCheckStop(run, 'output_truncated');
+}
+
+function finalizeCheck(run: CheckRun): void {
+ if (run.finished) return;
+ run.completionRequested = true;
+ if (run.killTimer && !run.killEscalationComplete) return;
+ run.finished = true;
+ if (run.monitor) clearInterval(run.monitor);
+ // Do not clear killTimer: a TERM-ignoring descendant must still be SIGKILLed
+ // even after the direct child exits.
+ run.opts.signal?.removeEventListener?.('abort', run.onAbort);
+ const { stdout, stderr, exitCode, error, interrupted, timedOut, deadlineExceeded, outputTruncated, rawBytes } = run;
+ run.resolveDone({ stdout, stderr, exitCode, signal: run.exitSignal, error, interrupted, timedOut, deadlineExceeded, outputTruncated, outputBreakdown: { rawBytes, retainedBytes: stdout.length, byType: {}, largestToolResults: [] } });
+}
+
+function terminateCheckChild(run: CheckRun, child: ChildProcessLike): void {
+ killChildGroup(child, 'SIGTERM');
+ run.killTimer = setTimeout(() => { if (run.child) killChildGroup(run.child, 'SIGKILL'); run.killEscalationComplete = true; if (run.completionRequested) finalizeCheck(run); }, KILL_GRACE_MS);
+}
+
+function requestCheckStop(run: CheckRun, reason: CheckStopReason): void {
+ if (run.finished) return;
+ if (reason === 'timeout') run.timedOut = true;
+ else if (reason === 'deadline') run.deadlineExceeded = true;
+ else if (reason === 'interrupt') run.interrupted = true;
+ if (run.child) {
+  terminateCheckChild(run, run.child);
+ } else {
+  finalizeCheck(run);
+ }
+}
+
+function attachCheckChild(run: CheckRun, stream: ChildProcessLike): void {
+ const opts = run.opts;
+ stream.stdout?.on('data', (c: any) => pushCheckOutput(run, 'stdout', c));
+ stream.stderr?.on('data', (c: any) => pushCheckOutput(run, 'stderr', c));
+ stream.on('error', (err: Error) => {
+  if (!run.error) run.error = err?.message || String(err);
+  // A broken stream must still tear down the process group, not orphan it.
+  if (run.child) {
+   terminateCheckChild(run, run.child);
+  }
+  finalizeCheck(run);
+ });
+ stream.on('exit', (code: number | null, signal: string | null) => { run.exitCode = code ?? null; run.exitSignal = signal ?? null; });
+ stream.on('close', (code: number | null, signal: string | null) => {
+  if (run.exitCode === null && code !== undefined) run.exitCode = code ?? null;
+  if (run.exitSignal === null && signal) run.exitSignal = signal;
+  finalizeCheck(run);
+ });
+ run.monitor = setInterval(() => {
+  const now = Date.now();
+  opts.heartbeat?.poll(now, null, null);
+  if (run.finished || run.timedOut || run.deadlineExceeded || run.interrupted) return;
+  if (now - run.startedAt >= opts.timeoutMs) requestCheckStop(run, 'timeout');
+  else if (now >= opts.deadlineAt) requestCheckStop(run, 'deadline');
+ }, 25);
+}
+
 export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResult> {
  const startedAt = Date.now();
  const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES;
- let stdout = '';
- let stderr = '';
- let exitCode: number | null = null;
- let exitSignal: string | null = null;
- let error: string | undefined;
- let interrupted = false;
- let timedOut = false;
- let deadlineExceeded = false;
- let outputTruncated = false;
- let rawBytes = 0;
- let finished = false;
- let killTimer: ReturnType<typeof setTimeout> | undefined;
- let killEscalationComplete = false;
- let completionRequested = false;
- let child: ChildProcessLike | undefined;
- let monitor: ReturnType<typeof setInterval> | undefined;
  const captureDir = opts.heartbeat?.captureDir?.();
  const captureSequence = checkCaptureSequence++;
  const stdoutPath = opts.stdoutPath ?? (captureDir ? join(captureDir, `check-${captureSequence}.stdout`) : undefined);
@@ -382,86 +461,32 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
 
  let resolveDone!: (r: CheckResult) => void;
  const done = new Promise<CheckResult>((res) => { resolveDone = res; });
+ const run: CheckRun = {
+  opts, startedAt, maxOutputBytes,
+  stdout: '', stderr: '', exitCode: null, exitSignal: null, error: undefined,
+  interrupted: false, timedOut: false, deadlineExceeded: false, outputTruncated: false,
+  rawBytes: 0, finished: false, killTimer: undefined, killEscalationComplete: false,
+  completionRequested: false, child: undefined, monitor: undefined,
+  resolveDone, onAbort: () => { run.interrupted = true; requestCheckStop(run, 'interrupt'); },
+ };
 
  opts.heartbeat?.update({ phase: 'checks' });
 
- function push(kind: 'stdout' | 'stderr', chunk: any): void {
-  const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  if (kind === 'stdout') rawBytes += text.length;
-  const current = kind === 'stdout' ? stdout : stderr;
-  if (current.length >= maxOutputBytes) { outputTruncated = true; requestStop('output_truncated'); return; }
-  const remaining = maxOutputBytes - current.length;
-  let accepted = text;
-  if (accepted.length > remaining) { accepted = accepted.slice(0, remaining); outputTruncated = true; }
-  if (kind === 'stdout') stdout += accepted; else stderr += accepted;
-  if (outputTruncated) requestStop('output_truncated');
- }
-
- function finalize(): void {
-  if (finished) return;
-  completionRequested = true;
-  if (killTimer && !killEscalationComplete) return;
-  finished = true;
-  if (monitor) clearInterval(monitor);
-  // Do not clear killTimer: a TERM-ignoring descendant must still be SIGKILLed
-  // even after the direct child exits.
-  opts.signal?.removeEventListener?.('abort', onAbort);
-  resolveDone({ stdout, stderr, exitCode, signal: exitSignal, error, interrupted, timedOut, deadlineExceeded, outputTruncated, outputBreakdown: { rawBytes, retainedBytes: stdout.length, byType: {}, largestToolResults: [] } });
- }
-
- function requestStop(reason: 'timeout' | 'deadline' | 'interrupt' | 'output_truncated'): void {
-  if (finished) return;
-  if (reason === 'timeout') timedOut = true;
-  else if (reason === 'deadline') deadlineExceeded = true;
-  else if (reason === 'interrupt') interrupted = true;
-  if (child) {
-   killChildGroup(child, 'SIGTERM');
-   killTimer = setTimeout(() => { if (child) killChildGroup(child, 'SIGKILL'); killEscalationComplete = true; if (completionRequested) finalize(); }, KILL_GRACE_MS);
-  } else {
-   finalize();
-  }
- }
-
- function onAbort(): void { interrupted = true; requestStop('interrupt'); }
  if (opts.signal) {
-  if (opts.signal.aborted) onAbort();
-  else opts.signal.addEventListener?.('abort', onAbort);
+  if (opts.signal.aborted) run.onAbort();
+  else opts.signal.addEventListener?.('abort', run.onAbort);
  }
 
  try {
-  if (!opts.signal?.aborted) child = opts.spawnChild(opts.command, opts.args, { cwd: opts.cwd, stdoutPath, stderrPath });
+  if (!opts.signal?.aborted) run.child = opts.spawnChild(opts.command, opts.args, { cwd: opts.cwd, stdoutPath, stderrPath });
  } catch (err: any) {
-  error = err?.message || String(err);
+  run.error = err?.message || String(err);
  }
 
- if (child) {
-  const stream = child;
-  stream.stdout?.on('data', (c: any) => push('stdout', c));
-  stream.stderr?.on('data', (c: any) => push('stderr', c));
-  stream.on('error', (err: Error) => {
-   if (!error) error = err?.message || String(err);
-   // A broken stream must still tear down the process group, not orphan it.
-   if (child) {
-    killChildGroup(child, 'SIGTERM');
-    killTimer = setTimeout(() => { if (child) killChildGroup(child, 'SIGKILL'); killEscalationComplete = true; if (completionRequested) finalize(); }, KILL_GRACE_MS);
-   }
-   finalize();
-  });
-  stream.on('exit', (code: number | null, signal: string | null) => { exitCode = code ?? null; exitSignal = signal ?? null; });
-  stream.on('close', (code: number | null, signal: string | null) => {
-   if (exitCode === null && code !== undefined) exitCode = code ?? null;
-   if (exitSignal === null && signal) exitSignal = signal;
-   finalize();
-  });
-  monitor = setInterval(() => {
-   const now = Date.now();
-   opts.heartbeat?.poll(now, null, null);
-   if (finished || timedOut || deadlineExceeded || interrupted) return;
-   if (now - startedAt >= opts.timeoutMs) requestStop('timeout');
-   else if (now >= opts.deadlineAt) requestStop('deadline');
-  }, 25);
+ if (run.child) {
+  attachCheckChild(run, run.child);
  } else {
-  finalize();
+  finalizeCheck(run);
  }
 
  return done;
