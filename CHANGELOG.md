@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The build uses TypeScript 7.0.2, the native compiler, in place of 5.9.3.
+  `scripts/build.mjs` now runs the native `tsc` once over every production
+  module (transpile only, `--noCheck`), because TypeScript 7 no longer ships
+  the `transpileModule` API. The emitted `dist/` is byte-for-byte the same.
+  The `build` script no longer re-transpiles five modules after the main
+  build, and `scripts/build.mjs` no longer exports `transpile` (#264).
+
 ### Documentation
 
 - The Junior skill documents the optional `<hop.json>` first argument to
