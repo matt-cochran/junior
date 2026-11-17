@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { releaseAssetName, SUPPORTED_MATRIX, TOOL_REPOS } from './installer.ts';
 import { DEFAULT_MODEL, PI_PACKAGE } from './setup.ts';
+import { systemClock, type Clock, type ManualClock } from './clock.ts';
 
 export const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 export const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
@@ -115,10 +116,14 @@ export function releaseServer(config: ServerConfig) {
 }
 
 /** A response whose streamed body never ends, so the abort timer must stop it. */
+/** A body whose first read never settles; `reading` resolves once the reader starts. */
 export function stalledBody() {
+  let started: () => void = () => {};
+  const reading = new Promise<void>((resolve) => { started = resolve; });
   return {
+    reading,
     getReader: () => ({
-      read: () => new Promise(() => {}),
+      read: () => { started(); return new Promise(() => {}); },
       cancel: async () => {},
       releaseLock: () => {},
     }),
@@ -164,14 +169,30 @@ export function readState(deps: any) {
 }
 
 /** A release fetch whose every call is delayed, to consume a shared deadline. */
-export function delayedServer(server: ReturnType<typeof releaseServer>, delayMs: number) {
+/** A server whose every response takes `delayMs` on `clock` (default the system clock). */
+export function delayedServer(server: ReturnType<typeof releaseServer>, delayMs: number, clock: Clock = systemClock) {
   return {
     ...server,
     fetch: async (url: string) => {
-      await new Promise((r) => setTimeout(r, delayMs));
+      await clock.sleep(delayMs);
       return server.fetch(url);
     },
   };
+}
+
+/**
+ * Settle `promise` while moving `clock` from timer to timer. Between timers
+ * the event loop gets a real turn (setImmediate), so file and process work the
+ * code does in between completes before virtual time moves again.
+ */
+export async function driveToSettle<T>(clock: ManualClock, promise: Promise<T>): Promise<T> {
+  let settled = false;
+  const tracked = promise.finally(() => { settled = true; });
+  while (!settled) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (!settled) clock.runNext();
+  }
+  return tracked;
 }
 
 export function binaryBodyFetch(repo: string, tag: string, assetName: string, body: any) {

@@ -14,6 +14,7 @@ import {
   resolveEpoch,
   sameTags,
 } from './compute-schema.ts';
+import type { Clock } from './clock.ts';
 import type {
   ComputeIssue,
   ComputeIssueSeverity,
@@ -425,7 +426,7 @@ function validateFallback(status: Record<string, unknown>, issues: ComputeIssue[
  */
 export function inspectComputeStatus(
   input: unknown,
-  opts: { now?: string | number } = {},
+  opts: { now?: string | number; clock?: Clock } = {},
 ): ComputeInspection {
   const issues: ComputeIssue[] = [];
   if (!isRecord(input)) {
@@ -473,10 +474,10 @@ export function inspectComputeStatus(
     (isRecord(input.ownership) ? input.ownership : {}) as ComputeOwnershipRecord,
     issues,
   );
-  validateLeases(input, resource, resolveEpoch(opts.now), issues);
+  validateLeases(input, resource, resolveEpoch(opts.now, opts.clock), issues);
 
   const leases = Array.isArray(input.leases) ? input.leases : [];
-  const now = resolveEpoch(opts.now);
+  const now = resolveEpoch(opts.now, opts.clock);
   const activeLeaseCount = leases.filter((lease) => {
     if (!isRecord(lease) || isTimestamp(lease.releasedAt)) return false;
     const expires = Date.parse(String(lease.expiresAt));
@@ -495,7 +496,7 @@ export function inspectComputeStatus(
 
 /** Throw for an invalid status document; unsafe status is still a document and
  * remains inspectable through `inspectComputeStatus`. */
-export function assertComputeStatus(input: unknown, opts: { now?: string | number } = {}): ComputeStatus {
+export function assertComputeStatus(input: unknown, opts: { now?: string | number; clock?: Clock } = {}): ComputeStatus {
   const result = inspectComputeStatus(input, opts);
   if (!result.valid) {
     const detail = result.issues.map((issue) => `${issue.path || 'status'}: ${issue.message}`).join('; ');
