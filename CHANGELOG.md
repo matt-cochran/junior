@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.7] - 2026-11-17
+
 ### Fixed
 
 - `junior init` with `JUNIOR_NO_INSTALL` writes the project's `.delivery/setup/hop.json` from the managed tools already installed, with no download. Before, it wrote no hop, so every `junior tools call` failed with `HOP_NOT_FOUND`. A recorded tool whose binary is gone is listed under `tools.hop.missing`. `junior doctor` now reports a project with usable tools but no hop as not ready (`tool:hop`), and `junior setup` repairs it with `junior init --install` (#271).
 
 ### Changed
+
+- Managed tools are verified at their current releases: cpm 0.8.0, fmeca 0.2.2, crossmatrix 0.3.4, elicitation 0.1.3, scientific-process 0.3.1 and triz 0.4.1. None has a newer published version.
 
 - Every module with timing logic reads the time and schedules timers through
   an injectable clock (`clock.ts`: `Clock`, `systemClock`, `createManualClock`).
