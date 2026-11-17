@@ -67,6 +67,7 @@ import type { GateClassifier } from './worker.ts';
 import { readExternalContextConsent } from './auth.ts';
 import { runSync } from './spawn-sync.ts';
 import { boundedDiff, changedFileDiff, changedFileText } from './worker-adr-gate.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export type AdrGit = (args: string[]) => {status: number; stdout: string};
 
@@ -78,6 +79,8 @@ export interface AdrCliDeps {
   stdout?: (s: string) => void;
   stderr?: (s: string) => void;
   now?: Date;
+  /** Time source when `now` is not given (default: the system clock). */
+  clock?: Clock;
 }
 
 export const ADR_CLI_USAGE = [
@@ -117,11 +120,11 @@ function flagSet(argv: string[], flag: string): boolean {
 }
 
 function currentNow(deps: AdrCliDeps): Date {
-  return deps.now ?? new Date();
+  return deps.now ?? (deps.clock ?? systemClock).date();
 }
 
 function readingDate(deps: AdrCliDeps): Date {
-  return deps.now ?? new Date();
+  return deps.now ?? (deps.clock ?? systemClock).date();
 }
 
 function latestPath(root: string): string {
@@ -407,6 +410,7 @@ async function checkGateStage(
     config: ready.config,
     adrs: ready.adrs,
     classify,
+    ...(deps.clock ? {clock: deps.clock} : {}),
   });
   return {gate, markdown: renderGateMarkdown(gate)};
 }

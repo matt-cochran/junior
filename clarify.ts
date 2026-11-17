@@ -36,6 +36,7 @@ import {
 import { buildPlanFromSpec, type PlanDocument } from './spec-bridge.ts';
 import { briefMdPath, briefPath, renderBrief, validateBrief, type Brief } from './prepare.ts';
 import { seedElicitation } from './jtbd-bridge.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export const CLARIFY_FILENAME = 'clarify.json';
 export const CLARIFY_MD_FILENAME = 'clarify.md';
@@ -144,6 +145,8 @@ export interface ClarifyDeps {
   playbooks?: string[];
   maxQuestions?: number;
   maxRounds?: number;
+  /** Time source for the fallback artifact directory stamp (default: the system clock). */
+  clock?: Clock;
 }
 
 /** `questionBatch` also carries the next round and its blockers. */
@@ -732,7 +735,7 @@ export function validateClarifyAnswers(answers: unknown, batch: ClarifyBatch): a
 export async function applyAnswers(options: ApplyAnswersOptions): Promise<ClarifyContinuation> {
   const { cwd, task } = options;
   const found = options.batch
-    ? { batch: options.batch, dir: options.batch.artifactDir ?? join(cwd, '.delivery', text(task?.id), String(Date.now())) }
+    ? { batch: options.batch, dir: options.batch.artifactDir ?? join(cwd, '.delivery', text(task?.id), String((options.deps?.clock ?? systemClock).now())) }
     : readLatestClarify(cwd, text(task?.id));
   if (!found) throw new Error(`No clarification session found for ${text(task?.id)}; run the handoff first.`);
   const batch = found.batch;

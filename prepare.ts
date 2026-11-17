@@ -31,16 +31,17 @@ import type { GateClassifier } from './worker.ts';
 import type { ToolRoute } from './tool-routing.ts';
 import { renderGateMarkdown, runAdrGate, type AdrGateFinding, type AdrGateResult } from './adr-gate.ts';
 import { activeDecision, readLedger } from './adr-ledger.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** A decision recorded after the brief was gated clears its finding too:
  * re-read the ledger at choose time so a stale brief never blocks an
  * override the human already recorded (ADR 0018 R5). */
-function overriddenSince(cwd: string, finding: AdrGateFinding): boolean {
+function overriddenSince(cwd: string, finding: AdrGateFinding, clock: Clock): boolean {
   try {
     const decision = activeDecision(
       readLedger(cwd),
       { adrId: finding.adrId, ruleId: finding.ruleId, target: finding.target, deliverable: finding.deliverable },
-      { now: new Date(), adrHash: finding.adrHash },
+      { now: clock.date(), adrHash: finding.adrHash },
     );
     return decision?.decision === 'override';
   } catch {
@@ -489,10 +490,12 @@ export function chooseBrief(opts: {
   brief: Brief;
   choice: BriefChoice;
   playbooks?: string[];
+  /** Time source for the ledger re-read (default: the system clock). */
+  clock?: Clock;
 }): { contract: any; history: PrepareHistoryEntry } {
   const blocked = opts.brief.adrGate?.gate === 'enforce'
     ? opts.brief.adrGate.findings.filter(
-        (finding) => finding.target === `option:${opts.choice.option}` && !finding.cleared && !overriddenSince(opts.cwd, finding),
+        (finding) => finding.target === `option:${opts.choice.option}` && !finding.cleared && !overriddenSince(opts.cwd, finding, opts.clock ?? systemClock),
       )
     : [];
   if (blocked.length > 0) {

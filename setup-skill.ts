@@ -2,6 +2,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { PACKAGED_SKILL_PATH, SKILL_FILENAME, SKILL_MANIFEST_FILENAME, SKILL_NAME, exists, readText, resolveJuniorCliPath, type SetupDeps } from './setup-env.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 // ---------------------------------------------------------------------------
 // Packaged delegation skill install.
@@ -35,7 +36,9 @@ export type SkillInstallOptions = { target?:SkillTargetSelection; scope?:SkillSc
  recognizeUnrecorded?:boolean;
  /** When false, an absent copy is left alone instead of created. `update`
   * uses this for user-scope roots so it only refreshes existing copies. */
- createMissing?:boolean };
+ createMissing?:boolean;
+ /** Time source for backup file stamps (default: the system clock). */
+ clock?:Clock };
 export type InitOptions = SkillInstallOptions & { install?:boolean; update?:boolean; withTriz?:boolean; companions?:boolean; matrix?:boolean; command?:'init'|'update' };
 
 function sha256(text:string):string {
@@ -110,8 +113,8 @@ function classifySkillCopy(deps:SetupDeps, sourceHash:string, root:string, path:
 
 /** Copy the current SKILL.md beside itself before an unrecorded replacement so
  * a user who edited a manifest-less copy can recover their text. */
-function backupSkillCopy(deps:SetupDeps, path:string):string {
- const backup=`${path}.bak-${Date.now()}`;
+function backupSkillCopy(deps:SetupDeps, path:string, clock:Clock):string {
+ const backup=`${path}.bak-${clock.now()}`;
  const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
  write(backup, readText(deps,path));
  return backup;
@@ -149,7 +152,7 @@ export function installSkill(deps:SetupDeps = {}, opts:SkillInstallOptions = {})
   }
   if (classification.status === 'outdated') {
    if (opts.upgrade !== false) {
-    const backup=classification.recorded ? null : backupSkillCopy(deps,path);
+    const backup=classification.recorded ? null : backupSkillCopy(deps,path,opts.clock ?? systemClock);
     write(path,source); writeSkillManifest(deps,manifestPath,sourceHash,sourcePath);
     actions.push({manager,path,status:'upgraded',message:backup
      ? `upgraded the ${manager} skill from an unrecorded copy; previous content backed up to ${backup}`

@@ -97,13 +97,23 @@ test('a classifier outage is unscored rather than clear', async () => {
   assert.equal(report.scores[0].status, 'unscored');
 });
 
+/** One macrotask turn: every queued promise reaction has run by then. */
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 test('reported scores keep the input contract order', async () => {
+  // 'slow' is held until 'fast' has been classified, so it finishes last.
   const contracts = [contract('slow', 'slow'), contract('fast', 'fast')];
+  let releaseSlow: () => void = () => {};
+  const fastClassified = new Promise<void>((resolve) => { releaseSlow = resolve; });
+  const finished: string[] = [];
   const classify: GateClassifier = async ({ state }) => {
-    if (state.deliverable === 'slow') await new Promise((resolve) => setTimeout(resolve, 30));
+    if (state.deliverable === 'slow') await fastClassified;
+    else void turn().then(releaseSlow);
+    finished.push(state.deliverable);
     return { answers: CLEAR };
   };
   const report = await scorePlanContracts(contracts, classify);
+  assert.equal(finished.indexOf('fast') < finished.indexOf('slow'), true, 'slow finished after fast');
   assert.deepEqual(report.scores.map((score) => score.id), ['slow', 'fast']);
 });
 
@@ -120,15 +130,26 @@ test('no classifier call exceeds the worker gate question limit', async () => {
 test('concurrency limits the number of classifier calls in flight', async () => {
   let active = 0;
   let peak = 0;
+  // Each call is held until the test releases it, one at a time.
+  const held: Array<() => void> = [];
   const classify: GateClassifier = async () => {
     active += 1;
     peak = Math.max(peak, active);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise<void>((resolve) => held.push(resolve));
     active -= 1;
     return { answers: CLEAR };
   };
   const contracts = Array.from({ length: 6 }, (_, i) => contract(`c${i}`, `d${i}`));
-  await scorePlanContracts(contracts, classify, { concurrency: 2 });
+  let done = false;
+  const run = scorePlanContracts(contracts, classify, { concurrency: 2 }).then(() => { done = true; });
+  await turn();
+  assert.equal(held.length, 2, 'two calls start at once');
+  while (!done) {
+    assert.equal(active <= 2, true);
+    held.shift()?.();
+    await turn();
+  }
+  await run;
   assert.equal(peak, 2);
 });
 

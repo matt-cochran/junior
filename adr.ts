@@ -36,6 +36,7 @@ import type { MatrixDimension } from './matrix.ts';
 import type { QcFinding, QcLink } from './link-qc.ts';
 import { callHop, loadHop, type CallOutcome } from './tools/tools.ts';
 import { createPiClassifier, type GateClassifier } from './worker.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 const ADR_ID_PATTERN = /^ADR-(\d+)[a-z]?$/;
 const VALID_STATUSES = new Set<AdrStatus>(['proposed', 'accepted', 'superseded', 'deprecated']);
@@ -482,6 +483,8 @@ export interface CreateAdrResult {
 
 export interface CreateAdrOptions {
   date?: string;
+  /** Time source for the default `date` (default: the system clock). */
+  clock?: Clock;
   status?: AdrStatus;
 }
 
@@ -496,7 +499,7 @@ export function createAdr(dir: string, title: string, options: CreateAdrOptions 
   }
   const padded = String(next).padStart(4, '0');
   const id = `ADR-${padded}`;
-  const date = options.date ?? new Date().toISOString().slice(0, 10);
+  const date = options.date ?? (options.clock ?? systemClock).iso().slice(0, 10);
   const status = options.status ?? 'proposed';
   const path = join(dir, `${padded}-${slugify(title)}.md`);
   fs.writeFileSync(path, renderAdrTemplate({ id, number: next, title, status, date }));

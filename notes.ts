@@ -8,6 +8,7 @@
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { systemClock, type Clock } from './clock.ts';
 
 export type NoteKind = 'note' | 'decision' | 'question' | 'risk' | 'hypothesis' | 'todo';
 
@@ -24,6 +25,8 @@ export type Note = {
 
 export type NotesDeps = {
   now?: () => Date;
+  /** Time source when `now`/`newId` are not given (default: the system clock). */
+  clock?: Clock;
   newId?: () => string;
   readFile?: (p: string) => string;
   appendFile?: (p: string, data: string) => void;
@@ -51,11 +54,13 @@ const MAX_EVIDENCE = 300;
 const KNOWN_OPS = new Set(['add', 'done', 'promote', 'dismiss']);
 
 function resolveDeps(deps: NotesDeps = {}): ResolvedDeps {
+  const clock = deps.clock ?? systemClock;
   return {
-    now: deps.now ?? (() => new Date()),
+    clock,
+    now: deps.now ?? (() => clock.date()),
     newId:
       deps.newId ??
-      (() => `n-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`),
+      (() => `n-${clock.now().toString(36)}-${randomBytes(2).toString('hex')}`),
     readFile: deps.readFile ?? ((path) => readFileSync(path, 'utf8')),
     appendFile: deps.appendFile ?? ((path, data) => appendFileSync(path, data)),
     exists: deps.exists ?? ((path) => existsSync(path)),

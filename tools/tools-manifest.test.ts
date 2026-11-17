@@ -6,7 +6,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withManifestLock } from "./tools-manifest.ts";
-import { mcpCallSequence } from "./tools-mcp.ts";
+import { mcpCallSequence, openMcpSession } from "./tools-mcp.ts";
+import { createManualClock } from "../clock.ts";
 import { ROOT, TOOLS, FAKE, NODE, tmpdir, toolEntry, writeConfig, writeJson, runCli, cliJson, initHop, cpmLoggingHop, managedState, initHopManifest, probeToolVersion, isReadTool, TOOL_NAMES } from "./tools-helpers.test.ts";
 
 // --- init / manifest contract -------------------------------------------------
@@ -263,6 +264,22 @@ function deadPid() {
   return child.pid;
 }
 
+/**
+ * Contend for a held lock on a manual clock: the attempt is still waiting one
+ * millisecond before `lockTimeoutMs` and fails LOCKED exactly at it.
+ */
+async function assertLockedAtDeadline(hop, lockTimeoutMs) {
+  const clock = createManualClock(0);
+  let settled = false;
+  const attempt = withManifestLock(hop, lockTimeoutMs, async () => {}, clock);
+  attempt.then(() => { settled = true; }, () => { settled = true; });
+  await clock.advanceAsync(lockTimeoutMs - 1);
+  assert.equal(settled, false, `still retrying ${lockTimeoutMs - 1}ms in`);
+  await clock.advanceAsync(1);
+  await assert.rejects(attempt, (err) => err.code === "LOCKED");
+  assert.equal(clock.pending(), 0, "no retry timer outlives the failure");
+}
+
 function writeLock(hop, extra) {
   fs.writeFileSync(hop + ".lock", JSON.stringify({ pid: process.pid, hostname: os.hostname(), at: new Date().toISOString(), ...extra }));
 }
@@ -272,38 +289,58 @@ test("a same-host dead-pid lock is reaped so acquisition proceeds", async () => 
   const hop = path.join(dir, "hop.json");
   writeLock(hop, { pid: deadPid() });
   let ran = false;
-  await withManifestLock(hop, 5000, async () => { ran = true; });
+  const clock = createManualClock(0);
+  await withManifestLock(hop, 5000, async () => { ran = true; }, clock);
   assert.equal(ran, true);
+  assert.equal(clock.pending(), 0, "acquired without waiting");
+});
+
+test("the manifest lock retries every 25ms on its clock until the holder lets go", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  writeLock(hop, { pid: process.pid });
+  const clock = createManualClock(0);
+  let ran = false;
+  const attempt = withManifestLock(hop, 1000, async () => { ran = true; }, clock);
+  await clock.advanceAsync(50);
+  assert.equal(ran, false);
+  fs.unlinkSync(hop + ".lock");
+  await clock.advanceAsync(24);
+  assert.equal(ran, false, "the next retry is not due until 75ms");
+  await clock.advanceAsync(1);
+  await attempt;
+  assert.equal(ran, true);
+  assert.equal(fs.existsSync(hop + ".lock"), false, "the lock is released afterwards");
+});
+
+test("the manifest lock records the holder's acquisition time from its clock", async () => {
+  const dir = tmpdir();
+  const hop = path.join(dir, "hop.json");
+  const clock = createManualClock("2026-01-02T03:04:05.000Z");
+  let holder;
+  await withManifestLock(hop, 1000, async () => { holder = JSON.parse(fs.readFileSync(hop + ".lock", "utf8")); }, clock);
+  assert.equal(JSON.stringify(holder).includes("2026-01-02T03:04:05.000Z"), true);
 });
 
 test("a live-pid lock is never reaped and yields LOCKED", async () => {
   const dir = tmpdir();
   const hop = path.join(dir, "hop.json");
   writeLock(hop, { pid: process.pid });
-  await assert.rejects(
-    () => withManifestLock(hop, 100, async () => {}),
-    (err) => err.code === "LOCKED",
-  );
+  await assertLockedAtDeadline(hop, 100);
 });
 
 test("a foreign-host lock is never reaped and yields LOCKED", async () => {
   const dir = tmpdir();
   const hop = path.join(dir, "hop.json");
   writeLock(hop, { pid: deadPid(), hostname: "other-host.invalid" });
-  await assert.rejects(
-    () => withManifestLock(hop, 100, async () => {}),
-    (err) => err.code === "LOCKED",
-  );
+  await assertLockedAtDeadline(hop, 100);
 });
 
 test("an unparseable lock is never reaped and yields LOCKED", async () => {
   const dir = tmpdir();
   const hop = path.join(dir, "hop.json");
   fs.writeFileSync(hop + ".lock", "{not json");
-  await assert.rejects(
-    () => withManifestLock(hop, 100, async () => {}),
-    (err) => err.code === "LOCKED",
-  );
+  await assertLockedAtDeadline(hop, 100);
 });
 
 // --- #210: a server that drops stdin mid-probe is a failed call, not a crash --
@@ -311,19 +348,61 @@ test("an unparseable lock is never reaped and yields LOCKED", async () => {
 test("mcpCallSequence reports SPAWN_ERROR when the server closes stdin before the request", { skip: process.platform === "win32" }, async () => {
   // The server closes its stdin and lingers, so the request write hits EPIPE
   // asynchronously; unhandled, that 'error' event aborts the whole process.
+  // The deadline sits on a manual clock that never advances, so only the real
+  // EPIPE/exit event can settle the call.
+  const clock = createManualClock(0);
   const err = await mcpCallSequence(
-    { command: "sh", args: ["-c", "exec 0<&-; sleep 2"], timeoutMs: 5000 },
+    { command: "sh", args: ["-c", "exec 0<&-; sleep 2"], timeoutMs: 5000, clock },
     [{ name: "noop", arguments: {} }],
   ).then(() => null, (e) => e);
   assert.ok(err, "expected the call to fail");
   assert.equal(err.code, "SPAWN_ERROR");
+  assert.equal(clock.pending(), 0, "the deadline timer is cleared");
 });
 
 test("mcpCallSequence reports SPAWN_ERROR when the server exits at once", async () => {
+  const clock = createManualClock(0);
   const err = await mcpCallSequence(
-    { command: process.execPath, args: ["-e", "process.exit(1)"], timeoutMs: 5000 },
+    { command: process.execPath, args: ["-e", "process.exit(1)"], timeoutMs: 5000, clock },
     [{ name: "noop", arguments: {} }],
   ).then(() => null, (e) => e);
   assert.ok(err, "expected the call to fail");
   assert.equal(err.code, "SPAWN_ERROR");
+  assert.equal(clock.pending(), 0, "the deadline timer is cleared");
+});
+
+// --- MCP deadlines on an injected clock -----------------------------------------
+
+const TIMEOUT_SERVER = { command: NODE, args: [FAKE], env: { FAKE_MCP_MODE: "timeout" } };
+
+test("mcpCallSequence times out exactly at timeoutMs on its clock", async () => {
+  const clock = createManualClock(0);
+  let settled = false;
+  const call = mcpCallSequence({ ...TIMEOUT_SERVER, timeoutMs: 500, clock }, [{ name: "noop", arguments: {} }]);
+  call.then(() => { settled = true; }, () => { settled = true; });
+  assert.equal(clock.pending(), 1, "the deadline is scheduled at spawn");
+  await clock.advanceAsync(499);
+  assert.equal(settled, false, "not timed out 1ms early");
+  await clock.advanceAsync(1);
+  await assert.rejects(call, (err) => err.code === "TIMEOUT" && /exceeded 500ms/.test(err.message));
+});
+
+test("an MCP session call times out on its clock and the session stays dead", async () => {
+  const clock = createManualClock(0);
+  const session = await openMcpSession({ ...TIMEOUT_SERVER, timeoutMs: 30_000, clock });
+  try {
+    assert.equal(clock.pending(), 0, "the handshake schedules no timer");
+    let settled = false;
+    const call = session.call([{ name: "noop", arguments: {} }], 300);
+    call.then(() => { settled = true; }, () => { settled = true; });
+    assert.equal(clock.pending(), 1);
+    await clock.advanceAsync(299);
+    assert.equal(settled, false, "not timed out 1ms early");
+    await clock.advanceAsync(1);
+    await assert.rejects(call, (err) => err.code === "TIMEOUT" && /exceeded 300ms/.test(err.message));
+    assert.equal(clock.pending(), 0, "the fired deadline is cleared");
+    await assert.rejects(session.call([{ name: "noop", arguments: {} }]), (err) => err.code === "TIMEOUT");
+  } finally {
+    await session.close();
+  }
 });

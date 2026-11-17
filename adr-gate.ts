@@ -39,6 +39,7 @@ import {
 } from './adr-ledger.ts';
 import { analyze, type AnalysisCriterion, type AnalysisInput } from './matrix-analyze.ts';
 import type { GateClassifier } from './worker.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** ADR 0018 R3/R10: one subject of a stage, treated as untrusted data. */
 export interface GateSubject {
@@ -90,6 +91,8 @@ export interface RunAdrGateOptions {
   classify?: GateClassifier;
   deps?: AdrDeps;
   now?: Date;
+  /** Time source when `now` is not given (default: the system clock). */
+  clock?: Clock;
   /** Skip the relevance pre-filter for file-less subjects (the caller already ran it). */
   relevance?: boolean;
 }
@@ -364,7 +367,7 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
 
   const allAdrs = opts.adrs ?? loadAllAdrs(join(opts.root, opts.config.dir), opts.config);
   const adrs = allAdrs.filter((adr) => adr.status === 'accepted');
-  const now = opts.now ?? new Date();
+  const now = opts.now ?? (opts.clock ?? systemClock).date();
   const entries = readLedger(opts.root);
   const skippedSet = new Set<string>();
   const findings: AdrGateFinding[] = [];
