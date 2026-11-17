@@ -119,3 +119,24 @@ test('redactSecrets omits a JSON token value', () => {
 test('redactSecrets omits a JSON apiKey value', () => {
   assert.ok(!redactSecrets('{"apiKey":"json-key"}').includes('json-key'));
 });
+
+// #251: OpenRouter's 402 arrives as an errored assistant message while Pi exits 0.
+const OPENROUTER_402 = '402: {"message":"This request requires more credits, or fewer max_tokens. You requested up to 936333 tokens, but can only afford 499343. To increase, visit https://openrouter.ai/workspaces/default/keys/abc and adjust the key\'s monthly limit","code":402,"metadata":{"limit_source":"openrouter_credits","remedy_hint":"Add credits"}}';
+
+test('#251: a provider 402 after a clean Pi exit is provider_credit_exhausted, not a success', () => {
+  const failure = classifyPiFailure({ exitCode: 0, stderr: '', assistantMessages: 1, errorMessages: [{ errorMessage: OPENROUTER_402 }] });
+  assert.equal(failure?.category, 'provider_credit_exhausted');
+  assert.equal(failure?.retryable, false);
+  assert.equal(failure?.httpStatus, 402);
+  assert.match(failure!.summary, /add credit/);
+  assert.match(failure!.summary, /Stop dispatching further lanes/);
+});
+
+test('#251: a 402 on stderr with a non-zero exit is provider_credit_exhausted, not generic transport_http', () => {
+  const failure = classifyPiFailure({ exitCode: 1, stderr: 'Error: 402 Payment Required: insufficient credits' });
+  assert.equal(failure?.category, 'provider_credit_exhausted');
+});
+
+test('#251: an unrelated 402 number is not a credit failure', () => {
+  assert.equal(classifyPiFailure({ exitCode: 0, stderr: 'wrote 402 lines', assistantMessages: 3 }), null);
+});

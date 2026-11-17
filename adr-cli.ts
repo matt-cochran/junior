@@ -189,6 +189,22 @@ function gitOutput(deps: AdrCliDeps, args: string[]): string {
   return result.stdout;
 }
 
+/**
+ * #249: with no `--base`, diff against the remote's default branch (`origin/HEAD`), else
+ * `origin/main`, else `origin/master`. A repository with none of them fails naming `--base`.
+ */
+export function defaultBase(deps: AdrCliDeps): string {
+  const git = deps.git;
+  if (!git) throw new Error('this command needs deps.git');
+  const head = git(['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  const resolved = head.status === 0 ? head.stdout.trim().replace(/^refs\/remotes\//, '') : '';
+  if (resolved !== '') return resolved;
+  for (const candidate of ['origin/main', 'origin/master']) {
+    if (git(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]).status === 0) return candidate;
+  }
+  throw new Error('cannot find the default branch (no origin/HEAD, origin/main or origin/master); pass --base <ref>');
+}
+
 function implementationSubject(root: string, path: string, base: string): GateSubject {
   const diff = changedFileDiff(root, path, base);
   return diff === null
@@ -210,7 +226,7 @@ function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[]
     if (path !== '' && !paths.includes(path)) paths.push(path);
   };
 
-  const base = valueAfter(argv, '--base') ?? 'origin/main';
+  const base = valueAfter(argv, '--base') ?? defaultBase(deps);
   for (const path of gitOutput(deps, ['diff', '--name-only', `${base}...HEAD`])
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -814,6 +830,21 @@ export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<
   const command = argv[0];
   const rest = argv.slice(1);
   const out = output(deps);
+
+  // #252: `--help`/`-h` on any subcommand prints usage and never runs it (`adr new --help`
+  // used to write an ADR titled "--help").
+  if (rest.includes('--help') || rest.includes('-h')) {
+    const lines = ADR_CLI_USAGE.split('\n');
+    const own: string[] = [];
+    let matched = false;
+    for (const line of lines.slice(1)) {
+      const continuation = /^ {4,}/.test(line);
+      if (!continuation) matched = command !== undefined && line.trim().split(/\s/)[0]!.split('|').includes(command);
+      if (matched) own.push(line);
+    }
+    out(`${own.length > 0 ? [lines[0], ...own].join('\n') : ADR_CLI_USAGE}\n`);
+    return 0;
+  }
 
   if (command === 'lint') {
     const root = deps.cwd ?? process.cwd();
