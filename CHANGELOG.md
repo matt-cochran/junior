@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-11-17
+
+### Changed
+
+- Junior verifies elicitation 0.1.3: its recorded fixtures are byte-identical to
+  0.1.2, so `junior doctor` reports the shape as verified. Elicitation 0.1.3
+  lists every missing `append` field in one error and documents complete
+  payloads and the `qualify` scope (#250).
+
 ### Documentation
 
 - The Junior skill documents the optional `<hop.json>` first argument to

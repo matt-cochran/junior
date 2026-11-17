@@ -1,0 +1,204 @@
+{
+  "accepted_stances": [],
+  "claims": [
+    {
+      "category": "requirement",
+      "dimensions": [
+        "acceptance"
+      ],
+      "evidence": [],
+      "id": "c1",
+      "modality": "constraint",
+      "object": {
+        "kind": "value",
+        "value": "csv"
+      },
+      "polarity": "positive",
+      "predicate": "format",
+      "session_id": "fixture-elicit-20261020b",
+      "source": {
+        "turn_id": "c1"
+      },
+      "standing": "challenged",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    },
+    {
+      "category": "requirement",
+      "dimensions": [
+        "acceptance"
+      ],
+      "evidence": [],
+      "id": "c2",
+      "modality": "constraint",
+      "object": {
+        "kind": "value",
+        "value": "csv"
+      },
+      "polarity": "negative",
+      "predicate": "format",
+      "session_id": "fixture-elicit-20261020b",
+      "source": {
+        "turn_id": "c2"
+      },
+      "standing": "challenged",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    }
+  ],
+  "contradictions": [
+    {
+      "claims": [
+        "c1",
+        "c2"
+      ],
+      "explanation": "Claim 'c1' asserts and 'c2' denies the same fact (fixture-elicit-20261020b format).",
+      "id": "ctr:intra:c1+c2",
+      "kind": "intra_spec",
+      "severity": "high",
+      "suggested_question": "Claims 'c1' and 'c2' both describe fixture-elicit-20261020b format but disagree — which holds?"
+    }
+  ],
+  "coverage_schema": {
+    "dimensions": [
+      {
+        "required": true,
+        "tag": "acceptance"
+      }
+    ]
+  },
+  "readiness": {
+    "blockers": [
+      "COVERAGE: required dimension 'acceptance' lacks a withstood hypothesis",
+      "CONTRADICTION: surviving high-severity contradiction 'ctr:intra:c1+c2' (Claim 'c1' asserts and 'c2' denies the same fact (fixture-elicit-20261020b format).)"
+    ],
+    "dimensions": [
+      {
+        "best_standing": "challenged",
+        "claims": [
+          "c1",
+          "c2"
+        ],
+        "dimension": "acceptance",
+        "required": true,
+        "satisfied": false
+      }
+    ],
+    "gaps": [
+      {
+        "dimension": "acceptance",
+        "suggested_question": "The acceptance hypothesis isn't settled yet — can you confirm or refute it?"
+      }
+    ],
+    "ready": false
+  },
+  "registry": {
+    "entity_ids": [
+      "fixture-elicit-20261020b"
+    ],
+    "predicate_tokens": [
+      "format"
+    ]
+  },
+  "requirements": [
+    {
+      "acceptance_criteria": [],
+      "capability": "format",
+      "id": "req:c1",
+      "quality_checks": [
+        {
+          "name": "has_acceptance",
+          "passed": false
+        },
+        {
+          "name": "has_owner",
+          "passed": false
+        },
+        {
+          "name": "testable",
+          "passed": false
+        },
+        {
+          "name": "unambiguous",
+          "passed": true
+        }
+      ],
+      "source_claims": [
+        "c1"
+      ],
+      "statement": "fixture-elicit-20261020b format csv",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    },
+    {
+      "acceptance_criteria": [],
+      "capability": "format",
+      "id": "req:c2",
+      "quality_checks": [
+        {
+          "name": "has_acceptance",
+          "passed": false
+        },
+        {
+          "name": "has_owner",
+          "passed": false
+        },
+        {
+          "name": "testable",
+          "passed": false
+        },
+        {
+          "name": "unambiguous",
+          "passed": true
+        }
+      ],
+      "source_claims": [
+        "c2"
+      ],
+      "statement": "fixture-elicit-20261020b format csv",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    }
+  ],
+  "session_id": "fixture-elicit-20261020b",
+  "signals": [
+    {
+      "claims": [
+        "c1",
+        "c2"
+      ],
+      "code": "intra_spec_contradiction",
+      "contradiction": "ctr:intra:c1+c2",
+      "kind": "notify",
+      "message": "Claim 'c1' asserts and 'c2' denies the same fact (fixture-elicit-20261020b format).",
+      "suggested_question": "Claims 'c1' and 'c2' both describe fixture-elicit-20261020b format but disagree — which holds?"
+    },
+    {
+      "claims": [
+        "c1",
+        "c2"
+      ],
+      "code": "resolve_intra_spec_contradiction",
+      "contradiction": "ctr:intra:c1+c2",
+      "kind": "remediate",
+      "message": "Resolve contradiction 'ctr:intra:c1+c2' with a remediation move.",
+      "suggested_question": "Claims 'c1' and 'c2' both describe fixture-elicit-20261020b format but disagree — which holds?"
+    },
+    {
+      "claims": [],
+      "code": "coverage_gap",
+      "dimension": "acceptance",
+      "kind": "clarify",
+      "message": "Coverage dimension 'acceptance' has no withstood hypothesis.",
+      "suggested_question": "The acceptance hypothesis isn't settled yet — can you confirm or refute it?"
+    }
+  ]
+}
