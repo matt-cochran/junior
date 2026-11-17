@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A remote Pi run whose transport returns an artifact manifest without a
+  source commit is now stamped with the requested commit. Before, that run
+  threw `ReferenceError: manifestRoot is not defined`, because the restamp path
+  called a helper that was never imported (#261).
+
 ### Documentation
 
 - The Junior skill documents the optional `<hop.json>` first argument to

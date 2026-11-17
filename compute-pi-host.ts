@@ -264,7 +264,7 @@ function manifestEntries(files: readonly PiManifestFile[]): PiManifestEntry[] {
   return entries.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function manifestRoot(
+export function manifestRoot(
   kind: PiManifest['kind'],
   entries: readonly PiManifestEntry[],
   metadata: { sourceCommit?: string; workspaceRoot?: string | null } = {},
