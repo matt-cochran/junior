@@ -224,6 +224,48 @@ function parseModel(argv: string[]): ParsedModel {
   return { sub, flags, values, positional };
 }
 
+async function runModelUpgrade(
+  parsed: ParsedModel,
+  deps: ModelCommandDeps,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  isTTY: boolean,
+  out: (line: string) => void,
+): Promise<{ exitCode: number; result: any }> {
+  const config = loadModelConfig(cwd);
+  const catalog = await catalogIds({ online: !parsed.flags.has('--offline'), fetch: deps.fetch, env, config });
+  const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
+  const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices, sources: catalog.sources });
+  const dryRun = parsed.flags.has('--dry-run');
+  const pricier = plan.changes.filter((change) => change.price.pricier === true);
+  const result: any = { changes: plan.changes, refused: plan.refused, waiting: plan.waiting, applied: false, pricier, catalog: catalog.catalog };
+
+  let refusedToWrite = false;
+  if (plan.changes.length > 0 && !dryRun) {
+    if (parsed.flags.has('--yes')) {
+      applyUpgrades(cwd, plan.changes);
+      result.applied = true;
+    } else if (isTTY) {
+      const confirm = deps.confirm ?? defaultConfirm;
+      const suffix = pricier.length > 0 ? ` ${pricier.length} ${pricier.length === 1 ? 'is' : 'are'} pricier than the current model.` : '';
+      const ok = await confirm(`Apply ${plan.changes.length} model change(s) to delivery.config.json?${suffix}`);
+      if (ok) {
+        applyUpgrades(cwd, plan.changes);
+        result.applied = true;
+      }
+    } else {
+      refusedToWrite = true;
+      result.message = 'Refusing to write delivery.config.json without --yes; rerun with --yes to apply the planned changes.';
+      out(result.message);
+    }
+  }
+
+  let exitCode = 0;
+  if (refusedToWrite) exitCode = 1;
+  else if (plan.refused.length > 0 && plan.changes.length === 0) exitCode = 1;
+  return { exitCode, result };
+}
+
 /**
  * Run one `junior model` subcommand. Returns the JSON result for the caller to
  * print and the process exit code. `status` and `list` are read-only; `upgrade`
@@ -297,40 +339,7 @@ export async function runModelCommand(argv: string[], deps: ModelCommandDeps = {
     return { exitCode: 0, result: { approved, key, changed } };
   }
 
-  if (parsed.sub === 'upgrade') {
-    const config = loadModelConfig(cwd);
-    const catalog = await catalogIds({ online: !parsed.flags.has('--offline'), fetch: deps.fetch, env, config });
-    const updates = modelUpdates(config, catalog.ids, { prices: catalog.prices, sources: catalog.sources });
-    const plan = planUpgrades(config, updates, { profile: parsed.values['--profile'], to: parsed.values['--to'], prices: catalog.prices, sources: catalog.sources });
-    const dryRun = parsed.flags.has('--dry-run');
-    const pricier = plan.changes.filter((change) => change.price.pricier === true);
-    const result: any = { changes: plan.changes, refused: plan.refused, waiting: plan.waiting, applied: false, pricier, catalog: catalog.catalog };
-
-    let refusedToWrite = false;
-    if (plan.changes.length > 0 && !dryRun) {
-      if (parsed.flags.has('--yes')) {
-        applyUpgrades(cwd, plan.changes);
-        result.applied = true;
-      } else if (isTTY) {
-        const confirm = deps.confirm ?? defaultConfirm;
-        const suffix = pricier.length > 0 ? ` ${pricier.length} ${pricier.length === 1 ? 'is' : 'are'} pricier than the current model.` : '';
-        const ok = await confirm(`Apply ${plan.changes.length} model change(s) to delivery.config.json?${suffix}`);
-        if (ok) {
-          applyUpgrades(cwd, plan.changes);
-          result.applied = true;
-        }
-      } else {
-        refusedToWrite = true;
-        result.message = 'Refusing to write delivery.config.json without --yes; rerun with --yes to apply the planned changes.';
-        out(result.message);
-      }
-    }
-
-    let exitCode = 0;
-    if (refusedToWrite) exitCode = 1;
-    else if (plan.refused.length > 0 && plan.changes.length === 0) exitCode = 1;
-    return { exitCode, result };
-  }
+  if (parsed.sub === 'upgrade') return runModelUpgrade(parsed, deps, cwd, env, isTTY, out);
 
   return { exitCode: 1, result: { error: `Unknown model subcommand: ${parsed.sub || '(none)'}` } };
 }

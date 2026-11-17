@@ -20,14 +20,10 @@ import { classifierBudget, outOfTime, remainingMs, type RunState } from './worke
 /** Shared error-message coercion, used across the worker modules. */
 const msg=(e:unknown)=>e instanceof Error ? e.message : String(e);
 
-/** Finish: workerError, evidence, postflight, status, billing and the result write. */
-export async function finish(state:RunState):Promise<any> {
- const {mock, deps, settings, sourceCwd, executionCwd, isolation, dir, heartbeat, emit,
-  requested, requestedSource, resume, prior, review, signal, mode, jev, decision, lineage,
-  modelRoute, providerRouting, externalContext, piIsolation, worktreePath, reportWorkflow,
-  reportPath, prepareRun, preparePlan, prepareHistory, isQa, isRepair, templates, classify,
-  before, streamResult, workerStatus, receipt, receiptOk, legacyError, segments, checks,
-  workerRan, stopped, deadlineAt, deadlineDuringChecks, runStartedAt, stderr, t} = state;
+const passing=(status:string)=>status === 'simulation_passed' || status === 'ready_for_review';
+
+function streamWorkerError(state:RunState):any {
+ const {streamResult, workerStatus, receipt, receiptOk, legacyError, stderr} = state;
  let workerError=legacyError;
  if (!workerError && streamResult?.interrupted) workerError='Run interrupted by signal; partial logs and edits preserved.';
  if (!workerError && streamResult?.deadlineExceeded) workerError='Total wall deadline exceeded; Pi process group was stopped.';
@@ -38,6 +34,11 @@ export async function finish(state:RunState):Promise<any> {
  if (!workerError && workerStatus !== 0) workerError=String(stderr).includes('No API key found for openrouter') ? 'OpenRouter authentication missing. Start pi and use /login to configure OpenRouter, then retry.' : 'Pi failed; inspect worker.log.';
  if (!workerError && receipt.outputLimited) workerError=OUTPUT_LIMIT_ERROR;
  if (!workerError && !receiptOk) workerError = receipt.malformed ? 'Pi event stream contained malformed JSONL; inspect events.jsonl.' : receipt.errored || receipt.aborted ? 'Pi assistant message did not complete cleanly.' : receipt.assistantMessages === 0 ? 'Pi settled with no assistant messages.' : 'Pi never reported agent_settled; inspect events.jsonl.';
+ return workerError;
+}
+
+function resolveWorkerError(state:RunState):any {
+ let workerError=streamWorkerError(state);
  // A typed Pi failure is more actionable than the generic exit/no-message
  // wording, so its summary is the worker error whenever the generic text was
  // what we would otherwise report.
@@ -47,67 +48,55 @@ export async function finish(state:RunState):Promise<any> {
    || workerError === 'Pi assistant message did not complete cleanly.'
    || workerError === 'Pi failed; inspect worker.log.'
    || workerError === 'Pi settled with no assistant messages.')) workerError=workerFailure.summary;
+ return workerError;
+}
 
- // Capture post-run evidence and the run-only delta even after a timeout,
- // deadline breach or interruption, and persist the complete evidence pair.
- const after=collectGitEvidence(executionCwd, { timeoutMs: Math.max(1, remainingMs(state)) });
- const evidence=evidenceDelta(before, after);
- // Advisory wiring check: new exports with no production reference. It reads
- // only the post-run evidence and never contributes to the terminal status.
- let unwired:UnwiredSymbol[]=[];
- try { unwired=findUnwiredExports(executionCwd, evidence.runChangedFiles, { diff: after.diff }); } catch {}
- let scopeResult:ScopeResult|undefined;
- if (t.scope) {
-  let projectConfig:any={};
-  try {
-   const configPath=join(sourceCwd,'delivery.config.json');
-   if (existsSync(configPath)) projectConfig=JSON.parse(readFileSync(configPath,'utf8'));
-  } catch { projectConfig={}; }
-  scopeResult=classifyScope(evidence.runChangedFiles, t.scope.owned, {
-   incidental: t.scope.incidental ?? incidentalGlobsFromConfig(projectConfig),
-   repo: basename(sourceCwd),
-  });
+function classifyRunScope(t:any, sourceCwd:string, evidence:any):ScopeResult|undefined {
+ if (!t.scope) return undefined;
+ let projectConfig:any={};
+ try {
+  const configPath=join(sourceCwd,'delivery.config.json');
+  if (existsSync(configPath)) projectConfig=JSON.parse(readFileSync(configPath,'utf8'));
+ } catch { projectConfig={}; }
+ return classifyScope(evidence.runChangedFiles, t.scope.owned, {
+  incidental: t.scope.incidental ?? incidentalGlobsFromConfig(projectConfig),
+  repo: basename(sourceCwd),
+ });
+}
+
+async function runPostflight(state:RunState, after:any, evidence:any):Promise<void> {
+ const {deps, executionCwd, signal, mode, jev, reportWorkflow, reportPath, classify, checks, workerRan, stopped, t} = state;
+ if (!(mode !== 'off' && classify && workerRan && !stopped && !outOfTime(state))) return;
+ const git = deps.git ?? after;
+ let report:ReportEvidence|undefined;
+ if (reportWorkflow && reportPath && existsSync(reportPath)) {
+  try { report=reportEvidence(readFileSync(reportPath,'utf8'),reportPath); } catch {}
  }
- writeFileSync(join(dir,'evidence.json'),JSON.stringify({
-  sourceCwd, executionCwd, isolation,
-  before: evidence.before, after: evidence.after,
-  runChangedFiles: evidence.runChangedFiles, preexistingFiles: evidence.preexistingFiles,
-  changed: evidence.changed,
- },null,2));
-
- // Postflight (completion) gate runs against the independent checks and the
- // complete bounded evidence.
- heartbeat.update({phase:'postflight'});
- emit('postflight');
- if (mode !== 'off' && classify && workerRan && !stopped && !outOfTime(state)) {
-  const git = deps.git ?? after;
-  let report:ReportEvidence|undefined;
-  if (reportWorkflow && reportPath && existsSync(reportPath)) {
-   try { report=reportEvidence(readFileSync(reportPath,'utf8'),reportPath); } catch {}
-  }
-  const allowed = reportPath && withinWorkspace(executionCwd, reportPath) ? [relative(executionCwd, reportPath)] : [];
-  try {
-   const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(state), evidence, {report,allowed}), signal);
-   jev!.postflight = postflight;
-   if (postflight.error) jev!.error = postflight.error;
-  } catch (e) {
-   jev!.error = `classifier unavailable: ${msg(e)}`;
-  }
+ const allowed = reportPath && withinWorkspace(executionCwd, reportPath) ? [relative(executionCwd, reportPath)] : [];
+ try {
+  const postflight = await raceSignal(assessPostflight(t, classify, checks, git, classifierBudget(state), evidence, {report,allowed}), signal);
+  jev!.postflight = postflight;
+  if (postflight.error) jev!.error = postflight.error;
+ } catch (e) {
+  jev!.error = `classifier unavailable: ${msg(e)}`;
  }
+}
 
- // Terminal status. No success is ever reported after the wall deadline.
- let status:string;
- if (streamResult?.interrupted || signal?.aborted) status='interrupted';
- else if (streamResult?.timedOut) status='worker_failed';
- else if (streamResult?.outputTruncated) status='output_truncated';
- else if (streamResult?.deadlineExceeded || deadlineDuringChecks || outOfTime(state)) status='deadline_exceeded';
- else if (streamResult?.persistError || streamResult?.streamError) status='worker_failed';
- else if (workerStatus !== 0) status='worker_failed';
- else if (!receiptOk) status='receipt_failed';
- else if (checks.some((c:any)=>c.exitCode !== 0 || c.error || c.timedOut || c.outputTruncated)) status='checks_failed';
- else status= mock ? 'simulation_passed' : 'ready_for_review';
- const adrGateIssues:string[]=[];
+function terminalStatus(state:RunState):string {
+ const {mock, streamResult, workerStatus, receiptOk, checks, signal, deadlineDuringChecks} = state;
+ if (streamResult?.interrupted || signal?.aborted) return 'interrupted';
+ if (streamResult?.timedOut) return 'worker_failed';
+ if (streamResult?.outputTruncated) return 'output_truncated';
+ if (streamResult?.deadlineExceeded || deadlineDuringChecks || outOfTime(state)) return 'deadline_exceeded';
+ if (streamResult?.persistError || streamResult?.streamError) return 'worker_failed';
+ if (workerStatus !== 0) return 'worker_failed';
+ if (!receiptOk) return 'receipt_failed';
+ if (checks.some((c:any)=>c.exitCode !== 0 || c.error || c.timedOut || c.outputTruncated)) return 'checks_failed';
+ return mock ? 'simulation_passed' : 'ready_for_review';
+}
 
+async function gatePrepareBrief(state:RunState, adrGateIssues:string[]):Promise<any> {
+ const {mock, sourceCwd, dir, prepareRun, preparePlan, classify, t} = state;
  // A mock prepare run has no model to author the brief, so synthesize a
  // well-formed placeholder; a live run reads (and augments) what the worker
  // wrote. The brief always carries the routed playbooks so the correction-rate
@@ -121,85 +110,85 @@ export async function finish(state:RunState):Promise<any> {
  // asked to choose. The gated brief (findings and all) is what the manager
  // reads, so a flagged option is visible before implementation starts.
  let prepareBrief:any=null;
- if (prepareRun && existsSync(briefPath(dir))) {
-  try { prepareBrief=JSON.parse(readFileSync(briefPath(dir),'utf8')); } catch { prepareBrief=null; }
-  if (prepareBrief) {
-   prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
-   if (classify) {
-    try {
-     prepareBrief=await designGate({cwd:sourceCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
-    } catch (e) {
-     adrGateIssues.push(`ADR design gate skipped: ${msg(e)}`);
-    }
-   }
-   writeFileSync(briefPath(dir), JSON.stringify(prepareBrief, null, 2));
-   writeFileSync(briefMdPath(dir), renderBrief(prepareBrief));
+ if (!(prepareRun && existsSync(briefPath(dir)))) return prepareBrief;
+ try { prepareBrief=JSON.parse(readFileSync(briefPath(dir),'utf8')); } catch { prepareBrief=null; }
+ if (!prepareBrief) return prepareBrief;
+ prepareBrief.playbooks=(preparePlan?.playbooks ?? []).map((p:any)=>p.id);
+ if (classify) {
+  try {
+   prepareBrief=await designGate({cwd:sourceCwd,brief:prepareBrief,deliverable:t.plan?.deliverable ?? t.id,classify});
+  } catch (e) {
+   adrGateIssues.push(`ADR design gate skipped: ${msg(e)}`);
   }
  }
+ writeFileSync(briefPath(dir), JSON.stringify(prepareBrief, null, 2));
+ writeFileSync(briefMdPath(dir), renderBrief(prepareBrief));
+ return prepareBrief;
+}
 
+function applyContractDowngrades(state:RunState, o:{status:string, workerError:any, analysis:any, reportPresent:boolean, prepareBrief:any, evidence:any}):{status:string, workerError:any} {
+ const {reportPath, prepareRun, isQa} = state;
+ let {status, workerError} = o;
  // An analysis-only workflow reports completion only when its deterministic
  // report exists in the run artifact directory. A missing report downgrades an
  // otherwise-passing run; it never upgrades a failure. This is a contract
  // boundary, not a sandbox guarantee.
- const reportPresent = reportPath ? existsSync(reportPath) : false;
- const analysis = reportWorkflow && reportPath ? { workflow:decision.selected, report:reportPath, reportPresent } : undefined;
- if (analysis && (status === 'simulation_passed' || status === 'ready_for_review') && !reportPresent) {
+ if (o.analysis && passing(status) && !o.reportPresent) {
   status='needs_review';
   workerError = workerError || `Analysis report missing: expected ${reportPath}; analysis-only workflows report completion only after the report exists.`;
  }
  // A completed prepare run stops at a choice, not at review: the manager must
  // pick an option before any implementation.
- if (prepareRun && prepareBrief && (status === 'simulation_passed' || status === 'ready_for_review' || status === 'needs_review')) {
+ if (prepareRun && o.prepareBrief && (passing(status) || status === 'needs_review')) {
   status='needs_choice';
  }
 
  // QA is report-only. If the reviewer changed production files despite the
  // instruction, the existing evidence delta flags it as needs_review; there is
  // no automatic remediation.
- if (isQa && evidence.changed && (status === 'simulation_passed' || status === 'ready_for_review')) {
+ if (isQa && o.evidence.changed && passing(status)) {
   status='needs_review';
-  workerError = workerError || `QA run changed production files despite report-only instructions: ${evidence.runChangedFiles.map((f:any)=>f.path).join(', ')}`;
+  workerError = workerError || `QA run changed production files despite report-only instructions: ${o.evidence.runChangedFiles.map((f:any)=>f.path).join(', ')}`;
  }
+ return {status, workerError};
+}
 
+async function runImplementationGate(state:RunState, status:string, evidence:any, adrGateIssues:string[]):Promise<{status:string, gate:any}> {
+ const {mock, sourceCwd, executionCwd, dir, prepareRun, reportWorkflow, isQa, classify, t} = state;
  // ADR 0018 R3-R5: a live code handoff is checked at the implementation stage
  // before it is ready for review. A blocked gate needs a human decision (or
  // stops an unattended run); it never silently passes.
  let implementationAdrGate:any=null;
- if (!mock && !prepareRun && !reportWorkflow && !isQa && status === 'ready_for_review') {
-  if (classify) {
-   try {
-    const gated=await implementationGate({
-     cwd:sourceCwd,
-     changedFiles:evidence.runChangedFiles.map((f:any)=>f.path),
-     deliverable:t.plan?.deliverable ?? t.id,
-     classify,
-     unattended:t.unattended === true,
-     contentRoot:executionCwd,
-    });
-    implementationAdrGate=gated.result;
-    if (gated.markdown !== null) writeFileSync(join(dir,'adr-gate.md'),gated.markdown);
-    if (gated.status !== null) {
-     status=gated.status;
-     adrGateIssues.push('ADR conformance findings need a human decision: junior adr decide (see adr-gate.md)');
-    }
-   } catch (e) {
-    adrGateIssues.push(`ADR gate skipped: ${msg(e)}`);
+ if (!(!mock && !prepareRun && !reportWorkflow && !isQa && status === 'ready_for_review')) return {status, gate:implementationAdrGate};
+ if (classify) {
+  try {
+   const gated=await implementationGate({
+    cwd:sourceCwd,
+    changedFiles:evidence.runChangedFiles.map((f:any)=>f.path),
+    deliverable:t.plan?.deliverable ?? t.id,
+    classify,
+    unattended:t.unattended === true,
+    contentRoot:executionCwd,
+   });
+   implementationAdrGate=gated.result;
+   if (gated.markdown !== null) writeFileSync(join(dir,'adr-gate.md'),gated.markdown);
+   if (gated.status !== null) {
+    status=gated.status;
+    adrGateIssues.push('ADR conformance findings need a human decision: junior adr decide (see adr-gate.md)');
    }
-  } else {
-   let hasAdrGate=false;
-   try { hasAdrGate=resolveGateConfig(sourceCwd) !== null; } catch { hasAdrGate=false; }
-   if (hasAdrGate) adrGateIssues.push('ADR gate skipped: classifier unavailable');
+  } catch (e) {
+   adrGateIssues.push(`ADR gate skipped: ${msg(e)}`);
   }
+ } else {
+  let hasAdrGate=false;
+  try { hasAdrGate=resolveGateConfig(sourceCwd) !== null; } catch { hasAdrGate=false; }
+  if (hasAdrGate) adrGateIssues.push('ADR gate skipped: classifier unavailable');
  }
+ return {status, gate:implementationAdrGate};
+}
 
- // Enforce can only downgrade an otherwise-passing run; it never upgrades
- // worker/checks failures.
- if (mode === 'enforce' && (status === 'simulation_passed' || status === 'ready_for_review')) {
-  const bad = !jev!.preflight || jev!.preflight.status !== 'pass' || !jev!.postflight || jev!.postflight.status !== 'pass';
-  if (bad) { status = 'needs_review'; jev!.enforced = true; }
- }
-
- emit(`finished ${status}`);
+function finalizeHeartbeat(state:RunState, status:string):void {
+ const {heartbeat, streamResult, runStartedAt} = state;
  // Finalize the shared runtime heartbeat with the terminal state.
  heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs(state))});
  if (status === 'ready_for_review' || status === 'simulation_passed') heartbeat.setState('ready_for_review',{stopReason:status==='simulation_passed'?'simulation_passed':'ready_for_review'});
@@ -207,7 +196,10 @@ export async function finish(state:RunState):Promise<any> {
  else if (status === 'deadline_exceeded') heartbeat.setState('deadline_exceeded',{deadlineExceeded:true, stopReason:'deadline_exceeded'});
  else if (streamResult?.timedOut) heartbeat.setState('tool_timed_out',{timedOut:true, stopReason:'tool_timed_out'});
  else heartbeat.setState('failed',{stopReason:status});
+}
 
+async function captureRunBilling(state:RunState):Promise<BillingCapture|undefined> {
+ const {mock, deps, receipt, signal, deadlineAt, t} = state;
  // Optional bounded authoritative OpenRouter billing capture. It never changes
  // the primary outcome; when billing is unavailable the concise reason is kept
  // as a recorded limitation.
@@ -223,47 +215,50 @@ export async function finish(state:RunState):Promise<any> {
    billing = { billedUsd:null, source:null, reason:'billing lookup interrupted', generationCount:0, capturedCount:0, providers:[] };
   }
  }
+ return billing;
+}
 
+function verifyRunDataPolicy(state:RunState, billing:BillingCapture|undefined):{record:any, issues:string[], violated:boolean} {
  // ADR 0017 R5: verify the upstream providers that actually served the run.
  // A provider outside the policy fails the run even when its checks passed. A
  // policy that could not be verified is recorded as a limitation, never a
  // silent pass.
  let dataPolicyRecord:any;
  const dataPolicyIssues:string[]=[];
- if (state.dataPolicy) {
-  const routing=state.dataPolicyRouting ?? null;
-  const resolvedOnly=Array.isArray((routing as any)?.only)
-   ? ((routing as any).only as unknown[]).filter((value):value is string=>typeof value==='string')
-   : undefined;
-  const captured=Array.isArray(billing?.providers) ? billing.providers : [];
-  if (captured.length===0) {
-   dataPolicyRecord={ routing, providers:[], verified:false };
-   dataPolicyIssues.push(billing?.reason
-    ? `data policy: served providers could not be verified; billing capture failed: ${billing.reason}`
-    : 'data policy: served providers could not be verified; set billing in the contract to capture them');
-  } else {
-   const verification=verifyServedProviders(
-    state.dataPolicy,
-    captured.map((entry:any)=>({ provider:typeof entry.provider==='string' ? entry.provider : null })),
-    Array.isArray(state.dataPolicyDirectory) ? state.dataPolicyDirectory : [],
-    resolvedOnly,
-   );
-   dataPolicyRecord={ routing, providers:verification.providers, verified:true };
-   if (!verification.ok) {
-    status='data_policy_violated';
-    for (const entry of verification.providers) {
-     if (!entry.allowed) dataPolicyIssues.push(`data policy: served provider ${entry.provider ?? 'unknown'} violated the policy: ${entry.reason ?? 'not allowed'}`);
-    }
-    heartbeat.setState('failed',{stopReason:'data_policy_violated'});
-   }
-  }
+ if (!state.dataPolicy) return {record:dataPolicyRecord, issues:dataPolicyIssues, violated:false};
+ const routing=state.dataPolicyRouting ?? null;
+ const resolvedOnly=Array.isArray((routing as any)?.only)
+  ? ((routing as any).only as unknown[]).filter((value):value is string=>typeof value==='string')
+  : undefined;
+ const captured=Array.isArray(billing?.providers) ? billing.providers : [];
+ if (captured.length===0) {
+  dataPolicyRecord={ routing, providers:[], verified:false };
+  dataPolicyIssues.push(billing?.reason
+   ? `data policy: served providers could not be verified; billing capture failed: ${billing.reason}`
+   : 'data policy: served providers could not be verified; set billing in the contract to capture them');
+  return {record:dataPolicyRecord, issues:dataPolicyIssues, violated:false};
  }
+ const verification=verifyServedProviders(
+  state.dataPolicy,
+  captured.map((entry:any)=>({ provider:typeof entry.provider==='string' ? entry.provider : null })),
+  Array.isArray(state.dataPolicyDirectory) ? state.dataPolicyDirectory : [],
+  resolvedOnly,
+ );
+ dataPolicyRecord={ routing, providers:verification.providers, verified:true };
+ if (!verification.ok) {
+  for (const entry of verification.providers) {
+   if (!entry.allowed) dataPolicyIssues.push(`data policy: served provider ${entry.provider ?? 'unknown'} violated the policy: ${entry.reason ?? 'not allowed'}`);
+  }
+  state.heartbeat.setState('failed',{stopReason:'data_policy_violated'});
+ }
+ return {record:dataPolicyRecord, issues:dataPolicyIssues, violated:!verification.ok};
+}
 
- const runtime=heartbeat.snapshot();
- const result:any={id:t.id,simulated:mock,status,workerExitCode:workerStatus,workerError,receipt,cost:estimateCost(receipt,t.pricing,billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null,unwired};
- result.checkTimeoutMs=settings.checkTimeoutMs;
- if (workerFailure) result.workerFailure=workerFailure;
- result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
+type Outcome={status:string, workerError:any, billing:BillingCapture|undefined, evidence:any, after:any, unwired:UnwiredSymbol[],
+ scopeResult:ScopeResult|undefined, implementationAdrGate:any, dataPolicyRecord:any, adrGateIssues:string[], dataPolicyIssues:string[], prepareBrief:any, analysis:any};
+
+function verifyPiIsolation(state:RunState):void {
+ const {piIsolation, segments, t} = state;
  // Verify against Pi's own system message that the applied isolation took
  // effect, so a Pi upgrade that ignores a flag is reported, not assumed.
  if (piIsolation && piIsolation.applied.length > 0 && segments[0] && existsSync(segments[0].eventsPath)) {
@@ -274,25 +269,45 @@ export async function finish(state:RunState):Promise<any> {
    });
   } catch { /* an unreadable event stream leaves the run unverified */ }
  }
+}
+
+function baseResult(state:RunState, o:Outcome):any {
+ const {mock, settings, dir, heartbeat, decision, lineage, modelRoute, providerRouting, templates, streamResult, workerStatus, receipt, segments, checks, jev, t} = state;
+ const runtime=heartbeat.snapshot();
+ const result:any={id:t.id,simulated:mock,status:o.status,workerExitCode:workerStatus,workerError:o.workerError,receipt,cost:estimateCost(receipt,t.pricing,o.billing),checks,artifactDir:dir,workflow:decision,templates,runtime,lineage,outputTruncated: streamResult?.outputTruncated ?? false,segments,modelRouting:modelRoute,providerRouting,outputBreakdown: streamResult?.outputBreakdown ?? null,unwired:o.unwired};
+ result.checkTimeoutMs=settings.checkTimeoutMs;
+ if (state.workerFailure) result.workerFailure=state.workerFailure;
+ result.toolPlan=jev?.preflight?.attention?.toolPlan ?? null;
+ return result;
+}
+
+function attachGateResults(state:RunState, result:any, o:Outcome):void {
+ const {piIsolation, externalContext, prepareRun, prepareHistory, streamResult, receipt} = state;
  if (piIsolation) result.piIsolation=piIsolation;
  if (externalContext) result.externalContext=externalContext;
- if (dataPolicyRecord) result.dataPolicy=dataPolicyRecord;
+ if (o.dataPolicyRecord) result.dataPolicy=o.dataPolicyRecord;
  if (state.matrixContext) result.matrixContext=state.matrixContext;
- if (scopeResult) result.scope=scopeResult;
- if (implementationAdrGate) result.adrGate=implementationAdrGate;
+ if (o.scopeResult) result.scope=o.scopeResult;
+ if (o.implementationAdrGate) result.adrGate=o.implementationAdrGate;
  // The ticket-stage check ran in preflight (ADR 0018 R3); surface its outcome.
  if ((state as any).ticketGate) result.ticketGate=(state as any).ticketGate;
- if ((state as any).ticketGateUnresolved) adrGateIssues.push((state as any).ticketGateUnresolved);
- if (prepareRun) { result.brief=prepareBrief; result.checkBack={ required:prepareBrief !== null, historyCount:prepareHistory.length }; }
+ if ((state as any).ticketGateUnresolved) o.adrGateIssues.push((state as any).ticketGateUnresolved);
+ if (prepareRun) { result.brief=o.prepareBrief; result.checkBack={ required:o.prepareBrief !== null, historyCount:prepareHistory.length }; }
  result.unresolved=[];
- for (const issue of adrGateIssues) result.unresolved.push(issue);
- for (const issue of dataPolicyIssues) result.unresolved.push(issue);
+ for (const issue of o.adrGateIssues) result.unresolved.push(issue);
+ for (const issue of o.dataPolicyIssues) result.unresolved.push(issue);
  if (streamResult?.timedOut && streamResult.timedOutTool) {
   result.timedOutTool={ name:streamResult.timedOutTool.name, command:streamResult.timedOutTool.command ?? null };
   result.unresolved.push(timedOutToolLine(streamResult.timedOutTool));
  }
  if (receipt.outputLimited) result.unresolved.push(OUTPUT_LIMIT_ERROR);
+ const billing=o.billing;
  if (billing) result.billing={ source:billing.source, billedUsd:billing.billedUsd, reason:billing.reason ?? null, generationCount:billing.generationCount, capturedCount:billing.capturedCount, providers:billing.providers ?? [] };
+}
+
+function attachRunContext(state:RunState, result:any, o:Outcome):void {
+ const {sourceCwd, executionCwd, isolation, dir, requested, resume, review, mode, jev, lineage, worktreePath, isRepair, receipt, t} = state;
+ const {after, evidence} = o;
  result.sourceCwd=sourceCwd;
  result.executionCwd=executionCwd;
  result.isolation={ mode:isolation, ...(worktreePath?{worktree:worktreePath}:{}) };
@@ -313,7 +328,72 @@ export async function finish(state:RunState):Promise<any> {
  if (t.hopContext) result.handoff={from:t.hopContext.from,projectId:t.hopContext.projectId,revision:t.hopContext.revision,managerAcceptance:t.hopContext.managerAcceptance};
  if (review) result.review={ from:review.from, priorResult:review.priorResult, context:join(dir,REVIEW_CONTEXT_FILENAME) };
  if (mode !== 'off') result.jev=jev;
- if (analysis) result.analysis=analysis;
+ if (o.analysis) result.analysis=o.analysis;
+}
+
+function buildResult(state:RunState, o:Outcome):any {
+ const result=baseResult(state, o);
+ verifyPiIsolation(state);
+ attachGateResults(state, result, o);
+ attachRunContext(state, result, o);
+ return result;
+}
+
+/** Finish: workerError, evidence, postflight, status, billing and the result write. */
+export async function finish(state:RunState):Promise<any> {
+ const {sourceCwd, executionCwd, isolation, dir, heartbeat, emit, mode, jev, decision, reportWorkflow, reportPath, before, t} = state;
+ let workerError=resolveWorkerError(state);
+
+ // Capture post-run evidence and the run-only delta even after a timeout,
+ // deadline breach or interruption, and persist the complete evidence pair.
+ const after=collectGitEvidence(executionCwd, { timeoutMs: Math.max(1, remainingMs(state)) });
+ const evidence=evidenceDelta(before, after);
+ // Advisory wiring check: new exports with no production reference. It reads
+ // only the post-run evidence and never contributes to the terminal status.
+ let unwired:UnwiredSymbol[]=[];
+ try { unwired=findUnwiredExports(executionCwd, evidence.runChangedFiles, { diff: after.diff }); } catch {}
+ const scopeResult=classifyRunScope(t, sourceCwd, evidence);
+ writeFileSync(join(dir,'evidence.json'),JSON.stringify({
+  sourceCwd, executionCwd, isolation,
+  before: evidence.before, after: evidence.after,
+  runChangedFiles: evidence.runChangedFiles, preexistingFiles: evidence.preexistingFiles,
+  changed: evidence.changed,
+ },null,2));
+
+ // Postflight (completion) gate runs against the independent checks and the
+ // complete bounded evidence.
+ heartbeat.update({phase:'postflight'});
+ emit('postflight');
+ await runPostflight(state, after, evidence);
+
+ // Terminal status. No success is ever reported after the wall deadline.
+ let status=terminalStatus(state);
+ const adrGateIssues:string[]=[];
+ const prepareBrief=await gatePrepareBrief(state, adrGateIssues);
+
+ const reportPresent = reportPath ? existsSync(reportPath) : false;
+ const analysis = reportWorkflow && reportPath ? { workflow:decision.selected, report:reportPath, reportPresent } : undefined;
+ ({status, workerError}=applyContractDowngrades(state, {status, workerError, analysis, reportPresent, prepareBrief, evidence}));
+
+ const gated=await runImplementationGate(state, status, evidence, adrGateIssues);
+ status=gated.status;
+ const implementationAdrGate=gated.gate;
+
+ // Enforce can only downgrade an otherwise-passing run; it never upgrades
+ // worker/checks failures.
+ if (mode === 'enforce' && passing(status)) {
+  const bad = !jev!.preflight || jev!.preflight.status !== 'pass' || !jev!.postflight || jev!.postflight.status !== 'pass';
+  if (bad) { status = 'needs_review'; jev!.enforced = true; }
+ }
+
+ emit(`finished ${status}`);
+ finalizeHeartbeat(state, status);
+ const billing=await captureRunBilling(state);
+ const policy=verifyRunDataPolicy(state, billing);
+ if (policy.violated) status='data_policy_violated';
+
+ const result=buildResult(state, {status, workerError, billing, evidence, after, unwired, scopeResult, implementationAdrGate,
+  dataPolicyRecord:policy.record, adrGateIssues, dataPolicyIssues:policy.issues, prepareBrief, analysis});
  state.workerError=workerError; state.status=status; state.billing=billing;
  writeFileSync(join(dir,'result.json'),JSON.stringify(result,null,2));
  return result;

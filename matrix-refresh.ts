@@ -85,6 +85,161 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface RefreshStepContext {
+  deps: RefreshDeps;
+  root: string;
+  hopPath: string;
+  modelId: string;
+  notes: string[];
+  stepDeps: StepDeps;
+}
+
+async function resolveRefreshPlan(
+  options: RefreshOptions,
+  deps: RefreshDeps,
+  root: string,
+  hopPath: string,
+  effectiveCallHop: typeof callHop,
+  notes: string[],
+): Promise<{ plan: string | undefined; planCandidates: string[] | undefined }> {
+  let plan = options.plan;
+  let planCandidates: string[] | undefined;
+  if (!plan && options.planFile === undefined) {
+    try {
+      const resolved = await (deps.resolveMatrixPlan ?? resolveMatrixPlan)(root, hopPath, undefined, effectiveCallHop);
+      plan = resolved.planId;
+      planCandidates = resolved.candidates;
+      if (plan) notes.push(`plan ${plan} (${resolved.source})`);
+    } catch (error) {
+      notes.push(`plan not resolved: ${message(error)}`);
+    }
+  }
+  return { plan, planCandidates };
+}
+
+async function syncRefreshSources(
+  ctx: RefreshStepContext,
+  options: RefreshOptions,
+  plan: string | undefined,
+): Promise<SyncDimensionsResult['synced']> {
+  const { deps, root, hopPath, modelId, notes, stepDeps } = ctx;
+  const sources = options.sources && options.sources.length > 0
+    ? options.sources
+    : (deps.defaultSources ?? defaultSources)(root, plan !== undefined || options.planFile !== undefined);
+  const build = deps.dimensionsForSource
+    ?? (async (name: string, sourceOptions: SourceDimensionOptions) =>
+      (await import('./matrix-cli.ts')).dimensionsForSource({ sources: [], ...sourceOptions }, name));
+  const dimensions: MatrixDimension[] = [];
+  for (const source of sources) {
+    try {
+      dimensions.push(...(await build(source, { dir: root, hop: hopPath, plan, planFile: options.planFile })));
+    } catch (error) {
+      notes.push(`sync ${source} failed: ${message(error)}`);
+    }
+  }
+  let synced: SyncDimensionsResult['synced'] = [];
+  try {
+    synced = (await (deps.syncDimensions ?? syncDimensions)({ hopPath, modelId, dimensions, deps: stepDeps })).synced;
+  } catch (error) {
+    notes.push(`sync failed: ${message(error)}`);
+  }
+  return synced;
+}
+
+async function bootstrapAndConfirm(ctx: RefreshStepContext): Promise<string[]> {
+  const { deps, root, hopPath, modelId, notes, stepDeps } = ctx;
+  const proposalsPath = path.join(root, '.delivery', 'matrix', 'proposals.json');
+  try {
+    await (deps.bootstrap ?? bootstrap)({
+      hopPath,
+      modelId,
+      dir: root,
+      out: proposalsPath,
+      deps: stepDeps,
+    });
+  } catch (error) {
+    notes.push(`bootstrap failed: ${message(error)}`);
+  }
+
+  let confirmed: string[] = [];
+  try {
+    const result = await (deps.confirmProposals ?? confirmProposals)({
+      hopPath,
+      modelId,
+      proposalsPath,
+      min: 'high',
+      deps: stepDeps,
+    });
+    confirmed = result.requestIds;
+  } catch (error) {
+    notes.push(`confirm failed: ${message(error)}`);
+  }
+  return confirmed;
+}
+
+async function autolinkRefreshPlan(
+  ctx: RefreshStepContext,
+  plan: string | undefined,
+  planCandidates: string[] | undefined,
+): Promise<string[]> {
+  const { deps, root, hopPath, modelId, notes, stepDeps } = ctx;
+  let autolinked: string[] = [];
+  if (!plan) {
+    const suffix = planCandidates && planCandidates.length > 0
+      ? `several unfinished plans (${planCandidates.join(', ')}); pass --plan <plan_id>`
+      : 'no single plan resolved; pass --plan <plan_id>';
+    notes.push(`autolink skipped: ${suffix}`);
+  } else {
+    try {
+      const result = await (deps.autolink ?? autolink)({
+        hopPath,
+        modelId,
+        planId: plan,
+        dir: root,
+        deps: stepDeps,
+      });
+      autolinked = result.requestIds;
+    } catch (error) {
+      notes.push(`autolink failed: ${message(error)}`);
+    }
+  }
+  return autolinked;
+}
+
+async function refreshStale(ctx: RefreshStepContext): Promise<CodemapStaleResult> {
+  const { deps, root, hopPath, modelId, notes, stepDeps } = ctx;
+  let stale: CodemapStaleResult = {
+    changed: [],
+    moved: [],
+    deleted: [],
+    entityChanged: [],
+    unanchored: [],
+    affectedCells: [],
+  };
+  try {
+    stale = await (deps.codemapStale ?? codemapStale)({
+      hopPath,
+      modelId,
+      dir: root,
+      deps: stepDeps,
+    });
+  } catch (error) {
+    notes.push(`stale failed: ${message(error)}`);
+  }
+  return stale;
+}
+
+function staleCounts(stale: CodemapStaleResult): RefreshResult['stale'] {
+  return {
+    changed: Array.isArray(stale.changed) ? stale.changed.length : 0,
+    moved: Array.isArray(stale.moved) ? stale.moved.length : 0,
+    deleted: Array.isArray(stale.deleted) ? stale.deleted.length : 0,
+    entityChanged: Array.isArray(stale.entityChanged) ? stale.entityChanged.length : 0,
+    unanchored: Array.isArray(stale.unanchored) ? stale.unanchored.length : 0,
+    affectedCells: Array.isArray(stale.affectedCells) ? stale.affectedCells.length : 0,
+  };
+}
+
 /**
  * Keep the feature-to-code map current in one idempotent pass. Defaults are
  * resolved from the project exactly as the other `matrix` subcommands do;
@@ -122,119 +277,19 @@ export async function refresh(options: RefreshOptions = {}): Promise<RefreshResu
   const modelId = model.id;
   if (model.source !== 'explicit') notes.push(`model ${modelId} (${model.source})`);
 
-  let plan = options.plan;
-  let planCandidates: string[] | undefined;
-  if (!plan && options.planFile === undefined) {
-    try {
-      const resolved = await (deps.resolveMatrixPlan ?? resolveMatrixPlan)(root, hopPath, undefined, effectiveCallHop);
-      plan = resolved.planId;
-      planCandidates = resolved.candidates;
-      if (plan) notes.push(`plan ${plan} (${resolved.source})`);
-    } catch (error) {
-      notes.push(`plan not resolved: ${message(error)}`);
-    }
-  }
+  const { plan, planCandidates } = await resolveRefreshPlan(options, deps, root, hopPath, effectiveCallHop, notes);
+  const ctx: RefreshStepContext = { deps, root, hopPath, modelId, notes, stepDeps };
 
-  const sources = options.sources && options.sources.length > 0
-    ? options.sources
-    : (deps.defaultSources ?? defaultSources)(root, plan !== undefined || options.planFile !== undefined);
-  const build = deps.dimensionsForSource
-    ?? (async (name: string, sourceOptions: SourceDimensionOptions) =>
-      (await import('./matrix-cli.ts')).dimensionsForSource({ sources: [], ...sourceOptions }, name));
-  const dimensions: MatrixDimension[] = [];
-  for (const source of sources) {
-    try {
-      dimensions.push(...(await build(source, { dir: root, hop: hopPath, plan, planFile: options.planFile })));
-    } catch (error) {
-      notes.push(`sync ${source} failed: ${message(error)}`);
-    }
-  }
-  let synced: SyncDimensionsResult['synced'] = [];
-  try {
-    synced = (await (deps.syncDimensions ?? syncDimensions)({ hopPath, modelId, dimensions, deps: stepDeps })).synced;
-  } catch (error) {
-    notes.push(`sync failed: ${message(error)}`);
-  }
-
-  const proposalsPath = path.join(root, '.delivery', 'matrix', 'proposals.json');
-  try {
-    await (deps.bootstrap ?? bootstrap)({
-      hopPath,
-      modelId,
-      dir: root,
-      out: proposalsPath,
-      deps: stepDeps,
-    });
-  } catch (error) {
-    notes.push(`bootstrap failed: ${message(error)}`);
-  }
-
-  let confirmed: string[] = [];
-  try {
-    const result = await (deps.confirmProposals ?? confirmProposals)({
-      hopPath,
-      modelId,
-      proposalsPath,
-      min: 'high',
-      deps: stepDeps,
-    });
-    confirmed = result.requestIds;
-  } catch (error) {
-    notes.push(`confirm failed: ${message(error)}`);
-  }
-
-  let autolinked: string[] = [];
-  if (!plan) {
-    const suffix = planCandidates && planCandidates.length > 0
-      ? `several unfinished plans (${planCandidates.join(', ')}); pass --plan <plan_id>`
-      : 'no single plan resolved; pass --plan <plan_id>';
-    notes.push(`autolink skipped: ${suffix}`);
-  } else {
-    try {
-      const result = await (deps.autolink ?? autolink)({
-        hopPath,
-        modelId,
-        planId: plan,
-        dir: root,
-        deps: stepDeps,
-      });
-      autolinked = result.requestIds;
-    } catch (error) {
-      notes.push(`autolink failed: ${message(error)}`);
-    }
-  }
-
-  let stale: CodemapStaleResult = {
-    changed: [],
-    moved: [],
-    deleted: [],
-    entityChanged: [],
-    unanchored: [],
-    affectedCells: [],
-  };
-  try {
-    stale = await (deps.codemapStale ?? codemapStale)({
-      hopPath,
-      modelId,
-      dir: root,
-      deps: stepDeps,
-    });
-  } catch (error) {
-    notes.push(`stale failed: ${message(error)}`);
-  }
+  const synced = await syncRefreshSources(ctx, options, plan);
+  const confirmed = await bootstrapAndConfirm(ctx);
+  const autolinked = await autolinkRefreshPlan(ctx, plan, planCandidates);
+  const stale = await refreshStale(ctx);
 
   return {
     synced,
     confirmed,
     autolinked,
-    stale: {
-      changed: Array.isArray(stale.changed) ? stale.changed.length : 0,
-      moved: Array.isArray(stale.moved) ? stale.moved.length : 0,
-      deleted: Array.isArray(stale.deleted) ? stale.deleted.length : 0,
-      entityChanged: Array.isArray(stale.entityChanged) ? stale.entityChanged.length : 0,
-      unanchored: Array.isArray(stale.unanchored) ? stale.unanchored.length : 0,
-      affectedCells: Array.isArray(stale.affectedCells) ? stale.affectedCells.length : 0,
-    },
+    stale: staleCounts(stale),
     notes,
   };
   } finally {

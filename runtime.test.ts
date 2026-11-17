@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET } from './runtime.ts';
+import { executeWorkerStreaming, executeCheck, spawnChildDetached, RuntimeHeartbeat, EXECUTION_DEFAULTS, TOOL_TEXT_LIMIT_BYTES, defaultWorkflowBudget, effectiveBudget, REPORT_WORKFLOW_BUDGET, CODE_WORKFLOW_BUDGET } from './runtime.ts';
 import { parseReceipt, receiptValid } from './worker.ts';
 import { compactHandoff } from './handoff.ts';
 
@@ -395,8 +395,15 @@ test('defaultWorkflowBudget returns the enforced report defaults for evaluate', 
   assert.deepEqual(defaultWorkflowBudget('evaluate'), REPORT_WORKFLOW_BUDGET);
 });
 
-test('defaultWorkflowBudget returns null for a non-report workflow', () => {
-  assert.equal(defaultWorkflowBudget('test_first'), null);
+test('defaultWorkflowBudget returns the enforced 16M code default for a non-report workflow', () => {
+  assert.deepEqual(defaultWorkflowBudget('test_first'), { maxTotalTokens: 16000000, mode: 'enforce' });
+  assert.deepEqual(defaultWorkflowBudget('checks_first'), CODE_WORKFLOW_BUDGET);
+});
+
+test('effectiveBudget lets a code contract override the token default and keeps the rest', () => {
+  assert.deepEqual(effectiveBudget('test_first', { maxTotalTokens: 30000000 }), { maxTotalTokens: 30000000, mode: 'enforce' });
+  assert.deepEqual(effectiveBudget('test_first', { maxToolCalls: 200 }), { maxTotalTokens: 16000000, maxToolCalls: 200, mode: 'enforce' });
+  assert.deepEqual(effectiveBudget('test_first'), CODE_WORKFLOW_BUDGET);
 });
 
 test('effectiveBudget keeps the workflow token default while a contract tool-call limit wins', () => {

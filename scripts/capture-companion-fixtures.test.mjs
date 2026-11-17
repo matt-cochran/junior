@@ -41,6 +41,11 @@ test('normalize_value_replaces_nested_plan_id_inside_arrays', () => {
   assert.equal(value.locks[0].plan_id, 'plan_FIXTURE');
 });
 
+test('normalize_value_replaces_the_temp_project_directory_with_a_placeholder', () => {
+  const value = normalizeValue({ durable_state: { location: '/tmp/junior-fixtures-jgia7x/cpm-planner.db' } });
+  assert.equal(value.durable_state.location, '<project>/cpm-planner.db');
+});
+
 // --- normalization: timestamps ----------------------------------------------
 
 test('normalize_value_replaces_iso8601_timestamp_with_fixed_instant', () => {

@@ -126,29 +126,31 @@ function isPresent(item: ReadinessItem): boolean {
   return item.status === 'present';
 }
 
-/** Compose the existing read-only inspectors into one harness readiness report. */
-export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOptions): ReadinessResult {
-  const env = deps.env ?? process.env;
-  const cwd = opts.cwd;
-  const home = deps.home ?? env.HOME ?? env.USERPROFILE ?? '';
-  const detected = detectHarness(env, opts.harness);
-  const roots = harnessSkillRoots(detected.harness, { cwd, home });
-  const target = harnessTarget(detected.harness);
-  const fix = setupCommand(detected.harness);
-  const items: ReadinessItem[] = [];
-
+function juniorSkillItem(
+  deps: ReadinessDeps,
+  target: ReturnType<typeof harnessTarget>,
+  roots: ReturnType<typeof harnessSkillRoots>,
+  fix: string,
+): ReadinessItem {
   const skill = inspectSkill(deps, { target, scope: 'project', roots });
   const juniorStatus = combineSkillStatuses(skill.targets.map((entry) => entry.status));
-  items.push({
+  return {
     id: 'skill:junior',
     kind: 'skill',
     name: 'junior',
     status: juniorStatus,
     required: true,
     ...(juniorStatus === 'present' ? {} : { fix }),
-  });
+  };
+}
 
-  const companionDeps: CompanionDeps = { env, exists: deps.exists, readFile: deps.readFile, exec: deps.exec };
+function companionSkillItems(
+  companionDeps: CompanionDeps,
+  inputs: { target: ReturnType<typeof harnessTarget>; cwd: string; home: string; roots: ReturnType<typeof harnessSkillRoots> },
+  fix: string,
+): ReadinessItem[] {
+  const { target, cwd, home, roots } = inputs;
+  const items: ReadinessItem[] = [];
   const companionSkills = inspectCompanionSkills(companionDeps, { target, scope: 'project', cwd, home, roots });
   for (const check of companionSkills.skills) {
     if (check.status === 'not_installed') continue;
@@ -162,9 +164,13 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
       ...(status === 'present' ? {} : { fix: check.remediation ?? fix }),
     });
   }
+  return items;
+}
 
+function mcpItems(deps: ReadinessDeps, harness: Harness, cwd: string, home: string, fix: string): ReadinessItem[] {
+  const items: ReadinessItem[] = [];
   const hopPath = deps.hopPath ?? join(cwd, '.delivery', 'setup', 'hop.json');
-  const mcp = inspectMcpRegistration(detected.harness, {
+  const mcp = inspectMcpRegistration(harness, {
     cwd,
     home,
     hopPath,
@@ -181,12 +187,11 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
       ...(server.status === 'present' ? {} : { fix }),
     });
   }
+  return items;
+}
 
-  const integrations = deps.integrations ?? inspectIntegrations({
-    env,
-    cwd,
-    installRoot: deps.toolsRoot,
-  } as InstallerDeps);
+function toolItems(integrations: IntegrationsResult, fix: string): ReadinessItem[] {
+  const items: ReadinessItem[] = [];
   for (const tool of integrations.tools) {
     const status = tool.usable ? 'present' : 'missing';
     items.push({
@@ -198,10 +203,14 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
       ...(status === 'present' ? {} : { fix }),
     });
   }
+  return items;
+}
 
-  // Whether this Junior release has verified the responses of an installed
-  // companion version is advisory: an unverified version never gates readiness
-  // and never becomes a `junior setup` action.
+// Whether this Junior release has verified the responses of an installed
+// companion version is advisory: an unverified version never gates readiness
+// and never becomes a `junior setup` action.
+function shapeItems(integrations: IntegrationsResult): ReadinessItem[] {
+  const items: ReadinessItem[] = [];
   for (const tool of integrations.tools) {
     if (!tool.usable || tool.version === null) continue;
     const verified = VERIFIED_VERSIONS[tool.tool];
@@ -220,8 +229,11 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
           }),
     });
   }
+  return items;
+}
 
-  const summary = readCachedSummary(deps, env, home);
+function updateItems(summary: UpdateSummary | null, fix: string): ReadinessItem[] {
+  const items: ReadinessItem[] = [];
   for (const name of summary?.outdated ?? []) {
     items.push({
       id: `update:${name}`,
@@ -232,6 +244,37 @@ export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOption
       fix,
     });
   }
+  return items;
+}
+
+/** Compose the existing read-only inspectors into one harness readiness report. */
+export function inspectReadiness(deps: ReadinessDeps = {}, opts: ReadinessOptions): ReadinessResult {
+  const env = deps.env ?? process.env;
+  const cwd = opts.cwd;
+  const home = deps.home ?? env.HOME ?? env.USERPROFILE ?? '';
+  const detected = detectHarness(env, opts.harness);
+  const roots = harnessSkillRoots(detected.harness, { cwd, home });
+  const target = harnessTarget(detected.harness);
+  const fix = setupCommand(detected.harness);
+  const items: ReadinessItem[] = [];
+
+  items.push(juniorSkillItem(deps, target, roots, fix));
+
+  const companionDeps: CompanionDeps = { env, exists: deps.exists, readFile: deps.readFile, exec: deps.exec };
+  items.push(...companionSkillItems(companionDeps, { target, cwd, home, roots }, fix));
+
+  items.push(...mcpItems(deps, detected.harness, cwd, home, fix));
+
+  const integrations = deps.integrations ?? inspectIntegrations({
+    env,
+    cwd,
+    installRoot: deps.toolsRoot,
+  } as InstallerDeps);
+  items.push(...toolItems(integrations, fix));
+  items.push(...shapeItems(integrations));
+
+  const summary = readCachedSummary(deps, env, home);
+  items.push(...updateItems(summary, fix));
 
   const unreadyRequired = items.filter((item) => item.required && !isPresent(item));
   const ready = unreadyRequired.length === 0;
@@ -491,6 +534,87 @@ function formatPlan(actions: SetupAction[]): string {
     .join('\n');
 }
 
+/** Ask for confirmation unless `--yes`; a result means stop with it. */
+async function confirmSetup(
+  deps: SetupDeps,
+  opts: RunSetupOptions,
+  actions: SetupAction[],
+  stderr: (text: string) => void,
+): Promise<RunSetupResult | null> {
+  if (opts.yes) return null;
+  const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
+  if (!isTTY) {
+    stderr(`refusing to apply ${actions.length} changes without confirmation; rerun with --yes`);
+    return { exitCode: 2 };
+  }
+  const answer = await (deps.prompt ?? defaultPrompt)(`Apply ${actions.length} changes? [y/N] `);
+  if (!/^y(es)?$/i.test(String(answer).trim())) {
+    stderr('aborted; nothing changed');
+    return { exitCode: 0 };
+  }
+  return null;
+}
+
+interface SetupApplyContext {
+  deps: SetupDeps;
+  cwd: string;
+  hopPath: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  exists: (path: string) => boolean;
+  exec: NonNullable<SetupDeps['exec']>;
+  copyFile: NonNullable<SetupDeps['copyFile']>;
+  registerMcp: NonNullable<SetupDeps['registerMcp']>;
+  applied: string[];
+  failed: SetupFailure[];
+  skipped: SetupSkip[];
+}
+
+function applyCommandlessAction(ctx: SetupApplyContext, action: SetupAction): void {
+  if (action.kind === 'mcp' && action.writes) {
+    try {
+      const configPath = resolve(ctx.cwd, action.writes);
+      if (ctx.exists(configPath)) ctx.copyFile(configPath, `${configPath}.bak`);
+      ctx.registerMcp({ hopPath: ctx.hopPath, projectDir: ctx.cwd });
+      ctx.applied.push(action.id);
+    } catch (err) {
+      ctx.failed.push({ id: action.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  } else {
+    ctx.skipped.push({ id: action.id, reason: 'no command' });
+  }
+}
+
+function applySetupAction(ctx: SetupApplyContext, action: SetupAction): void {
+  const { deps, cwd, env, timeoutMs, exec, applied, failed, skipped } = ctx;
+  if (action.command === null) {
+    applyCommandlessAction(ctx, action);
+    return;
+  }
+  if (action.id === 'mcp:jevitate' && !binaryOnPath(deps, 'jevitate')) {
+    skipped.push({ id: action.id, reason: 'jevitate is not on PATH' });
+    return;
+  }
+  const [command, ...args] = action.command;
+  // A companion skill installer writes new skill files; record exactly the
+  // paths it created in the repo-local exclude, as `junior init` does.
+  const tracksSkills = action.kind === 'skill' && action.id !== 'skill:junior';
+  const untrackedBefore = tracksSkills ? gitUntracked(cwd) : null;
+  const result = exec(command, args, { timeout: timeoutMs, env, cwd });
+  if (result.status === 0) {
+    applied.push(action.id);
+    if (tracksSkills && untrackedBefore) {
+      const untrackedAfter = gitUntracked(cwd);
+      if (untrackedAfter) {
+        const created = untrackedAfter.filter((path) => !untrackedBefore.includes(path));
+        if (created.length) ensureLocalExcludes(cwd, created.map((path) => `/${path}`));
+      }
+    }
+  } else {
+    failed.push({ id: action.id, error: result.error || result.stderr || `exited ${result.status}` });
+  }
+}
+
 /** Print the plan, confirm it, apply each action and print a JSON report. */
 export async function runSetup(deps: SetupDeps = {}, opts: RunSetupOptions): Promise<RunSetupResult> {
   const stderr = deps.stderr ?? ((text: string) => { process.stderr.write(text.endsWith('\n') ? text : `${text}\n`); });
@@ -523,18 +647,8 @@ export async function runSetup(deps: SetupDeps = {}, opts: RunSetupOptions): Pro
   stderr(formatPlan(actions));
   if (opts.dryRun) return { exitCode: 0 };
 
-  if (!opts.yes) {
-    const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
-    if (!isTTY) {
-      stderr(`refusing to apply ${actions.length} changes without confirmation; rerun with --yes`);
-      return { exitCode: 2 };
-    }
-    const answer = await (deps.prompt ?? defaultPrompt)(`Apply ${actions.length} changes? [y/N] `);
-    if (!/^y(es)?$/i.test(String(answer).trim())) {
-      stderr('aborted; nothing changed');
-      return { exitCode: 0 };
-    }
-  }
+  const stop = await confirmSetup(deps, opts, actions, stderr);
+  if (stop) return stop;
 
   const applied: string[] = [];
   const failed: SetupFailure[] = [];
@@ -544,45 +658,8 @@ export async function runSetup(deps: SetupDeps = {}, opts: RunSetupOptions): Pro
     registerMcpServers({ hopPath: write.hopPath, projectDir: write.projectDir, target: 'cursor' });
   });
 
-  for (const action of actions) {
-    if (action.command === null) {
-      if (action.kind === 'mcp' && action.writes) {
-        try {
-          const configPath = resolve(cwd, action.writes);
-          if (exists(configPath)) copyFile(configPath, `${configPath}.bak`);
-          registerMcp({ hopPath, projectDir: cwd });
-          applied.push(action.id);
-        } catch (err) {
-          failed.push({ id: action.id, error: err instanceof Error ? err.message : String(err) });
-        }
-      } else {
-        skipped.push({ id: action.id, reason: 'no command' });
-      }
-      continue;
-    }
-    if (action.id === 'mcp:jevitate' && !binaryOnPath(deps, 'jevitate')) {
-      skipped.push({ id: action.id, reason: 'jevitate is not on PATH' });
-      continue;
-    }
-    const [command, ...args] = action.command;
-    // A companion skill installer writes new skill files; record exactly the
-    // paths it created in the repo-local exclude, as `junior init` does.
-    const tracksSkills = action.kind === 'skill' && action.id !== 'skill:junior';
-    const untrackedBefore = tracksSkills ? gitUntracked(cwd) : null;
-    const result = exec(command, args, { timeout: timeoutMs, env, cwd });
-    if (result.status === 0) {
-      applied.push(action.id);
-      if (tracksSkills && untrackedBefore) {
-        const untrackedAfter = gitUntracked(cwd);
-        if (untrackedAfter) {
-          const created = untrackedAfter.filter((path) => !untrackedBefore.includes(path));
-          if (created.length) ensureLocalExcludes(cwd, created.map((path) => `/${path}`));
-        }
-      }
-    } else {
-      failed.push({ id: action.id, error: result.error || result.stderr || `exited ${result.status}` });
-    }
-  }
+  const ctx: SetupApplyContext = { deps, cwd, hopPath, env, timeoutMs, exists, exec, copyFile, registerMcp, applied, failed, skipped };
+  for (const action of actions) applySetupAction(ctx, action);
 
   const after = inspect();
   const report: SetupReport = {

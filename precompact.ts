@@ -288,6 +288,129 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function captureModelConfig(record: CaptureRecord, deps: CaptureDeps): { provider: string; model: string } {
+  let provider = '';
+  let model = '';
+  if (!record.error) {
+    try {
+      const config = (deps.modelConfig ?? (() => loadModelConfig(deps.root)))();
+      provider = config.provider;
+      model = config.model;
+      record.model = model;
+    } catch (error) {
+      record.error = errorMessage(error);
+    }
+  }
+  return { provider, model };
+}
+
+function captureKey(record: CaptureRecord, deps: CaptureDeps): string | null {
+  let key: string | null = null;
+  if (!record.error) {
+    key = (deps.apiKey ?? (() => resolveGatewayKey('openrouter')))();
+    if (typeof key !== 'string' || !key.trim()) {
+      record.error = 'no OpenRouter key';
+      key = null;
+    }
+  }
+  return key;
+}
+
+async function writeCaptureProposals(
+  record: CaptureRecord,
+  deps: CaptureDeps,
+  captureId: string,
+  content: string,
+): Promise<void> {
+  let items: CaptureItem[] = [];
+  try {
+    items = parseCaptureResponse(content);
+  } catch (error) {
+    record.error = errorMessage(error);
+  }
+
+  if (!record.error) {
+    const writeProposal = deps.writeProposal
+      ?? ((root: string, p: { kind: string; text: string; evidence?: string; captureId: string }) =>
+        notesWriteProposal(root, { ...p, kind: p.kind as CaptureItem['kind'] }));
+    for (const item of items) {
+      try {
+        const written = await writeProposal(deps.root, {
+          kind: item.kind,
+          text: item.text,
+          ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+          captureId,
+        });
+        if (written === null) record.duplicates++;
+        else record.proposals++;
+      } catch (error) {
+        record.error = errorMessage(error);
+        break;
+      }
+    }
+  }
+}
+
+async function callCaptureModel(
+  record: CaptureRecord,
+  deps: CaptureDeps,
+  captureId: string,
+  model: string,
+  tail: string,
+  key: string,
+): Promise<void> {
+  let content = '';
+  try {
+    const callModel = deps.callModel ?? defaultCallModel;
+    const response = await callModel({
+      model,
+      system: SYSTEM_PROMPT,
+      user: captureUserMessage(tail),
+      maxTokens: MAX_TOKENS,
+      timeoutMs: TIMEOUT_MS,
+      apiKey: key,
+    });
+    record.usage = response.usage ?? null;
+    content = response.content;
+  } catch (error) {
+    record.error = errorMessage(error);
+  }
+
+  if (!record.error) await writeCaptureProposals(record, deps, captureId, content);
+}
+
+async function captureFromTranscript(
+  record: CaptureRecord,
+  deps: CaptureDeps,
+  captureId: string,
+  transcriptPath: string,
+): Promise<void> {
+  const readTranscript = deps.readTranscript ?? defaultReadTranscript;
+  let tail = '';
+  try {
+    tail = transcriptTail(readTranscript(transcriptPath));
+  } catch (error) {
+    record.error = errorMessage(error);
+  }
+
+  if (!record.error) {
+    record.tailChars = tail.length;
+    if (!tail) {
+      record.error = 'empty transcript tail';
+    }
+  }
+
+  const { provider, model } = captureModelConfig(record, deps);
+
+  if (!record.error && (provider !== 'openrouter' || !isCommodity(provider, model))) {
+    record.error = 'default model not usable for capture';
+  }
+
+  const key = captureKey(record, deps);
+
+  if (!record.error && key) await callCaptureModel(record, deps, captureId, model, tail, key);
+}
+
 /** Run one fail-open capture attempt and always return a capture record. */
 export async function runCapture(input: HookInput, deps: CaptureDeps): Promise<CaptureRecord> {
   let at: Date;
@@ -316,95 +439,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps): Promise<C
     if (!transcriptPath) {
       record.error = 'no transcript_path';
     } else {
-      const readTranscript = deps.readTranscript ?? defaultReadTranscript;
-      let tail = '';
-      try {
-        tail = transcriptTail(readTranscript(transcriptPath));
-      } catch (error) {
-        record.error = errorMessage(error);
-      }
-
-      if (!record.error) {
-        record.tailChars = tail.length;
-        if (!tail) {
-          record.error = 'empty transcript tail';
-        }
-      }
-
-      let provider = '';
-      let model = '';
-      if (!record.error) {
-        try {
-          const config = (deps.modelConfig ?? (() => loadModelConfig(deps.root)))();
-          provider = config.provider;
-          model = config.model;
-          record.model = model;
-        } catch (error) {
-          record.error = errorMessage(error);
-        }
-      }
-
-      if (!record.error && (provider !== 'openrouter' || !isCommodity(provider, model))) {
-        record.error = 'default model not usable for capture';
-      }
-
-      let key: string | null = null;
-      if (!record.error) {
-        key = (deps.apiKey ?? (() => resolveGatewayKey('openrouter')))();
-        if (typeof key !== 'string' || !key.trim()) {
-          record.error = 'no OpenRouter key';
-          key = null;
-        }
-      }
-
-      if (!record.error && key) {
-        let content = '';
-        try {
-          const callModel = deps.callModel ?? defaultCallModel;
-          const response = await callModel({
-            model,
-            system: SYSTEM_PROMPT,
-            user: captureUserMessage(tail),
-            maxTokens: MAX_TOKENS,
-            timeoutMs: TIMEOUT_MS,
-            apiKey: key,
-          });
-          record.usage = response.usage ?? null;
-          content = response.content;
-        } catch (error) {
-          record.error = errorMessage(error);
-        }
-
-        if (!record.error) {
-          let items: CaptureItem[] = [];
-          try {
-            items = parseCaptureResponse(content);
-          } catch (error) {
-            record.error = errorMessage(error);
-          }
-
-          if (!record.error) {
-            const writeProposal = deps.writeProposal
-              ?? ((root: string, p: { kind: string; text: string; evidence?: string; captureId: string }) =>
-                notesWriteProposal(root, { ...p, kind: p.kind as CaptureItem['kind'] }));
-            for (const item of items) {
-              try {
-                const written = await writeProposal(deps.root, {
-                  kind: item.kind,
-                  text: item.text,
-                  ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
-                  captureId,
-                });
-                if (written === null) record.duplicates++;
-                else record.proposals++;
-              } catch (error) {
-                record.error = errorMessage(error);
-                break;
-              }
-            }
-          }
-        }
-      }
+      await captureFromTranscript(record, deps, captureId, transcriptPath);
     }
   } catch (error) {
     record.error = errorMessage(error);

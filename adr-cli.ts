@@ -320,93 +320,105 @@ function preflight(root: string, deps: AdrCliDeps): {config: AdrConfig; adrs: Re
   return {config: resolved.config, adrs: loadGateAdrs(root, resolved.config)};
 }
 
-async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
-  const root = deps.cwd ?? process.cwd();
+type CheckStage = 'design' | 'implementation' | 'ticket';
+type GateReady = NonNullable<ReturnType<typeof preflight>>;
+
+function reportDiscovery(
+  argv: string[],
+  deps: AdrCliDeps,
+  stage: CheckStage,
+  discovery: ReturnType<typeof adrDiscovery>,
+  config: AdrConfig,
+): number | undefined {
+  if (!discovery) return undefined;
+  errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
+  if (flagSet(argv, '--json')) {
+    output(deps)(`${JSON.stringify({stage, at: readingDate(deps).toISOString(), discovery}, null, 2)}\n`);
+  }
+  return 2;
+}
+
+function reportGateOff(argv: string[], deps: AdrCliDeps, root: string, stage: CheckStage): number {
+  const config = readAdrConfig(root) ?? proposeAdrConfig(root);
+  if (config) {
+    const discovery = adrDiscovery(join(root, config.dir), loadGateAdrs(root, config).length, config);
+    const code = reportDiscovery(argv, deps, stage, discovery, config);
+    if (code !== undefined) return code;
+  }
+  output(deps)('ADR gate off\n');
+  return 0;
+}
+
+async function checkTicketStage(
+  argv: string[],
+  deps: AdrCliDeps,
+  root: string,
+  ready: GateReady,
+  classify: GateClassifier,
+): Promise<{gate: AdrGateResult; markdown: string} | number> {
   const out = output(deps);
-  const stage = valueAfter(argv, '--stage');
-  if (stage !== 'design' && stage !== 'implementation' && stage !== 'ticket') {
-    return failure(out, 'check needs --stage design|implementation|ticket');
-  }
+  const ticketId = valueAfter(argv, '--ticket');
+  const draft = valueAfter(argv, '--draft');
+  if (!ticketId && !draft) return failure(out, 'check --stage ticket needs --ticket <id> or --draft <file>');
 
-  const ready = preflight(root, deps);
-  if (!ready) {
-    const config = readAdrConfig(root) ?? proposeAdrConfig(root);
-    if (config) {
-      const discovery = adrDiscovery(join(root, config.dir), loadGateAdrs(root, config).length, config);
-      if (discovery) {
-        errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
-        if (flagSet(argv, '--json')) {
-          out(`${JSON.stringify({stage, at: readingDate(deps).toISOString(), discovery}, null, 2)}\n`);
-        }
-        return 2;
-      }
-    }
-    out('ADR gate off\n');
-    return 0;
-  }
-
-  const discovery = adrDiscovery(join(root, ready.config.dir), ready.adrs.length, ready.config);
-  if (discovery) {
-    errorOutput(deps)(`${adrDiscoveryMessage(discovery, ready.config)}\n`);
-    if (flagSet(argv, '--json')) {
-      out(`${JSON.stringify({stage, at: readingDate(deps).toISOString(), discovery}, null, 2)}\n`);
-    }
-    return 2;
-  }
-
-  const classifier = await classifierFor(deps, root);
-  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
-  const classify = classifier;
-  let gate: AdrGateResult;
-  let markdown: string;
-
-  if (stage === 'ticket') {
-    const ticketId = valueAfter(argv, '--ticket');
-    const draft = valueAfter(argv, '--draft');
-    if (!ticketId && !draft) return failure(out, 'check --stage ticket needs --ticket <id> or --draft <file>');
-
-    let ticket: Ticket;
-    if (draft) {
-      ticket = ticketFromDraft(draft, currentNow(deps));
-    } else {
-      let adapter = deps.adapter;
-      if (!adapter) {
-        const config = ticketConfig(root, deps, false);
-        if (!config) return failure(out, 'tickets config is required for --ticket');
-        adapter = adapterFor(config, root);
-      }
-      ticket = await adapter.get(ticketId!);
-    }
-    const result = await checkTicket({
-      root,
-      ticket,
-      config: ready.config,
-      adrs: ready.adrs,
-      classify,
-    });
-    gate = result.gate;
-    markdown = renderTicketReport([result]);
+  let ticket: Ticket;
+  if (draft) {
+    ticket = ticketFromDraft(draft, currentNow(deps));
   } else {
-    let subjects: GateSubject[];
-    if (stage === 'design') {
-      const input = valueAfter(argv, '--input');
-      if (!input) return failure(out, 'check --stage design needs --input <file>');
-      subjects = [{target: input, text: readFileSync(input, 'utf8')}];
-    } else {
-      subjects = implementationSubjects(argv, deps);
+    let adapter = deps.adapter;
+    if (!adapter) {
+      const config = ticketConfig(root, deps, false);
+      if (!config) return failure(out, 'tickets config is required for --ticket');
+      adapter = adapterFor(config, root);
     }
+    ticket = await adapter.get(ticketId!);
+  }
+  const result = await checkTicket({
+    root,
+    ticket,
+    config: ready.config,
+    adrs: ready.adrs,
+    classify,
+  });
+  return {gate: result.gate, markdown: renderTicketReport([result])};
+}
 
-    gate = await runAdrGate({
-      root,
-      stage,
-      subjects,
-      config: ready.config,
-      adrs: ready.adrs,
-      classify,
-    });
-    markdown = renderGateMarkdown(gate);
+async function checkGateStage(
+  argv: string[],
+  deps: AdrCliDeps,
+  root: string,
+  stage: 'design' | 'implementation',
+  ready: GateReady,
+  classify: GateClassifier,
+): Promise<{gate: AdrGateResult; markdown: string} | number> {
+  let subjects: GateSubject[];
+  if (stage === 'design') {
+    const input = valueAfter(argv, '--input');
+    if (!input) return failure(output(deps), 'check --stage design needs --input <file>');
+    subjects = [{target: input, text: readFileSync(input, 'utf8')}];
+  } else {
+    subjects = implementationSubjects(argv, deps);
   }
 
+  const gate = await runAdrGate({
+    root,
+    stage,
+    subjects,
+    config: ready.config,
+    adrs: ready.adrs,
+    classify,
+  });
+  return {gate, markdown: renderGateMarkdown(gate)};
+}
+
+function reportCheck(
+  argv: string[],
+  deps: AdrCliDeps,
+  root: string,
+  stage: CheckStage,
+  {gate, markdown}: {gate: AdrGateResult; markdown: string},
+): number {
+  const out = output(deps);
   const findings = gate.findings.map((finding, index) => ({id: `F${index + 1}`, ...finding}));
   const document = {
     stage,
@@ -428,6 +440,32 @@ async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
 
   if (gate.inconclusive && gate.inconclusiveReason) errorOutput(deps)(`${gate.inconclusiveReason}\n`);
   return gate.blocked ? 3 : gate.inconclusive ? 2 : 0;
+}
+
+async function runCheck(argv: string[], deps: AdrCliDeps): Promise<number> {
+  const root = deps.cwd ?? process.cwd();
+  const out = output(deps);
+  const stage = valueAfter(argv, '--stage');
+  if (stage !== 'design' && stage !== 'implementation' && stage !== 'ticket') {
+    return failure(out, 'check needs --stage design|implementation|ticket');
+  }
+
+  const ready = preflight(root, deps);
+  if (!ready) return reportGateOff(argv, deps, root, stage);
+
+  const discovery = adrDiscovery(join(root, ready.config.dir), ready.adrs.length, ready.config);
+  const discoveryCode = reportDiscovery(argv, deps, stage, discovery, ready.config);
+  if (discoveryCode !== undefined) return discoveryCode;
+
+  const classifier = await classifierFor(deps, root);
+  if ('consentRequired' in classifier) return failure(out, classifier.consentRequired);
+  const classify = classifier;
+
+  const checked = stage === 'ticket'
+    ? await checkTicketStage(argv, deps, root, ready, classify)
+    : await checkGateStage(argv, deps, root, stage, ready, classify);
+  if (typeof checked === 'number') return checked;
+  return reportCheck(argv, deps, root, stage, checked);
 }
 
 async function runDecide(argv: string[], deps: AdrCliDeps): Promise<number> {
@@ -647,6 +685,72 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
   const config = readAdrConfig(root) ?? proposeAdrConfig(root);
   if (!config) return failure(out, 'no ADR directory found; run junior adr init');
 
+  const options = parseScopeOptions(argv, out);
+  if (typeof options === 'number') return options;
+  const {requested, maxCandidates, samples, fresh} = options;
+  const candidatesForRepo = scopeCandidates(root, maxCandidates === undefined ? undefined : {maxCandidates});
+  const adrs = loadGateAdrs(root, config)
+    .filter((adr) => adr.status === 'accepted')
+    .filter((adr) => requested.length === 0 || requested.includes(adr.id))
+    .filter(isForeignRecord);
+
+  const classifier = await scopeClassifier(root, deps, out);
+  if (typeof classifier === 'number') return classifier;
+
+  const run: ScopeRun = {
+    root,
+    samples,
+    fresh,
+    model: classifier.model,
+    classify: classifier.classify,
+    candidatesForRepo,
+    cache: readScopeCache(root),
+    judged: 0,
+    cached: 0,
+    proposals: [],
+    skipped: [],
+  };
+
+  for (const adr of adrs) await scopeAdr(run, adr);
+
+  if (run.judged > 0) writeScopeCache(root, run.cache);
+  printScope(argv, out, run);
+  return 0;
+}
+
+type UncertainPath = {path: string; votes: number; samples: number};
+
+interface ScopeProposal {
+  adrId: string;
+  path: string;
+  appliesTo: string[];
+  rules: Array<{id: string; text: string}>;
+  uncertain: UncertainPath[];
+  votes: Record<string, number>;
+}
+
+interface ScopeRun {
+  root: string;
+  samples: number;
+  fresh: boolean;
+  model: string;
+  classify: GateClassifier;
+  candidatesForRepo: string[];
+  cache: ReturnType<typeof readScopeCache>;
+  judged: number;
+  cached: number;
+  proposals: ScopeProposal[];
+  skipped: Array<{adrId: string; reason: string; uncertain?: UncertainPath[]}>;
+}
+
+interface ScopeOptions {
+  requested: string[];
+  maxCandidates: number | undefined;
+  samples: number;
+  fresh: boolean;
+}
+
+function parseScopeOptions(argv: string[], out: (s: string) => void): ScopeOptions | number {
   const requested = adrFlags(argv);
   const maxCandidatesRaw = valueAfter(argv, '--max-candidates');
   const maxCandidates = maxCandidatesRaw === undefined ? undefined : Number(maxCandidatesRaw);
@@ -660,148 +764,151 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
     return failure(out, '--samples must be an odd number from 1 to 7');
   }
   const fresh = flagSet(argv, '--fresh');
-  const candidatesForRepo = scopeCandidates(root, maxCandidates === undefined ? undefined : {maxCandidates});
-  const adrs = loadGateAdrs(root, config)
-    .filter((adr) => adr.status === 'accepted')
-    .filter((adr) => requested.length === 0 || requested.includes(adr.id))
-    .filter(isForeignRecord);
+  return {requested, maxCandidates, samples, fresh};
+}
 
-  let classify: GateClassifier;
-  let model = 'injected';
-  if (deps.classify) {
-    classify = deps.classify;
-  } else {
-    const created = await createJevClassifier();
-    const consent = readExternalContextConsent(root, created.gateway);
-    if (!consent.granted) {
-      return failure(out, `external-context consent required: an ADR check sends ADR and work text to ${created.gateway}; run junior auth consent grant ${created.gateway} --project ${root}${consent.reason ? ` (${consent.reason})` : ''}`);
-    }
-    classify = created.classify;
-    model = created.model;
+async function scopeClassifier(
+  root: string,
+  deps: AdrCliDeps,
+  out: (s: string) => void,
+): Promise<{classify: GateClassifier; model: string} | number> {
+  if (deps.classify) return {classify: deps.classify, model: 'injected'};
+  const created = await createJevClassifier();
+  const consent = readExternalContextConsent(root, created.gateway);
+  if (!consent.granted) {
+    return failure(out, `external-context consent required: an ADR check sends ADR and work text to ${created.gateway}; run junior auth consent grant ${created.gateway} --project ${root}${consent.reason ? ` (${consent.reason})` : ''}`);
   }
+  return {classify: created.classify, model: created.model};
+}
 
-  type UncertainPath = {path: string; votes: number; samples: number};
-  const proposals: Array<{
-    adrId: string;
-    path: string;
-    appliesTo: string[];
-    rules: Array<{id: string; text: string}>;
-    uncertain: UncertainPath[];
-    votes: Record<string, number>;
-  }> = [];
-  const skipped: Array<{adrId: string; reason: string; uncertain?: UncertainPath[]}> = [];
-  const cache = readScopeCache(root);
-  let judged = 0;
-  let cached = 0;
+function candidateOf(questionId: string): string {
+  return questionId.startsWith('cell:') && questionId.endsWith(':governs')
+    ? questionId.slice('cell:'.length, -':governs'.length)
+    : '';
+}
 
-  const candidateOf = (questionId: string): string =>
-    questionId.startsWith('cell:') && questionId.endsWith(':governs')
-      ? questionId.slice('cell:'.length, -':governs'.length)
-      : '';
-  const cacheEntry = (answer: unknown): Record<string, unknown> => {
-    const record = answer && typeof answer === 'object' ? (answer as Record<string, unknown>) : {};
-    const choice = typeof record.choice === 'string' ? record.choice : null;
-    const confidence =
-      typeof record.confidence === 'number' && Number.isFinite(record.confidence) ? record.confidence : null;
-    if (choice === null) return {};
-    return {type: 'choice', choice, ...(confidence === null ? {} : {confidence})};
-  };
-  const depthOf = (candidate: string): number => candidate.replace(/\/\*\*$/, '').split('/').length;
+function scopeCacheEntry(answer: unknown): Record<string, unknown> {
+  const record = answer && typeof answer === 'object' ? (answer as Record<string, unknown>) : {};
+  const choice = typeof record.choice === 'string' ? record.choice : null;
+  const confidence =
+    typeof record.confidence === 'number' && Number.isFinite(record.confidence) ? record.confidence : null;
+  if (choice === null) return {};
+  return {type: 'choice', choice, ...(confidence === null ? {} : {confidence})};
+}
 
-  for (const adr of adrs) {
-    if (candidatesForRepo.length === 0) {
-      skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
-      continue;
-    }
-    const adrHash = adrContentHash(readFileSync(adr.path, 'utf8'));
-    const counts = new Map<string, number>(candidatesForRepo.map((candidate) => [candidate, 0]));
-    const levels = new Map<number, string[]>();
-    for (const candidate of candidatesForRepo) {
-      const depth = depthOf(candidate);
-      levels.set(depth, [...(levels.get(depth) ?? []), candidate]);
-    }
-    const majority = new Set<string>();
-    let anyKnown = false;
+function depthOf(candidate: string): number {
+  return candidate.replace(/\/\*\*$/, '').split('/').length;
+}
 
-    for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
-      const eligible = (levels.get(depth) ?? []).filter(
-        (candidate) =>
-          ![...majority].some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`)),
-      );
-      if (eligible.length === 0) continue;
-
-      for (let sample = 0; sample < samples; sample += 1) {
-        const replay: GateClassifier = async ({state, questions}, options) => {
-          const answers: Record<string, unknown> = {};
-          const missing: Record<string, typeof questions[string]> = {};
-          for (const [id, question] of Object.entries(questions)) {
-            const candidate = candidateOf(id);
-            const key = scopeCacheKey({adrHash, candidate, sample, model});
-            if (!fresh && Object.prototype.hasOwnProperty.call(cache, key)) {
-              answers[id] = cache[key];
-              cached += 1;
-            } else {
-              missing[id] = question;
-            }
-          }
-          if (Object.keys(missing).length > 0) {
-            const result = await classify({state, questions: missing}, options);
-            for (const id of Object.keys(missing)) {
-              const candidate = candidateOf(id);
-              const key = scopeCacheKey({adrHash, candidate, sample, model});
-              const entry = cacheEntry(result.answers?.[id]);
-              cache[key] = entry;
-              answers[id] = entry;
-              judged += 1;
-            }
-          }
-          return {answers};
-        };
-        const result = await analyze({input: scopeRequest(adr, eligible), classify: replay});
-        for (const cell of result.cells.filter((entry) => entry.criterionId === 'governs')) {
-          if (!cell.known) continue;
-          anyKnown = true;
-          if (cell.optionId === 'yes') counts.set(cell.itemId, (counts.get(cell.itemId) ?? 0) + 1);
-        }
-      }
-
-      for (const candidate of eligible) {
-        if ((counts.get(candidate) ?? 0) > samples / 2) majority.add(candidate);
-      }
-    }
-
-    const voted = candidatesForRepo.filter((candidate) => (counts.get(candidate) ?? 0) > 0);
-    const majorityPaths = candidatesForRepo.filter((candidate) => majority.has(candidate));
-    const uncertain: UncertainPath[] = voted
-      .filter((candidate) => !majority.has(candidate))
-      .map((candidate) => ({path: candidate, votes: counts.get(candidate) ?? 0, samples}));
-    const votes = Object.fromEntries(voted.map((candidate) => [candidate, counts.get(candidate) ?? 0]));
-
-    if (majorityPaths.length === 0) {
-      if (uncertain.length > 0) {
-        skipped.push({adrId: adr.id, reason: `only uncertain paths (${uncertain.length})`, uncertain});
-      } else if (!anyKnown) {
-        skipped.push({adrId: adr.id, reason: 'Jev answers were unknown'});
+function replayClassifier(run: ScopeRun, adrHash: string, sample: number): GateClassifier {
+  const {cache, model} = run;
+  return async ({state, questions}, options) => {
+    const answers: Record<string, unknown> = {};
+    const missing: Record<string, typeof questions[string]> = {};
+    for (const [id, question] of Object.entries(questions)) {
+      const candidate = candidateOf(id);
+      const key = scopeCacheKey({adrHash, candidate, sample, model});
+      if (!run.fresh && Object.prototype.hasOwnProperty.call(cache, key)) {
+        answers[id] = cache[key];
+        run.cached += 1;
       } else {
-        skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
+        missing[id] = question;
       }
-      continue;
+    }
+    if (Object.keys(missing).length > 0) {
+      const result = await run.classify({state, questions: missing}, options);
+      for (const id of Object.keys(missing)) {
+        const candidate = candidateOf(id);
+        const key = scopeCacheKey({adrHash, candidate, sample, model});
+        const entry = scopeCacheEntry(result.answers?.[id]);
+        cache[key] = entry;
+        answers[id] = entry;
+        run.judged += 1;
+      }
+    }
+    return {answers};
+  };
+}
+
+async function voteScope(
+  run: ScopeRun,
+  adr: Adr,
+): Promise<{counts: Map<string, number>; majority: Set<string>; anyKnown: boolean}> {
+  const {candidatesForRepo, samples} = run;
+  const adrHash = adrContentHash(readFileSync(adr.path, 'utf8'));
+  const counts = new Map<string, number>(candidatesForRepo.map((candidate) => [candidate, 0]));
+  const levels = new Map<number, string[]>();
+  for (const candidate of candidatesForRepo) {
+    const depth = depthOf(candidate);
+    levels.set(depth, [...(levels.get(depth) ?? []), candidate]);
+  }
+  const majority = new Set<string>();
+  let anyKnown = false;
+
+  for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
+    const eligible = (levels.get(depth) ?? []).filter(
+      (candidate) =>
+        ![...majority].some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`)),
+    );
+    if (eligible.length === 0) continue;
+
+    for (let sample = 0; sample < samples; sample += 1) {
+      const replay = replayClassifier(run, adrHash, sample);
+      const result = await analyze({input: scopeRequest(adr, eligible), classify: replay});
+      for (const cell of result.cells.filter((entry) => entry.criterionId === 'governs')) {
+        if (!cell.known) continue;
+        anyKnown = true;
+        if (cell.optionId === 'yes') counts.set(cell.itemId, (counts.get(cell.itemId) ?? 0) + 1);
+      }
     }
 
-    const appliesTo: string[] = [];
-    for (const candidate of majorityPaths) {
-      if (appliesTo.some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`))) continue;
-      appliesTo.push(candidate);
+    for (const candidate of eligible) {
+      if ((counts.get(candidate) ?? 0) > samples / 2) majority.add(candidate);
     }
-    const ruleD = adr.rules.find((rule) => rule.id === 'D');
-    const rules = ruleD ? [{id: 'D', text: ruleD.text}] : [];
-    const draft = draftFrontMatter(adr, {appliesTo, rules, uncertain});
-    writeProposal(root, draft);
-    proposals.push({adrId: adr.id, path: draft.path, appliesTo, rules, uncertain, votes});
+  }
+  return {counts, majority, anyKnown};
+}
+
+async function scopeAdr(run: ScopeRun, adr: Adr): Promise<void> {
+  const {candidatesForRepo, samples, skipped} = run;
+  if (candidatesForRepo.length === 0) {
+    skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
+    return;
+  }
+  const {counts, majority, anyKnown} = await voteScope(run, adr);
+
+  const voted = candidatesForRepo.filter((candidate) => (counts.get(candidate) ?? 0) > 0);
+  const majorityPaths = candidatesForRepo.filter((candidate) => majority.has(candidate));
+  const uncertain: UncertainPath[] = voted
+    .filter((candidate) => !majority.has(candidate))
+    .map((candidate) => ({path: candidate, votes: counts.get(candidate) ?? 0, samples}));
+  const votes = Object.fromEntries(voted.map((candidate) => [candidate, counts.get(candidate) ?? 0]));
+
+  if (majorityPaths.length === 0) {
+    if (uncertain.length > 0) {
+      skipped.push({adrId: adr.id, reason: `only uncertain paths (${uncertain.length})`, uncertain});
+    } else if (!anyKnown) {
+      skipped.push({adrId: adr.id, reason: 'Jev answers were unknown'});
+    } else {
+      skipped.push({adrId: adr.id, reason: 'no candidate path judged governed'});
+    }
+    return;
   }
 
-  if (judged > 0) writeScopeCache(root, cache);
+  const appliesTo: string[] = [];
+  for (const candidate of majorityPaths) {
+    if (appliesTo.some((kept) => candidate.startsWith(`${kept.replace(/\/\*\*$/, '')}/`))) continue;
+    appliesTo.push(candidate);
+  }
+  const ruleD = adr.rules.find((rule) => rule.id === 'D');
+  const rules = ruleD ? [{id: 'D', text: ruleD.text}] : [];
+  const draft = draftFrontMatter(adr, {appliesTo, rules, uncertain});
+  writeProposal(run.root, draft);
+  run.proposals.push({adrId: adr.id, path: draft.path, appliesTo, rules, uncertain, votes});
+}
 
+function printScope(argv: string[], out: (s: string) => void, run: ScopeRun): void {
+  const {proposals, skipped, judged, cached} = run;
   if (flagSet(argv, '--json')) {
     out(`${JSON.stringify({proposals, skipped, judged, cached}, null, 2)}\n`);
   } else {
@@ -812,7 +919,44 @@ async function runScope(argv: string[], deps: AdrCliDeps): Promise<number> {
     for (const entry of skipped) out(`${entry.adrId} skipped: ${entry.reason}\n`);
     out(`judged: ${judged}, cached: ${cached}\n`);
   }
-  return 0;
+}
+
+function subcommandUsage(command: string | undefined): string {
+  const lines = ADR_CLI_USAGE.split('\n');
+  const own: string[] = [];
+  let matched = false;
+  for (const line of lines.slice(1)) {
+    const continuation = /^ {4,}/.test(line);
+    if (!continuation) matched = command !== undefined && line.trim().split(/\s/)[0]!.split('|').includes(command);
+    if (matched) own.push(line);
+  }
+  return own.length > 0 ? [lines[0], ...own].join('\n') : ADR_CLI_USAGE;
+}
+
+function runLint(rest: string[], deps: AdrCliDeps): number {
+  const out = output(deps);
+  const root = deps.cwd ?? process.cwd();
+  const configured = readAdrConfig(root) ?? proposeAdrConfig(root);
+  const detection = configured ? null : detectAdrDir(root);
+  let label = configured?.dir ?? detection?.dir ?? 'docs/adr';
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === '--dir') label = rest[++i] ?? label;
+    else if (arg.startsWith('--dir=')) label = arg.slice('--dir='.length);
+  }
+  const dir = isAbsolute(label) ? label : join(root, label);
+  const config = configured?.filePattern === undefined ? undefined : {filePattern: configured.filePattern};
+  try {
+    const adrs = loadAllAdrs(dir, config);
+    const foreignPaths = new Set(adrs.filter(isForeignRecord).map((adr) => adr.path));
+    const findings = lintAdrs(adrs, {foreignPaths});
+    const discovery = adrDiscovery(dir, adrs.length, {...config, dir: label});
+    if (discovery) errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
+    out(`${JSON.stringify(discovery ? {findings, discovery} : {findings}, null, 2)}\n`);
+    return findings.some((entry) => entry.severity === 'error') ? 1 : 0;
+  } catch (err) {
+    return failure(errorOutput(deps), err instanceof Error ? err.message : String(err));
+  }
 }
 
 /** ADR 0018 R1-R5: the `junior adr` command parser and dispatcher. */
@@ -834,42 +978,11 @@ export async function runAdrCli(argv: string[], deps: AdrCliDeps = {}): Promise<
   // #252: `--help`/`-h` on any subcommand prints usage and never runs it (`adr new --help`
   // used to write an ADR titled "--help").
   if (rest.includes('--help') || rest.includes('-h')) {
-    const lines = ADR_CLI_USAGE.split('\n');
-    const own: string[] = [];
-    let matched = false;
-    for (const line of lines.slice(1)) {
-      const continuation = /^ {4,}/.test(line);
-      if (!continuation) matched = command !== undefined && line.trim().split(/\s/)[0]!.split('|').includes(command);
-      if (matched) own.push(line);
-    }
-    out(`${own.length > 0 ? [lines[0], ...own].join('\n') : ADR_CLI_USAGE}\n`);
+    out(`${subcommandUsage(command)}\n`);
     return 0;
   }
 
-  if (command === 'lint') {
-    const root = deps.cwd ?? process.cwd();
-    const configured = readAdrConfig(root) ?? proposeAdrConfig(root);
-    const detection = configured ? null : detectAdrDir(root);
-    let label = configured?.dir ?? detection?.dir ?? 'docs/adr';
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--dir') label = rest[++i] ?? label;
-      else if (arg.startsWith('--dir=')) label = arg.slice('--dir='.length);
-    }
-    const dir = isAbsolute(label) ? label : join(root, label);
-    const config = configured?.filePattern === undefined ? undefined : {filePattern: configured.filePattern};
-    try {
-      const adrs = loadAllAdrs(dir, config);
-      const foreignPaths = new Set(adrs.filter(isForeignRecord).map((adr) => adr.path));
-      const findings = lintAdrs(adrs, {foreignPaths});
-      const discovery = adrDiscovery(dir, adrs.length, {...config, dir: label});
-      if (discovery) errorOutput(deps)(`${adrDiscoveryMessage(discovery, config)}\n`);
-      out(`${JSON.stringify(discovery ? {findings, discovery} : {findings}, null, 2)}\n`);
-      return findings.some((entry) => entry.severity === 'error') ? 1 : 0;
-    } catch (err) {
-      return failure(errorOutput(deps), err instanceof Error ? err.message : String(err));
-    }
-  }
+  if (command === 'lint') return runLint(rest, deps);
   if (command === 'new' || command === 'sync') {
     return runAdr([command, ...rest]);
   }

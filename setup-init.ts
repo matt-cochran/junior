@@ -115,14 +115,11 @@ function refreshProjectPiPin(deps:SetupDeps, path:string, tested:string, write:(
  return { from:pinned, to:tested, action:'raised' };
 }
 
-export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
- const cwd=deps.cwd ?? process.cwd();
- const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
- const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
+type TestedPi={ name:string; version:string };
+
+function seedProjectFiles(deps:SetupDeps, opts:InitOptions, cwd:string, write:(p:string,d:string)=>void, mkdir:(p:string)=>void, tested:TestedPi):{ created:string[]; preserved:string[]; piPin:InitResult['piPin'] } {
  const created:string[]=[];
  const preserved:string[]=[];
-
- const tested={name:PI_PACKAGE,version:TESTED_PI_VERSION};
  const defaultsPath=join(cwd,'delivery.config.json');
  let piPin:InitResult['piPin'];
  if (exists(deps,defaultsPath)) {
@@ -145,91 +142,84 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
   write(examplePath, JSON.stringify(exampleTask(cwd, deps.execPath ?? process.execPath),null,2)+'\n');
   created.push('tasks/example-task.json');
  }
+ return { created, preserved, piPin };
+}
 
+function installInitSkills(deps:SetupDeps, opts:InitOptions):{ skill:SkillResult; projectSkill:SkillResult } {
  // `update` also refreshes existing user-scope copies (doctor reports them),
  // but never creates a new user-level install. A plain `init` stays project-only.
  const isUpdate=opts.command === 'update' || opts.update === true;
- let skill:SkillResult;
- let projectSkill:SkillResult;
- if (isUpdate) {
-  const primary=installSkill(deps,{ ...opts, recognizeUnrecorded:true, createMissing:opts.scope !== 'user' });
-  projectSkill=primary;
-  if (opts.scope === 'user') skill=primary;
-  else {
-   const user=installSkill(deps,{ ...opts, skillRoot:undefined, scope:'user', recognizeUnrecorded:true, createMissing:false });
-   const actions=[...primary.actions, ...user.actions];
-   skill={ ...primary, actions, ok:actions.every((a)=>a.status !== 'outdated' && a.status !== 'customized') };
-  }
- } else {
-  skill=installSkill(deps, opts);
-  projectSkill=skill;
+ if (!isUpdate) {
+  const skill=installSkill(deps, opts);
+  return { skill, projectSkill:skill };
  }
- const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(projectSkill, created)).added;
- // Lock an existing .crossmatrix/ store to the CLI/MCP before doctor reads the
- // rules (#194); a store created below is locked right after creation.
- let storeLockdown:{path:string; changed:boolean}|undefined;
- const lockStore=()=>{ try { const r=installStoreDenyRules({ projectDir:cwd }); if (r.changed) storeLockdown=r; } catch { /* doctor reports it */ } };
- lockStore();
- let readiness=doctor(deps);
- let install:InitResult['install'];
- if (opts.install) {
-  const installed=readiness.pi.version;
-  if (installationDisabled(deps.env)) {
-   install={ requested:true, attempted:false, ok:true, skipped:'JUNIOR_NO_INSTALL',
-    pi:{ from:installed, to:installed, action:'disabled' } };
-  } else if (readiness.pi.found && installed) {
-   const comparison=compareSemver(installed,tested.version);
-   if (comparison === 0) {
-    install={ requested:true, attempted:false, ok:true,
-     pi:{ from:installed, to:installed, action:'current' } };
-   } else if (comparison > 0) {
-    const note=`installed pi ${installed} is newer than the tested ${tested.version}; leaving it alone`;
-    install={ requested:true, attempted:false, ok:true, note,
-     pi:{ from:installed, to:installed, action:'newer' } };
-   }
-  }
-  if (!install) {
-   if (!tested) {
-    const error=`Cannot determine the exact tested Pi version from a local package.json; install with \`npm install -g --ignore-scripts ${PI_PACKAGE}\` using the active Node/nvm.`;
-    install={ requested:true, attempted:false, ok:false, error,
-     pi:{ from:installed, to:installed, action:'failed', error } };
-   } else {
-    const spec=`${tested.name}@${tested.version}`;
-    const args=['install','-g','--ignore-scripts',spec];
-    const r=(deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o)))('npm',args,{timeout:INSTALL_TIMEOUT_MS, env:deps.env ?? process.env});
-    const ok=r.status===0;
-    const error=ok ? undefined : (r.error || (r.stderr || `npm install exited ${r.status}`));
-    install={ requested:true, attempted:true, ok, command:['npm',...args], spec,
-     ...(error ? { error } : {}),
-     pi:{ from:installed, to:ok ? tested.version : installed,
-      action:ok ? (installed ? 'upgraded' : 'installed') : 'failed', ...(error ? { error } : {}) } };
-   }
+ const primary=installSkill(deps,{ ...opts, recognizeUnrecorded:true, createMissing:opts.scope !== 'user' });
+ if (opts.scope === 'user') return { skill:primary, projectSkill:primary };
+ const user=installSkill(deps,{ ...opts, skillRoot:undefined, scope:'user', recognizeUnrecorded:true, createMissing:false });
+ const actions=[...primary.actions, ...user.actions];
+ return { skill:{ ...primary, actions, ok:actions.every((a)=>a.status !== 'outdated' && a.status !== 'customized') }, projectSkill:primary };
+}
+
+function existingPiInstall(deps:SetupDeps, readiness:ReturnType<typeof doctor>, tested:TestedPi):InitResult['install'] {
+ const installed=readiness.pi.version;
+ if (installationDisabled(deps.env)) {
+  return { requested:true, attempted:false, ok:true, skipped:'JUNIOR_NO_INSTALL',
+   pi:{ from:installed, to:installed, action:'disabled' } };
+ }
+ if (readiness.pi.found && installed) {
+  const comparison=compareSemver(installed,tested.version);
+  if (comparison === 0) {
+   return { requested:true, attempted:false, ok:true,
+    pi:{ from:installed, to:installed, action:'current' } };
+  } else if (comparison > 0) {
+   const note=`installed pi ${installed} is newer than the tested ${tested.version}; leaving it alone`;
+   return { requested:true, attempted:false, ok:true, note,
+    pi:{ from:installed, to:installed, action:'newer' } };
   }
  }
- if (install?.attempted && install.ok) readiness=doctor(deps);
- const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
- const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
- const command=opts.command ?? 'init';
- let agentInstructions:InitResult['agentInstructions'];
- if (opts.agentInstructions === false) {
-  agentInstructions={ skipped:true };
- } else {
-  agentInstructions=applyAgentInstructions(cwd,{ target:(opts.target ?? 'both') as AgentTarget, command, deps });
-  for (const file of agentInstructions.files) {
-   if (file.action === 'conflict') instructions.push(`${file.path}: ${file.reason} <junior> tags at lines ${(file.lines ?? []).join(', ')}; fix them by hand, then rerun junior update`);
-  }
-  // Like a generated delivery.config.json, an instruction file init creates is
-  // excluded locally so a fresh project stays ready for a worktree handoff; a
-  // file the user already had is theirs to commit.
-  const createdFiles=agentInstructions.files.filter((file)=>file.action === 'created').map((file)=>file.path);
-  if (createdFiles.length) {
-   excluded.push(...ensureLocalExcludes(cwd, createdFiles.map((path)=>`/${path}`)).added);
-   instructions.push(`Created ${createdFiles.join(' and ')} with the Junior <junior> block and excluded locally; to share it with your team, remove its line from .git/info/exclude and commit it.`);
-  }
-  const editedFiles=agentInstructions.files.filter((file)=>file.action === 'added' || file.action === 'updated').map((file)=>file.path);
-  if (editedFiles.length) instructions.push(`Commit the <junior> block in ${editedFiles.join(' and ')}; worktree handoffs need a clean checkout.`);
+ return undefined;
+}
+
+function installPi(deps:SetupDeps, readiness:ReturnType<typeof doctor>, tested:TestedPi):NonNullable<InitResult['install']> {
+ const existing=existingPiInstall(deps, readiness, tested);
+ if (existing) return existing;
+ const installed=readiness.pi.version;
+ if (!tested) {
+  const error=`Cannot determine the exact tested Pi version from a local package.json; install with \`npm install -g --ignore-scripts ${PI_PACKAGE}\` using the active Node/nvm.`;
+  return { requested:true, attempted:false, ok:false, error,
+   pi:{ from:installed, to:installed, action:'failed', error } };
  }
- if (install?.note) instructions.push(install.note);
+ const spec=`${tested.name}@${tested.version}`;
+ const args=['install','-g','--ignore-scripts',spec];
+ const r=(deps.exec ?? ((c:string,a:string[],o?:any)=>asSpawn(c,a,o)))('npm',args,{timeout:INSTALL_TIMEOUT_MS, env:deps.env ?? process.env});
+ const ok=r.status===0;
+ const error=ok ? undefined : (r.error || (r.stderr || `npm install exited ${r.status}`));
+ return { requested:true, attempted:true, ok, command:['npm',...args], spec,
+  ...(error ? { error } : {}),
+  pi:{ from:installed, to:ok ? tested.version : installed,
+   action:ok ? (installed ? 'upgraded' : 'installed') : 'failed', ...(error ? { error } : {}) } };
+}
+
+function applyInitAgentInstructions(deps:SetupDeps, opts:InitOptions, cwd:string, command:'init'|'update', excluded:string[], instructions:string[]):InitResult['agentInstructions'] {
+ if (opts.agentInstructions === false) return { skipped:true };
+ const agentInstructions=applyAgentInstructions(cwd,{ target:(opts.target ?? 'both') as AgentTarget, command, deps });
+ for (const file of agentInstructions.files) {
+  if (file.action === 'conflict') instructions.push(`${file.path}: ${file.reason} <junior> tags at lines ${(file.lines ?? []).join(', ')}; fix them by hand, then rerun junior update`);
+ }
+ // Like a generated delivery.config.json, an instruction file init creates is
+ // excluded locally so a fresh project stays ready for a worktree handoff; a
+ // file the user already had is theirs to commit.
+ const createdFiles=agentInstructions.files.filter((file)=>file.action === 'created').map((file)=>file.path);
+ if (createdFiles.length) {
+  excluded.push(...ensureLocalExcludes(cwd, createdFiles.map((path)=>`/${path}`)).added);
+  instructions.push(`Created ${createdFiles.join(' and ')} with the Junior <junior> block and excluded locally; to share it with your team, remove its line from .git/info/exclude and commit it.`);
+ }
+ const editedFiles=agentInstructions.files.filter((file)=>file.action === 'added' || file.action === 'updated').map((file)=>file.path);
+ if (editedFiles.length) instructions.push(`Commit the <junior> block in ${editedFiles.join(' and ')}; worktree handoffs need a clean checkout.`);
+ return agentInstructions;
+}
+
+function setupMatrixStore(deps:SetupDeps, opts:InitOptions, cwd:string, command:'init'|'update', lockStore:()=>void, instructions:string[]):MatrixOutcome {
  const storePath=join(cwd,'.crossmatrix');
  const hadStore=exists(deps, storePath);
  // `update` only creates committed project state when explicitly opted in;
@@ -256,6 +246,33 @@ export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
  } else if (!exists(deps, storePath) && !(command === 'update' && opts.matrix !== true)) {
   instructions.push(MATRIX_REMINDER);
  }
+ return matrix;
+}
+
+export function init(deps:SetupDeps = {}, opts:InitOptions = {}):InitResult {
+ const cwd=deps.cwd ?? process.cwd();
+ const write=(deps.writeFile ?? ((p:string,d:string)=>writeFileSync(p,d)));
+ const mkdir=(deps.mkdir ?? ((p:string)=>mkdirSync(p,{recursive:true})));
+
+ const tested={name:PI_PACKAGE,version:TESTED_PI_VERSION};
+ const { created, preserved, piPin }=seedProjectFiles(deps, opts, cwd, write, mkdir, tested);
+ const { skill, projectSkill }=installInitSkills(deps, opts);
+ const excluded=ensureLocalExcludes(cwd, generatedExcludePatterns(projectSkill, created)).added;
+ // Lock an existing .crossmatrix/ store to the CLI/MCP before doctor reads the
+ // rules (#194); a store created below is locked right after creation.
+ let storeLockdown:{path:string; changed:boolean}|undefined;
+ const lockStore=()=>{ try { const r=installStoreDenyRules({ projectDir:cwd }); if (r.changed) storeLockdown=r; } catch { /* doctor reports it */ } };
+ lockStore();
+ let readiness=doctor(deps);
+ let install:InitResult['install'];
+ if (opts.install) install=installPi(deps, readiness, tested);
+ if (install?.attempted && install.ok) readiness=doctor(deps);
+ const skillAdvice=skill.actions.filter((a)=>a.status === 'outdated' || a.status === 'customized').map((a)=>a.message);
+ const instructions=readiness.ok && skill.ok ? [] : [...(readiness.ok ? [] : readiness.remediation), ...skillAdvice];
+ const command=opts.command ?? 'init';
+ const agentInstructions=applyInitAgentInstructions(deps, opts, cwd, command, excluded, instructions);
+ if (install?.note) instructions.push(install.note);
+ const matrix=setupMatrixStore(deps, opts, cwd, command, lockStore, instructions);
  return { ...(storeLockdown ? { storeLockdown } : {}), command, cwd, created, preserved, ready:readiness.ok && skill.ok, pi:readiness.pi, ...(piPin ? { piPin } : {}), skill, excluded, matrix, install,
   installSummary:summarizeInstall(install,null), agentInstructions, instructions };
 }
@@ -266,31 +283,41 @@ function isSkillTarget(value:string|undefined):value is SkillTargetSelection {
  return !!value && (SKILL_TARGETS as string[]).includes(value);
 }
 
+const INIT_BOOLEAN_FLAGS=new Map<string,(opts:InitOptions)=>void>([
+ ['--install',(o)=>{ o.install=true; }],
+ ['--no-install',(o)=>{ o.install=false; }],
+ ['--no-companions',(o)=>{ o.companions=false; }],
+ ['--user',(o)=>{ o.scope='user'; }],
+ ['--project',(o)=>{ o.scope='project'; }],
+ ['--upgrade',(o)=>{ o.upgrade=true; }],
+ ['--update',(o)=>{ o.update=true; }],
+ ['--with-triz',(o)=>{ o.withTriz=true; }],
+ ['--no-matrix',(o)=>{ o.matrix=false; }],
+ ['--with-matrix',(o)=>{ o.matrix=true; }],
+ ['--force',(o)=>{ o.force=true; }],
+ ['--no-skill',(o)=>{ o.target='none'; }],
+ ['--no-agent-instructions',(o)=>{ o.agentInstructions=false; }],
+]);
+
+function applyInitValueFlag(opts:InitOptions, argv:string[], i:number):number {
+ const a=argv[i];
+ if (a === '--scope') { opts.scope = argv[++i] === 'user' ? 'user' : 'project'; return i; }
+ if (a.startsWith('--scope=')) { opts.scope = a.slice('--scope='.length) === 'user' ? 'user' : 'project'; return i; }
+ if (a === '--target') { const v=argv[++i]; opts.target=isSkillTarget(v) ? v : 'both'; return i; }
+ if (a.startsWith('--target=')) { const v=a.slice('--target='.length); opts.target=isSkillTarget(v) ? v : 'both'; return i; }
+ if (a === '--skill-root') { opts.skillRoot=argv[++i]; return i; }
+ if (a.startsWith('--skill-root=')) opts.skillRoot=a.slice('--skill-root='.length);
+ return i;
+}
+
 /** Parse the `init` flags shared by the `worker.ts` and `junior.ts` CLIs. */
 export function parseInitOptions(argv:string[]):InitOptions {
  // The CLI installs Pi, the managed tools and the companion tools by default.
  const opts:InitOptions={ install:true };
  for (let i=0;i<argv.length;i++) {
-  const a=argv[i];
-  if (a === '--install') opts.install=true;
-  else if (a === '--no-install') opts.install=false;
-  else if (a === '--no-companions') opts.companions=false;
-  else if (a === '--user') opts.scope='user';
-  else if (a === '--project') opts.scope='project';
-  else if (a === '--upgrade') opts.upgrade=true;
-  else if (a === '--update') opts.update=true;
-  else if (a === '--with-triz') opts.withTriz=true;
-  else if (a === '--no-matrix') opts.matrix=false;
-  else if (a === '--with-matrix') opts.matrix=true;
-  else if (a === '--force') opts.force=true;
-  else if (a === '--no-skill') opts.target='none';
-  else if (a === '--no-agent-instructions') opts.agentInstructions=false;
-  else if (a === '--scope') opts.scope = argv[++i] === 'user' ? 'user' : 'project';
-  else if (a.startsWith('--scope=')) opts.scope = a.slice('--scope='.length) === 'user' ? 'user' : 'project';
-  else if (a === '--target') { const v=argv[++i]; opts.target=isSkillTarget(v) ? v : 'both'; }
-  else if (a.startsWith('--target=')) { const v=a.slice('--target='.length); opts.target=isSkillTarget(v) ? v : 'both'; }
-  else if (a === '--skill-root') opts.skillRoot=argv[++i];
-  else if (a.startsWith('--skill-root=')) opts.skillRoot=a.slice('--skill-root='.length);
+  const setFlag=INIT_BOOLEAN_FLAGS.get(argv[i]);
+  if (setFlag) setFlag(opts);
+  else i=applyInitValueFlag(opts,argv,i);
  }
  return opts;
 }

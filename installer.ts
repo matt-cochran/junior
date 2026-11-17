@@ -159,12 +159,27 @@ function parseArgs(argv: string[]): InstallOptions {
   const opts: InstallOptions = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--update") opts.update = true;
-    else if (a === "--install-root") opts.installRoot = argv[++i];
-    else if (a.startsWith("--install-root=")) opts.installRoot = a.slice("--install-root=".length);
-    else if (a === "--tool") opts.tools = [argv[++i] as ToolName];
-    else if (a.startsWith("--tool=")) opts.tools = [a.slice("--tool=".length) as ToolName];
-    else if (a === "--with-triz") opts.withTriz = true;
+    if (a === "--update") {
+      opts.update = true;
+      continue;
+    }
+    if (a === "--install-root") {
+      opts.installRoot = argv[++i];
+      continue;
+    }
+    if (a.startsWith("--install-root=")) {
+      opts.installRoot = a.slice("--install-root=".length);
+      continue;
+    }
+    if (a === "--tool") {
+      opts.tools = [argv[++i] as ToolName];
+      continue;
+    }
+    if (a.startsWith("--tool=")) {
+      opts.tools = [a.slice("--tool=".length) as ToolName];
+      continue;
+    }
+    if (a === "--with-triz") opts.withTriz = true;
   }
   return opts;
 }
