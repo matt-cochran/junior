@@ -560,13 +560,24 @@ test('A mock run reports a null output breakdown',async()=>{
  const r=await run(task(),true);
  assert.equal(r.outputBreakdown,null);
 });
+/** Resolve once the run's events.jsonl contains `text`, polling the real file. */
+const eventsShow=async(repo:any,id:string,text:string)=>{for(let i=0;i<3000;i++){try{if(readFileSync(join(artifactFor(repo,id),'events.jsonl'),'utf8').includes(text))return;}catch{}await new Promise((r)=>setTimeout(r,5));}throw new Error(`timed out waiting for ${text}`);};
 test('A tool timeout names the tool and truncated command in the result unresolved list',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  const command='x'.repeat(300);
+ const clock=createManualClock(Date.now());
+ let spawned!:()=>void;
+ const attached=new Promise<void>((r)=>{spawned=r;});
  const t=okTask(repo,{id:'guard-unresolved',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:()=>{spawned();return fake.child;},clock});
+ await attached;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ await eventsShow(repo,'guard-unresolved','tool_execution_start');
+ // The 25 ms monitor first sees the 60 ms tool limit crossed on its 75 ms tick.
+ await clock.advanceAsync(74);
+ assert.equal(fake.state.killed,false);
+ await clock.advanceAsync(1);
  const r=await p;
  assert.equal((r.unresolved as string[]).find((u)=>u.includes('bash')),`tool timed out: bash: ${command.slice(0,200)}`);
 });
@@ -574,9 +585,18 @@ test('A tool timeout names the tool and truncated command in the compact handoff
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  const command='y'.repeat(300);
+ const clock=createManualClock(Date.now());
+ let spawned!:()=>void;
+ const attached=new Promise<void>((r)=>{spawned=r;});
  const t=okTask(repo,{id:'guard-handoff',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:60,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:()=>{spawned();return fake.child;},clock});
+ await attached;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash',args:{command}});
+ await eventsShow(repo,'guard-handoff','tool_execution_start');
+ // The 25 ms monitor first sees the 60 ms tool limit crossed on its 75 ms tick.
+ await clock.advanceAsync(74);
+ assert.equal(fake.state.killed,false);
+ await clock.advanceAsync(1);
  const r=await p;
  assert.ok(compactHandoff(r).unresolved.some((u)=>u.includes(`bash: ${command.slice(0,200)}`)));
 });
