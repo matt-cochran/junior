@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "durable_state": {
+    "location": "<project>/cpm-planner.db",
+    "outcome": "opened"
+  }
+}
