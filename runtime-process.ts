@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { DEFAULT_MAX_OUTPUT_BYTES, KILL_GRACE_MS, type ExecutionSettings } from './runtime-settings.ts';
 import type { OutputBreakdown } from './runtime-events.ts';
+import { systemClock, type Clock, type ClockTimer } from './clock.ts';
 
 // ---------------------------------------------------------------------------
 // Heartbeat
@@ -60,14 +61,18 @@ export type ProgressSink = (line: string) => void;
  * by the streaming executor; it flips `running` to `quiet` after `quietMs` of
  * inactivity and writes at most every `heartbeatMs`. When a progress sink is
  * supplied it also emits a heartbeat line at most every `heartbeatMs` while
- * the worker phase is active. */
+ * the worker phase is active. The optional `clock` (default `systemClock`)
+ * times heartbeat writes, and executors sharing this heartbeat fall back to it
+ * for their own timers when they are not given a clock explicitly. */
 export class RuntimeHeartbeat {
+ readonly clock: Clock;
  private snap: RuntimeSnapshot;
  private lastWriteAt = 0;
  private lastProgressAt = 0;
  private readonly path: string;
  private readonly progress?: ProgressSink;
- constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker', progress?: ProgressSink) {
+ constructor(path: string, settings: ExecutionSettings, startedAt: number, deadlineAt: number, phase: RuntimePhase = 'worker', progress?: ProgressSink, clock: Clock = systemClock) {
+  this.clock = clock;
   this.path = path;
   this.progress = progress;
   this.snap = {
@@ -85,7 +90,7 @@ export class RuntimeHeartbeat {
  /** Directory holding the run artifacts (where runtime.json lives). */
  captureDir(): string { return dirname(this.path); }
  private write(force = false): void {
-  const now = Date.now();
+  const now = this.clock.now();
   if (!force && now - this.lastWriteAt < this.snap.heartbeatMs) return;
   this.lastWriteAt = now;
   this.snap.heartbeatAt = iso(now);
@@ -196,6 +201,11 @@ export type SpawnChildOptions = {
  stdoutPath?: string;
  /** Capture stderr in this file instead of a pipe. */
  stderrPath?: string;
+ /** Clock for the capture-file tail poll (default `systemClock`). The
+  * executors deliberately do not forward their own clock here: the poll only
+  * pumps bytes a real child already wrote, so it stays on real time even when a
+  * test drives deadlines and kill grace from a manual clock. */
+ clock?: Clock;
 };
 
 export type SpawnChild = (command: string, args: string[], opts: SpawnChildOptions) => ChildProcessLike;
@@ -244,18 +254,18 @@ function createFileTail(path: string): FileTail {
 }
 
 /** Wrap a capture-backed child so its exit/close follow the tail streams. */
-function captureChild(raw: ChildProcess, stdoutTail?: FileTail, stderrTail?: FileTail): ChildProcessLike {
+function captureChild(raw: ChildProcess, clock: Clock, stdoutTail?: FileTail, stderrTail?: FileTail): ChildProcessLike {
  const wrapper = new EventEmitter() as unknown as ChildProcessLike & EventEmitter;
  wrapper.pid = raw.pid;
  wrapper.stdout = stdoutTail ? stdoutTail.stream : raw.stdout;
  wrapper.stderr = stderrTail ? stderrTail.stream : raw.stderr;
  wrapper.kill = (signal?: NodeJS.Signals) => raw.kill(signal as any);
  let finished = false;
- const poll = setInterval(() => { stdoutTail?.readAvailable(); stderrTail?.readAvailable(); }, TAIL_POLL_MS);
+ const poll = clock.setInterval(() => { stdoutTail?.readAvailable(); stderrTail?.readAvailable(); }, TAIL_POLL_MS);
  const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
   if (finished) return;
   finished = true;
-  clearInterval(poll);
+  clock.clearInterval(poll);
   stdoutTail?.end();
   stderrTail?.end();
   // Let the final tail chunks reach data listeners before the lifecycle events.
@@ -301,7 +311,7 @@ export const spawnChildDetached: SpawnChild = (command, args, opts) => {
   });
   const stdoutTail = stdoutPath ? createFileTail(stdoutPath) : undefined;
   const stderrTail = stderrPath ? createFileTail(stderrPath) : undefined;
-  child = captureChild(raw, stdoutTail, stderrTail);
+  child = captureChild(raw, opts.clock ?? systemClock, stdoutTail, stderrTail);
  } finally {
   for (const fd of fds) { try { closeSync(fd); } catch { /* already closed */ } }
  }
@@ -349,6 +359,9 @@ export type ExecuteCheckOptions = {
  /** Optional file-backed capture paths (sandbox-safe stdout/stderr). */
  stdoutPath?: string;
  stderrPath?: string;
+ /** Clock for the timeout/deadline monitor and the SIGKILL grace timer;
+  * defaults to the heartbeat's clock, then `systemClock`. */
+ clock?: Clock;
 };
 
 /** Run one acceptance check as an async bounded process. The whole process
@@ -360,6 +373,7 @@ type CheckStopReason = 'timeout' | 'deadline' | 'interrupt' | 'output_truncated'
 
 type CheckRun = {
  opts: ExecuteCheckOptions;
+ clock: Clock;
  startedAt: number;
  maxOutputBytes: number;
  stdout: string;
@@ -373,11 +387,11 @@ type CheckRun = {
  outputTruncated: boolean;
  rawBytes: number;
  finished: boolean;
- killTimer: ReturnType<typeof setTimeout> | undefined;
+ killTimer: ClockTimer | undefined;
  killEscalationComplete: boolean;
  completionRequested: boolean;
  child: ChildProcessLike | undefined;
- monitor: ReturnType<typeof setInterval> | undefined;
+ monitor: ClockTimer | undefined;
  resolveDone: (r: CheckResult) => void;
  onAbort: () => void;
 };
@@ -399,7 +413,7 @@ function finalizeCheck(run: CheckRun): void {
  run.completionRequested = true;
  if (run.killTimer && !run.killEscalationComplete) return;
  run.finished = true;
- if (run.monitor) clearInterval(run.monitor);
+ if (run.monitor) run.clock.clearInterval(run.monitor);
  // Do not clear killTimer: a TERM-ignoring descendant must still be SIGKILLed
  // even after the direct child exits.
  run.opts.signal?.removeEventListener?.('abort', run.onAbort);
@@ -409,7 +423,7 @@ function finalizeCheck(run: CheckRun): void {
 
 function terminateCheckChild(run: CheckRun, child: ChildProcessLike): void {
  killChildGroup(child, 'SIGTERM');
- run.killTimer = setTimeout(() => { if (run.child) killChildGroup(run.child, 'SIGKILL'); run.killEscalationComplete = true; if (run.completionRequested) finalizeCheck(run); }, KILL_GRACE_MS);
+ run.killTimer = run.clock.setTimeout(() => { if (run.child) killChildGroup(run.child, 'SIGKILL'); run.killEscalationComplete = true; if (run.completionRequested) finalizeCheck(run); }, KILL_GRACE_MS);
 }
 
 function requestCheckStop(run: CheckRun, reason: CheckStopReason): void {
@@ -442,8 +456,8 @@ function attachCheckChild(run: CheckRun, stream: ChildProcessLike): void {
   if (run.exitSignal === null && signal) run.exitSignal = signal;
   finalizeCheck(run);
  });
- run.monitor = setInterval(() => {
-  const now = Date.now();
+ run.monitor = run.clock.setInterval(() => {
+  const now = run.clock.now();
   opts.heartbeat?.poll(now, null, null);
   if (run.finished || run.timedOut || run.deadlineExceeded || run.interrupted) return;
   if (now - run.startedAt >= opts.timeoutMs) requestCheckStop(run, 'timeout');
@@ -452,7 +466,8 @@ function attachCheckChild(run: CheckRun, stream: ChildProcessLike): void {
 }
 
 export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResult> {
- const startedAt = Date.now();
+ const clock = opts.clock ?? opts.heartbeat?.clock ?? systemClock;
+ const startedAt = clock.now();
  const maxOutputBytes = typeof opts.maxOutputBytes === 'number' && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : DEFAULT_MAX_OUTPUT_BYTES;
  const captureDir = opts.heartbeat?.captureDir?.();
  const captureSequence = checkCaptureSequence++;
@@ -462,7 +477,7 @@ export async function executeCheck(opts: ExecuteCheckOptions): Promise<CheckResu
  let resolveDone!: (r: CheckResult) => void;
  const done = new Promise<CheckResult>((res) => { resolveDone = res; });
  const run: CheckRun = {
-  opts, startedAt, maxOutputBytes,
+  opts, clock, startedAt, maxOutputBytes,
   stdout: '', stderr: '', exitCode: null, exitSignal: null, error: undefined,
   interrupted: false, timedOut: false, deadlineExceeded: false, outputTruncated: false,
   rawBytes: 0, finished: false, killTimer: undefined, killEscalationComplete: false,

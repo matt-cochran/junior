@@ -9,6 +9,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { BudgetLimits, ExecutionSettings } from './runtime-settings.ts';
 import type { RuntimeHeartbeat, RuntimePhase, RuntimeSnapshot } from './runtime-process.ts';
+import type { Clock } from './clock.ts';
 
 /** Optional read boundary for the worker's read-like tool calls. */
 export type ReadScopeLimit = {
@@ -125,6 +126,9 @@ export type ExecuteWorkerOptions = {
  /** Optional contract context entries; their paths are allowed by a
   * `context-only` read scope in addition to `readScope.paths`. */
  context?: Array<{ path?: string } | string>;
+ /** Clock for the tool/deadline monitor and the SIGKILL grace timer; defaults
+  * to the heartbeat's clock, then `systemClock`. */
+ clock?: Clock;
 };
 
 /** Split strict JSONL incrementally. Returns complete lines and leaves an

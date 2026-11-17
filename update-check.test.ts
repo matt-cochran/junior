@@ -562,3 +562,60 @@ test('cachedUpdateSummary derives the cache path from JUNIOR_TOOLS_ROOT', async 
   });
   assert.ok(fs.files.has('/root/.junior/update-check.json'));
 });
+
+// --- injected clock ---------------------------------------------------------
+
+test('cachedUpdateSummary gives up on a hung refresh exactly at its budget', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const clock = createManualClock(100 * HOUR);
+  let settled = false;
+  const pending = (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, fs: memoryFs(), clock, refreshTimeoutMs: 500,
+    collect: () => new Promise<CollectedUpdates>(() => {}),
+  }).finally(() => { settled = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await clock.advanceAsync(499);
+  assert.equal(settled, false);
+  await clock.advanceAsync(1);
+  assert.equal(await pending, null);
+  assert.equal(clock.pending(), 0);
+});
+
+test('cachedUpdateSummary stamps checkedAt from the clock when no now is injected', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const clock = createManualClock(42 * HOUR);
+  const summary = await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, fs: memoryFs(), clock, collect: async () => emptyUpdates(),
+  });
+  assert.equal(summary?.checkedAt, 42 * HOUR);
+});
+
+test('an explicit now wins over the clock for the cache age', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const clock = createManualClock(1_000 * HOUR);
+  const fs = memoryFs();
+  fs.files.set(CACHE, JSON.stringify({ checkedAt: 100 * HOUR, outdated: ['junior'] }));
+  let collected = 0;
+  const summary = await (await import('./update-check.ts')).cachedUpdateSummary({
+    env: {}, cachePath: CACHE, fs, clock, now: () => 101 * HOUR,
+    collect: async () => { collected++; return emptyUpdates(); },
+  });
+  assert.equal(collected, 0);
+  assert.deepEqual(summary?.outdated, ['junior']);
+});
+
+test('the companion probe budget is measured on the injected clock', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const { collectUpdates } = await import('./update-check.ts');
+  const clock = createManualClock(0);
+  let probed: ReturnType<NonNullable<import('./companions.ts').CompanionDeps['exec']>> | undefined;
+  await collectUpdates({
+    ...OFFLINE_PROBES, modelUpdates: NO_MODEL_UPDATES, clock, budgetMs: 1000,
+    inspect: (companionDeps) => {
+      clock.advance(1000);
+      probed = companionDeps.exec?.('npm', ['view', 'x']);
+      return OFFLINE_PROBES.inspect();
+    },
+  });
+  assert.equal(probed?.error, 'update check budget exceeded');
+});

@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import process from "node:process";
+import { systemClock } from "./clock.ts";
 
 export type LockHolder = { pid?: number; hostname?: string };
 
@@ -63,6 +64,6 @@ export function reapDeadHolderLock(lockPath: string): boolean {
 }
 
 /** Stamp a freshly created lock file descriptor with this process as holder. */
-export function writeLockHolder(fd: number, at: string = new Date().toISOString()): void {
+export function writeLockHolder(fd: number, at: string = systemClock.iso()): void {
   fs.writeSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname(), at }));
 }

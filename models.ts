@@ -17,6 +17,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { systemClock, type Clock } from './clock.ts';
 
 export type ParsedModelId = {
  raw:string;
@@ -215,13 +216,13 @@ export const OPENROUTER_ENDPOINTS_URL=(id:string)=>`https://openrouter.ai/api/v1
 /** GET the OpenRouter catalog without credentials. Any network error, timeout
  * (default 3000 ms), non-200 response or unexpected shape resolves to null, so
  * this never throws. */
-export async function fetchOnlineCatalog(opts:{ fetch?:CatalogFetch; timeoutMs?:number; url?:string }={}):Promise<CatalogEntry[]|null> {
+export async function fetchOnlineCatalog(opts:{ fetch?:CatalogFetch; timeoutMs?:number; url?:string; clock?:Clock }={}):Promise<CatalogEntry[]|null> {
+ const clock=opts.clock ?? systemClock;
  const doFetch=opts.fetch ?? (globalThis.fetch as unknown as CatalogFetch);
  const timeoutMs=opts.timeoutMs ?? 3000;
  const url=opts.url ?? OPENROUTER_MODELS_URL;
  const controller=new AbortController();
- const timer=setTimeout(()=>controller.abort(),timeoutMs);
- if (typeof (timer as any).unref === 'function') (timer as any).unref();
+ const timer=clock.setTimeout(()=>controller.abort(),timeoutMs).unref();
  // The race bounds a fetch that ignores the abort signal, so startup never stalls.
  const expired=new Promise<null>(res=>controller.signal.addEventListener('abort',()=>res(null)));
  try {
@@ -244,19 +245,19 @@ export async function fetchOnlineCatalog(opts:{ fetch?:CatalogFetch; timeoutMs?:
  } catch {
   return null;
  } finally {
-  clearTimeout(timer);
+  clock.clearTimeout(timer);
  }
 }
 
 /** GET the OpenRouter endpoints for one model without credentials. Any network
  * error, timeout (default 3000 ms), non-200 response or unexpected shape
  * resolves to null, so this never throws. */
-export async function fetchModelEndpoints(id:string, opts:{ fetch?:CatalogFetch; timeoutMs?:number }={}):Promise<ModelEndpoint[]|null> {
+export async function fetchModelEndpoints(id:string, opts:{ fetch?:CatalogFetch; timeoutMs?:number; clock?:Clock }={}):Promise<ModelEndpoint[]|null> {
+ const clock=opts.clock ?? systemClock;
  const doFetch=opts.fetch ?? (globalThis.fetch as unknown as CatalogFetch);
  const timeoutMs=opts.timeoutMs ?? 3000;
  const controller=new AbortController();
- const timer=setTimeout(()=>controller.abort(),timeoutMs);
- if (typeof (timer as any).unref === 'function') (timer as any).unref();
+ const timer=clock.setTimeout(()=>controller.abort(),timeoutMs).unref();
  const expired=new Promise<null>(res=>controller.signal.addEventListener('abort',()=>res(null)));
  try {
   const res=await Promise.race([doFetch(OPENROUTER_ENDPOINTS_URL(id),{ signal:controller.signal }),expired]);
@@ -277,7 +278,7 @@ export async function fetchModelEndpoints(id:string, opts:{ fetch?:CatalogFetch;
  } catch {
   return null;
  } finally {
-  clearTimeout(timer);
+  clock.clearTimeout(timer);
  }
 }
 

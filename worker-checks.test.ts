@@ -16,6 +16,8 @@ import { runChecks } from './worker-checks.ts';
 import { validate } from './worker-contract.ts';
 import { COMMAND_PLACEMENT_ERROR, parseCommandPolicy } from './command-policy.ts';
 import { stopReasonSummary } from './handoff.ts';
+import { createManualClock, type ManualClock } from './clock.ts';
+import { KILL_GRACE_MS } from './runtime-settings.ts';
 
 /** A temporary artifact directory removed when the test finishes. */
 const arena = (t: any): string => {
@@ -65,23 +67,49 @@ const remoteRule = (dir: string) => parseCommandPolicy({
 
 // --- check timeout reporting -------------------------------------------------
 
-test('a check killed by checkTimeoutMs reports timedOut true', async (t) => {
-  const dir = arena(t);
+/** Resolve once `pred` holds. It polls a real condition (a file, a pending
+ * timer) and gives up after a generous bound; no assertion depends on how long
+ * the wait took. */
+const eventually = async (pred: () => boolean, what: string, tries = 3000) => {
+  for (let i = 0; i < tries; i++) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+};
+
+/** Run one hung check whose timeout and kill grace run on a manual clock that
+ * the executor reads from the run heartbeat. Returns the settled state. */
+const timedOutCheck = async (dir: string) => {
+  const clock: ManualClock = createManualClock(Date.now());
   const state = checkState(dir, [{
     command: process.execPath,
     args: ['-e', 'setInterval(() => {}, 1000)'],
-  }], { settings: { checkTimeoutMs: 100, toolTimeoutMs: 5000 } });
-  await runChecks(state);
+  }], { settings: { checkTimeoutMs: 100, toolTimeoutMs: 5000 }, heartbeat: { ...noopHeartbeat, clock } });
+  let done = false;
+  const running = runChecks(state).then(() => { done = true; });
+  // The executor's monitor is scheduled once the check child is spawned.
+  await eventually(() => clock.pending() > 0, 'the check to start');
+  await clock.advanceAsync(99);
+  const earlyDone = done;
+  await clock.advanceAsync(1);
+  await clock.advanceAsync(KILL_GRACE_MS);
+  await running;
+  return { state, earlyDone };
+};
+
+test('a check killed by checkTimeoutMs reports timedOut true', async (t) => {
+  const { state } = await timedOutCheck(arena(t));
   assert.equal(state.checks[0].timedOut, true);
 });
 
+test('a check is not timed out one millisecond before checkTimeoutMs', async (t) => {
+  const { earlyDone } = await timedOutCheck(arena(t));
+  assert.equal(earlyDone, false);
+});
+
 test('a timed-out check records the timeout it actually used', async (t) => {
-  const dir = arena(t);
-  const state = checkState(dir, [{
-    command: process.execPath,
-    args: ['-e', 'setInterval(() => {}, 1000)'],
-  }], { settings: { checkTimeoutMs: 100, toolTimeoutMs: 5000 } });
-  await runChecks(state);
+  const { state } = await timedOutCheck(arena(t));
   assert.equal(state.checks[0].timeoutMs, 100);
 });
 

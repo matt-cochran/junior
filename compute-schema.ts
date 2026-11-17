@@ -11,6 +11,8 @@
 // without cloud credentials or external infrastructure (ADR 0014).
 // ---------------------------------------------------------------------------
 
+import { systemClock, type Clock } from './clock.ts';
+
 /** Version of the public status/CLI contract in this module. */
 export const COMPUTE_SCHEMA_VERSION = 1 as const;
 
@@ -468,8 +470,9 @@ export function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
-export function resolveEpoch(value: string | number | undefined): number {
-  if (value === undefined) return Date.now();
+/** An explicit `value` wins; absent, the current time is read from `clock`. */
+export function resolveEpoch(value: string | number | undefined, clock: Clock = systemClock): number {
+  if (value === undefined) return clock.now();
   return typeof value === 'number' ? value : Date.parse(value);
 }
 

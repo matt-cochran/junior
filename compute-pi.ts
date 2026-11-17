@@ -11,6 +11,7 @@
 // compute-pi-host.ts, compute-pi-secrets.ts and compute-pi-protocol.ts (ADR 0016).
 
 import { abortError } from './compute-pi-protocol.ts';
+import { systemClock, type Clock } from './clock.ts';
 import type {
   PiHostIdentity,
   PiTransport,
@@ -88,6 +89,8 @@ export type {
 export type FakePiTransportOptions = {
   observedHost?: Partial<PiHostIdentity>;
   executionDelayMs?: number;
+  /** Clock the execution delay runs on; default the system clock. */
+  clock?: Clock;
   execute?: (
     request: PiTransportExecuteRequest,
   ) => Promise<PiTransportExecutionResult> | PiTransportExecutionResult;
@@ -127,7 +130,7 @@ export function createFakePiTransport(options: FakePiTransportOptions = {}): Fak
             if (execution.signal.aborted) throw abortError('fake Pi execution cancelled');
             return await options.execute(execution);
           }
-          await abortableDelay(options.executionDelayMs ?? 0, execution.signal);
+          await abortableDelay(options.executionDelayMs ?? 0, execution.signal, options.clock ?? systemClock);
           return { exitCode: 0 };
         },
         async close() {
@@ -139,18 +142,18 @@ export function createFakePiTransport(options: FakePiTransportOptions = {}): Fak
   return fake;
 }
 
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+function abortableDelay(ms: number, signal: AbortSignal, clock: Clock): Promise<void> {
   if (signal.aborted) return Promise.reject(abortError('fake Pi execution cancelled'));
   if (ms <= 0) {
-    return new Promise((resolve) => setTimeout(resolve, 0));
+    return new Promise((resolve) => clock.setTimeout(resolve, 0));
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = clock.setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
     const onAbort = () => {
-      clearTimeout(timer);
+      clock.clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       reject(abortError('fake Pi execution cancelled'));
     };
