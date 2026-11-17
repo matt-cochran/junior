@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- The Junior skill documents the optional `<hop.json>` first argument to
+  `junior tools call`, used when a checkout has no
+  `.delivery/setup/hop.json` (`HOP_NOT_FOUND`) or has several nested hops, and
+  points to each companion skill for its `append` payloads (#250).
+
 ## [0.18.5] - 2026-11-16
 
 ### Fixed
