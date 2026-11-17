@@ -44,8 +44,9 @@ export interface RunState {
 }
 
 /** Deadline arithmetic shared by every phase; `state.deadlineAt` is authoritative. */
-/** The run's current time; a state built without a clock falls back to the system clock. */
-export const runClock=(state:RunState):Clock=>state.clock ?? systemClock;
+/** The run's clock and current time. A state built without `clock` uses its
+ * heartbeat's clock (the runtime's), then the system clock. */
+export const runClock=(state:RunState):Clock=>state.clock ?? state.heartbeat?.clock ?? systemClock;
 export const runNow=(state:RunState)=>runClock(state).now();
 export const remainingMs=(state:RunState)=>state.deadlineAt-runNow(state);
 export const outOfTime=(state:RunState)=>runNow(state) >= state.deadlineAt;
