@@ -964,20 +964,36 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+interface FlagHit {
+  name: string;
+  value: string | undefined;
+  next: number;
+}
+
+function matchFlag(argv: string[], i: number, names: string[]): FlagHit | undefined {
+  const arg = argv[i];
+  for (const name of names) {
+    if (arg === name) return { name, value: argv[i + 1], next: i + 1 };
+    if (arg.startsWith(`${name}=`)) return { name, value: arg.slice(name.length + 1), next: i };
+  }
+  return undefined;
+}
+
 async function runAdrNew(argv: string[]): Promise<number> {
   let dir = defaultAdrDir();
   let date: string | undefined;
   let status: AdrStatus = 'proposed';
   const titleParts: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === '--dir') dir = argv[++i] ?? dir;
-    else if (arg.startsWith('--dir=')) dir = arg.slice('--dir='.length);
-    else if (arg === '--date') date = argv[++i];
-    else if (arg.startsWith('--date=')) date = arg.slice('--date='.length);
-    else if (arg === '--status') status = (argv[++i] as AdrStatus) ?? status;
-    else if (arg.startsWith('--status=')) status = arg.slice('--status='.length) as AdrStatus;
-    else titleParts.push(arg);
+    const hit = matchFlag(argv, i, ['--dir', '--date', '--status']);
+    if (!hit) {
+      titleParts.push(argv[i]);
+      continue;
+    }
+    i = hit.next;
+    if (hit.name === '--dir') dir = hit.value ?? dir;
+    else if (hit.name === '--date') date = hit.value;
+    else status = (hit.value as AdrStatus) ?? status;
   }
   const title = titleParts.join(' ').trim();
   if (!title) throw new Error('Usage: junior matrix adr new <title> [--dir <adr dir>]');
@@ -1018,13 +1034,10 @@ async function runAdrLint(argv: string[], options: RunAdrOptions = {}): Promise<
 async function runAdrSync(argv: string[]): Promise<number> {
   const values: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === '--dir') values.dir = argv[++i];
-    else if (arg.startsWith('--dir=')) values.dir = arg.slice('--dir='.length);
-    else if (arg === '--hop') values.hop = argv[++i];
-    else if (arg.startsWith('--hop=')) values.hop = arg.slice('--hop='.length);
-    else if (arg === '--model') values.model = argv[++i];
-    else if (arg.startsWith('--model=')) values.model = arg.slice('--model='.length);
+    const hit = matchFlag(argv, i, ['--dir', '--hop', '--model']);
+    if (!hit) continue;
+    i = hit.next;
+    values[hit.name.slice(2)] = hit.value as string;
   }
   if (!values.hop) throw new Error('matrix adr sync requires --hop <hop.json>');
   if (!values.model) throw new Error('matrix adr sync requires --model <modelId>');

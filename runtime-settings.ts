@@ -151,21 +151,23 @@ export type BudgetLimits = {
  * broadly, but bounded so a runaway report run still stops. */
 export const REPORT_WORKFLOW_BUDGET: BudgetLimits = { maxToolCalls: 25, maxTotalTokens: 400000, mode: 'enforce' };
 
+/** Default enforced budget for every other workflow (code and analysis):
+ * 16M total tokens, cache reads included. Observed legitimate code runs used
+ * 0.6M-15.2M; the runaway lanes in #251 used 18.4M and 22.1M. */
+export const CODE_WORKFLOW_BUDGET: BudgetLimits = { maxTotalTokens: 16000000, mode: 'enforce' };
+
 const REPORT_WORKFLOWS = new Set(['evaluate', 'qa', 'recon', 'investigate']);
 
-/** Return a copy of the report-workflow default for report workflows, or null
- * for every other workflow so an unconstrained contract keeps its behavior. */
-export function defaultWorkflowBudget(workflow: string): BudgetLimits | null {
- if (!REPORT_WORKFLOWS.has(workflow)) return null;
- return { ...REPORT_WORKFLOW_BUDGET };
+/** Return a copy of the default budget for a workflow: the report default for
+ * report workflows, the code default for every other workflow. */
+export function defaultWorkflowBudget(workflow: string): BudgetLimits {
+ return REPORT_WORKFLOWS.has(workflow) ? { ...REPORT_WORKFLOW_BUDGET } : { ...CODE_WORKFLOW_BUDGET };
 }
 
 /** Merge a contract budget over the workflow default field by field. Contract
- * fields win; workflow defaults fill the gaps; non-report workflows use only
- * the contract budget. */
-export function effectiveBudget(workflow: string, contractBudget?: BudgetLimits): BudgetLimits | null {
+ * fields win; workflow defaults fill the gaps. */
+export function effectiveBudget(workflow: string, contractBudget?: BudgetLimits): BudgetLimits {
  const base = defaultWorkflowBudget(workflow);
- if (!base) return contractBudget ? { ...contractBudget } : null;
  const merged: BudgetLimits = { ...base };
  if (contractBudget) {
   for (const key of Object.keys(contractBudget) as (keyof BudgetLimits)[]) {

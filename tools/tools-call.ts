@@ -212,6 +212,129 @@ function prepareCalls(
   return [replay, actual];
 }
 
+type CallRecordContext = {
+  hopPath: string;
+  tool: ToolName;
+  toolName: string;
+  hop: HopManifest;
+  kind: CallKind;
+  revision: number;
+};
+
+function callRuntimeFor(
+  hopPath: string,
+  tool: ToolName,
+  hop: HopManifest,
+  request: CallRequest,
+): { cfg: ToolConfig; timeoutMs: number; env: Record<string, string> } {
+  const cfg = hop.tools[tool];
+  if (!cfg) {
+    throw new HopError(
+      "MALFORMED_MANIFEST",
+      `hop manifest has no configuration for '${tool}'; run \`junior init --install\` to refresh it`,
+    );
+  }
+  const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
+  const env = { ...companionKeyEnv(cfg.env), ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
+  if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
+  return { cfg, timeoutMs, env };
+}
+
+function recordCallResult(
+  ctx: CallRecordContext,
+  request: CallRequest,
+  env: Record<string, string>,
+  mcp: McpSequenceResult,
+): CallOutcome {
+  const { hopPath, tool, toolName, hop, kind, revision } = ctx;
+  if (tool === "cpm" && env.CPM_PLANNER_DB) {
+    assertCpmProjectDatabase(mcp.stderr, env.CPM_PLANNER_DB);
+  }
+  const note = findNote(mcp.value);
+  const unsupported = note !== null && isUnsupportedNote(note);
+  const ok = !mcp.isError && !unsupported;
+
+  let snapshot: SnapshotRef | null = null;
+  if (kind === "read" && ok) {
+    snapshot = writeSnapshot(hopPath, tool, toolName, revision, mcp.value);
+    hop.snapshots.push(snapshot);
+  }
+  if (tool === "crossmatrix" && toolName === "crossmatrix.command" && ok && !crossmatrixUsesStore(hop)) {
+    persistCrossmatrixImport(hopPath, hop, request.arguments);
+  }
+
+  hop.evidence.push({
+    id: `ev_${revision}_${randomUUID().slice(0, 8)}`,
+    revision,
+    tool,
+    toolName,
+    kind,
+    status: ok ? "ok" : unsupported ? "unsupported" : "error",
+    snapshotId: snapshot?.id,
+    note: note ?? undefined,
+    createdAt: nowIso(),
+  });
+  if (unsupported) {
+    hop.unresolved.push({
+      id: `un_${revision}_${randomUUID().slice(0, 8)}`,
+      revision,
+      tool,
+      toolName,
+      reason: "unsupported-operation",
+      detail: note ?? undefined,
+      createdAt: nowIso(),
+    });
+  }
+
+  return {
+    ok,
+    tool,
+    toolName,
+    revision,
+    kind,
+    isError: mcp.isError,
+    unsupported,
+    note,
+    snapshot,
+    result: mcp.value,
+  };
+}
+
+function recordCallError(ctx: CallRecordContext, err: unknown): CallOutcome {
+  const { tool, toolName, hop, kind, revision } = ctx;
+  const hopErr = toHopError(err);
+  hop.evidence.push({
+    id: `ev_${revision}_${randomUUID().slice(0, 8)}`,
+    revision,
+    tool,
+    toolName,
+    kind,
+    status: "error",
+    note: hopErr.message,
+    createdAt: nowIso(),
+  });
+  hop.unresolved.push({
+    id: `un_${revision}_${randomUUID().slice(0, 8)}`,
+    revision,
+    tool,
+    toolName,
+    reason: hopErr.code,
+    detail: hopErr.message,
+    createdAt: nowIso(),
+  });
+  return {
+    ok: false,
+    tool,
+    toolName,
+    revision,
+    kind,
+    isError: hopErr.code === "UPSTREAM_ERROR",
+    unsupported: false,
+    note: null,
+    error: { code: hopErr.code, message: hopErr.message, detail: hopErr.detail },
+  };
+}
+
 /**
  * Run one tool call's per-call bookkeeping — manifest lock, revision bump,
  * snapshots, evidence, unresolved entries and error mapping — around a supplied
@@ -246,103 +369,15 @@ async function processCall(
 
     const kind: CallKind = isReadTool(tool, toolName) ? "read" : "command";
     const revision = hop.revision + 1;
-    const cfg = hop.tools[tool];
-    if (!cfg) {
-      throw new HopError(
-        "MALFORMED_MANIFEST",
-        `hop manifest has no configuration for '${tool}'; run \`junior init --install\` to refresh it`,
-      );
-    }
-    const timeoutMs = request.timeoutMs ?? hop.timeoutMs;
-    const env = { ...companionKeyEnv(cfg.env), ...(cfg.env ?? {}), ...buildToolEnv(hopPath, tool, hop) };
-    if (tool === "cpm") Object.assign(env, cpmReviewEnv(cfg.env), cpmModelEnv(hopPath, cfg.env));
+    const { cfg, timeoutMs, env } = callRuntimeFor(hopPath, tool, hop, request);
+    const ctx: CallRecordContext = { hopPath, tool, toolName, hop, kind, revision };
 
     let outcome: CallOutcome;
     try {
       const mcp = await run({ hop, cfg, env, timeoutMs, toolName });
-      if (tool === "cpm" && env.CPM_PLANNER_DB) {
-        assertCpmProjectDatabase(mcp.stderr, env.CPM_PLANNER_DB);
-      }
-      const note = findNote(mcp.value);
-      const unsupported = note !== null && isUnsupportedNote(note);
-      const ok = !mcp.isError && !unsupported;
-
-      let snapshot: SnapshotRef | null = null;
-      if (kind === "read" && ok) {
-        snapshot = writeSnapshot(hopPath, tool, toolName, revision, mcp.value);
-        hop.snapshots.push(snapshot);
-      }
-      if (tool === "crossmatrix" && toolName === "crossmatrix.command" && ok && !crossmatrixUsesStore(hop)) {
-        persistCrossmatrixImport(hopPath, hop, request.arguments);
-      }
-
-      hop.evidence.push({
-        id: `ev_${revision}_${randomUUID().slice(0, 8)}`,
-        revision,
-        tool,
-        toolName,
-        kind,
-        status: ok ? "ok" : unsupported ? "unsupported" : "error",
-        snapshotId: snapshot?.id,
-        note: note ?? undefined,
-        createdAt: nowIso(),
-      });
-      if (unsupported) {
-        hop.unresolved.push({
-          id: `un_${revision}_${randomUUID().slice(0, 8)}`,
-          revision,
-          tool,
-          toolName,
-          reason: "unsupported-operation",
-          detail: note ?? undefined,
-          createdAt: nowIso(),
-        });
-      }
-
-      outcome = {
-        ok,
-        tool,
-        toolName,
-        revision,
-        kind,
-        isError: mcp.isError,
-        unsupported,
-        note,
-        snapshot,
-        result: mcp.value,
-      };
+      outcome = recordCallResult(ctx, request, env, mcp);
     } catch (err) {
-      const hopErr = toHopError(err);
-      hop.evidence.push({
-        id: `ev_${revision}_${randomUUID().slice(0, 8)}`,
-        revision,
-        tool,
-        toolName,
-        kind,
-        status: "error",
-        note: hopErr.message,
-        createdAt: nowIso(),
-      });
-      hop.unresolved.push({
-        id: `un_${revision}_${randomUUID().slice(0, 8)}`,
-        revision,
-        tool,
-        toolName,
-        reason: hopErr.code,
-        detail: hopErr.message,
-        createdAt: nowIso(),
-      });
-      outcome = {
-        ok: false,
-        tool,
-        toolName,
-        revision,
-        kind,
-        isError: hopErr.code === "UPSTREAM_ERROR",
-        unsupported: false,
-        note: null,
-        error: { code: hopErr.code, message: hopErr.message, detail: hopErr.detail },
-      };
+      outcome = recordCallError(ctx, err);
     }
 
     hop.managerAcceptance = 'pending';

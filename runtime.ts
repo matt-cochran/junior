@@ -30,6 +30,7 @@ export {
   KILL_GRACE_MS,
   DEFAULT_MAX_OUTPUT_BYTES,
   REPORT_WORKFLOW_BUDGET,
+  CODE_WORKFLOW_BUDGET,
   defaultWorkflowBudget,
   effectiveBudget,
 } from './runtime-settings.ts';

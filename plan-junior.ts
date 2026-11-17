@@ -392,17 +392,11 @@ function criticalPathOf(deliverables: Array<Record<string, any>>): { path: strin
   return longest;
 }
 
-function criticalPathReport(
-  plan: unknown,
-  deliverables: Array<Record<string, any>>,
-  agentCount: number,
+function criticalPathSteps(
+  real: string[],
+  byId: Map<string, Record<string, any>>,
   maxHours: number,
-  opts: PlanCheckOptions,
-): CriticalPathReport {
-  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
-  const longest = criticalPathOf(deliverables);
-  const path = ['__start__', ...longest.path, '__finish__'];
-  const real = realPathIds(path);
+): { ownerWork: CriticalPathStep[]; manualWork: CriticalPathStep[]; longRunning: CriticalPathStep[] } {
   const ownerWork: CriticalPathStep[] = [];
   const manualWork: CriticalPathStep[] = [];
   const longRunning: CriticalPathStep[] = [];
@@ -415,7 +409,10 @@ function criticalPathReport(
     else if (owner !== 'agent' && owner !== 'worker') ownerWork.push(step);
     if (step.hours > maxHours) longRunning.push(step);
   }
+  return { ownerWork, manualWork, longRunning };
+}
 
+function criticalPathLags(real: string[], byId: Map<string, Record<string, any>>): CriticalPathLag[] {
   const lags: CriticalPathLag[] = [];
   for (let i = 1; i < real.length; i++) {
     const from = real[i - 1];
@@ -424,7 +421,10 @@ function criticalPathReport(
     const raw = isRecord(edge) ? edge.lag_hours : undefined;
     if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) lags.push({ from, to, hours: raw });
   }
+  return lags;
+}
 
+function fanOutOf(deliverables: Array<Record<string, any>>): CriticalPathFanOut[] {
   const dependents = new Map<string, Array<{ id: string; consumes: string }>>();
   for (const deliverable of deliverables) {
     const to = text(deliverable.id);
@@ -449,7 +449,10 @@ function criticalPathReport(
       if (ids.length >= 3) fanOut.push({ id, dependents: ids.sort(), consumes });
     }
   }
+  return fanOut;
+}
 
+function expectedPathDrift(plan: unknown, real: string[], opts: PlanCheckOptions): CriticalPathDrift {
   const expected = expectedCriticalPath(plan, opts);
   let drift: CriticalPathDrift = { detected: false, expected: [], actual: real, reason: null };
   if ((isRecord(plan) && plan.definition_drift === true) || (isRecord(opts.status) && opts.status.definition_drift === true)) {
@@ -467,23 +470,31 @@ function criticalPathReport(
       drift = { detected: false, expected: expectedReal, actual: real, reason: null };
     }
   }
-  if (!drift.detected) {
-    const statuses = new Map(deliverables.map((deliverable) => [text(deliverable.id), text(deliverable.status).toLowerCase()]));
-    for (const deliverable of deliverables) {
-      if (text(deliverable.status).toLowerCase() !== 'complete') continue;
-      const incomplete = prerequisiteIds(deliverable).filter((id) => statuses.get(id) !== 'complete');
-      if (incomplete.length > 0) {
-        drift = {
-          detected: true,
-          expected: incomplete,
-          actual: [text(deliverable.id)],
-          reason: `${text(deliverable.id)} is complete before ${incomplete.join(', ')}; reconcile the plan with the real order`,
-        };
-        break;
-      }
+  return drift;
+}
+
+function completionOrderDrift(deliverables: Array<Record<string, any>>): CriticalPathDrift | undefined {
+  const statuses = new Map(deliverables.map((deliverable) => [text(deliverable.id), text(deliverable.status).toLowerCase()]));
+  for (const deliverable of deliverables) {
+    if (text(deliverable.status).toLowerCase() !== 'complete') continue;
+    const incomplete = prerequisiteIds(deliverable).filter((id) => statuses.get(id) !== 'complete');
+    if (incomplete.length > 0) {
+      return {
+        detected: true,
+        expected: incomplete,
+        actual: [text(deliverable.id)],
+        reason: `${text(deliverable.id)} is complete before ${incomplete.join(', ')}; reconcile the plan with the real order`,
+      };
     }
   }
+  return undefined;
+}
 
+function criticalPathRisks(
+  agentCount: number,
+  report: Omit<CriticalPathReport, 'path' | 'hours' | 'risks'>,
+): PlanFinding[] {
+  const { ownerWork, manualWork, lags, longRunning, fanOut, drift } = report;
   const risks: PlanFinding[] = [];
   if (agentCount > 0) {
     for (const step of ownerWork) {
@@ -505,92 +516,111 @@ function criticalPathReport(
   if (drift.detected) {
     risks.push(finding('PLAN_DRIFT', 'error', [ ...drift.expected, ...drift.actual ].filter(Boolean), drift.reason ?? 'plan drift detected'));
   }
+  return risks;
+}
 
+function criticalPathReport(
+  plan: unknown,
+  deliverables: Array<Record<string, any>>,
+  agentCount: number,
+  maxHours: number,
+  opts: PlanCheckOptions,
+): CriticalPathReport {
+  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
+  const longest = criticalPathOf(deliverables);
+  const path = ['__start__', ...longest.path, '__finish__'];
+  const real = realPathIds(path);
+  const { ownerWork, manualWork, longRunning } = criticalPathSteps(real, byId, maxHours);
+  const lags = criticalPathLags(real, byId);
+  const fanOut = fanOutOf(deliverables);
+
+  let drift = expectedPathDrift(plan, real, opts);
+  if (!drift.detected) drift = completionOrderDrift(deliverables) ?? drift;
+
+  const risks = criticalPathRisks(agentCount, { ownerWork, manualWork, lags, longRunning, fanOut, drift });
   return { path, hours: longest.hours, ownerWork, manualWork, lags, longRunning, fanOut, drift, risks };
 }
 
-/** Lint a cpm plan for safe Junior execution and describe its cohorts. */
-export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): JuniorPlanCheck {
-  const maxHours = typeof opts.maxHours === 'number' && Number.isFinite(opts.maxHours) ? opts.maxHours : 4;
-  const hotFiles = opts.hotFiles ?? HOT_FILES;
-  const registeredTests = opts.registeredTests;
-  const deliverables = deliverablesOf(plan);
-  const agent = deliverables.filter(isAgentDeliverable);
-  // Ancestry spans every deliverable, so an order through a manager-owned step still counts.
-  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
-  const planApprovedProfiles = approvedProfilesOf(plan);
-  const findings: PlanFinding[] = [];
+interface DeliverableCheckContext {
+  maxHours: number;
+  hotFiles: readonly string[];
+  registeredTests: PlanCheckOptions['registeredTests'];
+  byId: Map<string, Record<string, any>>;
+  planApprovedProfiles: string[];
+}
 
-  for (const deliverable of agent) {
-    const id = text(deliverable.id);
-    const files = ownedFiles(deliverable);
+function deliverableFindings(deliverable: Record<string, any>, ctx: DeliverableCheckContext, findings: PlanFinding[]): void {
+  const { maxHours, hotFiles, registeredTests, byId, planApprovedProfiles } = ctx;
+  const id = text(deliverable.id);
+  const files = ownedFiles(deliverable);
 
-    if (files.length === 0) {
-      findings.push(finding('NO_OWNED_FILES', 'warning', [id], `${id} owns no files and cannot be parallelized safely`));
-    }
+  if (files.length === 0) {
+    findings.push(finding('NO_OWNED_FILES', 'warning', [id], `${id} owns no files and cannot be parallelized safely`));
+  }
 
-    const hours = likelyHours(deliverable);
-    if (Number.isFinite(hours) && hours > maxHours) {
-      findings.push(finding('TOO_LARGE', 'warning', [id], `${id} likely takes ${hours}h (> ${maxHours}h); split it into chained handoffs`));
-    }
+  const hours = likelyHours(deliverable);
+  if (Number.isFinite(hours) && hours > maxHours) {
+    findings.push(finding('TOO_LARGE', 'warning', [id], `${id} likely takes ${hours}h (> ${maxHours}h); split it into chained handoffs`));
+  }
 
-    const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
-    const acceptance = acceptanceEntries(junior.acceptance);
-    if (acceptance.length === 0) {
-      findings.push(finding('NO_ACCEPTANCE', 'warning', [id], `${id} has no metadata.junior.acceptance`));
-    }
-    for (const duplicateId of duplicateAcceptanceIds(acceptance)) {
+  const junior = isRecord(deliverable.metadata?.junior) ? deliverable.metadata.junior : {};
+  const acceptance = acceptanceEntries(junior.acceptance);
+  if (acceptance.length === 0) {
+    findings.push(finding('NO_ACCEPTANCE', 'warning', [id], `${id} has no metadata.junior.acceptance`));
+  }
+  for (const duplicateId of duplicateAcceptanceIds(acceptance)) {
+    findings.push(finding(
+      'DUPLICATE_ACCEPTANCE_ID',
+      'warning',
+      [id],
+      `${id} has more than one acceptance criterion with id '${duplicateId}'`,
+    ));
+  }
+  if (asArray(junior.checks).length === 0) {
+    findings.push(finding('NO_CHECKS', 'warning', [id], `${id} has no metadata.junior.checks; a deliverable needs an independent check`));
+  }
+
+  const hot = files.filter((file) => hotFiles.includes(file));
+  if (hot.length > 0) {
+    findings.push(finding('HOT_FILE', 'info', [id, ...hot], `${id} owns hot file(s) ${hot.join(', ')}; prefer one final registration deliverable`));
+  }
+
+  const requestedProfile = text(junior.profile).trim();
+  if (requestedProfile && requestedProfile !== 'general' && !planApprovedProfiles.includes(requestedProfile)) {
+    findings.push(finding(
+      'NEEDS_MODEL_APPROVAL',
+      'warning',
+      [id, requestedProfile],
+      `${id} pins model profile '${requestedProfile}'; split or tighten it to fit the default model, or record the approval in plan.metadata.junior.approvedProfiles`,
+    ));
+  }
+
+  if (registeredTests !== undefined) {
+    const unregistered = files.filter((file) => TEST_FILE_PATTERN.test(file) && !registeredTests.includes(file));
+    if (unregistered.length > 0 && !files.includes('package.json') && !hasPackageJsonDescendant(byId, id)) {
       findings.push(finding(
-        'DUPLICATE_ACCEPTANCE_ID',
+        'REGISTRATION_OUTSIDE_SCOPE',
         'warning',
-        [id],
-        `${id} has more than one acceptance criterion with id '${duplicateId}'`,
-      ));
-    }
-    if (asArray(junior.checks).length === 0) {
-      findings.push(finding('NO_CHECKS', 'warning', [id], `${id} has no metadata.junior.checks; a deliverable needs an independent check`));
-    }
-
-    const hot = files.filter((file) => hotFiles.includes(file));
-    if (hot.length > 0) {
-      findings.push(finding('HOT_FILE', 'info', [id, ...hot], `${id} owns hot file(s) ${hot.join(', ')}; prefer one final registration deliverable`));
-    }
-
-    const requestedProfile = text(junior.profile).trim();
-    if (requestedProfile && requestedProfile !== 'general' && !planApprovedProfiles.includes(requestedProfile)) {
-      findings.push(finding(
-        'NEEDS_MODEL_APPROVAL',
-        'warning',
-        [id, requestedProfile],
-        `${id} pins model profile '${requestedProfile}'; split or tighten it to fit the default model, or record the approval in plan.metadata.junior.approvedProfiles`,
-      ));
-    }
-
-    if (registeredTests !== undefined) {
-      const unregistered = files.filter((file) => TEST_FILE_PATTERN.test(file) && !registeredTests.includes(file));
-      if (unregistered.length > 0 && !files.includes('package.json') && !hasPackageJsonDescendant(byId, id)) {
-        findings.push(finding(
-          'REGISTRATION_OUTSIDE_SCOPE',
-          'warning',
-          [id, ...unregistered],
-          `${id} owns test file(s) ${unregistered.join(', ')} not registered in package.json; workers then edit package.json outside their owned files (observed in 22 of 79 plan-backed runs, H2)`,
-        ));
-      }
-    }
-
-    for (const edge of asArray(deliverable.prerequisites)) {
-      if (edgeConsumes(edge).trim()) continue;
-      const dependencyId = (typeof edge === 'string' ? edge : isRecord(edge) ? edge.id : '') as string;
-      const dependency = text(dependencyId);
-      findings.push(finding(
-        'INTERFACE_UNSPECIFIED',
-        'warning',
-        [id, dependency].filter(Boolean),
-        `${id} depends on ${dependency || 'a prerequisite'} without consumes text`,
+        [id, ...unregistered],
+        `${id} owns test file(s) ${unregistered.join(', ')} not registered in package.json; workers then edit package.json outside their owned files (observed in 22 of 79 plan-backed runs, H2)`,
       ));
     }
   }
 
+  for (const edge of asArray(deliverable.prerequisites)) {
+    if (edgeConsumes(edge).trim()) continue;
+    const dependencyId = (typeof edge === 'string' ? edge : isRecord(edge) ? edge.id : '') as string;
+    const dependency = text(dependencyId);
+    findings.push(finding(
+      'INTERFACE_UNSPECIFIED',
+      'warning',
+      [id, dependency].filter(Boolean),
+      `${id} depends on ${dependency || 'a prerequisite'} without consumes text`,
+    ));
+  }
+}
+
+function sharedFileFindings(agent: Array<Record<string, any>>, byId: Map<string, Record<string, any>>, findings: PlanFinding[]): void {
   for (let i = 0; i < agent.length; i++) {
     for (let j = i + 1; j < agent.length; j++) {
       const first = agent[i];
@@ -609,6 +639,24 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
       ));
     }
   }
+}
+
+/** Lint a cpm plan for safe Junior execution and describe its cohorts. */
+export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): JuniorPlanCheck {
+  const maxHours = typeof opts.maxHours === 'number' && Number.isFinite(opts.maxHours) ? opts.maxHours : 4;
+  const hotFiles = opts.hotFiles ?? HOT_FILES;
+  const registeredTests = opts.registeredTests;
+  const deliverables = deliverablesOf(plan);
+  const agent = deliverables.filter(isAgentDeliverable);
+  // Ancestry spans every deliverable, so an order through a manager-owned step still counts.
+  const byId = new Map(deliverables.map((deliverable) => [text(deliverable.id), deliverable]));
+  const planApprovedProfiles = approvedProfilesOf(plan);
+  const findings: PlanFinding[] = [];
+
+  const ctx: DeliverableCheckContext = { maxHours, hotFiles, registeredTests, byId, planApprovedProfiles };
+  for (const deliverable of agent) deliverableFindings(deliverable, ctx, findings);
+
+  sharedFileFindings(agent, byId, findings);
 
   const criticalPath = criticalPathReport(plan, deliverables, agent.length, maxHours, opts);
   findings.push(...criticalPath.risks);

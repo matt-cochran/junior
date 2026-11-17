@@ -547,126 +547,141 @@ interface Tokenized {
   opaque?: string;
 }
 
-function tokenize(input: string): Tokenized {
-  const segments: string[][] = [];
-  let current: string[] = [];
-  let token = '';
-  let started = false;
-  let quote: '"' | "'" | null = null;
-  let opaque: string | undefined;
+interface TokenizerState {
+  segments: string[][];
+  current: string[];
+  token: string;
+  started: boolean;
+  quote: '"' | "'" | null;
+  opaque: string | undefined;
+}
 
-  const pushToken = (): void => {
-    if (started) {
-      current.push(token);
-      token = '';
-      started = false;
-    }
-  };
-  const pushSegment = (): void => {
-    pushToken();
-    if (current.length > 0) {
-      segments.push(current);
-      current = [];
-    }
-  };
-
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index];
-
-    if (quote) {
-      if (char === quote) {
-        quote = null;
-        started = true;
-        continue;
-      }
-      if (quote === '"' && char === '\\') {
-        const next = input[index + 1];
-        if (next === '$' || next === '`' || next === '"' || next === '\\' || next === '\n') {
-          token += next;
-          started = true;
-          index += 1;
-          continue;
-        }
-      }
-      // Double quotes still perform command substitution; single quotes do not.
-      if (quote === '"' && char === '`') opaque = 'command substitution';
-      if (quote === '"' && char === '$' && input[index + 1] === '(') {
-        opaque = 'command substitution';
-      }
-      token += char;
-      started = true;
-      continue;
-    }
-
-    if (char === "'" || char === '"') {
-      quote = char;
-      started = true;
-      continue;
-    }
-    if (char === '\\') {
-      const next = input[index + 1];
-      if (next === undefined) {
-        opaque = 'trailing escape';
-        started = true;
-        continue;
-      }
-      token += next;
-      started = true;
-      index += 1;
-      continue;
-    }
-    if (char === '`') {
-      opaque = 'command substitution';
-      token += char;
-      started = true;
-      continue;
-    }
-    if (char === '$' && input[index + 1] === '(') {
-      opaque = 'command substitution';
-      token += char;
-      started = true;
-      continue;
-    }
-    if ((char === '<' || char === '>') && input[index + 1] === '(') {
-      opaque = 'process substitution';
-      token += char;
-      started = true;
-      continue;
-    }
-
-    if (char === ' ' || char === '\t' || char === '\r') {
-      pushToken();
-      continue;
-    }
-    if (char === '\n' || char === ';') {
-      pushSegment();
-      continue;
-    }
-    if (char === '&') {
-      const next = input[index + 1];
-      // `2>&1`, `&>file`: a redirection, not a background separator.
-      if (next === '>' || ((token.endsWith('>') || token.endsWith('<')) && /[0-9-]/.test(next ?? ''))) {
-        token += char;
-        started = true;
-        continue;
-      }
-      pushSegment();
-      if (next === '&') index += 1;
-      continue;
-    }
-    if (char === '|') {
-      pushSegment();
-      if (input[index + 1] === '|') index += 1;
-      continue;
-    }
-
-    token += char;
-    started = true;
+function pushToken(state: TokenizerState): void {
+  if (state.started) {
+    state.current.push(state.token);
+    state.token = '';
+    state.started = false;
   }
+}
 
-  if (quote) return { segments, opaque: 'unterminated quote' };
-  pushSegment();
-  return { segments, opaque };
+function pushSegment(state: TokenizerState): void {
+  pushToken(state);
+  if (state.current.length > 0) {
+    state.segments.push(state.current);
+    state.current = [];
+  }
+}
+
+function appendText(state: TokenizerState, text: string): void {
+  state.token += text;
+  state.started = true;
+}
+
+/** Consume one character inside a quote; returns the index of the last consumed character. */
+function stepQuoted(state: TokenizerState, input: string, index: number): number {
+  const char = input[index];
+  if (char === state.quote) {
+    state.quote = null;
+    state.started = true;
+    return index;
+  }
+  if (state.quote === '"' && char === '\\') {
+    const next = input[index + 1];
+    if (next === '$' || next === '`' || next === '"' || next === '\\' || next === '\n') {
+      appendText(state, next);
+      return index + 1;
+    }
+  }
+  // Double quotes still perform command substitution; single quotes do not.
+  if (state.quote === '"' && char === '`') state.opaque = 'command substitution';
+  if (state.quote === '"' && char === '$' && input[index + 1] === '(') {
+    state.opaque = 'command substitution';
+  }
+  appendText(state, char);
+  return index;
+}
+
+/** Quotes, escapes and substitutions outside a quote; undefined when `char` is none of them. */
+function stepUnquotedSpecial(state: TokenizerState, input: string, index: number): number | undefined {
+  const char = input[index];
+  if (char === "'" || char === '"') {
+    state.quote = char;
+    state.started = true;
+    return index;
+  }
+  if (char === '\\') {
+    const next = input[index + 1];
+    if (next === undefined) {
+      state.opaque = 'trailing escape';
+      state.started = true;
+      return index;
+    }
+    appendText(state, next);
+    return index + 1;
+  }
+  if (char === '`') {
+    state.opaque = 'command substitution';
+    appendText(state, char);
+    return index;
+  }
+  if (char === '$' && input[index + 1] === '(') {
+    state.opaque = 'command substitution';
+    appendText(state, char);
+    return index;
+  }
+  if ((char === '<' || char === '>') && input[index + 1] === '(') {
+    state.opaque = 'process substitution';
+    appendText(state, char);
+    return index;
+  }
+  return undefined;
+}
+
+/** Whitespace and chain separators outside a quote; undefined when `char` is neither. */
+function stepSeparator(state: TokenizerState, input: string, index: number): number | undefined {
+  const char = input[index];
+  if (char === ' ' || char === '\t' || char === '\r') {
+    pushToken(state);
+    return index;
+  }
+  if (char === '\n' || char === ';') {
+    pushSegment(state);
+    return index;
+  }
+  if (char === '&') {
+    const next = input[index + 1];
+    // `2>&1`, `&>file`: a redirection, not a background separator.
+    if (next === '>' || ((state.token.endsWith('>') || state.token.endsWith('<')) && /[0-9-]/.test(next ?? ''))) {
+      appendText(state, char);
+      return index;
+    }
+    pushSegment(state);
+    return next === '&' ? index + 1 : index;
+  }
+  if (char === '|') {
+    pushSegment(state);
+    return input[index + 1] === '|' ? index + 1 : index;
+  }
+  return undefined;
+}
+
+function stepUnquoted(state: TokenizerState, input: string, index: number): number {
+  const special = stepUnquotedSpecial(state, input, index);
+  if (special !== undefined) return special;
+  const separator = stepSeparator(state, input, index);
+  if (separator !== undefined) return separator;
+  appendText(state, input[index]);
+  return index;
+}
+
+function tokenize(input: string): Tokenized {
+  const state: TokenizerState = { segments: [], current: [], token: '', started: false, quote: null, opaque: undefined };
+  for (let index = 0; index < input.length; index += 1) {
+    index = state.quote ? stepQuoted(state, input, index) : stepUnquoted(state, input, index);
+  }
+  if (state.quote) return { segments: state.segments, opaque: 'unterminated quote' };
+  pushSegment(state);
+  return { segments: state.segments, opaque: state.opaque };
 }
 
 // ---------------------------------------------------------------------------

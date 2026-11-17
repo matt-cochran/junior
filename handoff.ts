@@ -172,34 +172,19 @@ function consentProject(value: unknown, fallback: unknown): string | null {
  return typeof fallback === 'string' && fallback.trim() ? fallback : null;
 }
 
-/** Deduplicate event stop reasons into a short, stable summary, then add the
- * actionable causes recorded on the result (consent, check timeout, budget,
- * resume and typed Pi failures). */
-export function stopReasonSummary(input: any): string[] {
- const result = input && typeof input === 'object' ? input : null;
- const receipt = input?.receipt && typeof input.receipt === 'object' ? input.receipt : input;
- const raw = Array.isArray(receipt?.stopReasons) ? receipt.stopReasons : [];
- const seen: string[] = [];
- const add = (value: unknown) => { const s = String(value); if (!seen.includes(s)) seen.push(s); };
- for (const r of raw) add(r);
-
- if (!result) return seen;
-
+function consentStopReason(result: any): string | null {
  const external = result.externalContext;
  const authorization = external?.authorization ?? external?.preflight?.authorization;
  if (result.status === 'needs_external_context_consent' || (authorization?.required !== false && authorization?.granted === false) || result.externalContextConsent?.approve) {
   const consent = result.externalContextConsent;
   const provider = consent?.provider ?? external?.preflight?.provider ?? external?.provider ?? 'provider';
   const project = consentProject(consent?.approve?.project ?? authorization?.approve?.project, result.sourceCwd ?? result.executionCwd ?? result.execution?.cwd);
-  add(`consent_required: run "junior auth consent grant ${provider} --project ${project ?? '<cwd>'}" or set externalContextConsent`);
+  return `consent_required: run "junior auth consent grant ${provider} --project ${project ?? '<cwd>'}" or set externalContextConsent`;
  }
+ return null;
+}
 
- const checks = Array.isArray(result.checks) ? result.checks : [];
- const timeoutMs = result.runtime?.checkTimeoutMs ?? result.execution?.checkTimeoutMs ?? result.settings?.checkTimeoutMs ?? result.checkTimeoutMs;
- checks.forEach((check: any, index: number) => {
-  if (check?.timedOut) add(`check_timeout: check ${index + 1} killed after ${check.timeoutMs ?? timeoutMs ?? 'unknown'} ms (raise execution.checkTimeoutMs)`);
- });
-
+function budgetStopReason(result: any, raw: any[]): string | null {
  const budget = result.budget ?? result.outputBreakdown?.budget;
  const stopReason = result.runtime?.stopReason ?? result.stopReason ?? result.status;
  if (budget?.exceeded || budget?.stopReason === 'budget_exceeded' || stopReason === 'budget_exceeded' || raw.includes('budget_exceeded')) {
@@ -208,9 +193,12 @@ export function stopReasonSummary(input: any): string[] {
   const reportState = workflow
    ? (result.analysis?.reportPresent === true || result.reportPresent === true ? 'partial' : 'missing')
    : null;
-  add(`budget_exceeded${field ? ` (${field})` : ''}${reportState ? `; report: ${reportState}` : ''}`);
+  return `budget_exceeded${field ? ` (${field})` : ''}${reportState ? `; report: ${reportState}` : ''}`;
  }
+ return null;
+}
 
+function resumeStopReason(result: any, receipt: any): string | null {
  const failure = result.workerFailure;
  const resumeError = typeof result.resume?.error === 'string' ? result.resume.error : '';
  const resumeUnavailable = failure?.category === 'resume_session_unavailable'
@@ -221,16 +209,47 @@ export function stopReasonSummary(input: any): string[] {
    ?? result.resumeFallback?.sessionId ?? failure?.sessionId;
   // The compact receipt names the session by its first 8 characters only;
   // the full id stays in the local result for diagnostics.
-  add(`resume_session_unavailable${sessionId ? `: session ${redactSecrets(String(sessionId)).slice(0, 8)}…` : ''}`);
+  return `resume_session_unavailable${sessionId ? `: session ${redactSecrets(String(sessionId)).slice(0, 8)}…` : ''}`;
  }
+ return null;
+}
 
+function workerFailureStopReason(failure: any): string | null {
  if (failure && typeof failure === 'object') {
   if (typeof failure.summary === 'string' && failure.summary.trim()) {
-   add(`worker_failure${failure.category ? ` ${failure.category}` : ''}: ${failure.summary}`);
+   return `worker_failure${failure.category ? ` ${failure.category}` : ''}: ${failure.summary}`;
   } else if (typeof failure.category === 'string' && failure.category.trim()) {
-   add(`worker_failure: ${failure.category}`);
+   return `worker_failure: ${failure.category}`;
   }
  }
+ return null;
+}
+
+/** Deduplicate event stop reasons into a short, stable summary, then add the
+ * actionable causes recorded on the result (consent, check timeout, budget,
+ * resume and typed Pi failures). */
+export function stopReasonSummary(input: any): string[] {
+ const result = input && typeof input === 'object' ? input : null;
+ const receipt = input?.receipt && typeof input.receipt === 'object' ? input.receipt : input;
+ const raw = Array.isArray(receipt?.stopReasons) ? receipt.stopReasons : [];
+ const seen: string[] = [];
+ const add = (value: unknown) => { const s = String(value); if (!seen.includes(s)) seen.push(s); };
+ const addReason = (value: string | null) => { if (value !== null) add(value); };
+ for (const r of raw) add(r);
+
+ if (!result) return seen;
+
+ addReason(consentStopReason(result));
+
+ const checks = Array.isArray(result.checks) ? result.checks : [];
+ const timeoutMs = result.runtime?.checkTimeoutMs ?? result.execution?.checkTimeoutMs ?? result.settings?.checkTimeoutMs ?? result.checkTimeoutMs;
+ checks.forEach((check: any, index: number) => {
+  if (check?.timedOut) add(`check_timeout: check ${index + 1} killed after ${check.timeoutMs ?? timeoutMs ?? 'unknown'} ms (raise execution.checkTimeoutMs)`);
+ });
+
+ addReason(budgetStopReason(result, raw));
+ addReason(resumeStopReason(result, receipt));
+ addReason(workerFailureStopReason(result.workerFailure));
 
  if (result.analysis && result.analysis.reportPresent === false) {
   add(`analysis_report_missing: ${result.analysis.report ?? 'unknown path'}`);
@@ -343,37 +362,141 @@ export function compactCost(r: any): CompactHandoff['model']['cost'] {
  return out;
 }
 
-/** Build the compact handoff from a full worker result. */
-export function compactHandoff(result: any): CompactHandoff {
- const r = result || {};
- const dir = typeof r.artifactDir === 'string' && r.artifactDir ? r.artifactDir : null;
- const evidenceChanged = r.evidence?.runChangedFiles ?? r.evidence?.changedFiles ?? [];
- const changedFiles = (Array.isArray(evidenceChanged) ? evidenceChanged : [])
-  .map((f: any) => (typeof f === 'string' ? f : f?.path))
-  .filter((p: any) => typeof p === 'string');
- const cost = compactCost(r);
+function compactScope(r: any): CompactHandoff['scope'] {
+ return r.scope && typeof r.scope === 'object' ? {
+  checked: !!r.scope.checked,
+  inScope: Array.isArray(r.scope.inScope) ? r.scope.inScope : [],
+  incidental: Array.isArray(r.scope.incidental) ? r.scope.incidental : [],
+  outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
+ } : null;
+}
+
+function compactDataPolicy(r: any): CompactHandoff['dataPolicy'] {
+ return r.dataPolicy && typeof r.dataPolicy === 'object' ? {
+  routing: r.dataPolicy.routing && typeof r.dataPolicy.routing === 'object' ? r.dataPolicy.routing : null,
+  providers: Array.isArray(r.dataPolicy.providers) ? r.dataPolicy.providers : [],
+  verified: r.dataPolicy.verified === true,
+ } : null;
+}
+
+function compactPiIsolation(r: any): CompactHandoff['piIsolation'] {
+ return r.piIsolation && typeof r.piIsolation === 'object' ? {
+  applied: Array.isArray(r.piIsolation.applied) ? r.piIsolation.applied : [],
+  missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],
+  ambient: !!r.piIsolation.ambient,
+  probed: !!r.piIsolation.probed,
+  honored: r.piIsolation.verification?.checked ? !!r.piIsolation.verification.honored : null,
+ } : null;
+}
+
+function compactChecks(r: any): CompactHandoff['checks'] {
+ return (Array.isArray(r.checks) ? r.checks : []).map((c: any) => ({
+  command: [c?.command, ...(Array.isArray(c?.args) ? c.args : [])].filter(Boolean).join(' '),
+  exitCode: c?.exitCode ?? null,
+  passed: c?.exitCode === 0 && !c?.error && !c?.timedOut && !c?.outputTruncated,
+  ...(c?.error ? { error: String(c.error) } : {}),
+ }));
+}
+
+function compactOutput(r: any): CompactHandoff['output'] {
+ return r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults, ...(r.outputBreakdown.budget ? { budget: r.outputBreakdown.budget } : {}), ...(r.outputBreakdown.phaseAccounting ? { phaseAccounting: r.outputBreakdown.phaseAccounting } : {}) } : null;
+}
+
+function compactModel(r: any, cost: CompactHandoff['model']['cost']): CompactHandoff['model'] {
  const cacheInput = r.receipt?.usage?.input ?? 0;
  const cacheRead = r.receipt?.usage?.cacheRead ?? 0;
  const cacheTotal = cacheInput + cacheRead;
  const hitRate = cacheTotal > 0 ? Math.round((cacheRead / cacheTotal) * 100) / 100 : null;
- const report = typeof r.analysis?.report === 'string' ? r.analysis.report : null;
- const budget = r.budget ?? r.outputBreakdown?.budget ?? null;
- const phaseAccounting = r.phaseAccounting ?? r.outputBreakdown?.phaseAccounting ?? null;
- const analysis = r.analysis && typeof r.analysis === 'object' ? {
+ return {
+  requested: r.receipt?.requested ?? null,
+  routing: r.modelRouting ?? null,
+  approval: r.modelRouting?.approval ?? null,
+  approvalRequest: r.modelApproval ?? null,
+  policy: r.modelPolicy ?? null,
+  observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
+  observedUnknown: r.receipt?.observedUnknown ?? true,
+  tokens: r.receipt?.usage?.totalTokens ?? 0,
+  input: r.receipt?.usage?.input ?? 0,
+  output: r.receipt?.usage?.output ?? 0,
+  cacheRead: r.receipt?.usage?.cacheRead ?? 0,
+  cacheWrite: r.receipt?.usage?.cacheWrite ?? 0,
+  usageAvailable: r.receipt?.usage?.available ?? false,
+  cache: { input: cacheInput, cacheRead, cacheWrite: r.receipt?.usage?.cacheWrite ?? 0, hitRate },
+  upstream: r.billing?.providers ?? null,
+  responseIds: Array.isArray(r.receipt?.responseIds) ? r.receipt.responseIds : [],
+  cost,
+ };
+}
+
+function compactRuntime(r: any): CompactHandoff['runtime'] {
+ return {
+  state: r.runtime?.state ?? null,
+  stopReason: r.runtime?.stopReason ?? null,
+  elapsedMs: r.runtime?.elapsedMs ?? null,
+  deadlineMs: r.runtime?.deadlineMs ?? r.settings?.deadlineMs ?? r.execution?.deadlineMs ?? null,
+  checkTimeoutMs: r.runtime?.checkTimeoutMs ?? r.settings?.checkTimeoutMs ?? r.execution?.checkTimeoutMs ?? null,
+  checkReserveMs: r.runtime?.checkReserveMs ?? null,
+  quietMs: r.runtime?.quietMs ?? null,
+  toolTimeoutMs: r.runtime?.toolTimeoutMs ?? null,
+  heartbeatMs: r.runtime?.heartbeatMs ?? null,
+  interrupted: !!r.runtime?.interrupted,
+  timedOut: !!r.runtime?.timedOut,
+  deadlineExceeded: !!r.runtime?.deadlineExceeded,
+  stopReasonSummary: stopReasonSummary(r),
+ };
+}
+
+function compactAnalysis(r: any, report: string | null): CompactHandoff['analysis'] {
+ return r.analysis && typeof r.analysis === 'object' ? {
   workflow: String(r.analysis.workflow ?? ''),
   report,
   reportPresent: !!r.analysis.reportPresent,
  } : null;
- const review = r.review && typeof r.review === 'object' ? {
+}
+
+function compactReview(r: any): CompactHandoff['review'] {
+ return r.review && typeof r.review === 'object' ? {
   from: String(r.review.from ?? ''),
   priorResult: r.review.priorResult ?? null,
   context: typeof r.review.context === 'string' ? r.review.context : null,
  } : null;
+}
+
+function compactClarification(r: any): Partial<Pick<CompactHandoff, 'clarification'>> {
+ return r.clarification && typeof r.clarification === 'object' ? {clarification:{
+  sessionId:String(r.clarification.sessionId ?? ''),
+  round:Number(r.clarification.round ?? 0),
+  questions:Array.isArray(r.clarification.questions) ? r.clarification.questions : [],
+ }} : {};
+}
+
+function compactChangedFiles(r: any): string[] {
+ const evidenceChanged = r.evidence?.runChangedFiles ?? r.evidence?.changedFiles ?? [];
+ return (Array.isArray(evidenceChanged) ? evidenceChanged : [])
+  .map((f: any) => (typeof f === 'string' ? f : f?.path))
+  .filter((p: any) => typeof p === 'string');
+}
+
+function compactAttention(r: any): CompactHandoff['attention'] {
+ return r.jev?.preflight?.attention ? {...r.jev.preflight.attention, mode:r.jev.mode, workerBlocked:r.jev.enforced === true && r.workerExitCode === null} : null;
+}
+
+/** Build the compact handoff from a full worker result. */
+export function compactHandoff(result: any): CompactHandoff {
+ const r = result || {};
+ const dir = typeof r.artifactDir === 'string' && r.artifactDir ? r.artifactDir : null;
+ const changedFiles = compactChangedFiles(r);
+ const cost = compactCost(r);
+ const report = typeof r.analysis?.report === 'string' ? r.analysis.report : null;
+ const budget = r.budget ?? r.outputBreakdown?.budget ?? null;
+ const phaseAccounting = r.phaseAccounting ?? r.outputBreakdown?.phaseAccounting ?? null;
+ const analysis = compactAnalysis(r, report);
+ const review = compactReview(r);
  return {
   ...(r.handoff ? {handoff:r.handoff} : {}),
   id: String(r.id ?? 'unknown'),
   outcome: String(r.status ?? r.outcome ?? 'unknown'),
-  attention: r.jev?.preflight?.attention ? {...r.jev.preflight.attention, mode:r.jev.mode, workerBlocked:r.jev.enforced === true && r.workerExitCode === null} : null,
+  attention: compactAttention(r),
   source: r.simulated ? 'mock' : (r.receipt?.source ?? 'pi_message_end'),
   sourceCwd: r.sourceCwd ?? null,
   execution: {
@@ -381,81 +504,25 @@ export function compactHandoff(result: any): CompactHandoff {
    artifact: dir,
    isolation: r.isolation?.mode ?? 'none',
   },
-  scope: r.scope && typeof r.scope === 'object' ? {
-   checked: !!r.scope.checked,
-   inScope: Array.isArray(r.scope.inScope) ? r.scope.inScope : [],
-   incidental: Array.isArray(r.scope.incidental) ? r.scope.incidental : [],
-   outOfScope: Array.isArray(r.scope.outOfScope) ? r.scope.outOfScope : [],
-  } : null,
+  scope: compactScope(r),
   externalContext: r.externalContext && typeof r.externalContext === 'object' ? r.externalContext : null,
-  dataPolicy: r.dataPolicy && typeof r.dataPolicy === 'object' ? {
-   routing: r.dataPolicy.routing && typeof r.dataPolicy.routing === 'object' ? r.dataPolicy.routing : null,
-   providers: Array.isArray(r.dataPolicy.providers) ? r.dataPolicy.providers : [],
-   verified: r.dataPolicy.verified === true,
-  } : null,
+  dataPolicy: compactDataPolicy(r),
   // Advisory (#186): new exports with no production reference; review call sites before apply.
   unwired: Array.isArray(r.unwired) ? r.unwired : [],
-  piIsolation: r.piIsolation && typeof r.piIsolation === 'object' ? {
-   applied: Array.isArray(r.piIsolation.applied) ? r.piIsolation.applied : [],
-   missing: Array.isArray(r.piIsolation.missing) ? r.piIsolation.missing : [],
-   ambient: !!r.piIsolation.ambient,
-   probed: !!r.piIsolation.probed,
-   honored: r.piIsolation.verification?.checked ? !!r.piIsolation.verification.honored : null,
-  } : null,
+  piIsolation: compactPiIsolation(r),
   artifact: dir,
   segments: Array.isArray(r.segments) ? r.segments.length : 0,
   changedFiles,
-  checks: (Array.isArray(r.checks) ? r.checks : []).map((c: any) => ({
-   command: [c?.command, ...(Array.isArray(c?.args) ? c.args : [])].filter(Boolean).join(' '),
-   exitCode: c?.exitCode ?? null,
-   passed: c?.exitCode === 0 && !c?.error && !c?.timedOut && !c?.outputTruncated,
-   ...(c?.error ? { error: String(c.error) } : {}),
-  })),
+  checks: compactChecks(r),
   unresolved: unresolvedIssues(r),
-  output: r.outputBreakdown ? { rawBytes: r.outputBreakdown.rawBytes, retainedBytes: r.outputBreakdown.retainedBytes, largestToolResults: r.outputBreakdown.largestToolResults, ...(r.outputBreakdown.budget ? { budget: r.outputBreakdown.budget } : {}), ...(r.outputBreakdown.phaseAccounting ? { phaseAccounting: r.outputBreakdown.phaseAccounting } : {}) } : null,
+  output: compactOutput(r),
   budget,
   phaseAccounting,
-  model: {
-   requested: r.receipt?.requested ?? null,
-   routing: r.modelRouting ?? null,
-   approval: r.modelRouting?.approval ?? null,
-   approvalRequest: r.modelApproval ?? null,
-   policy: r.modelPolicy ?? null,
-   observed: Array.isArray(r.receipt?.observed) ? r.receipt.observed : [],
-   observedUnknown: r.receipt?.observedUnknown ?? true,
-   tokens: r.receipt?.usage?.totalTokens ?? 0,
-   input: r.receipt?.usage?.input ?? 0,
-   output: r.receipt?.usage?.output ?? 0,
-   cacheRead: r.receipt?.usage?.cacheRead ?? 0,
-   cacheWrite: r.receipt?.usage?.cacheWrite ?? 0,
-   usageAvailable: r.receipt?.usage?.available ?? false,
-   cache: { input: cacheInput, cacheRead, cacheWrite: r.receipt?.usage?.cacheWrite ?? 0, hitRate },
-   upstream: r.billing?.providers ?? null,
-   responseIds: Array.isArray(r.receipt?.responseIds) ? r.receipt.responseIds : [],
-   cost,
-  },
-  runtime: {
-   state: r.runtime?.state ?? null,
-   stopReason: r.runtime?.stopReason ?? null,
-   elapsedMs: r.runtime?.elapsedMs ?? null,
-   deadlineMs: r.runtime?.deadlineMs ?? r.settings?.deadlineMs ?? r.execution?.deadlineMs ?? null,
-   checkTimeoutMs: r.runtime?.checkTimeoutMs ?? r.settings?.checkTimeoutMs ?? r.execution?.checkTimeoutMs ?? null,
-   checkReserveMs: r.runtime?.checkReserveMs ?? null,
-   quietMs: r.runtime?.quietMs ?? null,
-   toolTimeoutMs: r.runtime?.toolTimeoutMs ?? null,
-   heartbeatMs: r.runtime?.heartbeatMs ?? null,
-   interrupted: !!r.runtime?.interrupted,
-   timedOut: !!r.runtime?.timedOut,
-   deadlineExceeded: !!r.runtime?.deadlineExceeded,
-   stopReasonSummary: stopReasonSummary(r),
-  },
+  model: compactModel(r, cost),
+  runtime: compactRuntime(r),
   analysis,
   review,
-  ...(r.clarification && typeof r.clarification === 'object' ? {clarification:{
-   sessionId:String(r.clarification.sessionId ?? ''),
-   round:Number(r.clarification.round ?? 0),
-   questions:Array.isArray(r.clarification.questions) ? r.clarification.questions : [],
-  }} : {}),
+  ...compactClarification(r),
   artifacts: artifactPaths(dir, report),
  };
 }

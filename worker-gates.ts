@@ -187,9 +187,11 @@ async function invokeClassifier(
  }
 }
 
-/** Readiness gate: is the contract clear and free of unresolved assumptions? */
-export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number } = {}):Promise<JevPreflight> {
- const state = {
+type PreflightOpts = { workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number };
+type BoolVerdict = ReturnType<typeof boolVerdict>;
+
+function preflightState(t:any, opts:PreflightOpts) {
+ return {
   deliverable: t.deliverable,
   acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
@@ -197,6 +199,9 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
   checks: (t.checks || []).map((c:any)=>({ command:c.command, args:c.args })),
   context: opts.context ?? resolveContext(t),
  };
+}
+
+function preflightQuestions(opts:PreflightOpts):{ questions:Record<string,GateQuestion>; catalogTraits:string[] } {
  const questions:Record<string,GateQuestion> = {
   requires_frontier: {
    type:'bool',
@@ -254,27 +259,12 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
    };
   }
  }
- const { result, error } = await invokeClassifier(classify, state, questions, opts.timeoutMs);
- const answers = result?.answers ?? {};
- const confidence:Record<string,number|null> = {};
- for (const k of Object.keys(questions)) confidence[k] = answerConfidence(answers[k]);
- const usage = normalizeGateUsage(result?.usage);
- const frontier = boolVerdict(answers.requires_frontier);
- const clear = boolVerdict(answers.contract_clear);
- const assumptions = boolVerdict(answers.blocking_assumptions);
- const traitProbabilities:Record<string,number> = {};
- for (const trait of catalogTraits) {
-  const p = answers[`trait_${trait}`]?.probability;
-  if (typeof p === 'number' && Number.isFinite(p)) traitProbabilities[trait] = p;
- }
- // A missing or failed classification yields a null plan; never crash.
- let routing:ToolRoute|null = null;
- if (!error) {
-  try { routing = routeTools(traitProbabilities); } catch { routing = null; }
- }
+ return { questions, catalogTraits };
+}
+
+function preflightAttention(error:string|undefined, frontier:BoolVerdict, clear:BoolVerdict, assumptions:BoolVerdict, routing:ToolRoute|null, detail:ReturnType<typeof clarifyDetail>):JevAttention {
  const probabilities = { requires_frontier:frontier.probability, contract_clear:clear.probability, blocking_assumptions:assumptions.probability };
- const detail = clarifyDetail(state, contractPartVerdict(answers.contract_part));
- const attention:JevAttention = error
+ return error
   ? {target:'manager',decision:'uncertain',trigger:'error',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:error,probability:frontier.probability,toolPlan:routing}
   : frontier.verdict === 'uncertain'
    ? {target:'manager',decision:'uncertain',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Frontier suitability is uncertain or missing; manager assessment required.',probability:frontier.probability,toolPlan:routing}
@@ -285,21 +275,56 @@ export async function assessPreflight(t:any, classify:GateClassifier, opts:{ wor
      : assumptions.verdict !== 'false'
       ? {target:'manager',decision:'clarify',trigger:'blocking_assumptions',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:assumptionClarifyReason(assumptions),probability:assumptions.probability,toolPlan:routing,...detail}
       : {target:'commodity',decision:'delegate',trigger:'requires_frontier',threshold:CONFIDENCE_THRESHOLD,probabilities,reason:'Suitable for bounded commodity execution with independent checks and manager review.',probability:frontier.probability,toolPlan:routing};
+}
+
+function preflightStatus(frontier:BoolVerdict, clear:BoolVerdict, assumptions:BoolVerdict):JevPreflight['status'] {
+ if (frontier.verdict === 'true') return 'block';
+ if (clear.verdict === 'false' || assumptions.verdict === 'true') return 'block';
+ if (frontier.verdict === 'uncertain') return 'uncertain';
+ if (clear.verdict === 'uncertain' || assumptions.verdict === 'uncertain') return 'uncertain';
+ if (clear.verdict === 'true' && assumptions.verdict === 'false') return 'pass';
+ return 'block';
+}
+
+function traitProbabilitiesFrom(answers:Record<string,any>, catalogTraits:string[]):Record<string,number> {
+ const traitProbabilities:Record<string,number> = {};
+ for (const trait of catalogTraits) {
+  const p = answers[`trait_${trait}`]?.probability;
+  if (typeof p === 'number' && Number.isFinite(p)) traitProbabilities[trait] = p;
+ }
+ return traitProbabilities;
+}
+
+/** Readiness gate: is the contract clear and free of unresolved assumptions? */
+export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number } = {}):Promise<JevPreflight> {
+ const state = preflightState(t, opts);
+ const { questions, catalogTraits } = preflightQuestions(opts);
+ const { result, error } = await invokeClassifier(classify, state, questions, opts.timeoutMs);
+ const answers = result?.answers ?? {};
+ const confidence:Record<string,number|null> = {};
+ for (const k of Object.keys(questions)) confidence[k] = answerConfidence(answers[k]);
+ const usage = normalizeGateUsage(result?.usage);
+ const frontier = boolVerdict(answers.requires_frontier);
+ const clear = boolVerdict(answers.contract_clear);
+ const assumptions = boolVerdict(answers.blocking_assumptions);
+ const traitProbabilities = traitProbabilitiesFrom(answers, catalogTraits);
+ // A missing or failed classification yields a null plan; never crash.
+ let routing:ToolRoute|null = null;
+ if (!error) {
+  try { routing = routeTools(traitProbabilities); } catch { routing = null; }
+ }
+ const detail = clarifyDetail(state, contractPartVerdict(answers.contract_part));
+ const attention = preflightAttention(error, frontier, clear, assumptions, routing, detail);
  const base = { attention, answers, confidence, usage, reportedProvider:result?.provider, reportedModel:result?.model };
  // A gate error is not a pass or a definite block: it is uncertain.
  if (error) return { status:'uncertain', ...base, error };
- if (frontier.verdict === 'true') return {status:'block', ...base};
- if (clear.verdict === 'false' || assumptions.verdict === 'true') return {status:'block', ...base};
- if (frontier.verdict === 'uncertain') return {status:'uncertain', ...base};
- if (clear.verdict === 'uncertain' || assumptions.verdict === 'uncertain') return { status:'uncertain', ...base };
- if (clear.verdict === 'true' && assumptions.verdict === 'false') return { status:'pass', ...base };
- return { status:'block', ...base };
+ return { status:preflightStatus(frontier, clear, assumptions), ...base };
 }
 
-/** Completion gate: is each acceptance criterion satisfied by independent
- * check results and bounded git diff evidence? */
-export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]}):Promise<JevPostflight> {
- const criteria:{qid:string; id:string; index:number; text:string; when?:string; checks?:number[]; mitigates?:string[]}[] = (t.acceptance || []).map((item:any, index:number)=>{
+type PostflightCriterion = {qid:string; id:string; index:number; text:string; when?:string; checks?:number[]; mitigates?:string[]};
+
+function postflightCriteria(t:any):PostflightCriterion[] {
+ return (t.acceptance || []).map((item:any, index:number)=>{
   const qid=`AC${index+1}`;
   const supplied=item && typeof item === 'object' && !Array.isArray(item) && typeof item.id === 'string' && item.id.trim() ? item.id : undefined;
   const when=acceptanceWhen(item);
@@ -308,18 +333,16 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
   return { qid, id:supplied ?? qid, index, text:acceptanceText(item),
    ...(when ? { when } : {}), ...(entryChecks ? { checks:entryChecks } : {}), ...(entryMitigates ? { mitigates:entryMitigates } : {}) };
  });
- // A criterion names checks by index; check_passed needs every named check to
- // have run in this run and exited 0 (ADR-0011 R4).
- const checkPassed=(c:{checks?:number[]}):boolean=> Array.isArray(c.checks) && c.checks.length > 0
+}
+
+// A criterion names checks by index; check_passed needs every named check to
+// have run in this run and exited 0 (ADR-0011 R4).
+function criterionCheckPassed(c:{checks?:number[]}, checks:any[]):boolean {
+ return Array.isArray(c.checks) && c.checks.length > 0
   && c.checks.every((i:number)=> i >= 0 && i < checks.length && checks[i] && checks[i].exitCode === 0);
- const report=opts?.report;
- const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
- const allowed=opts?.allowed ?? (report && !isAbsolute(report.path) ? [report.path] : []);
- const deterministic=new Map<string,'met'|'gap'>();
- for (const c of criteria) {
-  const settled=deterministicCriterion(c.text,{changedFiles:runChanged,allowed});
-  if (settled) deterministic.set(c.qid,settled);
- }
+}
+
+function postflightQuestions(criteria:PostflightCriterion[], deterministic:Map<string,'met'|'gap'>, report:ReportEvidence|undefined):Record<string,GateQuestion> {
  const evidencePhrase=report
   ? 'based only on the independent check results, the bounded git diff evidence and the analysis report outline and excerpt'
   : 'based only on the independent check results and the bounded git diff evidence';
@@ -339,7 +362,11 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
    };
   }
  }
- const state = {
+ return questions;
+}
+
+function postflightState(t:any, checks:any[], git:GitEvidence, evidence:EvidenceDelta|undefined, report:ReportEvidence|undefined) {
+ return {
   deliverable: t.deliverable,
   acceptance: acceptanceTexts(t.acceptance),
   handoff: t.hopContext ?? null,
@@ -350,31 +377,49 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
   runChanges: evidence ? { changedFiles:evidence.runChangedFiles, preexistingFiles:evidence.preexistingFiles } : undefined,
   ...(report ? { report } : {}),
  };
+}
+
+function judgeCriterion(c:PostflightCriterion, deterministic:Map<string,'met'|'gap'>, answers:Record<string,any>, checks:any[]):JevCriterion {
+ const base:{id:string; index:number; text:string; when?:string; mitigates?:string[]} = { id:c.id, index:c.index, text:c.text };
+ if (c.when) base.when=c.when;
+ if (c.mitigates) base.mitigates=c.mitigates;
+ const settled=deterministic.get(c.qid);
+ if (settled) return { ...base,
+  verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true },
+  tier: criterionCheckPassed(c, checks) ? 'check_passed' : 'deterministic' };
+ const v = boolVerdict(answers[c.qid]);
+ const condition = c.when ? boolVerdict(conditionAnswer(answers, c.qid)) : null;
+ const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
+  ? 'not_applicable'
+  : v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain';
+ return { ...base,
+  verdict, probability: v.probability,
+  ...(condition ? { conditionProbability: condition.probability } : {}),
+  answer: answers[c.qid],
+  tier: criterionCheckPassed(c, checks) ? 'check_passed' : (v.verdict === 'true' || v.verdict === 'false') ? 'judged' : 'none' };
+}
+
+/** Completion gate: is each acceptance criterion satisfied by independent
+ * check results and bounded git diff evidence? */
+export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]}):Promise<JevPostflight> {
+ const criteria = postflightCriteria(t);
+ const report=opts?.report;
+ const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
+ const allowed=opts?.allowed ?? (report && !isAbsolute(report.path) ? [report.path] : []);
+ const deterministic=new Map<string,'met'|'gap'>();
+ for (const c of criteria) {
+  const settled=deterministicCriterion(c.text,{changedFiles:runChanged,allowed});
+  if (settled) deterministic.set(c.qid,settled);
+ }
+ const questions = postflightQuestions(criteria, deterministic, report);
+ const state = postflightState(t, checks, git, evidence, report);
  let result:GateClassifierResult|undefined;
  let error:string|undefined;
  if (Object.keys(questions).length) ({ result, error } = await invokeClassifier(classify, state, questions, timeoutMs));
  const deterministicAnswers=Object.fromEntries([...deterministic].map(([id])=>[id,{deterministic:true}]));
  const answers = {...(result?.answers ?? {}), ...deterministicAnswers};
  const usage = normalizeGateUsage(result?.usage);
- const out:JevCriterion[] = criteria.map((c)=>{
-  const base:{id:string; index:number; text:string; when?:string; mitigates?:string[]} = { id:c.id, index:c.index, text:c.text };
-  if (c.when) base.when=c.when;
-  if (c.mitigates) base.mitigates=c.mitigates;
-  const settled=deterministic.get(c.qid);
-  if (settled) return { ...base,
-   verdict:settled, probability: settled === 'met' ? 1 : 0, answer:{ deterministic:true },
-   tier: checkPassed(c) ? 'check_passed' : 'deterministic' };
-  const v = boolVerdict(answers[c.qid]);
-  const condition = c.when ? boolVerdict(conditionAnswer(answers, c.qid)) : null;
-  const verdict:JevCriterion['verdict'] = condition && condition.verdict === 'false'
-   ? 'not_applicable'
-   : v.verdict === 'true' ? 'met' : v.verdict === 'false' ? 'gap' : 'uncertain';
-  return { ...base,
-   verdict, probability: v.probability,
-   ...(condition ? { conditionProbability: condition.probability } : {}),
-   answer: answers[c.qid],
-   tier: checkPassed(c) ? 'check_passed' : (v.verdict === 'true' || v.verdict === 'false') ? 'judged' : 'none' };
- });
+ const out:JevCriterion[] = criteria.map((c)=>judgeCriterion(c, deterministic, answers, checks));
  const gapIds = out.filter((c)=>c.verdict === 'gap').map((c)=>c.id);
  const uncertainIds = out.filter((c)=>c.verdict === 'uncertain').map((c)=>c.id);
  let status:'pass'|'gaps'|'uncertain';

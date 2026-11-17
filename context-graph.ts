@@ -472,38 +472,61 @@ function parseLocation(member: string): ContractContextEntry | null {
  * path) plus an evidence summary of related outcomes, risks, claims and notes.
  */
 export function contractContext(slice: GraphSlice): ContractContext {
-  const context: ContractContextEntry[] = [];
-  const paths = new Set<string>();
-  const outcomes: string[] = [];
-  const risks: string[] = [];
-  const claims: ContractClaim[] = [];
-  const notes: string[] = [];
-  const personas: string[] = [];
+  const acc: ContractAccumulator = {
+    context: [],
+    paths: new Set<string>(),
+    outcomes: [],
+    risks: [],
+    claims: [],
+    notes: [],
+    personas: [],
+  };
 
-  for (const node of slice.nodes) {
-    if (node.kind === 'file' || node.kind === 'test') {
-      const entry = parseLocation(node.member);
-      if (!entry || entry.path.endsWith('/')) continue;
-      if (paths.has(entry.path)) continue;
-      if (context.length >= MAX_CONTEXT_ENTRIES) continue;
-      paths.add(entry.path);
-      context.push(entry);
-    } else if (node.kind === 'outcome') {
-      if (!outcomes.includes(node.member)) outcomes.push(node.member);
-    } else if (node.kind === 'failure-mode') {
-      if (!risks.includes(node.member)) risks.push(node.member);
-    } else if (node.kind === 'claim') {
-      if (!claims.some((claim) => claim.member === node.member)) {
-        claims.push({ member: node.member, standing: node.standing });
-      }
-    } else if (node.kind === 'adr' || node.kind === 'hypothesis') {
-      if (!notes.includes(node.member)) notes.push(node.member);
-    } else if (node.kind === 'persona') {
-      if (!personas.includes(node.member)) personas.push(node.member);
-    }
-  }
+  for (const node of slice.nodes) collectContractNode(acc, node);
 
+  const { context, outcomes, risks, claims, notes, personas } = acc;
   return { context, evidence: { outcomes, risks, claims, notes, personas } };
+}
+
+interface ContractAccumulator {
+  context: ContractContextEntry[];
+  paths: Set<string>;
+  outcomes: string[];
+  risks: string[];
+  claims: ContractClaim[];
+  notes: string[];
+  personas: string[];
+}
+
+function pushUnique(list: string[], member: string): void {
+  if (!list.includes(member)) list.push(member);
+}
+
+function collectContextFile(acc: ContractAccumulator, member: string): void {
+  const entry = parseLocation(member);
+  if (!entry || entry.path.endsWith('/')) return;
+  if (acc.paths.has(entry.path)) return;
+  if (acc.context.length >= MAX_CONTEXT_ENTRIES) return;
+  acc.paths.add(entry.path);
+  acc.context.push(entry);
+}
+
+function collectContractNode(acc: ContractAccumulator, node: GraphSlice['nodes'][number]): void {
+  if (node.kind === 'file' || node.kind === 'test') {
+    collectContextFile(acc, node.member);
+  } else if (node.kind === 'outcome') {
+    pushUnique(acc.outcomes, node.member);
+  } else if (node.kind === 'failure-mode') {
+    pushUnique(acc.risks, node.member);
+  } else if (node.kind === 'claim') {
+    if (!acc.claims.some((claim) => claim.member === node.member)) {
+      acc.claims.push({ member: node.member, standing: node.standing });
+    }
+  } else if (node.kind === 'adr' || node.kind === 'hypothesis') {
+    pushUnique(acc.notes, node.member);
+  } else if (node.kind === 'persona') {
+    pushUnique(acc.personas, node.member);
+  }
 }
 
 // --- impactChecks -----------------------------------------------------------

@@ -338,26 +338,18 @@ function addProposal(
   proposals.push({ id, ...proposal });
 }
 
-/**
- * Build the deterministic proposal set from the project's known artifacts.
- * Writes the proposals document to `--out` (default `<dir>/proposals.json`).
- */
-export async function bootstrap(options: BootstrapOptions): Promise<BootstrapResult> {
-  const dir = options.dir;
-  const deps = options.deps ?? {};
-  const files = deps.files ?? trackedFiles(dir);
-  const byPath = new Map(files.map((entry) => [normalizePath(entry.path), fileText(entry)]));
-  const testPaths = new Set(
-    testArtifacts(files).members
-      .filter((member) => member.attributes?.type === 'file')
-      .map((member) => String(member.attributes?.path)),
-  );
-  const planGraph = deps.planGraph ?? planGraphFromHop(options.hopPath, deps.loadHop ?? loadHop);
-  const proposals: Proposal[] = [];
-  const seen = new Set<string>();
-  const featureRefs: FeatureRef[] = [];
+interface BootstrapContext {
+  files: MatrixFile[];
+  byPath: Map<string, string>;
+  testPaths: Set<string>;
+  proposals: Proposal[];
+  seen: Set<string>;
+  featureRefs: FeatureRef[];
+}
 
-  // 1. cpm deliverables -> their owned files (high).
+// 1. cpm deliverables -> their owned files (high).
+function proposeCpmOwnedFiles(ctx: BootstrapContext, planGraph: unknown): void {
+  const { byPath, proposals, seen, featureRefs } = ctx;
   for (const deliverable of strictItems(planDeliverables(planGraph), 'cpm', 'plan.get', planGraph)) {
     const id = deliverableId(deliverable);
     if (!id) continue;
@@ -373,8 +365,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       });
     }
   }
+}
 
-  // 2. jevitate journeys -> source files containing a route/selector (medium).
+// 2. jevitate journeys -> source files containing a route/selector (medium).
+function proposeJourneyRoutes(ctx: BootstrapContext): Map<string, Set<string>> {
+  const { files, byPath, testPaths, proposals, seen, featureRefs } = ctx;
   const journeyDimension = jevitateJourneys(files);
   const journeyLinks = new Map<string, Set<string>>();
   for (const file of files) {
@@ -403,8 +398,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
     }
     journeyLinks.set(id, linked);
   }
+  return journeyLinks;
+}
 
-  // 3. jevitate jobs -> files of the journeys that reference the job (low).
+// 3. jevitate jobs -> files of the journeys that reference the job (low).
+function proposeJobJourneys(ctx: BootstrapContext, journeyLinks: Map<string, Set<string>>): void {
+  const { files, proposals, seen, featureRefs } = ctx;
   const jobsFile = files.find((entry) => normalizePath(entry.path) === '.jevitate/jobs.json');
   const jobs = jobsFrom(jobsFile ? parseJson(fileText(jobsFile)) : []).filter((job) => jobId(job));
   const jobDimension = jevitateJobs(jobs);
@@ -427,8 +426,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       }
     }
   }
+}
 
-  // 4. test files -> features named in the test names (medium, `tests` links).
+// 4. test files -> features named in the test names (medium, `tests` links).
+function proposeTestNames(ctx: BootstrapContext): void {
+  const { byPath, testPaths, proposals, seen, featureRefs } = ctx;
   for (const testPath of testPaths) {
     const names = testNames(byPath.get(testPath) ?? '');
     if (names.length === 0) continue;
@@ -448,12 +450,41 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
       });
     }
   }
+}
 
+function sortAndCountProposals(proposals: Proposal[]): Record<Confidence, number> {
   proposals.sort(
     (a, b) => a.feature.localeCompare(b.feature) || a.path.localeCompare(b.path) || a.observation.localeCompare(b.observation),
   );
   const counts: Record<Confidence, number> = { high: 0, medium: 0, low: 0 };
   for (const proposal of proposals) counts[proposal.confidence] += 1;
+  return counts;
+}
+
+/**
+ * Build the deterministic proposal set from the project's known artifacts.
+ * Writes the proposals document to `--out` (default `<dir>/proposals.json`).
+ */
+export async function bootstrap(options: BootstrapOptions): Promise<BootstrapResult> {
+  const dir = options.dir;
+  const deps = options.deps ?? {};
+  const files = deps.files ?? trackedFiles(dir);
+  const byPath = new Map(files.map((entry) => [normalizePath(entry.path), fileText(entry)]));
+  const testPaths = new Set(
+    testArtifacts(files).members
+      .filter((member) => member.attributes?.type === 'file')
+      .map((member) => String(member.attributes?.path)),
+  );
+  const planGraph = deps.planGraph ?? planGraphFromHop(options.hopPath, deps.loadHop ?? loadHop);
+  const proposals: Proposal[] = [];
+  const ctx: BootstrapContext = { files, byPath, testPaths, proposals, seen: new Set<string>(), featureRefs: [] };
+
+  proposeCpmOwnedFiles(ctx, planGraph);
+  const journeyLinks = proposeJourneyRoutes(ctx);
+  proposeJobJourneys(ctx, journeyLinks);
+  proposeTestNames(ctx);
+
+  const counts = sortAndCountProposals(proposals);
 
   const document: ProposalsDocument = { schemaVersion: '0.1.0', modelId: options.modelId, project: dir, proposals };
   if (options.out) {
