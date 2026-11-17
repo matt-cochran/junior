@@ -80,40 +80,44 @@ export async function run(t:any, mock=false, deps:GateDeps = {}) {
  }
 }
 
-export function status(path:string) {
+function readResultFile(path:string):any {
  let raw:string;
  try { raw=readFileSync(path,'utf8'); } catch { throw Error(`Cannot read result file: ${path}`); }
  let result:any;
  try { result=JSON.parse(raw); } catch { throw Error(`Invalid JSON in result file: ${path}`); }
+ return result;
+}
+
+function assertResultShape(result:any):void {
  if (!result || typeof result!=='object' || Array.isArray(result)) throw Error('Malformed result: expected an object');
  if (typeof result.id!=='string' || !result.id.trim()) throw Error('Malformed result: missing id');
  if (typeof result.status!=='string' || !result.status.trim()) throw Error('Malformed result: missing status');
  if (!Array.isArray(result.checks)) throw Error('Malformed result: missing checks');
  if (typeof result.artifactDir!=='string' || !result.artifactDir.trim()) throw Error('Malformed result: missing artifactDir');
+}
+
+// Optional result fields copied in this order when present with the given type.
+// Old result files have no receipt; estimated cost, Jev gate records, workflow
+// selection, template IDs, continuation, cache note, isolation/execution
+// checkout, complete evidence, runtime heartbeat, lineage/repair budget and
+// worker error are all optional additions.
+const OPTIONAL_STATUS_FIELDS:Array<[string,'object'|'string']>=[
+ ['receipt','object'],['cost','object'],['jev','object'],
+ ['workflow','object'],['templates','object'],['resume','object'],['cache','object'],
+ ['sourceCwd','string'],['executionCwd','string'],['isolation','object'],['evidence','object'],
+ ['runtime','object'],['lineage','object'],['repair','object'],['analysis','object'],['review','object'],
+ ['workerError','string'],
+];
+
+function hasOptionalField(value:any, kind:'object'|'string'):boolean {
+ return kind === 'string' ? typeof value === 'string' : Boolean(value && typeof value === 'object');
+}
+
+export function status(path:string) {
+ const result=readResultFile(path);
+ assertResultShape(result);
  const out:any={id:result.id,outcome:result.status,checks:result.checks,artifactDir:result.artifactDir};
- // Old result files have no receipt; expose it only when present.
- if (result.receipt && typeof result.receipt === 'object') out.receipt=result.receipt;
- // Estimated cost is optional and only present on results that carry it.
- if (result.cost && typeof result.cost === 'object') out.cost=result.cost;
- // Jev gate records are optional and only present for jev-enabled tasks.
- if (result.jev && typeof result.jev === 'object') out.jev=result.jev;
- // Workflow selection, template IDs, continuation and cache note are optional.
- if (result.workflow && typeof result.workflow === 'object') out.workflow=result.workflow;
- if (result.templates && typeof result.templates === 'object') out.templates=result.templates;
- if (result.resume && typeof result.resume === 'object') out.resume=result.resume;
- if (result.cache && typeof result.cache === 'object') out.cache=result.cache;
- // Isolation/execution checkout and complete evidence are optional additions.
- if (typeof result.sourceCwd === 'string') out.sourceCwd=result.sourceCwd;
- if (typeof result.executionCwd === 'string') out.executionCwd=result.executionCwd;
- if (result.isolation && typeof result.isolation === 'object') out.isolation=result.isolation;
- if (result.evidence && typeof result.evidence === 'object') out.evidence=result.evidence;
- // Runtime heartbeat, lineage/repair budget and worker error are optional.
- if (result.runtime && typeof result.runtime === 'object') out.runtime=result.runtime;
- if (result.lineage && typeof result.lineage === 'object') out.lineage=result.lineage;
- if (result.repair && typeof result.repair === 'object') out.repair=result.repair;
- if (result.analysis && typeof result.analysis === 'object') out.analysis=result.analysis;
- if (result.review && typeof result.review === 'object') out.review=result.review;
- if (typeof result.workerError === 'string') out.workerError=result.workerError;
+ for (const [key,kind] of OPTIONAL_STATUS_FIELDS) if (hasOptionalField(result[key],kind)) out[key]=result[key];
  return out;
 }
 if (isDirectEntry(import.meta.url)) {
