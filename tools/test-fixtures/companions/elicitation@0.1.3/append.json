@@ -1,0 +1,123 @@
+{
+  "accepted_stances": [],
+  "claims": [
+    {
+      "category": "requirement",
+      "dimensions": [
+        "acceptance"
+      ],
+      "evidence": [],
+      "id": "c1",
+      "modality": "constraint",
+      "object": {
+        "kind": "value",
+        "value": "csv"
+      },
+      "polarity": "positive",
+      "predicate": "format",
+      "session_id": "fixture-elicit-20261020b",
+      "source": {
+        "turn_id": "c1"
+      },
+      "standing": "open",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    }
+  ],
+  "contradictions": [],
+  "coverage_schema": {
+    "dimensions": [
+      {
+        "required": true,
+        "tag": "acceptance"
+      }
+    ]
+  },
+  "readiness": {
+    "blockers": [
+      "COVERAGE: required dimension 'acceptance' lacks a withstood hypothesis"
+    ],
+    "dimensions": [
+      {
+        "best_standing": "open",
+        "claims": [
+          "c1"
+        ],
+        "dimension": "acceptance",
+        "required": true,
+        "satisfied": false
+      }
+    ],
+    "gaps": [
+      {
+        "dimension": "acceptance",
+        "suggested_question": "The acceptance hypothesis isn't settled yet — can you confirm or refute it?"
+      }
+    ],
+    "ready": false
+  },
+  "registry": {
+    "entity_ids": [
+      "fixture-elicit-20261020b"
+    ],
+    "predicate_tokens": [
+      "format"
+    ]
+  },
+  "requirements": [
+    {
+      "acceptance_criteria": [],
+      "capability": "format",
+      "id": "req:c1",
+      "quality_checks": [
+        {
+          "name": "has_acceptance",
+          "passed": false
+        },
+        {
+          "name": "has_owner",
+          "passed": false
+        },
+        {
+          "name": "testable",
+          "passed": false
+        },
+        {
+          "name": "unambiguous",
+          "passed": true
+        }
+      ],
+      "source_claims": [
+        "c1"
+      ],
+      "statement": "fixture-elicit-20261020b format csv",
+      "subject": {
+        "id": "fixture-elicit-20261020b",
+        "label": "export"
+      }
+    }
+  ],
+  "session_id": "fixture-elicit-20261020b",
+  "signals": [
+    {
+      "claims": [],
+      "code": "coverage_gap",
+      "dimension": "acceptance",
+      "kind": "clarify",
+      "message": "Coverage dimension 'acceptance' has no withstood hypothesis.",
+      "suggested_question": "The acceptance hypothesis isn't settled yet — can you confirm or refute it?"
+    },
+    {
+      "claims": [
+        "c1"
+      ],
+      "code": "open_hypothesis",
+      "dimension": "acceptance",
+      "kind": "clarify",
+      "message": "Hypothesis 'c1' has no evidence yet; seek user assent or refutation.",
+      "suggested_question": "Can you confirm: fixture-elicit-20261020b format ... ? (claim 'c1')"
+    }
+  ]
+}

@@ -303,8 +303,9 @@ and the failure is then marked `retried: true`.
 A contract `budget` (`maxToolCalls`, `maxTotalTokens`, `mode`) bounds the
 worker. Cache reads count towards `maxTotalTokens`. The report workflows
 `evaluate`, `qa`, `recon` and `investigate` have an enforced default of 25 tool
-calls and 400,000 tokens. Contract fields override the default field by field.
-Other workflows are unbounded unless the contract sets `budget`. A run that
+calls and 400,000 tokens. Every other workflow (`test_first`, `checks_first`
+and the rest) has an enforced default of 16,000,000 tokens. Contract fields
+override either default field by field. A run that
 hits a limit stops with `stopReason: budget_exceeded`. Report workflows update
 their report after each criterion, so a stopped run keeps a partial report.
 

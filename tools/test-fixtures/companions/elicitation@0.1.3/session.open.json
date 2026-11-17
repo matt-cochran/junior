@@ -1,0 +1,50 @@
+{
+  "accepted_stances": [],
+  "claims": [],
+  "contradictions": [],
+  "coverage_schema": {
+    "dimensions": [
+      {
+        "required": true,
+        "tag": "acceptance"
+      }
+    ]
+  },
+  "readiness": {
+    "blockers": [
+      "COVERAGE: required dimension 'acceptance' lacks a withstood hypothesis"
+    ],
+    "dimensions": [
+      {
+        "best_standing": null,
+        "claims": [],
+        "dimension": "acceptance",
+        "required": true,
+        "satisfied": false
+      }
+    ],
+    "gaps": [
+      {
+        "dimension": "acceptance",
+        "suggested_question": "What is the acceptance for this work?"
+      }
+    ],
+    "ready": false
+  },
+  "registry": {
+    "entity_ids": [],
+    "predicate_tokens": []
+  },
+  "requirements": [],
+  "session_id": "fixture-elicit-20261020b",
+  "signals": [
+    {
+      "claims": [],
+      "code": "coverage_gap",
+      "dimension": "acceptance",
+      "kind": "clarify",
+      "message": "Coverage dimension 'acceptance' has no withstood hypothesis.",
+      "suggested_question": "What is the acceptance for this work?"
+    }
+  ]
+}

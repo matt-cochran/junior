@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `build` script no longer re-transpiles five modules after the main
   build, and `scripts/build.mjs` no longer exports `transpile` (#264).
 
+## [0.18.6] - 2026-11-17
+
+### Changed
+
+- Junior verifies elicitation 0.1.3: its recorded fixtures are byte-identical to
+  0.1.2, so `junior doctor` reports the shape as verified. Elicitation 0.1.3
+  lists every missing `append` field in one error and documents complete
+  payloads and the `qualify` scope (#250).
+- Junior verifies cpm-planner 0.8.0, the current release (it verified up to
+  0.4.3, so `junior doctor` reported the installed 0.8.0 as unverified). The 0.8.0
+  responses only add fields: a `durable_state` block on every call and
+  `schedule` on baselines. Every reader accepts them unchanged.
+- Every managed tool Junior verifies is now at its current published version:
+  cpm 0.8.0, fmeca 0.2.2, elicitation 0.1.3 and scientific-process 0.3.1. Pi is
+  1.5.2.
+- `scripts/capture-companion-fixtures.mjs` replaces the capture's temp project
+  directory with `<project>`, so the `durable_state.location` paths cpm reports
+  stay identical from run to run.
+
+- Code and other non-report workflows run with an enforced default budget of
+  16,000,000 total tokens (cache reads count). Before, they were unbounded
+  unless the contract set `budget`, so a runaway lane could spend 18M–22M
+  tokens. A contract `budget` overrides the default field by field; ADR 0015 R5
+  is amended (#251).
+
 ### Fixed
 
 - A remote Pi run whose transport returns an artifact manifest without a
