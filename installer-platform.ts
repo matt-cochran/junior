@@ -1,6 +1,7 @@
 import path from "node:path";
 import process from "node:process";
 import type { ReleaseInfo } from "./installer-release.ts";
+import type { Clock } from "./clock.ts";
 
 // ---------------------------------------------------------------------------
 // Public constants and types
@@ -134,6 +135,8 @@ export interface InstallerDeps {
   githubToken?: string;
   /** Injectable bounded offline TRIZ smoke; defaults to importing it as ESM. */
   smokeTriz?: (jsPath: string) => Promise<boolean>;
+  /** Clock for deadlines, request timers and timestamps; defaults to the system clock. */
+  clock?: Clock;
   /** Force the resolved release instead of asking the GitHub API. */
   resolveRelease?: (repo: string) => Promise<ReleaseInfo>;
 }

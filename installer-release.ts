@@ -17,12 +17,11 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 
 /**
- * The clock an install reads time and schedules request timers on. `clock` is
- * an optional InstallerDeps field (declared here because InstallerDeps lives in
- * installer-platform.ts); absent, the system clock is used.
+ * The clock an install reads time and schedules request timers on: the
+ * optional `InstallerDeps.clock`, or the system clock when absent.
  */
 export function installerClock(deps: InstallerDeps): Clock {
-  return (deps as InstallerDeps & { clock?: Clock }).clock ?? systemClock;
+  return deps.clock ?? systemClock;
 }
 
 export const APPROVED_HOSTS: ReadonlySet<string> = new Set([

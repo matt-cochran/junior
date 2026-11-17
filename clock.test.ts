@@ -1,6 +1,63 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { createManualClock, systemClock } from './clock.ts';
+
+// --- guard: production code reads time only through the clock (#265) --------
+
+const ROOT = import.meta.dirname;
+const CLOCK_MODULE = 'clock.ts';
+const SKIPPED_DIRS = new Set(['node_modules', 'dist']);
+const TIMING_CALLS: Array<[string, RegExp]> = [
+  ['Date.now()', /\bDate\.now\s*\(/],
+  ['new Date()', /\bnew\s+Date\s*\(\s*\)/],
+  ['performance.now()', /\bperformance\.now\s*\(/],
+  ['a global timer', /(?<![.\w$])(?:setTimeout|setInterval|clearTimeout|clearInterval)\s*\(/],
+];
+
+function productionSources(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRS.has(entry.name)) productionSources(join(dir, entry.name), out);
+    } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.d.ts')) {
+      out.push(join(dir, entry.name));
+    }
+  }
+  return out;
+}
+
+/** Blank out comments so prose that names an API is not mistaken for a call. */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
+}
+
+test('no production module reads the time or schedules a timer outside the clock', () => {
+  const offenders: string[] = [];
+  for (const file of productionSources(ROOT)) {
+    const rel = relative(ROOT, file);
+    if (rel === CLOCK_MODULE) continue;
+    const lines = withoutComments(readFileSync(file, 'utf8')).split('\n');
+    lines.forEach((line, index) => {
+      for (const [name, pattern] of TIMING_CALLS) {
+        if (pattern.test(line)) offenders.push(`${rel}:${index + 1} uses ${name}`);
+      }
+    });
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test('the timing guard recognises each direct call it forbids', () => {
+  const samples = ['Date.now()', 'new Date()', 'performance.now()', 'setTimeout(f, 1)', 'clearInterval(t)'];
+  assert.deepEqual(samples.map((s) => TIMING_CALLS.some(([, p]) => p.test(s))), [true, true, true, true, true]);
+});
+
+test('the timing guard allows clock methods, parsed dates and comments', () => {
+  const allowed = ['clock.setTimeout(f, 1)', 'deps.clock.clearTimeout(t)', "new Date('2026-01-01')", 'new Date(ms)'];
+  assert.deepEqual(allowed.map((s) => TIMING_CALLS.some(([, p]) => p.test(s))), [false, false, false, false]);
+  assert.equal(withoutComments('x(); // Date.now() here').includes('Date.now'), false);
+});
 
 test('a manual clock reports the time it was started at', () => {
   const clock = createManualClock('2026-11-17T00:00:00.000Z');
