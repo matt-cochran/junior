@@ -44,6 +44,15 @@ const settledFlag=(p:Promise<unknown>)=>{const s={done:false};p.then(()=>{s.done
  * once its handlers are installed, so a test never signals it too early. */
 const readyTermIgnorer=(pidFile:string)=>`process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('fs').writeFileSync(${JSON.stringify(pidFile+'.ready')},'1');setInterval(()=>{},1000)`;
 const advanceTo=async(clock:ManualClock,ms:number)=>{await clock.advanceAsync(ms);};
+/** A fake-child spawn hook plus a promise that settles once run() has spawned
+ * it; awaiting it lands after the runtime has attached its listeners. */
+const gatedSpawn=(child:any)=>{let spawnedNow!:()=>void;const spawned=new Promise<void>((r)=>{spawnedNow=r;});return {spawned,spawnChild:()=>{spawnedNow();return child;}};};
+/** True once the run's events.jsonl contains `text` (the runtime has handled that line). */
+const eventsInclude=(repo:any,id:string,text:string)=>{try{return fileIncludes(join(artifactFor(repo,id),'events.jsonl'),text);}catch{return false;}};
+// run() tests drive the worker monitor, quiet threshold, deadlines and kill
+// grace from `deps.clock`. The monitor ticks every 25 ms of clock time from the
+// moment the child is attached, so a bound is observed on the first tick at or
+// past it.
 
 // --- D08 runtime handoff: streaming lifecycle, deadlines, repair lineage (offline; no paid calls) ---
 test('Validated execution settings default and reject out-of-bound values',()=>{
@@ -77,15 +86,24 @@ test('Common prompt restricts searches to the checkout and forbids broad filesys
 test('Streaming runtime reports running -> quiet -> running and quiet never kills',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
- const t=okTask(repo,{id:'quiet',execution:{quietMs:80,heartbeatMs:15,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
+ // quietMs 100 lands on a monitor tick, so the threshold is exact.
+ const t=okTask(repo,{id:'quiet',execution:{quietMs:100,heartbeatMs:15,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
  fake.emit({type:'agent_start'});
- await delay(220);
+ await eventually(()=>eventsInclude(repo,'quiet','agent_start'),'the agent_start line');
  const art=artifactFor(repo,'quiet');
+ await clock.advanceAsync(99);
+ assert.notEqual(readRuntime(art).state,'quiet','not quiet one millisecond before quietMs');
+ await clock.advanceAsync(1);
  assert.equal(readRuntime(art).state,'quiet','idle past quietMs is reported quiet');
+ await clock.advanceAsync(1000);
  assert.equal(fake.state.killed,false,'quiet must not kill the child');
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
- await delay(40);
+ await eventually(()=>eventsInclude(repo,'quiet','tool_execution_start'),'the tool start line');
+ await clock.advanceAsync(25);
  assert.equal(readRuntime(art).state,'running','activity returns state to running');
  assert.equal(readRuntime(art).currentTool,'bash');
  fake.emit({type:'tool_execution_end',toolCallId:'c1',toolName:'bash'});
@@ -101,10 +119,15 @@ test('Streaming runtime reports running -> quiet -> running and quiet never kill
 test('Streaming runtime exposes live heartbeat and log visibility',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'live',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
- await delay(80);
+ await eventually(()=>eventsInclude(repo,'live','tool_execution_start'),'the tool start line');
+ // One monitor tick past heartbeatMs rewrites runtime.json with the live tool.
+ await clock.advanceAsync(25);
  const art=artifactFor(repo,'live');
  assert.ok(existsSync(join(art,'runtime.json')),'runtime heartbeat exists while running');
  assert.equal(readRuntime(art).state,'running');
@@ -122,9 +145,17 @@ test('Tool timeout stops the process group with TERM and produces a failed recei
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
  let spawns=0;
- const t=okTask(repo,{id:'tool-timeout',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:80,checkTimeoutMs:5000,deadlineMs:30000}});
- const p=run(t,false,{spawnChild:()=>{spawns++;return fake.child;}});
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
+ const t=okTask(repo,{id:'tool-timeout',execution:{quietMs:100000,heartbeatMs:20,toolTimeoutMs:100,checkTimeoutMs:5000,deadlineMs:30000}});
+ const p=run(t,false,{spawnChild:()=>{spawns++;return gate.spawnChild();},clock});
+ await gate.spawned;
  fake.emit({type:'tool_execution_start',toolCallId:'c1',toolName:'bash'});
+ await eventually(()=>eventsInclude(repo,'tool-timeout','tool_execution_start'),'the tool start line');
+ await clock.advanceAsync(99);
+ assert.equal(fake.state.killed,false,'the tool has not timed out one millisecond early');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the tool times out at toolTimeoutMs');
  const r=await p;
  assert.equal(spawns,1,'no automatic retry/restart');
  assert.equal(r.status,'worker_failed');
@@ -139,9 +170,19 @@ test('Tool timeout stops the process group with TERM and produces a failed recei
 
 test('Total wall deadline covers checks and no success is reported after it',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
- const slowCheck={command:process.execPath,args:['-e','setTimeout(()=>{},1000)']};
+ // The check never exits on its own; it writes a marker once it is running.
+ const marker=join(mkdtempSync(join(tmpdir(),'junior-slow-check-')),'started');
+ const slowCheck={command:process.execPath,args:['-e',`require('fs').writeFileSync(${JSON.stringify(marker)},'1');setInterval(()=>{},1000)`]};
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'deadline',checks:[slowCheck],execution:{deadlineMs:300,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:10000}});
- const r=await run(t,false,{spawnPi:okSpawn()});
+ const p=run(t,false,{spawnPi:okSpawn(),clock});
+ const settled=settledFlag(p);
+ await eventually(()=>existsSync(marker),'the slow check to start');
+ await clock.advanceAsync(299);
+ assert.equal(settled.done,false,'the run is not stopped one millisecond before its deadline');
+ await clock.advanceAsync(1);
+ await clock.advanceAsync(KILL_GRACE_MS);
+ const r=await p;
  assert.equal(r.status,'deadline_exceeded');
  assert.equal(r.runtime.deadlineExceeded,true);
  assert.equal(r.runtime.state,'deadline_exceeded');
@@ -407,20 +448,28 @@ test('An interrupted run cancels a hung check process tree and keeps the heartbe
  const pidFile=join(repo.dir,'hung-check.pid');
  const checkScript=[
   "const {spawn}=require('child_process');const fs=require('fs');",
-  `const d=spawn(process.execPath,['-e',${JSON.stringify(termIgnoringDescendant())}],{stdio:'ignore'});`,
+  `const d=spawn(process.execPath,['-e',${JSON.stringify(readyTermIgnorer(pidFile))}],{stdio:'ignore'});`,
   "fs.writeFileSync(process.argv[1],String(d.pid));",
   "setInterval(()=>{},1000);",
  ].join('');
  const controller=new AbortController();
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'check-interrupt',checks:[{command:process.execPath,args:['-e',checkScript,pidFile]}],
   execution:{deadlineMs:30000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:3000,checkTimeoutMs:3000}});
- const p=run(t,false,{spawnPi:okSpawn(),signal:controller.signal});
+ const p=run(t,false,{spawnPi:okSpawn(),signal:controller.signal,clock});
+ const settled=settledFlag(p);
  const cpid=await waitForPid(pidFile);
  assert.ok(cpid>0,'hung check started');
+ await eventually(()=>existsSync(pidFile+'.ready'),'the descendant to ignore SIGTERM');
  // Heartbeat must advance to the checks phase while the check is running.
  const art=artifactFor(repo,'check-interrupt');
  assert.equal(readRuntime(art).phase,'checks','heartbeat stays live during checks');
  controller.abort();
+ // SIGTERM went to the group at once; the descendant ignores it until the grace ends.
+ await clock.advanceAsync(KILL_GRACE_MS-1);
+ assert.equal(settled.done,false,'the handback waits for the full kill grace');
+ assert.doesNotThrow(()=>process.kill(cpid,0),'the TERM-ignoring descendant outlives SIGTERM until the grace ends');
+ await clock.advanceAsync(1);
  const r=await p;
  assert.equal(r.status,'interrupted');
  assert.equal(r.runtime.interrupted,true);
@@ -456,11 +505,27 @@ test('Unbounded worker output is capped and classified as truncated, not a valid
 test('An expired wall deadline skips worker startup',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  let workerStarted=false;
+ const clock=createManualClock(Date.now());
  const t=okTask(repo,{id:'expired',execution:{deadlineMs:10,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
- const r=await run(t,false,{spawnChild:()=>{workerStarted=true;return makeFakeChild().child;}});
+ // Readiness consumes the whole 10 ms wall budget before the worker would start.
+ const progress=(line:string)=>{if(line==='readiness')clock.advance(10);};
+ const r=await run(t,false,{spawnChild:()=>{workerStarted=true;return makeFakeChild().child;},clock,progress});
  assert.equal(workerStarted,false,'worker must not start after the wall deadline');
  assert.equal(r.status,'deadline_exceeded');
  assert.ok(existsSync(join(r.artifactDir,'evidence.json')),'evidence still captured without a worker');
+});
+
+test('A worker deadline one millisecond away still starts the worker',async()=>{
+ const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
+ const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const t=okTask(repo,{id:'not-expired',execution:{deadlineMs:10,checkReserveMs:1,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000}});
+ // Worker deadline = 10 ms wall - 1 ms reserve = 9 ms; readiness uses 8 of them.
+ const progress=(line:string)=>{if(line==='readiness')clock.advance(8);};
+ let workerStarted=false;
+ const r=await run(t,false,{spawnChild:()=>{workerStarted=true;queueMicrotask(()=>{fake.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage:U(1,1,2),stopReason:'stop'}});fake.emit({type:'agent_settled'});fake.end(0);});return fake.child;},clock,progress});
+ assert.equal(workerStarted,true,'the worker starts while wall time remains');
+ assert.notEqual(r.status,'deadline_exceeded');
 });
 
 test('Disk persistence failure is surfaced without aborting the run',async()=>{
@@ -557,15 +622,33 @@ test('A check reserve at least the deadline is rejected',()=>{
 test('A worker stopped by its reserved deadline still records check results',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'reserve-checks',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
- const r=await run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
+ // The worker deadline is the wall deadline minus the 1000 ms check reserve.
+ await clock.advanceAsync(499);
+ assert.equal(fake.state.killed,false,'the worker is not stopped one millisecond before its reserved deadline');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the worker is stopped at its reserved deadline');
+ const r=await p;
  assert.equal(r.checks.length,1);
 });
 test('A worker stopped by its reserved deadline keeps the run deadline_exceeded',async()=>{
  const repo=gitRepo(); commitFile(repo,'a.txt','base\n');
  const fake=makeFakeChild();
+ const clock=createManualClock(Date.now());
+ const gate=gatedSpawn(fake.child);
  const t=okTask(repo,{id:'reserve-status',execution:{deadlineMs:1500,checkReserveMs:1000,quietMs:100000,heartbeatMs:20,toolTimeoutMs:10000,checkTimeoutMs:1000}});
- const r=await run(t,false,{spawnChild:()=>fake.child});
+ const p=run(t,false,{spawnChild:gate.spawnChild,clock});
+ await gate.spawned;
+ // The worker deadline is the wall deadline minus the 1000 ms check reserve.
+ await clock.advanceAsync(499);
+ assert.equal(fake.state.killed,false,'the worker is not stopped one millisecond before its reserved deadline');
+ await clock.advanceAsync(1);
+ assert.equal(fake.state.killed,true,'the worker is stopped at its reserved deadline');
+ const r=await p;
  assert.equal(r.status,'deadline_exceeded');
 });
 test('An interrupted run still records no checks',async()=>{
