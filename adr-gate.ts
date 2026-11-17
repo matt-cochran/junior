@@ -219,29 +219,15 @@ export async function relevantAdrs(
   return {kept: adrs.filter((adr) => !excluded.has(adr.id)), irrelevant: adrs.filter((adr) => excluded.has(adr.id)).map((adr) => adr.id)};
 }
 
-/**
- * ADR 0018 R3-R5, R7, R8: run one Jev check per accepted ADR rule against the
- * in-scope subjects, turn the flagged cells into findings, and resolve each
- * finding against the committed decision ledger.
- */
-export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult> {
-  if (opts.config.gate === 'off') {
-    const result: AdrGateResult = {gate: 'off', blocked: false, findings: [], checked: 0, skipped: []};
-    // An off gate never checks and never skips, but callers still read the
-    // boolean; keep it out of the legacy serialized shape.
-    Object.defineProperty(result, 'inconclusive', {value: false, enumerable: false});
-    return result;
-  }
+function offGateResult(): AdrGateResult {
+  const result: AdrGateResult = {gate: 'off', blocked: false, findings: [], checked: 0, skipped: []};
+  // An off gate never checks and never skips, but callers still read the
+  // boolean; keep it out of the legacy serialized shape.
+  Object.defineProperty(result, 'inconclusive', {value: false, enumerable: false});
+  return result;
+}
 
-  const allAdrs = opts.adrs ?? loadAllAdrs(join(opts.root, opts.config.dir), opts.config);
-  const adrs = allAdrs.filter((adr) => adr.status === 'accepted');
-  const now = opts.now ?? new Date();
-  const entries = readLedger(opts.root);
-  const skippedSet = new Set<string>();
-  const findings: AdrGateFinding[] = [];
-  let checked = 0;
-
-  // File-less subjects are pre-filtered for relevance once each (R3).
+async function irrelevanceMap(opts: RunAdrGateOptions, adrs: Adr[]): Promise<Map<string, Set<string>>> {
   const irrelevantFor = new Map<string, Set<string>>();
   if (opts.relevance !== false) {
     for (const subject of opts.subjects) {
@@ -250,6 +236,143 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
       irrelevantFor.set(subject.target, new Set(filtered.irrelevant));
     }
   }
+  return irrelevantFor;
+}
+
+interface GateRun {
+  opts: RunAdrGateOptions;
+  allAdrs: readonly Adr[];
+  now: Date;
+  entries: ReturnType<typeof readLedger>;
+  findings: AdrGateFinding[];
+}
+
+type GateCell = Awaited<ReturnType<typeof analyze>>['cells'][number];
+type GateRule = Adr['rules'][number];
+
+function cellVerdict(cell: GateCell, config: RunAdrGateOptions['config']): AdrGateVerdict | null {
+  const belowMinimum =
+    config.minConfidence !== undefined &&
+    cell.probability !== null &&
+    cell.probability < config.minConfidence;
+  return (
+    // A contradiction counts only when the cell is known; a barely
+    // believed one (e.g. p=0.02) is uncertain, not a contradiction.
+    cell.optionId === 'contradicts' && cell.known && !belowMinimum
+      ? 'contradicts'
+      : !cell.known || belowMinimum
+        ? 'uncertain'
+        : null
+  );
+}
+
+function cellFinding(
+  run: GateRun,
+  adr: Adr,
+  rule: GateRule,
+  adrHash: string,
+  cell: GateCell,
+  verdict: AdrGateVerdict,
+): AdrGateFinding {
+  const {opts, entries, now, allAdrs} = run;
+  const key = {
+    adrId: adr.id,
+    ruleId: rule.id,
+    target: cell.criterionId,
+    deliverable: opts.deliverable,
+  };
+  const context = {now, adrHash};
+  const decision = activeDecision(entries, key, context);
+  const lapsed = decision === null ? lapsedStanding(entries, key, context) : null;
+  const carried =
+    opts.stage === 'design' || opts.stage === 'implementation'
+      ? carriedForward(entries, {
+          adrId: adr.id,
+          ruleId: rule.id,
+          deliverable: opts.deliverable,
+        })
+      : null;
+  const cleared =
+    decision !== null &&
+    (decision.decision === 'override' ||
+      (decision.decision === 'amend' && amendmentAccepted(decision, allAdrs)));
+
+  return {
+    adrId: adr.id,
+    ruleId: rule.id,
+    rule: rule.text,
+    target: cell.criterionId,
+    verdict,
+    probability: cell.probability,
+    confidence: cell.confidence,
+    adrHash,
+    decision,
+    lapsed,
+    carried,
+    cleared,
+    stage: opts.stage,
+    ...(opts.deliverable !== undefined ? {deliverable: opts.deliverable} : {}),
+  };
+}
+
+/** Check one rule against its subjects; returns the number of cells judged. */
+async function checkRule(run: GateRun, adr: Adr, rule: GateRule, subjects: GateSubject[], adrHash: string): Promise<number> {
+  const {opts} = run;
+  const criteria: AnalysisCriterion[] = subjects.map((subject) => ({
+    id: subject.target,
+    label: subject.target,
+    question: subjectQuestion(rule, subject),
+    weight: 1,
+    scale: CONFORMANCE_SCALE.map((option) => ({...option})),
+  }));
+  const input: AnalysisInput = {
+    items: [{id: `${adr.id}/${rule.id}`, label: rule.text}],
+    criteria,
+  };
+  const result = await analyze({
+    input,
+    classify: opts.classify,
+    deps: opts.deps,
+  });
+
+  let checked = 0;
+  for (const cell of result.cells) {
+    checked += 1;
+    const verdict = cellVerdict(cell, opts.config);
+    if (!verdict) continue;
+    run.findings.push(cellFinding(run, adr, rule, adrHash, cell, verdict));
+  }
+  return checked;
+}
+
+function inconclusiveReasonFor(adrs: Adr[], skippedSet: Set<string>, inconclusive: boolean): string | undefined {
+  const unscoped = adrs.filter((adr) => skippedSet.has(adr.id) && adr.appliesTo.length === 0).length;
+  return inconclusive
+    ? unscoped > 0
+      ? `${unscoped} accepted ADR${unscoped === 1 ? ' has' : 's have'} no applies_to; run \`junior adr scope\` to draft front matter.`
+      : `${skippedSet.size} accepted ADR${skippedSet.size === 1 ? '' : 's'} were skipped because no applies_to matched the subject; run \`junior adr scope\` to review their scope.`
+    : undefined;
+}
+
+/**
+ * ADR 0018 R3-R5, R7, R8: run one Jev check per accepted ADR rule against the
+ * in-scope subjects, turn the flagged cells into findings, and resolve each
+ * finding against the committed decision ledger.
+ */
+export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult> {
+  if (opts.config.gate === 'off') return offGateResult();
+
+  const allAdrs = opts.adrs ?? loadAllAdrs(join(opts.root, opts.config.dir), opts.config);
+  const adrs = allAdrs.filter((adr) => adr.status === 'accepted');
+  const now = opts.now ?? new Date();
+  const entries = readLedger(opts.root);
+  const skippedSet = new Set<string>();
+  const findings: AdrGateFinding[] = [];
+  const run: GateRun = {opts, allAdrs, now, entries, findings};
+  let checked = 0;
+
+  // File-less subjects are pre-filtered for relevance once each (R3).
+  const irrelevantFor = await irrelevanceMap(opts, adrs);
 
   for (const adr of adrs) {
     const subjects = inScopeSubjects(adr, opts.subjects, skippedSet)
@@ -262,90 +385,14 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     const adrHash = adrTextHash(adr);
 
     for (const rule of adr.rules) {
-      const criteria: AnalysisCriterion[] = subjects.map((subject) => ({
-        id: subject.target,
-        label: subject.target,
-        question: subjectQuestion(rule, subject),
-        weight: 1,
-        scale: CONFORMANCE_SCALE.map((option) => ({...option})),
-      }));
-      const input: AnalysisInput = {
-        items: [{id: `${adr.id}/${rule.id}`, label: rule.text}],
-        criteria,
-      };
-      const result = await analyze({
-        input,
-        classify: opts.classify,
-        deps: opts.deps,
-      });
-
-      for (const cell of result.cells) {
-        checked += 1;
-        const belowMinimum =
-          opts.config.minConfidence !== undefined &&
-          cell.probability !== null &&
-          cell.probability < opts.config.minConfidence;
-        const verdict: AdrGateVerdict | null =
-          // A contradiction counts only when the cell is known; a barely
-          // believed one (e.g. p=0.02) is uncertain, not a contradiction.
-          cell.optionId === 'contradicts' && cell.known && !belowMinimum
-            ? 'contradicts'
-            : !cell.known || belowMinimum
-              ? 'uncertain'
-              : null;
-        if (!verdict) continue;
-
-        const key = {
-          adrId: adr.id,
-          ruleId: rule.id,
-          target: cell.criterionId,
-          deliverable: opts.deliverable,
-        };
-        const context = {now, adrHash};
-        const decision = activeDecision(entries, key, context);
-        const lapsed = decision === null ? lapsedStanding(entries, key, context) : null;
-        const carried =
-          opts.stage === 'design' || opts.stage === 'implementation'
-            ? carriedForward(entries, {
-                adrId: adr.id,
-                ruleId: rule.id,
-                deliverable: opts.deliverable,
-              })
-            : null;
-        const cleared =
-          decision !== null &&
-          (decision.decision === 'override' ||
-            (decision.decision === 'amend' && amendmentAccepted(decision, allAdrs)));
-
-        findings.push({
-          adrId: adr.id,
-          ruleId: rule.id,
-          rule: rule.text,
-          target: cell.criterionId,
-          verdict,
-          probability: cell.probability,
-          confidence: cell.confidence,
-          adrHash,
-          decision,
-          lapsed,
-          carried,
-          cleared,
-          stage: opts.stage,
-          ...(opts.deliverable !== undefined ? {deliverable: opts.deliverable} : {}),
-        });
-      }
+      checked += await checkRule(run, adr, rule, subjects, adrHash);
     }
   }
 
   // ADR 0018 R9: an implementation check that judged nothing because every
   // accepted ADR was skipped is inconclusive, not clean.
   const inconclusive = checked === 0 && skippedSet.size > 0;
-  const unscoped = adrs.filter((adr) => skippedSet.has(adr.id) && adr.appliesTo.length === 0).length;
-  const inconclusiveReason = inconclusive
-    ? unscoped > 0
-      ? `${unscoped} accepted ADR${unscoped === 1 ? ' has' : 's have'} no applies_to; run \`junior adr scope\` to draft front matter.`
-      : `${skippedSet.size} accepted ADR${skippedSet.size === 1 ? '' : 's'} were skipped because no applies_to matched the subject; run \`junior adr scope\` to review their scope.`
-    : undefined;
+  const inconclusiveReason = inconclusiveReasonFor(adrs, skippedSet, inconclusive);
 
   return {
     gate: opts.config.gate,
