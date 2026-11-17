@@ -22,6 +22,7 @@ import {
 } from './installer.ts';
 import { extractEntryToBuffer } from './installer-release.ts';
 import { withInstallLock } from './installer-state.ts';
+import { createManualClock } from './clock.ts';
 import {
   tmp,
   response,
@@ -35,6 +36,7 @@ import {
   stalledBody,
   readState,
   delayedServer,
+  driveToSettle,
   binaryBodyFetch,
   stateWith,
   managedStateWith,
@@ -374,9 +376,19 @@ test('The optional TRIZ install resolves the portable dist/triz.js archive', asy
   assert.equal(existsSync(join(deps.installRoot, 'triz', 'dist', 'triz.js')), true);
 });
 test('A stalled release response body is aborted by the request timeout', async () => {
-  const fetch = binaryBodyFetch(TOOL_REPOS.fmeca.repo, 'v1.2.3', fmecaAsset, stalledBody());
-  const report = await installTools({ tools: ['fmeca'] }, baseDeps({ fetch } as any, { fetch, requestTimeoutMs: 50 }));
-  assert.match(report.outcomes[0].error ?? '', /abort|timeout|deadline/i);
+  const clock = createManualClock('2026-10-25T12:00:00.000Z');
+  const body = stalledBody();
+  const fetch = binaryBodyFetch(TOOL_REPOS.fmeca.repo, 'v1.2.3', fmecaAsset, body);
+  let settled = false;
+  const install = installTools({ tools: ['fmeca'] }, baseDeps({ fetch } as any, { fetch, requestTimeoutMs: 50, clock }))
+    .finally(() => { settled = true; });
+  await body.reading;
+  await clock.advanceAsync(49);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  await clock.advanceAsync(1);
+  const report = await install;
+  assert.match(report.outcomes[0].error ?? '', /aborted by the request timeout/i);
 });
 test('A streaming release body over the byte limit is rejected by streaming', async () => {
   const totalChunks = 100;
@@ -402,9 +414,25 @@ test('An overall install deadline is shared across release requests', async () =
     assetName: fmecaAsset,
     entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
   });
-  const deps = baseDeps(delayedServer(server, 30) as any, { installTimeoutMs: 40, requestTimeoutMs: 60_000 });
-  const report = await installTools({ tools: ['fmeca'] }, deps);
+  const clock = createManualClock('2026-10-25T12:00:00.000Z');
+  const deps = baseDeps(delayedServer(server, 30, clock) as any, { installTimeoutMs: 40, requestTimeoutMs: 60_000, clock });
+  const report = await driveToSettle(clock, installTools({ tools: ['fmeca'] }, deps));
   assert.equal(report.outcomes[0].status, 'failed');
+  assert.match(report.outcomes[0].error ?? '', /request timeout|install deadline/i);
+});
+
+test('An install that fits the overall deadline on virtual time succeeds', async () => {
+  const server = releaseServer({
+    repo: TOOL_REPOS.fmeca.repo,
+    assetName: fmecaAsset,
+    entries: [{ name: 'fmeca-mcp', data: entryData('BINARY') }],
+  });
+  const clock = createManualClock('2026-10-25T12:00:00.000Z');
+  const deps = baseDeps(delayedServer(server, 30, clock) as any, { installTimeoutMs: 60_000, clock });
+  const report = await driveToSettle(clock, installTools({ tools: ['fmeca'] }, deps));
+  assert.equal(report.outcomes[0].status, 'installed');
+  assert.ok(clock.now() > Date.parse('2026-10-25T12:00:00.000Z'));
+  assert.equal(readState(deps).tools.fmeca.installedAt, clock.iso());
 });
 test('A release manifest supplies the recorded source SHA instead of the binary digest', async () => {
   const sourceSha = 'b'.repeat(40);
@@ -798,6 +826,39 @@ test('withInstallLock records its holder and reaps a lock left by a dead process
   });
   assert.equal(holder?.pid, process.pid);
   assert.equal(existsSync(`${statePath}.lock`), false);
+});
+
+test('withInstallLock gives up on a live holder after 10 s of clock time', async () => {
+  const dir = tmp('installer-lock-');
+  const statePath = join(dir, 'installed.json');
+  writeFileSync(`${statePath}.lock`, JSON.stringify({ pid: process.pid, hostname: hostname(), at: new Date(0).toISOString() }));
+  const clock = createManualClock(0);
+  let ran = false;
+  let error: any;
+  const locked = withInstallLock(statePath, async () => { ran = true; }, clock).catch((err) => { error = err; });
+  await clock.advanceAsync(9_975);
+  assert.equal(error, undefined);
+  await clock.advanceAsync(25);
+  await locked;
+  assert.equal(error?.code, 'LOCKED');
+  assert.equal(ran, false);
+});
+
+test('withInstallLock acquires the lock once the holder releases it', async () => {
+  const dir = tmp('installer-lock-');
+  const statePath = join(dir, 'installed.json');
+  writeFileSync(`${statePath}.lock`, JSON.stringify({ pid: process.pid, hostname: hostname(), at: new Date(0).toISOString() }));
+  const clock = createManualClock(0);
+  let holder: { at?: string } | undefined;
+  const locked = withInstallLock(statePath, async () => {
+    holder = JSON.parse(readFileSync(`${statePath}.lock`, 'utf8'));
+  }, clock);
+  await clock.advanceAsync(100);
+  assert.equal(holder, undefined);
+  rmSync(`${statePath}.lock`);
+  await clock.advanceAsync(25);
+  await locked;
+  assert.equal(holder?.at, '1970-01-01T00:00:00.125Z');
 });
 
 test('an install removes staging directories a crashed install left behind', async () => {

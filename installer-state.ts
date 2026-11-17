@@ -16,6 +16,7 @@ import {
   type ToolName,
 } from "./installer-platform.ts";
 import { effectiveTimeoutMs, resolveLatestRelease } from "./installer-release.ts";
+import { systemClock, type Clock } from "./clock.ts";
 
 // Re-exported for installer-integrations.ts so only this module imports tools/tools.ts.
 export { loadHop };
@@ -79,11 +80,11 @@ export function writeInstallState(state: InstallState, deps: InstallerDeps = {})
   writeFileAtomic(defaultStatePath(deps), JSON.stringify(state, null, 2) + "\n");
 }
 
-export async function withInstallLock<T>(statePath: string, fn: () => Promise<T>): Promise<T> {
+export async function withInstallLock<T>(statePath: string, fn: () => Promise<T>, clock: Clock = systemClock): Promise<T> {
   const lockPath = `${statePath}.lock`;
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   let fd: number | null = null;
-  const deadline = Date.now() + 10_000;
+  const deadline = clock.now() + 10_000;
   while (fd === null) {
     try {
       fd = fs.openSync(lockPath, "wx");
@@ -93,12 +94,12 @@ export async function withInstallLock<T>(statePath: string, fn: () => Promise<T>
       // A crashed install (the process aborted before its finally ran) leaves
       // the lock behind; reap it when its recorded holder is gone (#210).
       if (reapDeadHolderLock(lockPath)) continue;
-      if (Date.now() >= deadline) throw new InstallerError("LOCKED", `another install holds ${lockPath}`);
-      await new Promise((r) => setTimeout(r, 25));
+      if (clock.now() >= deadline) throw new InstallerError("LOCKED", `another install holds ${lockPath}`);
+      await clock.sleep(25);
     }
   }
   try {
-    writeLockHolder(fd);
+    writeLockHolder(fd, clock.iso());
     return await fn();
   } finally {
     try {

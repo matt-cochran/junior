@@ -7,6 +7,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { createManualClock, type ManualClock } from './clock.ts';
 import {
   OPENROUTER_ENDPOINTS_URL,
   OPENROUTER_MODELS_URL,
@@ -250,12 +251,51 @@ test('fetchOnlineCatalog returns null when the body JSON is malformed', async ()
   assert.equal(await fetchOnlineCatalog({ fetch }), null);
 });
 
+/** Track whether a promise has settled without awaiting it. */
+function track<T>(promise: Promise<T>): { settled: () => boolean; promise: Promise<T> } {
+  let done = false;
+  const tracked = promise.finally(() => { done = true; });
+  return { settled: () => done, promise: tracked };
+}
+
+async function tick(clock: ManualClock, ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await clock.advanceAsync(ms);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 test('fetchOnlineCatalog returns null when the request times out', async () => {
+  const clock = createManualClock(0);
   const fetch: CatalogFetch = (_url, init) =>
     new Promise((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
     });
-  assert.equal(await fetchOnlineCatalog({ fetch, timeoutMs: 5 }), null);
+  const result = track(fetchOnlineCatalog({ fetch, timeoutMs: 5, clock }));
+  await tick(clock, 4);
+  assert.equal(result.settled(), false);
+  await tick(clock, 1);
+  assert.equal(result.settled(), true);
+  assert.equal(await result.promise, null);
+});
+
+test('fetchOnlineCatalog aborts after the default 3000 ms', async () => {
+  const clock = createManualClock(0);
+  let signal: AbortSignal | undefined;
+  const fetch: CatalogFetch = (_url, init) => { signal = init.signal; return new Promise(() => {}); };
+  const result = track(fetchOnlineCatalog({ fetch, clock }));
+  await tick(clock, 2_999);
+  assert.equal(signal?.aborted, false);
+  assert.equal(result.settled(), false);
+  await tick(clock, 1);
+  assert.equal(signal?.aborted, true);
+  assert.equal(await result.promise, null);
+});
+
+test('fetchOnlineCatalog clears its timer once the fetch resolves', async () => {
+  const clock = createManualClock(0);
+  const fetch: CatalogFetch = async () => ({ status: 200, json: async () => ({ data: [] }) });
+  assert.deepEqual(await fetchOnlineCatalog({ fetch, clock }), []);
+  assert.equal(clock.pending(), 0);
 });
 
 test('fetchOnlineCatalog requests the OpenRouter models endpoint by default', async () => {
@@ -269,8 +309,23 @@ test('fetchOnlineCatalog requests the OpenRouter models endpoint by default', as
 });
 
 test('fetchOnlineCatalog returns null when a fetch ignores the abort signal past the timeout', async () => {
+  const clock = createManualClock(0);
   const fetch: CatalogFetch = () => new Promise(() => {});
-  assert.equal(await fetchOnlineCatalog({ fetch, timeoutMs: 5 }), null);
+  const result = track(fetchOnlineCatalog({ fetch, timeoutMs: 5, clock }));
+  await tick(clock, 4);
+  assert.equal(result.settled(), false);
+  await tick(clock, 1);
+  assert.equal(await result.promise, null);
+});
+
+test('fetchModelEndpoints returns null when a fetch outlives the timeout', async () => {
+  const clock = createManualClock(0);
+  const fetch: CatalogFetch = () => new Promise(() => {});
+  const result = track(fetchModelEndpoints('a/b', { fetch, timeoutMs: 50, clock }));
+  await tick(clock, 49);
+  assert.equal(result.settled(), false);
+  await tick(clock, 1);
+  assert.equal(await result.promise, null);
 });
 
 // --- model pricing ---------------------------------------------------------

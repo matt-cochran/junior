@@ -906,3 +906,38 @@ test('a status with a fallback that lacks a reason is invalid', () => {
     'fallback.reason',
   );
 });
+
+test('compute status reads the current time from an injected clock when no now is given', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const later = '2026-10-25T14:00:00.000Z';
+  assert.deepEqual(inspectComputeStatus(status(), { clock: createManualClock(NOW) }), inspect(status()));
+  assert.deepEqual(
+    inspectComputeStatus(status(), { clock: createManualClock(later) }),
+    inspectComputeStatus(status(), { now: later }),
+  );
+  assert.notDeepEqual(inspectComputeStatus(status(), { now: later }), inspect(status()));
+});
+
+test('an explicit now wins over the clock for compute status', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  assert.deepEqual(
+    inspectComputeStatus(status(), { now: NOW, clock: createManualClock('2026-10-25T14:00:00.000Z') }),
+    inspect(status()),
+  );
+});
+
+test('lease state inspection reads the current time from an injected clock', async () => {
+  const { createManualClock } = await import('./clock.ts');
+  const empty = createComputeLeaseState({ resourceId: 'resource-1', resourceGeneration: 3, now: NOW });
+  const acquired = acquireComputeLease(empty, {
+    leaseId: 'lease-1', holder: 'worker-1', now: NOW, expiresAt: '2026-10-25T13:00:00.000Z',
+  });
+  assert.equal(acquired.ok, true);
+  const state = acquired.ok ? acquired.state : empty;
+  for (const at of [NOW, '2026-10-25T14:00:00.000Z']) {
+    assert.deepEqual(
+      inspectComputeLeaseState(state, { clock: createManualClock(at) }),
+      inspectComputeLeaseState(state, { now: at }),
+    );
+  }
+});
