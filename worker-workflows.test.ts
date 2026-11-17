@@ -24,7 +24,9 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
-import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
+import { createManualClock } from './clock.ts';
+import { KILL_GRACE_MS } from './runtime.ts';
+import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, watchTimers, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
 
 // --- estimated execution cost (offline; no pricing is fetched) ---
 test('Zero Pi catalog cost without verified pricing is unknown, not free',()=>{
@@ -154,7 +156,20 @@ test('Auto workflow without Jev deterministically uses checks_first',async()=>{
 });
 test('Classifier failure is bounded by a timeout and defaults to checks_first',async()=>{
  const hanging:any=async()=>new Promise(()=>{});
- const r=await run(task(0,{workflow:'auto',jev:{mode:'shadow'}}),true,{classify:hanging,classifierTimeoutMs:20});
+ const clock=createManualClock(Date.now());
+ const timers=watchTimers(clock);
+ let settled=false;
+ const p=run(task(0,{workflow:'auto',jev:{mode:'shadow'}}),true,{classify:hanging,classifierTimeoutMs:20,clock}).finally(()=>{settled=true;});
+ assert.equal((await timers.next()).ms,20);
+ // One millisecond short of the bound the preflight classifier is still pending.
+ await clock.advanceAsync(19);
+ assert.equal(settled,false);
+ assert.equal(timers.seen.length,1);
+ // At the bound it times out; any later classifier timer is driven the same way.
+ await clock.advanceAsync(1);
+ const done=p.then(()=>null,()=>null);
+ for(;;){const next=await Promise.race([timers.next(),done]);if(!next)break;await clock.advanceAsync(next.ms);}
+ const r=await p;
  assert.equal(r.status,'simulation_passed');
  assert.equal(r.jev.preflight.status,'uncertain');
  assert.match(r.jev.preflight.error,/timed out/);
@@ -664,10 +679,28 @@ test('Compact cost falls back to the raw receipt cost when no projection exists'
 
 test('Cancellation completes kill escalation before returning handback',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'junior-cancel-order-'));
+ const start=Date.parse('2026-01-01T00:00:00.000Z');
+ const clock=createManualClock(start);
  const ee:any=new EventEmitter(); ee.stdout=new PassThrough(); ee.stderr=new PassThrough();
  const signals:string[]=[];
- ee.kill=(signal:string)=>{signals.push(signal); if(signal==='SIGTERM') setImmediate(()=>ee.emit('close',null,'SIGTERM')); return true;};
- const r=await executeWorkerStreaming({spawnChild:()=>ee,command:'fixture',args:[],cwd:dir,eventsPath:join(dir,'events.jsonl'),logPath:join(dir,'worker.log'),runtimePath:join(dir,'runtime.json'),settings:resolveExecutionSettings({execution:{deadlineMs:50,heartbeatMs:10,quietMs:10}}),deadlineAt:Date.now()+50});
+ let closed!:()=>void;
+ const closedOnTerm=new Promise<void>((r)=>{closed=r;});
+ ee.kill=(signal:string)=>{signals.push(signal); if(signal==='SIGTERM') setImmediate(()=>{ee.emit('close',null,'SIGTERM');closed();}); return true;};
+ let settled=false;
+ const p=executeWorkerStreaming({spawnChild:()=>ee,command:'fixture',args:[],cwd:dir,eventsPath:join(dir,'events.jsonl'),logPath:join(dir,'worker.log'),runtimePath:join(dir,'runtime.json'),settings:resolveExecutionSettings({execution:{deadlineMs:50,heartbeatMs:10,quietMs:10}}),deadlineAt:start+50,clock}).finally(()=>{settled=true;});
+ // Before the wall deadline nothing is signalled.
+ await clock.advanceAsync(49);
+ assert.deepEqual(signals,[]);
+ // At the deadline the group gets SIGTERM; the child closes on it at once.
+ await clock.advanceAsync(1);
+ assert.deepEqual(signals,['SIGTERM']);
+ await closedOnTerm;
+ // The handback still waits for the bounded SIGKILL escalation.
+ await clock.advanceAsync(KILL_GRACE_MS-1);
+ assert.equal(settled,false);
+ assert.deepEqual(signals,['SIGTERM']);
+ await clock.advanceAsync(1);
+ const r=await p;
  assert.equal(r.deadlineExceeded,true);
  assert.deepEqual(signals,['SIGTERM','SIGKILL']);
 });

@@ -6,7 +6,7 @@ import { classifyPiFailure, type PiFailure } from './pi-failure.ts';
 import { buildContinuationCheckpoint, CONTINUATION_PROMPT_LEAD, OUTPUT_LIMIT_CONTINUATION_LINE } from './worker-gates.ts';
 import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from './worker-receipt.ts';
 import { resolveCommandPolicy, type Receipt } from './worker-contract.ts';
-import { blockedResult, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
+import { blockedResult, runClock, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
 import { readDataPolicy, toRoutingPreferences } from './data-policy.ts';
 
 type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; outputLimited:boolean; checkpointPath:string|null};
@@ -97,7 +97,7 @@ async function runSegment(state:RunState, run:LaunchRun, seg:{spawnChild:any, ma
    spawnChild:seg.spawnChild, command:'pi',
    args:[...buildPiArgs(requested, seg.sessionId, t.thinking ?? 'low', piGuardModulePath(), isolationArgs),seg.segmentPrompt],
    cwd:executionCwd, env:run.piBashEnv, eventsPath:seg.segEventsPath, logPath:seg.segLogPath, runtimePath, settings, deadlineAt:workerDeadlineAt(state),
-   phase:'worker', signal, heartbeat, maxOutputBytes: seg.maxSegmentOutputBytes,
+   phase:'worker', signal, heartbeat, clock:runClock(state), maxOutputBytes: seg.maxSegmentOutputBytes,
    budget:effectiveBudget(state.decision.selected, t.budget), readScope:t.readScope,
   });
   run.stdout=segResult.stdout; run.stderr=segResult.stderr;
@@ -115,7 +115,7 @@ async function runSegment(state:RunState, run:LaunchRun, seg:{spawnChild:any, ma
   if (!failure?.retryable || segReceipt.assistantMessages !== 0 || run.retriedFailure) break;
   run.retriedFailure=true;
   segmentRetried=true;
-  await new Promise((resolve)=>setTimeout(resolve,2000));
+  await runClock(state).sleep(2000);
  }
  if (segmentRetried && run.workerFailure) run.workerFailure={...run.workerFailure, retried:true} as PiFailure;
  return {segResult, segReceipt};
