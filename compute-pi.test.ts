@@ -167,6 +167,25 @@ test('a completed operation returns a content-addressed artifact manifest', asyn
   assert.equal(verifyPiManifest(result.artifacts), true);
 });
 
+test('a transport artifact manifest without a commit is restamped with the requested commit', async () => {
+  const transport = createFakePiTransport({
+    execute: async () => ({
+      exitCode: 0,
+      artifacts: createPiArtifactManifest({ files: [{ path: 'out.txt', content: 'done\n' }] }),
+    }),
+  });
+  const result = await createPiProtocol(transport).execute({
+    expectedHost: verifiedHost,
+    operation: 'run',
+    requestId: 'req-restamp',
+    workspace: workspace(),
+    sourceCommit: 'abc123',
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.artifacts.sourceCommit, 'abc123');
+  assert.equal(verifyPiManifest(result.artifacts), true);
+});
+
 
 const NOW = '2026-10-25T12:00:00.000Z';
 
