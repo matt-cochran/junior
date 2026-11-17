@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyHandoff } from './apply.ts';
+import { createManualClock } from './clock.ts';
 import { initHop } from './tools/tools.ts';
 
 const git = (cwd: string, args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -199,6 +200,15 @@ test('applyHandoff records the resolved source worktree as the apply target', (t
   applyHandoff(resultPath, { cwd: primary });
   const record = JSON.parse(readFileSync(join(art, 'applied.json'), 'utf8'));
   assert.equal(record.target, lane);
+});
+
+test('applyHandoff stamps appliedAt from the injected clock', (t) => {
+  const root = arena(t);
+  const { primary, lane } = linkedSource(root);
+  const { art, resultPath } = makeRun(lane, 'handoff-lane-clock', '1000', (wt) => writeFileSync(join(wt, 'base.txt'), 'worktree\n'), 'ready_for_review', { sourceCwd: lane });
+  applyHandoff(resultPath, { cwd: primary, clock: createManualClock('2026-05-06T07:08:09.000Z') });
+  const record = JSON.parse(readFileSync(join(art, 'applied.json'), 'utf8'));
+  assert.equal(record.appliedAt, '2026-05-06T07:08:09.000Z');
 });
 
 // --- dry run -----------------------------------------------------------------

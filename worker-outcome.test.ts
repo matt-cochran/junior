@@ -8,6 +8,9 @@ import { resolveExplicitApproval } from './worker-approval.ts';
 import { buildPrompt } from './worker-prompt.ts';
 import { mockReceipt } from './worker-receipt.ts';
 import { collectGitEvidence } from './evidence.ts';
+import { createManualClock } from './clock.ts';
+
+const OUTCOME_START = Date.parse('2026-02-03T04:05:06.000Z');
 
 function outcomeState(over: any = {}): any {
   const cwd = over.cwd ?? mkdtempSync(join(tmpdir(), 'delivery-outcome-'));
@@ -58,9 +61,10 @@ function outcomeState(over: any = {}): any {
     checks: [],
     workerRan: true,
     stopped: false,
-    deadlineAt: Date.now() + 60_000,
+    clock: createManualClock(OUTCOME_START),
+    deadlineAt: OUTCOME_START + 60_000,
     deadlineDuringChecks: false,
-    runStartedAt: Date.now(),
+    runStartedAt: OUTCOME_START,
     stderr: '',
     t: { id: 'task', cwd },
     ...over,
@@ -121,4 +125,23 @@ test('#251: a credit-exhausted failure replaces "did not complete cleanly" on a 
   const result = await finish(state);
   assert.equal(result.workerError, summary);
   assert.equal(result.workerFailure.category, 'provider_credit_exhausted');
+});
+
+test('the final heartbeat reports elapsed and remaining time from the run clock', async () => {
+  const updates: any[] = [];
+  const state = outcomeState({ heartbeat: { update(u: any) { updates.push(u); }, setState() {}, snapshot() { return {}; } } });
+  state.clock.advance(1500);
+  await finish(state);
+  const done = updates.find((u) => u.phase === 'done');
+  assert.deepEqual({ elapsedMs: done.elapsedMs, remainingMs: done.remainingMs }, { elapsedMs: 1500, remainingMs: 58500 });
+});
+
+test('a run state without a clock falls back to the system clock', async () => {
+  const updates: any[] = [];
+  const now = Date.now();
+  const state = outcomeState({ clock: undefined, runStartedAt: now, deadlineAt: now + 60_000,
+    heartbeat: { update(u: any) { updates.push(u); }, setState() {}, snapshot() { return {}; } } });
+  await finish(state);
+  const done = updates.find((u) => u.phase === 'done');
+  assert.ok(done.elapsedMs >= 0 && done.elapsedMs < 60_000);
 });

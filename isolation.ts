@@ -16,6 +16,7 @@ import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
 import { runSync, type RunSyncOptions } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandPolicy } from './command-policy.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export type IsolationMode = 'none' | 'worktree';
 
@@ -247,7 +248,7 @@ export function provisionIsolationSetup(
  sourceCwd: string,
  worktreeCwd: string,
  artifactDir: string,
- opts: { deadlineAt: number; checkTimeoutMs: number; commandPolicy?: CommandPolicy | null },
+ opts: { deadlineAt: number; checkTimeoutMs: number; commandPolicy?: CommandPolicy | null; clock?: Clock },
 ): IsolationSetupResult {
  const steps: IsolationSetupStep[] = [];
  const lines: string[] = [];
@@ -314,7 +315,7 @@ export function provisionIsolationSetup(
    return finish(`command ${cmd.command}: ${message}`);
   }
   const cwd = join(worktreeCwd, cmd.cwd ?? '.');
-  const remaining = opts.deadlineAt - Date.now();
+  const remaining = opts.deadlineAt - (opts.clock ?? systemClock).now();
   if (remaining <= 0) {
    steps.push({ kind: 'command', target: cmd.command, ok: false, error: 'wall deadline exceeded before setup command' });
    lines.push(`command ${cmd.command} SKIPPED: wall deadline exceeded`);
@@ -374,10 +375,10 @@ export function lockPathFor(lockDir: string, key: string): string {
 
 /** Atomically acquire a lock. A held lock is reported with its holder and a
  * manual removal hint; it is never auto-deleted. */
-export function acquireLock(lockDir: string, key: string, info: Record<string, unknown> = {}): { handle?: LockHandle; error?: string; lockPath: string } {
+export function acquireLock(lockDir: string, key: string, info: Record<string, unknown> = {}, clock: Clock = systemClock): { handle?: LockHandle; error?: string; lockPath: string } {
  const lockPath = lockPathFor(lockDir, key);
  try { mkdirSync(lockDir, { recursive: true }); } catch (e: any) { return { error: `could not create lock directory ${lockDir}: ${e?.message || e}`, lockPath }; }
- const payload = JSON.stringify({ key, pid: process.pid, startedAt: new Date().toISOString(), ...info }, null, 2) + '\n';
+ const payload = JSON.stringify({ key, pid: process.pid, startedAt: clock.iso(), ...info }, null, 2) + '\n';
  try {
   writeFileSync(lockPath, payload, { flag: 'wx' });
  } catch (e: any) {

@@ -77,12 +77,27 @@ export const workflowClassifier=(pre:any,post:any={AC1:bool(0.95)}):any=>{
 };
 
 export const CONTINUATION_CAP=1024;
-export const until=async(fn:()=>boolean,ms=8000)=>{const start=Date.now();while(!fn()){if(Date.now()-start>ms)throw Error('timed out waiting for condition');await delay(20);}};
-export const continuationFixture=(repo:any,continuations=1,extra:any={})=>{
+// Event-driven wait: `until` re-checks its condition each time a fake child is
+// created (`makeFakeChild`) or a continuation-fixture run settles, instead of
+// polling on a wall-clock interval. A fixture run that settles while the
+// condition still fails ends the wait with an error rather than hanging.
+const fixtureWaiters=new Set<()=>void>();
+let fixtureSettlements=0;
+const notifyFixture=()=>{const ws=[...fixtureWaiters];fixtureWaiters.clear();for(const w of ws)w();};
+export const until=async(fn:()=>boolean)=>{
+ const settlements=fixtureSettlements;
+ while(!fn()){
+  if(fixtureSettlements!==settlements)throw Error('run settled before the awaited condition held');
+  await new Promise<void>((r)=>fixtureWaiters.add(r));
+ }
+};
+export const continuationFixture=(repo:any,continuations=1,extra:any={},deps:any={})=>{
  const fakes:any[]=[];const argvs:string[][]=[];
  const spawnChild=(_c:string,args:string[])=>{argvs.push(args);const f=makeFakeChild();fakes.push(f);return f.child;};
  const t=okTask(repo,{id:'cont',acceptance:['distinctive acceptance phrase'],execution:{continuations,quietMs:100000,heartbeatMs:20,toolTimeoutMs:5000,checkTimeoutMs:5000},...extra});
- const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP});
+ const p=run(t,false,{spawnChild,maxOutputBytes:CONTINUATION_CAP,...deps});
+ const settle=()=>{fixtureSettlements+=1;notifyFixture();};
+ p.then(settle,settle);
  return {t,p,fakes,argvs};
 };
 export const firstAssistant=(f:any,text:string,usage:any=U(1,2,3))=>f.emit({type:'message_end',message:{role:'assistant',provider:'openrouter',model:'m',usage,stopReason:'stop',content:[{type:'text',text}]}});
@@ -168,11 +183,23 @@ export const okTask=(repo:any,extra:any={})=>({id:'ev',deliverable:'evidence',cw
 
 export const priorNone=(repo:any,slot:string)=>{const priorDir=join(repo.dir,'.delivery','prior',slot);mkdirSync(priorDir,{recursive:true});const prior={id:'prior',status:'ready_for_review',artifactDir:priorDir,sourceCwd:repo.dir,executionCwd:repo.dir,isolation:{mode:'none'},receipt:{source:'pi_message_end',requested:{provider:'openrouter',model:COMMODITY_MODEL},sessionId:SESSION_A}};writeFileSync(join(priorDir,'result.json'),JSON.stringify(prior));seedSession(priorDir);return join(priorDir,'result.json');};
 
+/** Observe every timer scheduled on a manual clock, so a test can wait for
+ * the code under test to arm a timer (an event) before advancing time. */
+export const watchTimers=(clock:any)=>{
+ const seen:{ms:number}[]=[];
+ const waiters:Array<()=>void>=[];
+ const schedule=clock.setTimeout;
+ clock.setTimeout=(cb:()=>void,ms:number)=>{const timer=schedule(cb,ms);seen.push({ms});for(const w of waiters.splice(0))w();return timer;};
+ let cursor=0;
+ return {seen,next:async()=>{while(cursor>=seen.length)await new Promise<void>((r)=>waiters.push(r));return seen[cursor++];}};
+};
 export const delay=(ms:number)=>new Promise((r)=>setTimeout(r,ms));
 export const artifactFor=(repo:any,id:string)=>{const base=join(repo.dir,'.delivery',id);const stamps=readdirSync(base,{withFileTypes:true}).filter((e)=>e.isDirectory()).map((e)=>e.name).sort();return join(base,stamps[stamps.length-1]);};
 export const readRuntime=(art:string)=>JSON.parse(readFileSync(join(art,'runtime.json'),'utf8'));
 
 export const makeFakeChild=()=>{
+ // Wake `until` waiters once the caller has stored this fake (after its sync push).
+ queueMicrotask(notifyFixture);
  const ee=new EventEmitter();
  const stdout=new PassThrough();
  const stderr=new PassThrough();

@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 
 import { cohortDeliverableIds, planLocks, planStatusRows, strictItems } from './companion-shapes.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** Outcomes that stop a run to wait for the manager or the human: the lease is
  * kept (a rerun by the same caller is re-entrant) and the deliverable is not
@@ -74,6 +75,8 @@ export interface PlanLeaseDeps<R> {
   callHop: PlanHop;
   deadlineMs: number;
   now?: () => number;
+  /** Fallback time source when `now` is absent (default `systemClock`). */
+  clock?: Clock;
   summarize: (result: R) => PlanLeaseSummary;
 }
 
@@ -553,7 +556,7 @@ export async function withPlanLease<R>(
   const ctx: LeaseContext<R> = {
     task,
     deps,
-    now: deps.now ?? Date.now,
+    now: deps.now ?? (() => (deps.clock ?? systemClock).now()),
     callerId: task.plan.callerId ?? 'junior-worker',
     plan,
     ownRevision: baselineRevisionOf(task),

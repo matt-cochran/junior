@@ -24,6 +24,8 @@ import { compactHandoff } from './handoff.ts';
 import { recordExternalContextConsent } from './auth.ts';
 import { GatewayError } from './gateway.ts';
 import { loadPlaybooks } from './playbooks.ts';
+import { createManualClock } from './clock.ts';
+import { raceAbort } from './worker-gates.ts';
 import { seedSession, run, task, COMMODITY_MODEL, ROUTED_MODEL, cli, resultFile, saved, U, assistant, stream, documentation, bool, gateUsage, gateClassifier, outage, JEVPASS, jsonFetch, captureFetch, typesafeGateway, stubClassifier, PRICING, costReceipt, choice, workflowClassifier, CONTINUATION_CAP, until, continuationFixture, firstAssistant, exhaustCap, completeSegment, driveToContinuation, lengthSegment, driveLengthToContinuation, SESSION_A, priorResult, okExec, setupDeps, writeAgent, withPiDir, modelGate, routingCwd, routeConfig, approvalCwd, pricedAgent, approvalFile, initRepo, exampleTaskFrom, skillSource, codexSkill, claudeSkill, gitRepo, commitFile, wtTask, okSpawn, okTask, priorNone, delay, artifactFor, readRuntime, makeFakeChild, waitForPid, aliveAfter, termIgnoringDescendant, handoffResult, addNestedPackage, cwdCheck, makeDirLink, markerCheck, symlinkEscape, tempGitRepo, localExclude, emptyQuestionHop, artifactTask, deliveryPath, onlineAgent, capturePreflight, contextdir, linkRepo, routingClassifier, routingSeam, routingPlan, stickyCwd, stickyFile, isolationCapabilities, bounded } from './worker-helpers.test.ts';
 
 // --- offline Jev classifier mocks: no SDK load, no paid calls ---
@@ -566,3 +568,56 @@ test('Total resolved context text never exceeds 40000 characters',async()=>{
 });
 
 
+
+// --- #265: classifier bounds run on the injected clock ---
+test('raceAbort rejects at the startup bound on the injected clock, not before',async()=>{
+ const clock=createManualClock(0);
+ let error:any=null;
+ const p=raceAbort(new Promise(()=>{}),500,undefined,clock).catch((e)=>{error=e;});
+ await clock.advanceAsync(499);
+ assert.equal(error,null);
+ await clock.advanceAsync(1);
+ await p;
+ assert.match(error.message,/classifier startup timed out after 500ms/);
+ assert.equal(clock.pending(),0);
+});
+test('raceAbort clears its clock timer when the promise settles first',async()=>{
+ const clock=createManualClock(0);
+ assert.equal(await raceAbort(Promise.resolve('ok'),500,undefined,clock),'ok');
+ assert.equal(clock.pending(),0);
+});
+test('raceAbort rejects on abort and clears its clock timer',async()=>{
+ const clock=createManualClock(0);
+ const controller=new AbortController();
+ const p=raceAbort(new Promise(()=>{}),500,controller.signal,clock);
+ controller.abort();
+ await assert.rejects(p,/aborted/);
+ assert.equal(clock.pending(),0);
+});
+test('assessPreflight times a hung classifier out on the injected clock',async()=>{
+ const clock=createManualClock(0);
+ let aborted=false;
+ const hanging:any=(_req:any,opts:any)=>{opts?.signal?.addEventListener('abort',()=>{aborted=true;});return new Promise(()=>{});};
+ let out:any=null;
+ const p=assessPreflight(task(),hanging,{timeoutMs:1000,clock}).then((r)=>{out=r;});
+ await clock.advanceAsync(999);
+ assert.equal(out,null);
+ assert.equal(aborted,false);
+ await clock.advanceAsync(1);
+ await p;
+ assert.equal(aborted,true);
+ assert.match(out.error,/classifier timed out after 1000ms/);
+ assert.equal(clock.pending(),0);
+});
+test('assessPostflight times a hung classifier out on the injected clock',async()=>{
+ const clock=createManualClock(0);
+ const hanging:any=async()=>new Promise(()=>{});
+ let out:any=null;
+ const git={changedFiles:[],diffStat:'',diff:''} as any;
+ const p=assessPostflight(task(),hanging,[],git,250,undefined,{clock}).then((r)=>{out=r;});
+ await clock.advanceAsync(249);
+ assert.equal(out,null);
+ await clock.advanceAsync(1);
+ await p;
+ assert.match(out.error,/classifier timed out after 250ms/);
+});

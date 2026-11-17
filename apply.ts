@@ -16,6 +16,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { runSync } from './spawn-sync.ts';
 import { createHash } from 'node:crypto';
 import { featureFromResult } from './matrix-defaults.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 export type ApplyHandoffResult = {
  applied: boolean;
@@ -152,7 +153,7 @@ function resolveSourceCwd(result: any, fallback: string): { dir?: string; error?
  * ancestor of that source HEAD. `dryRun` only checks the patch. A failed
  * three-way merge restores every touched file and reports the conflicts;
  * nothing is committed or pushed. */
-export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boolean; force?: boolean; noLink?: boolean }): ApplyHandoffResult {
+export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boolean; force?: boolean; noLink?: boolean; clock?: Clock }): ApplyHandoffResult {
  const callerCwd = resolve(opts.cwd);
  const dryRun = opts.dryRun === true;
  const resolved = resolveArtifactDir(target, callerCwd);
@@ -218,7 +219,7 @@ export function applyHandoff(target: string, opts: { cwd: string; dryRun?: boole
  // reviewed once its diff still hashes to the same bytes. Best effort: a write
  // failure never turns a successful apply into a reported failure.
  try {
-  writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString(), patchSha256: sha256, target: cwd, sourceCwd: cwd }, null, 2) + '\n');
+  writeFileSync(join(artifactDir, 'applied.json'), JSON.stringify({ appliedAt: (opts.clock ?? systemClock).iso(), patchSha256: sha256, target: cwd, sourceCwd: cwd }, null, 2) + '\n');
  } catch { /* the applied record is best effort */ }
  const matrixLink = opts.noLink === true ? undefined : linkApplied(join(artifactDir, 'result.json'), cwd);
  return { applied: true, dryRun: false, files, artifactDir, target: cwd, ...(matrixLink === undefined ? {} : { matrixLink }) };

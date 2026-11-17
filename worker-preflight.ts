@@ -22,6 +22,7 @@ import { readDataPolicy } from './data-policy.ts';
 import { isolationRecord, decideRoute, settleModelApproval, applyDataPolicy, runTicketGate, clarificationApplies, prepareWorkflowDecision, finishPreflight, type PreflightCtx } from './worker-preflight-phases.ts';
 
 import type { JevProvider } from './gateway.ts';
+import { systemClock, type Clock } from './clock.ts';
 
 /** Shared error-message coercion, used across the worker modules. */
 const msg=(e:unknown)=>e instanceof Error ? e.message : String(e);
@@ -34,6 +35,8 @@ export interface RunState {
  deadlineAt:number; heartbeat:RuntimeHeartbeat; emit:(line:string)=>void;
  resume:any; review:any; lineage:any; decision:any; jev:any;
  signal?:AbortSignal; locks:LockHandle[];
+ /** The run's clock (`deps.clock`, default `systemClock`); the runtime layer reads `state.clock`. */
+ clock:Clock;
  // phase outputs are added as optional fields: prompt, receipt, streamResult, checks, workerError, status
  prompt?:string; receipt?:any; streamResult?:any; checks?:any[]; workerError?:string; status?:string;
  release?:()=>void;
@@ -41,14 +44,17 @@ export interface RunState {
 }
 
 /** Deadline arithmetic shared by every phase; `state.deadlineAt` is authoritative. */
-export const remainingMs=(state:RunState)=>state.deadlineAt-Date.now();
-export const outOfTime=(state:RunState)=>Date.now() >= state.deadlineAt;
+/** The run's current time; a state built without a clock falls back to the system clock. */
+export const runClock=(state:RunState):Clock=>state.clock ?? systemClock;
+export const runNow=(state:RunState)=>runClock(state).now();
+export const remainingMs=(state:RunState)=>state.deadlineAt-runNow(state);
+export const outOfTime=(state:RunState)=>runNow(state) >= state.deadlineAt;
 // The worker is stopped before the total deadline so the reserved budget is
 // available to the contract's checks, which remain bounded by the total wall
 // deadline.
 export const workerDeadlineAt=(state:RunState)=>state.deadlineAt-state.settings.checkReserveMs;
-export const workerRemainingMs=(state:RunState)=>workerDeadlineAt(state)-Date.now();
-export const workerOutOfTime=(state:RunState)=>Date.now() >= workerDeadlineAt(state);
+export const workerRemainingMs=(state:RunState)=>workerDeadlineAt(state)-runNow(state);
+export const workerOutOfTime=(state:RunState)=>runNow(state) >= workerDeadlineAt(state);
 export const classifierBudget=(state:RunState)=>Math.max(1, Math.min(state.classifierBase, Math.max(1, remainingMs(state))));
 
 /** Every pre-worker refusal writes an inspectable result plus a runtime heartbeat. */
@@ -64,7 +70,8 @@ export function blockedResult(state:RunState, workerError:string, extra:any={}):
 
 /** Create the run directory, model request and runtime heartbeat before any phase runs. */
 export function createRunState(t:any, mock:boolean, deps:GateDeps):RunState {
- const runStartedAt=Date.now();
+ const clock=deps.clock ?? systemClock;
+ const runStartedAt=clock.now();
  const settings=resolveExecutionSettings(t);
  const sourceCwd=resolve(t.cwd);
  const isolation=resolveIsolation(t).mode;
@@ -72,7 +79,7 @@ export function createRunState(t:any, mock:boolean, deps:GateDeps):RunState {
  // the first artifact is written, so `.delivery/` never surfaces as a target
  // change. A non-git cwd has nothing to touch and is left alone.
  ensureLocalExcludes(sourceCwd, ['/.delivery/']);
- const stamp=String(Date.now());
+ const stamp=String(clock.now());
  const dir=join(sourceCwd,'.delivery',t.id,stamp);
  mkdirSync(dir,{recursive:true});
  const modelConfig=loadModelConfig(sourceCwd);
@@ -96,13 +103,13 @@ export function createRunState(t:any, mock:boolean, deps:GateDeps):RunState {
  let deadlineAt=runStartedAt+settings.deadlineMs;
  const runtimePath=join(dir,'runtime.json');
  const emit=(line:string)=>{ try { deps.progress?.(line); } catch { /* progress must never abort a run */ } };
- const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness', deps.progress);
+ const heartbeat=new RuntimeHeartbeat(runtimePath, settings, runStartedAt, deadlineAt, 'readiness', deps.progress, clock);
  heartbeat.begin();
  emit('readiness');
  return { t, mock, deps, settings, sourceCwd, executionCwd:sourceCwd, isolation, dir,
   requested, requestedSource, modelConfig, deadlineAt, heartbeat, emit,
   resume:undefined, review:undefined, lineage:undefined, decision:undefined, jev,
-  signal:undefined, locks:[], runStartedAt, mode, jevProviderSetting, runtimePath,
+  signal:undefined, locks:[], clock, runStartedAt, mode, jevProviderSetting, runtimePath,
   explicitProvider, explicitModel, modelProfile };
 }
 
@@ -123,7 +130,7 @@ function initLineage(state:RunState, c:PreflightCtx):any {
  if (typeof t.lineageDeadlineMs==='number') {
   c.deadlineAt=Math.min(c.deadlineAt, runStartedAt+t.lineageDeadlineMs);
   state.deadlineAt=c.deadlineAt;
-  heartbeat.update({ deadlineAt:new Date(c.deadlineAt).toISOString(), remainingMs:Math.max(0, c.deadlineAt-Date.now()) });
+  heartbeat.update({ deadlineAt:new Date(c.deadlineAt).toISOString(), remainingMs:Math.max(0, c.deadlineAt-runNow(state)) });
  }
  return undefined;
 }
@@ -325,9 +332,9 @@ function applyRepairLineage(state:RunState, c:PreflightCtx):any {
   c.deadlineAt=Math.min(c.deadlineAt, inherited);
   state.deadlineAt=c.deadlineAt;
   lineage.deadlineAt=new Date(inherited).toISOString();
-  heartbeat.update({ deadlineAt:new Date(c.deadlineAt).toISOString(), remainingMs:Math.max(0, c.deadlineAt-Date.now()) });
+  heartbeat.update({ deadlineAt:new Date(c.deadlineAt).toISOString(), remainingMs:Math.max(0, c.deadlineAt-runNow(state)) });
  }
- if (Date.now() >= c.deadlineAt) {
+ if (runNow(state) >= c.deadlineAt) {
   return blockedResult(state, 'repair rejected before any paid call: the lineage deadline has already elapsed', { lineage });
  }
  return undefined;
@@ -423,7 +430,7 @@ function provisionWorktree(state:RunState, c:PreflightCtx):any {
   let commandPolicy;
   try { commandPolicy=resolveCommandPolicy(t, sourceCwd); }
   catch(e) { return isolationSetupFailed(state, c, `Invalid commandPolicy: ${msg(e)}`); }
-  const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, c.executionCwd, dir, { deadlineAt:c.deadlineAt, checkTimeoutMs:settings.checkTimeoutMs, commandPolicy });
+  const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, c.executionCwd, dir, { deadlineAt:c.deadlineAt, checkTimeoutMs:settings.checkTimeoutMs, commandPolicy, clock:runClock(state) });
   if (!provisioned.ok) return isolationSetupFailed(state, c, `isolationSetup failed: ${provisioned.error}`);
   if (provisioned.excludePatterns.length) ensureLocalExcludes(c.executionCwd, provisioned.excludePatterns);
  }
@@ -437,11 +444,11 @@ function acquireRunLocks(state:RunState, c:PreflightCtx):any {
  const locks=state.locks;
  const lockDir=join(sourceCwd,'.delivery','locks');
  const lockInfo={ id:c.t.id, artifactDir:dir, sourceCwd, executionCwd:c.executionCwd };
- const checkoutLock=acquireLock(lockDir, `checkout:${c.executionCwd}`, lockInfo);
+ const checkoutLock=acquireLock(lockDir, `checkout:${c.executionCwd}`, lockInfo, runClock(state));
  if (checkoutLock.error) return blockedResult(state, `cannot start run: ${checkoutLock.error}`);
  locks.push(checkoutLock.handle!);
  if (c.resume) {
-  const sessionLock=acquireLock(lockDir, sessionLockKey(c.resume), lockInfo);
+  const sessionLock=acquireLock(lockDir, sessionLockKey(c.resume), lockInfo, runClock(state));
   if (sessionLock.error) {
    // The checkout lock is already held; release it before the early return so
    // a failed session-lock acquisition cannot leak the checkout lock.
@@ -473,7 +480,7 @@ async function resolveJevClassifier(state:RunState, c:PreflightCtx):Promise<void
  const {deps, jevProviderSetting} = state;
  const jev=c.jev;
  try {
-  const resolved = await raceAbort(createJevClassifier(jevProviderSetting, { gateway: deps.gateway, fetch: deps.jevFetch, pi: deps.jevPi }), classifierBudget(state), c.signal);
+  const resolved = await raceAbort(createJevClassifier(jevProviderSetting, { gateway: deps.gateway, fetch: deps.jevFetch, pi: deps.jevPi }), classifierBudget(state), c.signal, runClock(state));
   c.classify = resolved.classify;
   jev!.gateway = resolved.gateway;
   jev!.model = { provider: resolved.gateway, id: resolved.model, explicit: false };
@@ -503,7 +510,7 @@ async function runReadinessGate(state:RunState, c:PreflightCtx):Promise<void> {
  const jev=c.jev;
  jev!.attempted = true;
  try {
-  const preflight = await raceSignal(assessPreflight(c.t, c.classify, { workflowQuestion: c.explicitWorkflow === 'auto', modelProfiles:c.modelProfiles, timeoutMs: classifierBudget(state), context:c.codeContext }), c.signal);
+  const preflight = await raceSignal(assessPreflight(c.t, c.classify, { workflowQuestion: c.explicitWorkflow === 'auto', modelProfiles:c.modelProfiles, timeoutMs: classifierBudget(state), context:c.codeContext, clock:runClock(state) }), c.signal);
   jev!.preflight = preflight;
   if (preflight.error) jev!.error = preflight.error;
  } catch (e) {
@@ -525,7 +532,7 @@ async function runClarification(state:RunState, c:PreflightCtx):Promise<any> {
     maxQuestions: deps.clarify?.maxQuestions,
     maxRounds: deps.clarify?.maxRounds,
    });
-   heartbeat.update({phase:'done', elapsedMs:Date.now()-runStartedAt, remainingMs:Math.max(0, remainingMs(state))});
+   heartbeat.update({phase:'done', elapsedMs:runNow(state)-runStartedAt, remainingMs:Math.max(0, remainingMs(state))});
    heartbeat.setState('ready_for_review',{stopReason:'needs_answers'});
    const attentionQuestions=jev?.preflight?.attention?.questions ?? [];
    const questions=batch.questions.length > 0
@@ -608,7 +615,7 @@ function rememberStickyRoute(state:RunState, c:PreflightCtx):void {
   provider:c.requested.provider,
   model:c.requested.model,
   approval:c.modelRoute.approval ?? null,
- });
+ }, runClock(state));
 }
 
 /** ADR 0018 R3/R5/R8: true when the ticket gate must run; a classifier-less

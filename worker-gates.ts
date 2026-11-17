@@ -10,6 +10,7 @@ import { resolveApiKeyFromEnvironment, readOpenRouterAuthFile, openRouterAuthPat
 import { resolveJevGateway, validateJevProvider, type JevProvider, type GatewayDeps, type ResolvedJevGateway } from './gateway.ts';
 import type { ClarifyDeps } from './clarify.ts';
 import type { PiCapabilities } from './pi-isolation.ts';
+import { systemClock, type Clock, type ClockTimer } from './clock.ts';
 import type { SpawnChild } from './runtime.ts';
 import { DEFAULT_JEV, CONFIDENCE_THRESHOLD, MAX_GATE_QUESTIONS, answerConfidence, type JevMode } from './worker-approval.ts';
 import { acceptanceText, acceptanceTexts, acceptanceWhen, resolveContext, type ResolvedContextEntry } from './worker-contract.ts';
@@ -162,11 +163,12 @@ async function invokeClassifier(
  state:Record<string,unknown>,
  questions:Record<string,GateQuestion>,
  timeoutMs:number=CLASSIFIER_TIMEOUT_MS,
+ clock:Clock=systemClock,
 ):Promise<{ result?:GateClassifierResult; error?:string }> {
  const controller=new AbortController();
- let timer:ReturnType<typeof setTimeout>|undefined;
+ let timer:ClockTimer|undefined;
  const timeout=new Promise<never>((_resolve,reject)=>{
-  timer=setTimeout(()=>{ controller.abort(); reject(new Error(`classifier timed out after ${timeoutMs}ms`)); }, timeoutMs);
+  timer=clock.setTimeout(()=>{ controller.abort(); reject(new Error(`classifier timed out after ${timeoutMs}ms`)); }, timeoutMs);
  });
  try {
   const result = await Promise.race([
@@ -183,11 +185,11 @@ async function invokeClassifier(
  } catch (e) {
   return { error: msg(e) };
  } finally {
-  if (timer) clearTimeout(timer);
+  if (timer) clock.clearTimeout(timer);
  }
 }
 
-type PreflightOpts = { workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number };
+type PreflightOpts = { workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number; clock?:Clock };
 type BoolVerdict = ReturnType<typeof boolVerdict>;
 
 function preflightState(t:any, opts:PreflightOpts) {
@@ -296,10 +298,10 @@ function traitProbabilitiesFrom(answers:Record<string,any>, catalogTraits:string
 }
 
 /** Readiness gate: is the contract clear and free of unresolved assumptions? */
-export async function assessPreflight(t:any, classify:GateClassifier, opts:{ workflowQuestion?:boolean; modelProfiles?:Record<string,string>; timeoutMs?:number; context?:ResolvedContextEntry[]; maxQuestions?:number } = {}):Promise<JevPreflight> {
+export async function assessPreflight(t:any, classify:GateClassifier, opts:PreflightOpts = {}):Promise<JevPreflight> {
  const state = preflightState(t, opts);
  const { questions, catalogTraits } = preflightQuestions(opts);
- const { result, error } = await invokeClassifier(classify, state, questions, opts.timeoutMs);
+ const { result, error } = await invokeClassifier(classify, state, questions, opts.timeoutMs, opts.clock);
  const answers = result?.answers ?? {};
  const confidence:Record<string,number|null> = {};
  for (const k of Object.keys(questions)) confidence[k] = answerConfidence(answers[k]);
@@ -401,7 +403,7 @@ function judgeCriterion(c:PostflightCriterion, deterministic:Map<string,'met'|'g
 
 /** Completion gate: is each acceptance criterion satisfied by independent
  * check results and bounded git diff evidence? */
-export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]}):Promise<JevPostflight> {
+export async function assessPostflight(t:any, classify:GateClassifier, checks:any[], git:GitEvidence, timeoutMs?:number, evidence?:EvidenceDelta, opts?:{report?:ReportEvidence; allowed?:string[]; clock?:Clock}):Promise<JevPostflight> {
  const criteria = postflightCriteria(t);
  const report=opts?.report;
  const runChanged=evidence?.runChangedFiles ?? git.changedFiles ?? [];
@@ -415,7 +417,7 @@ export async function assessPostflight(t:any, classify:GateClassifier, checks:an
  const state = postflightState(t, checks, git, evidence, report);
  let result:GateClassifierResult|undefined;
  let error:string|undefined;
- if (Object.keys(questions).length) ({ result, error } = await invokeClassifier(classify, state, questions, timeoutMs));
+ if (Object.keys(questions).length) ({ result, error } = await invokeClassifier(classify, state, questions, timeoutMs, opts?.clock));
  const deterministicAnswers=Object.fromEntries([...deterministic].map(([id])=>[id,{deterministic:true}]));
  const answers = {...(result?.answers ?? {}), ...deterministicAnswers};
  const usage = normalizeGateUsage(result?.usage);
@@ -603,6 +605,8 @@ export type GateDeps = {
  jevPi?:typeof createPiClassifier;
  /** Injectable project `jev.provider` reader for offline tests. */
  readJevProvider?:(cwd:string)=>JevProvider;
+ /** The run's clock (default `systemClock`): deadlines, timers and timestamps. */
+ clock?:Clock;
  /** Injectable billing credential seam for offline tests. Never logs a key. */
  billingResolveApiKey?:() => string | null | Promise<string | null>;
  /** Override the environment used to read the local/cached model catalog
@@ -627,15 +631,15 @@ export function raceSignal<T>(p:Promise<T>, signal?:AbortSignal):Promise<T> {
 }
 
 /** Bound classifier SDK startup with the remaining budget (and the run signal). */
-export function raceAbort<T>(p:Promise<T>, timeoutMs:number, signal?:AbortSignal):Promise<T> {
+export function raceAbort<T>(p:Promise<T>, timeoutMs:number, signal?:AbortSignal, clock:Clock=systemClock):Promise<T> {
  return new Promise<T>((resolve,reject)=>{
   let settled=false;
-  const timer=setTimeout(()=>{ if(!settled){settled=true;reject(Error(`classifier startup timed out after ${Math.max(1,timeoutMs)}ms`));} },Math.max(1,timeoutMs));
-  (timer as any)?.unref?.();
-  const onAbort=()=>{ if(!settled){settled=true;clearTimeout(timer);reject(Error('aborted'));} };
+  const timer=clock.setTimeout(()=>{ if(!settled){settled=true;reject(Error(`classifier startup timed out after ${Math.max(1,timeoutMs)}ms`));} },Math.max(1,timeoutMs));
+  timer.unref();
+  const onAbort=()=>{ if(!settled){settled=true;clock.clearTimeout(timer);reject(Error('aborted'));} };
   signal?.addEventListener?.('abort',onAbort,{once:true});
-  p.then((v)=>{ if(!settled){settled=true;clearTimeout(timer);signal?.removeEventListener?.('abort',onAbort);resolve(v);} },
-         (e)=>{ if(!settled){settled=true;clearTimeout(timer);signal?.removeEventListener?.('abort',onAbort);reject(e);} });
+  p.then((v)=>{ if(!settled){settled=true;clock.clearTimeout(timer);signal?.removeEventListener?.('abort',onAbort);resolve(v);} },
+         (e)=>{ if(!settled){settled=true;clock.clearTimeout(timer);signal?.removeEventListener?.('abort',onAbort);reject(e);} });
  });
 }
 

@@ -14,7 +14,8 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { launch } from './worker-launch.ts';
-import { createRunState } from './worker-preflight.ts';
+import { createRunState, outOfTime, remainingMs } from './worker-preflight.ts';
+import { createManualClock, systemClock } from './clock.ts';
 import { resolveOpenRouterKey } from './worker-gates.ts';
 
 const COMMODITY_MODEL = 'deepseek/deepseek-v4.1-flash';
@@ -137,38 +138,98 @@ test('an evaluate run without a contract budget passes the report defaults to th
   assert.deepEqual(state.streamResult.budget.requested, { maxToolCalls: 25, maxTotalTokens: 400000, mode: 'enforce' });
 });
 
+const failedFetchChild = () => {
+  const fake = fakeChild();
+  fake.stderr.write('fetch failed\n');
+  setImmediate(() => fake.end(1));
+  return fake.child;
+};
+
+/** A manual clock (started at real time, so wall deadlines stay sane) whose
+ * sleeps are observable: `slept` resolves with the delay of the first sleep. */
+const retryClock = () => {
+  const clock = createManualClock(Date.now());
+  const sleeps: number[] = [];
+  let sawSleep!: (ms: number) => void;
+  const slept = new Promise<number>((resolve) => { sawSleep = resolve; });
+  const sleep = clock.sleep;
+  clock.sleep = (ms: number, signal?: AbortSignal) => { sleeps.push(ms); sawSleep(ms); return sleep(ms, signal); };
+  return { clock, sleeps, slept };
+};
+
 test('a retryable fetch failure without assistant messages retries the segment exactly once', async (t) => {
   let spawns = 0;
-  const makeFailed = () => {
-    const fake = fakeChild();
-    fake.stderr.write('fetch failed\n');
-    setImmediate(() => fake.end(1));
-    return fake.child;
-  };
+  const { clock, sleeps, slept } = retryClock();
   const state = launchState({
     deps: {
+      clock,
       spawnChild: () => {
         spawns += 1;
-        return makeFailed();
+        return failedFetchChild();
       },
     },
   });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
-  await launch(state);
+  const running = launch(state);
+  assert.equal(await slept, 2000);
+  assert.equal(spawns, 1);
+  // The retry waits on the run clock: nothing respawns until 2000 ms pass.
+  await clock.advanceAsync(1999);
+  assert.equal(spawns, 1);
+  await clock.advanceAsync(1);
+  await running;
   assert.equal(spawns, 2);
+  assert.deepEqual(sleeps, [2000]);
 });
 
 test('a retried Pi failure is recorded with retried true', async (t) => {
-  const makeFailed = () => {
-    const fake = fakeChild();
-    fake.stderr.write('fetch failed\n');
-    setImmediate(() => fake.end(1));
-    return fake.child;
-  };
-  const state = launchState({ deps: { spawnChild: makeFailed } });
+  const { clock, slept } = retryClock();
+  const state = launchState({ deps: { clock, spawnChild: failedFetchChild } });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
-  await launch(state);
+  const running = launch(state);
+  await clock.advanceAsync(await slept);
+  await running;
   assert.equal(state.workerFailure.retried, true);
+});
+
+test('createRunState defaults the run clock to the system clock', (t) => {
+  const state = launchState();
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  assert.equal(state.clock, systemClock);
+});
+
+test('createRunState starts the wall deadline from the injected clock', (t) => {
+  const start = Date.parse('2026-01-02T03:04:05.000Z');
+  const clock = createManualClock(start);
+  const state = launchState({ deps: { clock }, task: { execution: { deadlineMs: 120000 } } });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  assert.equal(state.clock, clock);
+  assert.equal(state.runStartedAt, start);
+  assert.equal(state.deadlineAt, start + 120000);
+  assert.equal(state.dir.endsWith(String(start)), true);
+});
+
+test('remainingMs and outOfTime follow the run clock to the deadline', (t) => {
+  const clock = createManualClock(1_000_000);
+  const state = launchState({ deps: { clock }, task: { execution: { deadlineMs: 500 } } });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  clock.advance(499);
+  assert.equal(remainingMs(state), 1);
+  assert.equal(outOfTime(state), false);
+  clock.advance(1);
+  assert.equal(remainingMs(state), 0);
+  assert.equal(outOfTime(state), true);
+});
+
+test('a launch whose worker deadline passed on the run clock never spawns Pi', async (t) => {
+  let spawns = 0;
+  const clock = createManualClock(Date.now());
+  const state = launchState({ deps: { clock, spawnChild: () => { spawns += 1; return failedFetchChild(); } } });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  clock.set(state.deadlineAt);
+  await launch(state);
+  assert.equal(spawns, 0);
+  assert.equal(state.streamResult.stopReason, 'deadline_exceeded');
 });
 
 test('Jev key resolution returns the direct auth-file key before consulting AuthStorage', async (t) => {
