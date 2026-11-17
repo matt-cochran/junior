@@ -191,6 +191,343 @@ function evidenceLine(summary?: PlanLeaseSummary): string {
   ].join(' ');
 }
 
+interface LeaseContext<R> {
+  task: PlanLeaseTask;
+  deps: PlanLeaseDeps<R>;
+  now: () => number;
+  callerId: string;
+  plan: PlanLeaseOutcome<R>['plan'];
+  ownRevision: number | undefined;
+  ttlSeconds: number;
+  priorActualHours: number;
+  startedAt: number;
+}
+
+function baselineRevisionOf(task: PlanLeaseTask): number | undefined {
+  const contextRevision = task.hopContext?.revision;
+  return typeof task.hopRevision === 'number' && Number.isInteger(task.hopRevision) && task.hopRevision >= 0
+    ? task.hopRevision
+    : typeof contextRevision === 'number' && Number.isInteger(contextRevision) && contextRevision >= 0
+      ? contextRevision
+      : undefined;
+}
+
+function refreshRevision<R>(ctx: LeaseContext<R>, revision: number): void {
+  ctx.ownRevision = revision;
+  ctx.task.hopRevision = revision;
+  if (ctx.task.hopContext) ctx.task.hopContext.revision = revision;
+}
+
+// Confirm this handoff's deliverable is still leased to callerId. A sibling
+// that leased/marked a different deliverable leaves this deliverable's lock
+// untouched; only a change to this deliverable fails the confirmation. The
+// read also refreshes the expected revision to the latest it reached.
+async function confirmLeaseStillHeld<R>(ctx: LeaseContext<R>): Promise<boolean> {
+  let status: PlanHopResult;
+  try {
+    status = await ctx.deps.callHop('cpm', { tool: 'plan.status', arguments: { plan_id: ctx.plan.id } });
+  } catch {
+    return false;
+  }
+  if (typeof status.revision === 'number') refreshRevision(ctx, status.revision);
+  if (!status.ok) return false;
+  let held: { deliverableId: string; callerId: string } | undefined;
+  try {
+    held = lockHolders(status.result).find((lock) => lock.deliverableId === ctx.plan.deliverable);
+  } catch {
+    return false;
+  }
+  return held?.callerId === ctx.callerId;
+}
+
+// `releasesLease` marks a successful mark that hands the lease back (failed,
+// ready): the lease check cannot apply afterwards, and the mark itself proves
+// this handoff's write landed, so a sibling's forward jump is accepted.
+async function noteRevision<R>(
+  ctx: LeaseContext<R>,
+  response: PlanHopResult,
+  tool: string,
+  releasesLease = false,
+): Promise<string | undefined> {
+  if (typeof response.revision !== 'number') return undefined;
+  const ownRevision = ctx.ownRevision;
+  if (ownRevision === undefined || response.revision === ownRevision + 1 || (releasesLease && response.revision > ownRevision)) {
+    refreshRevision(ctx, response.revision);
+    return undefined;
+  }
+  const stale = `HOP revision changed outside this handoff: ${tool} returned revision ${response.revision}; expected ${ownRevision + 1}`;
+  if (response.revision < ownRevision + 1) return stale;
+  return (await confirmLeaseStillHeld(ctx)) ? undefined : stale;
+}
+
+/** Call one cpm tool before the run; any failure is recorded in `plan.error`. */
+async function leaseStep<R>(
+  ctx: LeaseContext<R>,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<PlanHopResult | undefined> {
+  let response: PlanHopResult;
+  try {
+    response = await ctx.deps.callHop('cpm', { tool, arguments: args });
+  } catch (error) {
+    ctx.plan.error = `${tool} failed: ${messageOf(error)}`;
+    return undefined;
+  }
+  if (!response.ok) {
+    ctx.plan.error = `${tool} failed: ${response.error?.message ?? 'unknown error'}`;
+    return undefined;
+  }
+  const revisionError = await noteRevision(ctx, response, tool);
+  if (revisionError) {
+    ctx.plan.error = revisionError;
+    return undefined;
+  }
+  return response;
+}
+
+async function acquireOnce<R>(ctx: LeaseContext<R>): Promise<{ response: PlanHopResult; ids: string[] } | undefined> {
+  const response = await leaseStep(ctx, 'plan.acquire_cohort', {
+    plan_id: ctx.plan.id,
+    caller_id: ctx.callerId,
+    ids: [ctx.plan.deliverable],
+    max_count: 1,
+    ttl_seconds: ctx.ttlSeconds,
+  });
+  if (!response) return undefined;
+  try {
+    return { response, ids: cohortIds(response.result) };
+  } catch (error) {
+    ctx.plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
+    return undefined;
+  }
+}
+
+/** Return a failed deliverable to ready and lease it again. */
+async function retryFailedDeliverable<R>(ctx: LeaseContext<R>, status: PlanHopResult): Promise<PlanHopResult | undefined> {
+  const { plan } = ctx;
+  let state: DeliverableState | undefined;
+  try {
+    state = status.ok ? deliverableState(status.result, plan.deliverable) : undefined;
+  } catch (error) {
+    plan.error = `plan.status failed: ${messageOf(error)}`;
+    return undefined;
+  }
+  if (state?.status === 'complete') {
+    // cpm deliberately has no lockless complete -> ready transition. The
+    // manager first revises/reopens the graph, then the reopened work is
+    // leased and rereviewed; never rewrite a completed status here.
+    plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; completed work must be revised/reopened before a new lease`;
+    return undefined;
+  }
+  const reason = state?.status === 'failed'
+    ? state.reason ?? 'failure reason not recorded'
+    : undefined;
+  if (reason === undefined) {
+    plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
+    return undefined;
+  }
+  ctx.priorActualHours = state?.actualHours ?? 0;
+  // cpm 0.4.3 supports Failed -> Ready only as an audited lockless mark;
+  // return the deliverable through that lifecycle, never by inventing a
+  // lease or a direct status write. Completed work is not handled here.
+  const ready = await leaseStep(ctx, 'plan.mark_status', {
+    caller_id: ctx.callerId,
+    plan_id: plan.id,
+    deliverable_id: plan.deliverable,
+    status: { status: 'ready' },
+    evidence: retryEvidence(reason),
+  });
+  if (!ready) return undefined;
+  const retried = await acquireOnce(ctx);
+  if (!retried) return undefined;
+  if (!retried.ids.includes(plan.deliverable)) {
+    plan.error = `plan.acquire_cohort did not lease ${plan.deliverable} after returning it to ready`;
+    return undefined;
+  }
+  plan.retried = true;
+  plan.retryReason = reason;
+  return retried.response;
+}
+
+/** The acquire did not lease the deliverable: re-enter an own lease or retry a failure. */
+async function resolveUnleased<R>(ctx: LeaseContext<R>, acquired: PlanHopResult): Promise<PlanHopResult | undefined> {
+  const { plan } = ctx;
+  let status: PlanHopResult;
+  try {
+    status = await ctx.deps.callHop('cpm', {
+      tool: 'plan.status',
+      arguments: { plan_id: plan.id },
+    });
+  } catch {
+    status = { ok: false };
+  }
+  const statusRevisionError = await noteRevision(ctx, status, 'plan.status');
+  if (statusRevisionError) {
+    plan.error = statusRevisionError;
+    return undefined;
+  }
+  let held: { deliverableId: string; callerId: string } | undefined;
+  try {
+    held = status.ok
+      ? lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable)
+      : undefined;
+  } catch (error) {
+    plan.error = `plan.status failed: ${messageOf(error)}`;
+    return undefined;
+  }
+  if (held && held.callerId !== ctx.callerId) {
+    plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`;
+    return undefined;
+  }
+  if (held) {
+    plan.reentered = true;
+    return typeof status.revision === 'number' ? { ...acquired, revision: status.revision } : acquired;
+  }
+  return retryFailedDeliverable(ctx, status);
+}
+
+async function acquireLease<R>(ctx: LeaseContext<R>): Promise<PlanHopResult | undefined> {
+  const first = await acquireOnce(ctx);
+  if (!first) return undefined;
+  if (first.ids.includes(ctx.plan.deliverable)) return first.response;
+  return resolveUnleased(ctx, first.response);
+}
+
+// cpm releases a lease only on complete/failed; a hand-back to Ready keeps
+// the lock until its TTL, which blocks every other caller. Drop this
+// handoff's own lease explicitly after the Ready mark.
+async function dropOwnLease<R>(ctx: LeaseContext<R>, reason: string, trackRevision: boolean): Promise<void> {
+  const { plan } = ctx;
+  try {
+    const response = await ctx.deps.callHop('cpm', {
+      tool: 'plan.force_release',
+      arguments: {
+        plan_id: plan.id,
+        deliverable_id: plan.deliverable,
+        reason: `handoff ${ctx.task.id} handed ${plan.deliverable} back to ready: ${reason}`.slice(0, 2048),
+      },
+    });
+    if (trackRevision && response.ok) {
+      const revisionError = await noteRevision(ctx, response, 'plan.force_release', true);
+      if (revisionError && !plan.error) plan.error = revisionError;
+    }
+  } catch {
+    // The Ready mark already landed; the lease then lapses at its TTL.
+  }
+}
+
+// A refusal after the lease and before the run hands the deliverable back to
+// Ready, so a pre-worker stop never leaves a stray lease behind.
+async function releaseLease<R>(ctx: LeaseContext<R>, reason: string): Promise<void> {
+  const { plan } = ctx;
+  try {
+    await ctx.deps.callHop('cpm', {
+      tool: 'plan.mark_status',
+      arguments: {
+        caller_id: ctx.callerId,
+        plan_id: plan.id,
+        deliverable_id: plan.deliverable,
+        status: { status: 'ready' },
+        evidence: `handoff ${ctx.task.id} stopped before its run: ${reason}`.slice(0, 2048),
+      },
+    });
+    plan.marked = 'ready';
+    await dropOwnLease(ctx, reason, false);
+  } catch {
+    // The original refusal is already recorded in plan.error.
+  }
+}
+
+// A correction mark reports total effort, not just this run: CPM keeps the
+// original actuals through a retry or an explicit revise/reopen. Read them
+// after the lease (a read must not race the acquire baseline) and add this
+// run's wall hours without replacing the earlier work. An unavailable EV
+// read is not fatal; the status row may still carry the prior actuals.
+// Returns false when the read refused the run (the lease was returned).
+async function readPriorActuals<R>(ctx: LeaseContext<R>): Promise<boolean> {
+  const { plan } = ctx;
+  try {
+    const ev = await ctx.deps.callHop('cpm', { tool: 'plan.ev', arguments: { plan_id: plan.id } });
+    // A failed plan.ev can still advance the Hop, so its revision is noted on
+    // every response. A foreign jump here returns the lease before refusing.
+    const evRevisionError = await noteRevision(ctx, ev, 'plan.ev');
+    if (evRevisionError) {
+      plan.error = evRevisionError;
+      await releaseLease(ctx, evRevisionError);
+      return false;
+    }
+    if (ev.ok) {
+      const previous = deliverableActualHours(ev.result, plan.deliverable);
+      if (previous !== undefined) ctx.priorActualHours = Math.max(ctx.priorActualHours, previous);
+    }
+  } catch {
+    // plan.ev is optional for a plan that has not been baselined yet.
+  }
+  return true;
+}
+
+async function markRun<R>(
+  ctx: LeaseContext<R>,
+  marked: 'in_progress' | 'failed',
+  summary: PlanLeaseSummary | undefined,
+  reason?: string,
+): Promise<void> {
+  const { plan } = ctx;
+  const now = ctx.now;
+  plan.marked = marked;
+  const status = marked === 'failed'
+    ? { status: 'failed', ...(reason ? { reason } : {}) }
+    : { status: 'in_progress' };
+  try {
+    const response = await ctx.deps.callHop('cpm', {
+      tool: 'plan.mark_status',
+      arguments: {
+        caller_id: ctx.callerId,
+        plan_id: plan.id,
+        deliverable_id: plan.deliverable,
+        status,
+        actual_effort_hours: effortHours(ctx.startedAt, now(), ctx.priorActualHours),
+        evidence: evidenceLine(summary),
+      },
+    });
+    if (!response.ok) {
+      plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
+    } else {
+      const revisionError = await noteRevision(ctx, response, 'plan.mark_status', marked === 'failed');
+      if (revisionError) plan.error = revisionError;
+    }
+  } catch (error) {
+    plan.error = `plan.mark_status failed: ${messageOf(error)}`;
+  }
+}
+
+async function markReady<R>(ctx: LeaseContext<R>, result: R): Promise<void> {
+  const { plan } = ctx;
+  plan.marked = 'ready';
+  const text = `run ${ctx.task.id} never started: ${String((result as any)?.status ?? 'unknown')}`.slice(0, 2048);
+  try {
+    const response = await ctx.deps.callHop('cpm', {
+      tool: 'plan.mark_status',
+      arguments: {
+        caller_id: ctx.callerId,
+        plan_id: plan.id,
+        deliverable_id: plan.deliverable,
+        status: { status: 'ready' },
+        evidence: text,
+      },
+    });
+    if (!response.ok) {
+      plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
+    } else {
+      const revisionError = await noteRevision(ctx, response, 'plan.mark_status', true);
+      if (revisionError) plan.error = revisionError;
+      await dropOwnLease(ctx, text, true);
+    }
+  } catch (error) {
+    plan.error = `plan.mark_status failed: ${messageOf(error)}`;
+  }
+}
+
 /**
  * Claim `task.plan.deliverable` from `task.plan.id`, run the handoff, and record
  * its outcome. When the lease is denied the run is skipped and `plan.leased` is
@@ -201,369 +538,59 @@ export async function withPlanLease<R>(
   run: () => Promise<R>,
   deps: PlanLeaseDeps<R>,
 ): Promise<PlanLeaseOutcome<R>> {
-  const now = deps.now ?? Date.now;
-  const callerId = task.plan.callerId ?? 'junior-worker';
   const plan: PlanLeaseOutcome<R>['plan'] = {
     id: task.plan.id,
     deliverable: task.plan.deliverable,
     leased: false,
     marked: null,
   };
-
-  const contextRevision = task.hopContext?.revision;
-  const baselineRevision = typeof task.hopRevision === 'number' && Number.isInteger(task.hopRevision) && task.hopRevision >= 0
-    ? task.hopRevision
-    : typeof contextRevision === 'number' && Number.isInteger(contextRevision) && contextRevision >= 0
-      ? contextRevision
-      : undefined;
   // A sibling handoff on another deliverable of the same plan advances the shared
   // HOP revision between this handoff's own calls, so a forward jump is not by
   // itself a mutation of this deliverable. The acquire is not sent an
   // expectedRevision (cpm 0.4.3 rejects the unknown field); each response still
   // refreshes the expected revision, and a jump is only rejected after the plan
   // confirms this handoff's deliverable was changed under it.
-  let ownRevision = baselineRevision;
-  const refreshRevision = (revision: number): void => {
-    ownRevision = revision;
-    task.hopRevision = revision;
-    if (task.hopContext) task.hopContext.revision = revision;
+  const ctx: LeaseContext<R> = {
+    task,
+    deps,
+    now: deps.now ?? Date.now,
+    callerId: task.plan.callerId ?? 'junior-worker',
+    plan,
+    ownRevision: baselineRevisionOf(task),
+    ttlSeconds: Math.ceil(deps.deadlineMs / 1000) + 3600,
+    priorActualHours: 0,
+    startedAt: 0,
   };
-  // Confirm this handoff's deliverable is still leased to callerId. A sibling
-  // that leased/marked a different deliverable leaves this deliverable's lock
-  // untouched; only a change to this deliverable fails the confirmation. The
-  // read also refreshes the expected revision to the latest it reached.
-  const confirmLeaseStillHeld = async (): Promise<boolean> => {
-    let status: PlanHopResult;
-    try {
-      status = await deps.callHop('cpm', { tool: 'plan.status', arguments: { plan_id: plan.id } });
-    } catch {
-      return false;
-    }
-    if (typeof status.revision === 'number') refreshRevision(status.revision);
-    if (!status.ok) return false;
-    let held: { deliverableId: string; callerId: string } | undefined;
-    try {
-      held = lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable);
-    } catch {
-      return false;
-    }
-    return held?.callerId === callerId;
-  };
-  // `releasesLease` marks a successful mark that hands the lease back (failed,
-  // ready): the lease check cannot apply afterwards, and the mark itself proves
-  // this handoff's write landed, so a sibling's forward jump is accepted.
-  const noteRevision = async (response: PlanHopResult, tool: string, releasesLease = false): Promise<string | undefined> => {
-    if (typeof response.revision !== 'number') return undefined;
-    if (ownRevision === undefined || response.revision === ownRevision + 1 || (releasesLease && response.revision > ownRevision)) {
-      refreshRevision(response.revision);
-      return undefined;
-    }
-    const stale = `HOP revision changed outside this handoff: ${tool} returned revision ${response.revision}; expected ${ownRevision + 1}`;
-    if (response.revision < ownRevision + 1) return stale;
-    return (await confirmLeaseStillHeld()) ? undefined : stale;
-  };
-  const ttlSeconds = Math.ceil(deps.deadlineMs / 1000) + 3600;
-  let priorActualHours = 0;
-  let acquired: PlanHopResult;
-  try {
-    acquired = await deps.callHop('cpm', {
-      tool: 'plan.acquire_cohort',
-      arguments: {
-        plan_id: plan.id,
-        caller_id: callerId,
-        ids: [plan.deliverable],
-        max_count: 1,
-        ttl_seconds: ttlSeconds,
-      },
-    });
-  } catch (error) {
-    plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
-    return { plan };
-  }
-  if (!acquired.ok) {
-    plan.error = `plan.acquire_cohort failed: ${acquired.error?.message ?? 'unknown error'}`;
-    return { plan };
-  }
-  const acquiredRevisionError = await noteRevision(acquired, 'plan.acquire_cohort');
-  if (acquiredRevisionError) {
-    plan.error = acquiredRevisionError;
-    return { plan };
-  }
-  let leasedIds: string[];
-  try {
-    leasedIds = cohortIds(acquired.result);
-  } catch (error) {
-    plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
-    return { plan };
-  }
-  if (!leasedIds.includes(plan.deliverable)) {
-    let status: PlanHopResult;
-    try {
-      status = await deps.callHop('cpm', {
-        tool: 'plan.status',
-        arguments: { plan_id: plan.id },
-      });
-    } catch {
-      status = { ok: false };
-    }
-    const statusRevisionError = await noteRevision(status, 'plan.status');
-    if (statusRevisionError) {
-      plan.error = statusRevisionError;
-      return { plan };
-    }
-    let held: { deliverableId: string; callerId: string } | undefined;
-    try {
-      held = status.ok
-        ? lockHolders(status.result).find((lock) => lock.deliverableId === plan.deliverable)
-        : undefined;
-    } catch (error) {
-      plan.error = `plan.status failed: ${messageOf(error)}`;
-      return { plan };
-    }
-    if (held && held.callerId !== callerId) {
-      plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; held by ${held.callerId}`;
-      return { plan };
-    }
-    if (held) {
-      if (typeof status.revision === 'number') acquired = { ...acquired, revision: status.revision };
-      plan.reentered = true;
-    } else {
-      let state: DeliverableState | undefined;
-      try {
-        state = status.ok ? deliverableState(status.result, plan.deliverable) : undefined;
-      } catch (error) {
-        plan.error = `plan.status failed: ${messageOf(error)}`;
-        return { plan };
-      }
-      if (state?.status === 'complete') {
-        // cpm deliberately has no lockless complete -> ready transition. The
-        // manager first revises/reopens the graph, then the reopened work is
-        // leased and rereviewed; never rewrite a completed status here.
-        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}; completed work must be revised/reopened before a new lease`;
-        return { plan };
-      }
-      const reason = state?.status === 'failed'
-        ? state.reason ?? 'failure reason not recorded'
-        : undefined;
-      if (reason === undefined) {
-        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable}`;
-        return { plan };
-      }
-      priorActualHours = state?.actualHours ?? 0;
-      // cpm 0.4.3 supports Failed -> Ready only as an audited lockless mark;
-      // return the deliverable through that lifecycle, never by inventing a
-      // lease or a direct status write. Completed work is not handled here.
-      let ready: PlanHopResult;
-      try {
-        ready = await deps.callHop('cpm', {
-          tool: 'plan.mark_status',
-          arguments: {
-            caller_id: callerId,
-            plan_id: plan.id,
-            deliverable_id: plan.deliverable,
-            status: { status: 'ready' },
-            evidence: retryEvidence(reason),
-          },
-        });
-      } catch (error) {
-        plan.error = `plan.mark_status failed: ${messageOf(error)}`;
-        return { plan };
-      }
-      if (!ready.ok) {
-        plan.error = `plan.mark_status failed: ${ready.error?.message ?? 'unknown error'}`;
-        return { plan };
-      }
-      const readyRevisionError = await noteRevision(ready, 'plan.mark_status');
-      if (readyRevisionError) {
-        plan.error = readyRevisionError;
-        return { plan };
-      }
-      let retried: PlanHopResult;
-      try {
-        retried = await deps.callHop('cpm', {
-          tool: 'plan.acquire_cohort',
-          arguments: {
-            plan_id: plan.id,
-            caller_id: callerId,
-            ids: [plan.deliverable],
-            max_count: 1,
-            ttl_seconds: ttlSeconds,
-          },
-        });
-      } catch (error) {
-        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
-        return { plan };
-      }
-      if (!retried.ok) {
-        plan.error = `plan.acquire_cohort failed: ${retried.error?.message ?? 'unknown error'}`;
-        return { plan };
-      }
-      const retriedRevisionError = await noteRevision(retried, 'plan.acquire_cohort');
-      if (retriedRevisionError) {
-        plan.error = retriedRevisionError;
-        return { plan };
-      }
-      let retriedIds: string[];
-      try {
-        retriedIds = cohortIds(retried.result);
-      } catch (error) {
-        plan.error = `plan.acquire_cohort failed: ${messageOf(error)}`;
-        return { plan };
-      }
-      if (!retriedIds.includes(plan.deliverable)) {
-        plan.error = `plan.acquire_cohort did not lease ${plan.deliverable} after returning it to ready`;
-        return { plan };
-      }
-      acquired = retried;
-      plan.retried = true;
-      plan.retryReason = reason;
-    }
-  }
+  const acquired = await acquireLease(ctx);
+  if (!acquired) return { plan };
   // The run is checked against the revision the lease left behind, not the
   // pre-lease revision that the lease itself invalidated.
   if (typeof acquired.revision === 'number') plan.revision = acquired.revision;
   plan.leased = true;
-  // cpm releases a lease only on complete/failed; a hand-back to Ready keeps
-  // the lock until its TTL, which blocks every other caller. Drop this
-  // handoff's own lease explicitly after the Ready mark.
-  const dropOwnLease = async (reason: string, trackRevision: boolean): Promise<void> => {
-    try {
-      const response = await deps.callHop('cpm', {
-        tool: 'plan.force_release',
-        arguments: {
-          plan_id: plan.id,
-          deliverable_id: plan.deliverable,
-          reason: `handoff ${task.id} handed ${plan.deliverable} back to ready: ${reason}`.slice(0, 2048),
-        },
-      });
-      if (trackRevision && response.ok) {
-        const revisionError = await noteRevision(response, 'plan.force_release', true);
-        if (revisionError && !plan.error) plan.error = revisionError;
-      }
-    } catch {
-      // The Ready mark already landed; the lease then lapses at its TTL.
-    }
-  };
-  // A refusal after the lease and before the run hands the deliverable back to
-  // Ready, so a pre-worker stop never leaves a stray lease behind.
-  const releaseLease = async (reason: string): Promise<void> => {
-    try {
-      await deps.callHop('cpm', {
-        tool: 'plan.mark_status',
-        arguments: {
-          caller_id: callerId,
-          plan_id: plan.id,
-          deliverable_id: plan.deliverable,
-          status: { status: 'ready' },
-          evidence: `handoff ${task.id} stopped before its run: ${reason}`.slice(0, 2048),
-        },
-      });
-      plan.marked = 'ready';
-      await dropOwnLease(reason, false);
-    } catch {
-      // The original refusal is already recorded in plan.error.
-    }
-  };
 
-  // A correction mark reports total effort, not just this run: CPM keeps the
-  // original actuals through a retry or an explicit revise/reopen. Read them
-  // after the lease (a read must not race the acquire baseline) and add this
-  // run's wall hours without replacing the earlier work. An unavailable EV
-  // read is not fatal; the status row may still carry the prior actuals.
-  try {
-    const ev = await deps.callHop('cpm', { tool: 'plan.ev', arguments: { plan_id: plan.id } });
-    // A failed plan.ev can still advance the Hop, so its revision is noted on
-    // every response. A foreign jump here returns the lease before refusing.
-    const evRevisionError = await noteRevision(ev, 'plan.ev');
-    if (evRevisionError) {
-      plan.error = evRevisionError;
-      await releaseLease(evRevisionError);
-      return { plan };
-    }
-    if (ev.ok) {
-      const previous = deliverableActualHours(ev.result, plan.deliverable);
-      if (previous !== undefined) priorActualHours = Math.max(priorActualHours, previous);
-    }
-  } catch {
-    // plan.ev is optional for a plan that has not been baselined yet.
-  }
+  if (!(await readPriorActuals(ctx))) return { plan };
 
-  const startedAt = now();
-  const mark = async (
-    marked: 'in_progress' | 'failed',
-    summary: PlanLeaseSummary | undefined,
-    reason?: string,
-  ): Promise<void> => {
-    plan.marked = marked;
-    const status = marked === 'failed'
-      ? { status: 'failed', ...(reason ? { reason } : {}) }
-      : { status: 'in_progress' };
-    try {
-      const response = await deps.callHop('cpm', {
-        tool: 'plan.mark_status',
-        arguments: {
-          caller_id: callerId,
-          plan_id: plan.id,
-          deliverable_id: plan.deliverable,
-          status,
-          actual_effort_hours: effortHours(startedAt, now(), priorActualHours),
-          evidence: evidenceLine(summary),
-        },
-      });
-      if (!response.ok) {
-        plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
-      } else {
-        const revisionError = await noteRevision(response, 'plan.mark_status', marked === 'failed');
-        if (revisionError) plan.error = revisionError;
-      }
-    } catch (error) {
-      plan.error = `plan.mark_status failed: ${messageOf(error)}`;
-    }
-  };
-  const markReady = async (result: R): Promise<void> => {
-    plan.marked = 'ready';
-    const text = `run ${task.id} never started: ${String((result as any)?.status ?? 'unknown')}`.slice(0, 2048);
-    try {
-      const response = await deps.callHop('cpm', {
-        tool: 'plan.mark_status',
-        arguments: {
-          caller_id: callerId,
-          plan_id: plan.id,
-          deliverable_id: plan.deliverable,
-          status: { status: 'ready' },
-          evidence: text,
-        },
-      });
-      if (!response.ok) {
-        plan.error = `plan.mark_status failed: ${response.error?.message ?? 'unknown error'}`;
-      } else {
-        const revisionError = await noteRevision(response, 'plan.mark_status', true);
-        if (revisionError) plan.error = revisionError;
-        await dropOwnLease(text, true);
-      }
-    } catch (error) {
-      plan.error = `plan.mark_status failed: ${messageOf(error)}`;
-    }
-  };
+  const now = ctx.now;
+  ctx.startedAt = now();
 
   let result: R;
   try {
     result = await run();
   } catch (error) {
-    await mark('failed', { success: false, outcome: 'error' }, messageOf(error));
+    await markRun(ctx, 'failed', { success: false, outcome: 'error' }, messageOf(error));
     throw error;
   }
 
   if (runNeverStarted(result)) {
-    await markReady(result);
+    await markReady(ctx, result);
     return { result, plan };
   }
   const summary = deps.summarize(result);
   if (summary.hold) return { result, plan };
   if (summary.success) {
-    await mark('in_progress', summary);
+    await markRun(ctx, 'in_progress', summary);
     return { result, plan };
   }
-  await mark('failed', summary, summary.reason ?? 'run reported failure');
+  await markRun(ctx, 'failed', summary, summary.reason ?? 'run reported failure');
   return { result, plan };
 }

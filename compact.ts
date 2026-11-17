@@ -758,14 +758,7 @@ function nextDroppable(blocks: Block[]): Block | null {
   return null;
 }
 
-/**
- * Build the compact session-start context block from live local stores. All
- * companion access goes through the injected `callHop`; failures are reported
- * per section and never thrown. Over `maxChars`, proposals, PRs, in-flight runs,
- * hypotheses, risk detail, notes and decisions are dropped in that order while
- * the plan is preserved.
- */
-export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock> {
+function validatedLimits(deps: CompactDeps): { maxChars: number; maxAgeHours: number } {
   if (!isObject(deps)) throw new TypeError('deps must be an object');
   if (typeof deps.cwd !== 'string' || deps.cwd.trim().length === 0) {
     throw new TypeError('cwd must be a non-empty string');
@@ -781,6 +774,99 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
   if (typeof maxAgeHours !== 'number' || !Number.isFinite(maxAgeHours) || maxAgeHours <= 0) {
     throw new TypeError(`inFlightMaxAgeHours must be a positive number, got ${String(maxAgeHours)}`);
   }
+  return { maxChars, maxAgeHours };
+}
+
+function compactHeader(
+  generated: Date,
+  ambiguous: boolean,
+  ambiguousMessage: string | undefined,
+  hopExists: boolean,
+  hopPath: string,
+): string[] {
+  const header = ['## Junior compact context', `- generated: ${generated.toISOString()}`];
+  if (ambiguous) {
+    header.push(`- hop: ambiguous: ${ambiguousMessage}`);
+  } else if (hopExists) {
+    header.push(`- hop: ${hopPath}`);
+    try {
+      header.push(`- hop revision: ${inspectHop(hopPath).revision}`);
+    } catch (error) {
+      header.push(`- hop: unavailable: ${errorMessage(error)}`);
+    }
+  } else {
+    header.push('- hop: none');
+  }
+  return header;
+}
+
+async function completedFor(
+  deps: CompactDeps,
+  planner: PlannerSnapshot,
+  hopExists: boolean,
+  callHop: typeof defaultCallHop,
+): Promise<Set<string>> {
+  let completed = new Set<string>();
+  try {
+    completed = deps.completedDeliverables
+      ? await deps.completedDeliverables()
+      : planner.blocked
+        ? new Set()
+        : await defaultCompletedDeliverables(planner.hopPath, hopExists, callHop);
+  } catch {
+    completed = new Set();
+  }
+  return completed;
+}
+
+function startOpenPrs(openPrs: () => Promise<PrSection>): Promise<{ section?: PrSection; error?: unknown }> {
+  let prsOutcome: Promise<{ section?: PrSection; error?: unknown }>;
+  try {
+    prsOutcome = Promise.resolve(openPrs()).then(
+      (section) => ({ section }),
+      (error) => ({ error }),
+    );
+  } catch (error) {
+    prsOutcome = Promise.resolve({ error });
+  }
+  return prsOutcome;
+}
+
+function fitToBudget(header: string[], blocks: Block[], maxChars: number): CompactBlock {
+  const dropped: Record<string, number> = {
+    plan: 0,
+    decisions: 0,
+    notes: 0,
+    risk: 0,
+    hypotheses: 0,
+    runs: 0,
+    prs: 0,
+    proposals: 0,
+    matrix: 0,
+  };
+  let markdown = render(header, blocks, dropped);
+  while (markdown.length > maxChars) {
+    const block = nextDroppable(blocks);
+    if (block === null) break;
+    block.lines.pop();
+    dropped[block.key] = (dropped[block.key] ?? 0) + 1;
+    markdown = render(header, blocks, dropped);
+  }
+
+  const sections: Record<string, CompactSectionStatus> = {};
+  for (const block of blocks) sections[block.key] = block.status;
+  return { markdown, truncated: Object.values(dropped).some((count) => count > 0), sections };
+}
+
+/**
+ * Build the compact session-start context block from live local stores. All
+ * companion access goes through the injected `callHop`; failures are reported
+ * per section and never thrown. Over `maxChars`, proposals, PRs, in-flight runs,
+ * hypotheses, risk detail, notes and decisions are dropped in that order while
+ * the plan is preserved.
+ */
+export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock> {
+  const { maxChars, maxAgeHours } = validatedLimits(deps);
   const now = deps.now ?? (() => new Date());
   const readDir = deps.readDir ?? ((path: string) => readdirSync(path));
   const readFile = deps.readFile ?? ((path: string) => readFileSync(path, 'utf8'));
@@ -799,44 +885,15 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
   if (!(generated instanceof Date) || Number.isNaN(generated.getTime())) {
     throw new TypeError('now must return a valid Date');
   }
-  const header = ['## Junior compact context', `- generated: ${generated.toISOString()}`];
-  if (ambiguous) {
-    header.push(`- hop: ambiguous: ${resolution.message}`);
-  } else if (hopExists) {
-    header.push(`- hop: ${hopPath}`);
-    try {
-      header.push(`- hop revision: ${inspectHop(hopPath).revision}`);
-    } catch (error) {
-      header.push(`- hop: unavailable: ${errorMessage(error)}`);
-    }
-  } else {
-    header.push('- hop: none');
-  }
+  const header = compactHeader(generated, ambiguous, ambiguous ? resolution.message : undefined, hopExists, hopPath);
 
   const planner = hopExists ? snapshotPlannerDatabase(hopPath) : noPlannerSnapshot(hopPath);
   try {
-    let completed = new Set<string>();
-    try {
-      completed = deps.completedDeliverables
-        ? await deps.completedDeliverables()
-        : planner.blocked
-          ? new Set()
-          : await defaultCompletedDeliverables(planner.hopPath, hopExists, callHop);
-    } catch {
-      completed = new Set();
-    }
+    const completed = await completedFor(deps, planner, hopExists, callHop);
 
     const listNotes = deps.listNotes ?? (() => listOpen(deps.cwd));
     const openPrs = deps.openPrs ?? (() => openPullRequests({ cwd: deps.cwd }));
-    let prsOutcome: Promise<{ section?: PrSection; error?: unknown }>;
-    try {
-      prsOutcome = Promise.resolve(openPrs()).then(
-        (section) => ({ section }),
-        (error) => ({ error }),
-      );
-    } catch (error) {
-      prsOutcome = Promise.resolve({ error });
-    }
+    const prsOutcome = startOpenPrs(openPrs);
 
     const cutoffMs = generated.getTime() - maxAgeHours * 3_600_000;
     const notesAndProposals = notesBlocks(listNotes);
@@ -859,29 +916,7 @@ export async function buildCompactBlock(deps: CompactDeps): Promise<CompactBlock
       notesAndProposals[1],
     ];
 
-    const dropped: Record<string, number> = {
-      plan: 0,
-      decisions: 0,
-      notes: 0,
-      risk: 0,
-      hypotheses: 0,
-      runs: 0,
-      prs: 0,
-      proposals: 0,
-      matrix: 0,
-    };
-    let markdown = render(header, blocks, dropped);
-    while (markdown.length > maxChars) {
-      const block = nextDroppable(blocks);
-      if (block === null) break;
-      block.lines.pop();
-      dropped[block.key] = (dropped[block.key] ?? 0) + 1;
-      markdown = render(header, blocks, dropped);
-    }
-
-    const sections: Record<string, CompactSectionStatus> = {};
-    for (const block of blocks) sections[block.key] = block.status;
-    return { markdown, truncated: Object.values(dropped).some((count) => count > 0), sections };
+    return fitToBudget(header, blocks, maxChars);
   } finally {
     planner.cleanup();
   }
