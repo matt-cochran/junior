@@ -15,6 +15,7 @@ export type PiFailureCategory =
   | 'transport_fetch'
   | 'credential_lock'
   | 'auth_missing'
+  | 'provider_credit_exhausted'
   | 'resume_session_unavailable'
   | 'zero_messages'
   | 'unknown';
@@ -44,6 +45,9 @@ export interface ClassifyPiFailureInput {
 const CREDENTIAL_REMEDIATION = 'Junior runs Pi with a run-local copy of your Pi credentials; if this path is your ambient Pi directory, set PI_CODING_AGENT_DIR to a writable directory or report it';
 
 const REDACTED = '[REDACTED]';
+
+/** HTTP 402 credit/limit refusals as OpenRouter and other providers word them. */
+const CREDIT_EXHAUSTED = /\b402\b[^\n]{0,200}\b(?:credit|credits|payment required|limit)\b|requires more credits|insufficient (?:credits|balance|funds)|"limit_source"\s*:\s*"[a-z_]*credits"/i;
 
 /** Redact provider keys, bearer credentials, credential headers, JSON secret
  * values and HTTP response bodies. Safe on arbitrary logs; never throws. */
@@ -168,6 +172,20 @@ export function classifyPiFailure(input: ClassifyPiFailureInput): PiFailure | nu
   const messages = assistantCount(input);
   const combined = [stderr, eventText(input)].filter(Boolean).join('\n');
   const detail = redactSecrets(combined).slice(-500);
+
+  // #251: an exhausted provider credit or key limit (HTTP 402) ends the run with
+  // an errored assistant message while Pi still exits 0, so it is classified
+  // before the clean-exit check. It is never retryable: every further lane on
+  // the same key fails the same way until the owner adds credit.
+  if (CREDIT_EXHAUSTED.test(combined)) {
+    return result(
+      'provider_credit_exhausted',
+      'The provider refused the request for lack of credit (HTTP 402); add credit or raise the key limit, then rerun. Stop dispatching further lanes on this key.',
+      false,
+      detail,
+      402,
+    );
+  }
 
   // A process that produced an assistant message and exited cleanly is a
   // success even when its stderr mentions a transient transport warning.

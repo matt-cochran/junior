@@ -43,6 +43,8 @@ export async function finish(state:RunState):Promise<any> {
  // what we would otherwise report.
  const workerFailure=state.workerFailure;
  if (workerFailure?.summary && (!workerError
+   || workerFailure.category === 'provider_credit_exhausted'
+   || workerError === 'Pi assistant message did not complete cleanly.'
    || workerError === 'Pi failed; inspect worker.log.'
    || workerError === 'Pi settled with no assistant messages.')) workerError=workerFailure.summary;
 
