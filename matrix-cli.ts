@@ -323,285 +323,287 @@ export async function dimensionsForSource(options: MatrixOptions, source: string
   return [fmecaFailureModes(outcome.result, options.session)];
 }
 
+async function reportCommandErrors(run: () => Promise<number>): Promise<number> {
+  try {
+    return await run();
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+}
+
+async function matrixSyncCommand(argv: string[]): Promise<number> {
+  const options = parseMatrixArgs(argv.slice(1));
+  const notes: string[] = [];
+  const core = resolveCore(options, notes);
+  options.hop = core.hop;
+  options.model = core.model;
+  await defaultSyncSources(options, core.root, notes);
+  writeNotes(notes);
+  if (options.sources.includes('state')) {
+    const { syncState } = await import('./state-sync.ts');
+    const result = await syncState({
+      hopPath: options.hop,
+      modelId: options.model,
+      planId: options.plan,
+      fmecaSession: options.fmecaSession,
+      elicitationSession: options.elicitationSession,
+      spSession: options.spSession,
+      jevitateResults: options.jevitateResults,
+      dir: options.dir,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.failures.length > 0) process.exitCode = 1;
+    return 0;
+  }
+  const dimensions: MatrixDimension[] = [];
+  for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
+  const { syncDimensions } = await import('./matrix-sync.ts');
+  const result = await syncDimensions({ hopPath: options.hop, modelId: options.model, dimensions });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixRefreshCommand(argv: string[]): Promise<number> {
+  const options = parseMatrixArgs(argv.slice(1));
+  const { refresh } = await import('./matrix-refresh.ts');
+  const result = await refresh({
+    dir: options.dir,
+    hop: options.hop,
+    model: options.model,
+    plan: options.plan,
+    planFile: options.planFile,
+  });
+  writeNotes(result.notes);
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixCodemapCommand(argv: string[]): Promise<number> {
+  if (argv[1] !== 'init') throw new Error('Usage: junior matrix codemap init [--feature-dimension <id> ...]');
+  const options = parseCodemapArgs(argv.slice(2));
+  const notes: string[] = [];
+  Object.assign(options, pick(resolveCore(options, notes)));
+  writeNotes(notes);
+  const { codemapInit } = await import('./codemap.ts');
+  const result = await codemapInit({
+    hopPath: options.hop,
+    modelId: options.model,
+    featureDimensions: options.featureDimensions.length > 0 ? options.featureDimensions : undefined,
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixLinkCommand(argv: string[]): Promise<number> {
+  const options = parseCodemapArgs(argv.slice(1));
+  const notes: string[] = [];
+  const core = resolveCore(options, notes);
+  Object.assign(options, pick(core));
+  if (!options.result) {
+    options.result = newestResult(core.root);
+    if (!options.result) throw new Error('matrix link found no .delivery/<id>/<stamp>/result.json; pass --result <result.json>');
+    notes.push(`result ${options.result} (newest)`);
+  }
+  if (!options.feature) {
+    options.feature = featureFromResult(options.result);
+    if (!options.feature) throw new Error('matrix link: the result names no plan deliverable; pass --feature <dimensionId>:<memberId> or <deliverable id>');
+    notes.push(`feature ${options.feature} (result plan)`);
+  }
+  options.feature = normalizeFeature(options.feature);
+  writeNotes(notes);
+  const { codemapLink } = await import('./codemap.ts');
+  const result = await codemapLink({
+    hopPath: options.hop,
+    modelId: options.model,
+    resultPath: options.result,
+    feature: options.feature,
+    dir: core.root,
+    observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixAutopilotCommand(argv: string[]): Promise<number> {
+  const subcommand = argv[0];
+  const options = parseCodemapArgs(argv.slice(1));
+  const notes: string[] = [];
+  const core = resolveCore(options, notes);
+  Object.assign(options, pick(core));
+  if (subcommand === 'autolink' && !options.plan) {
+    const plan = await resolveMatrixPlan(core.root, core.hop);
+    if (!plan.planId) throw new Error(planError('matrix autolink', plan.candidates));
+    options.plan = plan.planId;
+    notes.push(`plan ${plan.planId} (${plan.source})`);
+  }
+  writeNotes(notes);
+  const autopilot = await import('./matrix-autopilot.ts');
+  if (subcommand === 'bootstrap') {
+    const dir = options.dir ?? process.cwd();
+    // --plan-file reads the plan graph offline instead of the hop's plan.get snapshot.
+    const planGraph = options.planFile === undefined ? undefined : JSON.parse(fs.readFileSync(options.planFile, 'utf8'));
+    const result = await autopilot.bootstrap({
+      hopPath: options.hop,
+      modelId: options.model,
+      dir,
+      out: options.out ?? path.join(dir, 'proposals.json'),
+      ...(planGraph === undefined ? {} : { deps: { planGraph } }),
+    });
+    process.stdout.write(
+      `${JSON.stringify({ out: result.out, count: result.proposals.length, ...result.counts })}\n`,
+    );
+    return 0;
+  }
+  if (subcommand === 'confirm') {
+    if (!options.proposals) throw new Error('matrix confirm requires --proposals <proposals.json>');
+    const result = await autopilot.confirmProposals({
+      hopPath: options.hop,
+      modelId: options.model,
+      proposalsPath: options.proposals,
+      min: options.min as 'high' | 'medium' | 'low' | undefined,
+      only: options.only,
+      exclude: options.exclude,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  const result = await autopilot.autolink({
+    hopPath: options.hop,
+    modelId: options.model,
+    planId: options.plan,
+    dir: options.dir ?? process.cwd(),
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixCodemapQueryCommand(argv: string[]): Promise<number> {
+  const subcommand = argv[0];
+  const options = parseCodemapArgs(argv.slice(1));
+  const notes: string[] = [];
+  const core = resolveCore(options, notes);
+  Object.assign(options, pick(core));
+  writeNotes(notes);
+  const codemap = await import('./codemap.ts');
+  if (subcommand === 'features') {
+    const requested = options.path ?? options.feature;
+    if (!requested) throw new Error('matrix features requires a path: <path> or --path <path>');
+    const absolute = path.resolve(process.cwd(), requested);
+    const relative = path.relative(core.root, absolute).split(path.sep).join('/');
+    const isDirectory = fs.existsSync(absolute) && fs.statSync(absolute).isDirectory();
+    const result = await codemap.codemapFeatures({
+      hopPath: options.hop,
+      modelId: options.model,
+      path: isDirectory && !relative.endsWith('/') ? `${relative}/` : relative,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  if (subcommand === 'stale') {
+    const result = await codemap.codemapStale({
+      hopPath: options.hop,
+      modelId: options.model,
+      dir: options.dir ?? process.cwd(),
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  if (!options.feature) throw new Error(`matrix ${subcommand} requires a feature: <deliverable id> or --feature <dimensionId>:<memberId>`);
+  options.feature = normalizeFeature(options.feature);
+  if (subcommand === 'files') {
+    const result = await codemap.codemapFiles({
+      hopPath: options.hop,
+      modelId: options.model,
+      feature: options.feature,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+  const result = await codemap.codemapContext({
+    hopPath: options.hop,
+    modelId: options.model,
+    feature: options.feature,
+    max: options.max,
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 0;
+}
+
+async function matrixExportCommand(argv: string[]): Promise<number> {
+  const options = parseMatrixArgs(argv.slice(1));
+  if (options.sources.length === 0) {
+    options.sources = defaultSources(projectRoot(options.dir), options.planFile !== undefined || (options.hop !== undefined && options.plan !== undefined));
+  }
+  const written: string[] = [];
+  const unchanged: string[] = [];
+  for (const source of options.sources) {
+    const dimensionSetId = options.set ?? `project-${source}`;
+    const dimensions = await dimensionsForSource(options, source);
+    const doc = buildDimensionSet(dimensionSetId, dimensions);
+    const outDir = options.out ?? path.join(options.dir, '.crossmatrix');
+    const result = writeDimensionSet(outDir, doc);
+    if (result.unchanged) unchanged.push(result.path);
+    else written.push(result.path);
+  }
+  process.stdout.write(`${JSON.stringify({ written, unchanged }, null, 2)}\n`);
+  return 0;
+}
+
+type MatrixCommand = (argv: string[]) => Promise<number>;
+
+const guarded = (run: MatrixCommand): MatrixCommand => (argv) => reportCommandErrors(() => run(argv));
+
+const MATRIX_COMMANDS = new Map<string, MatrixCommand>([
+  ['init', async (argv) => {
+    const { runMatrixInit } = await import('./matrix-init.ts');
+    return runMatrixInit(argv.slice(1));
+  }],
+  ['sync', guarded(matrixSyncCommand)],
+  ['refresh', guarded(matrixRefreshCommand)],
+  ['codemap', guarded(matrixCodemapCommand)],
+  ['link', guarded(matrixLinkCommand)],
+  ['bootstrap', guarded(matrixAutopilotCommand)],
+  ['confirm', guarded(matrixAutopilotCommand)],
+  ['autolink', guarded(matrixAutopilotCommand)],
+  ['files', guarded(matrixCodemapQueryCommand)],
+  ['features', guarded(matrixCodemapQueryCommand)],
+  ['context', guarded(matrixCodemapQueryCommand)],
+  ['stale', guarded(matrixCodemapQueryCommand)],
+  ['qc', async (argv) => {
+    const { runLinkQc } = await import('./link-qc.ts');
+    return runLinkQc(argv.slice(1));
+  }],
+  ['graph', async (argv) => {
+    const { runGraph } = await import('./context-graph.ts');
+    return runGraph(argv.slice(1));
+  }],
+  ['jtbd', async (argv) => {
+    const { runJtbd } = await import('./jtbd-bridge.ts');
+    return runJtbd(argv.slice(1));
+  }],
+  ['plan-from-spec', async (argv) => {
+    const { runPlanFromSpec } = await import('./spec-bridge.ts');
+    return runPlanFromSpec(argv.slice(1));
+  }],
+  ['analyze', async (argv) => {
+    const { runAnalyze } = await import('./matrix-analyze.ts');
+    return runAnalyze(argv.slice(1));
+  }],
+  ['adr', async (argv) => {
+    const { runAdrCli } = await import('./adr-cli.ts');
+    return runAdrCli(argv.slice(1));
+  }],
+  ['export', guarded(matrixExportCommand)],
+]);
+
 export async function main(argv: string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(`${MATRIX_USAGE}\n`);
     return 0;
   }
-  if (argv[0] === 'init') {
-    const { runMatrixInit } = await import('./matrix-init.ts');
-    return runMatrixInit(argv.slice(1));
-  }
-  if (argv[0] === 'sync') {
-    try {
-      const options = parseMatrixArgs(argv.slice(1));
-      const notes: string[] = [];
-      const core = resolveCore(options, notes);
-      options.hop = core.hop;
-      options.model = core.model;
-      await defaultSyncSources(options, core.root, notes);
-      writeNotes(notes);
-      if (options.sources.includes('state')) {
-        const { syncState } = await import('./state-sync.ts');
-        const result = await syncState({
-          hopPath: options.hop,
-          modelId: options.model,
-          planId: options.plan,
-          fmecaSession: options.fmecaSession,
-          elicitationSession: options.elicitationSession,
-          spSession: options.spSession,
-          jevitateResults: options.jevitateResults,
-          dir: options.dir,
-        });
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        if (result.failures.length > 0) process.exitCode = 1;
-        return 0;
-      }
-      const dimensions: MatrixDimension[] = [];
-      for (const source of options.sources) dimensions.push(...(await dimensionsForSource(options, source)));
-      const { syncDimensions } = await import('./matrix-sync.ts');
-      const result = await syncDimensions({ hopPath: options.hop, modelId: options.model, dimensions });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'refresh') {
-    try {
-      const options = parseMatrixArgs(argv.slice(1));
-      const { refresh } = await import('./matrix-refresh.ts');
-      const result = await refresh({
-        dir: options.dir,
-        hop: options.hop,
-        model: options.model,
-        plan: options.plan,
-        planFile: options.planFile,
-      });
-      writeNotes(result.notes);
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'codemap') {
-    try {
-      if (argv[1] !== 'init') throw new Error('Usage: junior matrix codemap init [--feature-dimension <id> ...]');
-      const options = parseCodemapArgs(argv.slice(2));
-      const notes: string[] = [];
-      Object.assign(options, pick(resolveCore(options, notes)));
-      writeNotes(notes);
-      const { codemapInit } = await import('./codemap.ts');
-      const result = await codemapInit({
-        hopPath: options.hop,
-        modelId: options.model,
-        featureDimensions: options.featureDimensions.length > 0 ? options.featureDimensions : undefined,
-      });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'link') {
-    try {
-      const options = parseCodemapArgs(argv.slice(1));
-      const notes: string[] = [];
-      const core = resolveCore(options, notes);
-      Object.assign(options, pick(core));
-      if (!options.result) {
-        options.result = newestResult(core.root);
-        if (!options.result) throw new Error('matrix link found no .delivery/<id>/<stamp>/result.json; pass --result <result.json>');
-        notes.push(`result ${options.result} (newest)`);
-      }
-      if (!options.feature) {
-        options.feature = featureFromResult(options.result);
-        if (!options.feature) throw new Error('matrix link: the result names no plan deliverable; pass --feature <dimensionId>:<memberId> or <deliverable id>');
-        notes.push(`feature ${options.feature} (result plan)`);
-      }
-      options.feature = normalizeFeature(options.feature);
-      writeNotes(notes);
-      const { codemapLink } = await import('./codemap.ts');
-      const result = await codemapLink({
-        hopPath: options.hop,
-        modelId: options.model,
-        resultPath: options.result,
-        feature: options.feature,
-        dir: core.root,
-        observation: options.observation as 'implements' | 'tests' | 'touches' | undefined,
-      });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'bootstrap' || argv[0] === 'confirm' || argv[0] === 'autolink') {
-    const subcommand = argv[0];
-    try {
-      const options = parseCodemapArgs(argv.slice(1));
-      const notes: string[] = [];
-      const core = resolveCore(options, notes);
-      Object.assign(options, pick(core));
-      if (subcommand === 'autolink' && !options.plan) {
-        const plan = await resolveMatrixPlan(core.root, core.hop);
-        if (!plan.planId) throw new Error(planError('matrix autolink', plan.candidates));
-        options.plan = plan.planId;
-        notes.push(`plan ${plan.planId} (${plan.source})`);
-      }
-      writeNotes(notes);
-      const autopilot = await import('./matrix-autopilot.ts');
-      if (subcommand === 'bootstrap') {
-        const dir = options.dir ?? process.cwd();
-        // --plan-file reads the plan graph offline instead of the hop's plan.get snapshot.
-        const planGraph = options.planFile === undefined ? undefined : JSON.parse(fs.readFileSync(options.planFile, 'utf8'));
-        const result = await autopilot.bootstrap({
-          hopPath: options.hop,
-          modelId: options.model,
-          dir,
-          out: options.out ?? path.join(dir, 'proposals.json'),
-          ...(planGraph === undefined ? {} : { deps: { planGraph } }),
-        });
-        process.stdout.write(
-          `${JSON.stringify({ out: result.out, count: result.proposals.length, ...result.counts })}\n`,
-        );
-        return 0;
-      }
-      if (subcommand === 'confirm') {
-        if (!options.proposals) throw new Error('matrix confirm requires --proposals <proposals.json>');
-        const result = await autopilot.confirmProposals({
-          hopPath: options.hop,
-          modelId: options.model,
-          proposalsPath: options.proposals,
-          min: options.min as 'high' | 'medium' | 'low' | undefined,
-          only: options.only,
-          exclude: options.exclude,
-        });
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        return 0;
-      }
-      const result = await autopilot.autolink({
-        hopPath: options.hop,
-        modelId: options.model,
-        planId: options.plan,
-        dir: options.dir ?? process.cwd(),
-      });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'files' || argv[0] === 'features' || argv[0] === 'context' || argv[0] === 'stale') {
-    const subcommand = argv[0];
-    try {
-      const options = parseCodemapArgs(argv.slice(1));
-      const notes: string[] = [];
-      const core = resolveCore(options, notes);
-      Object.assign(options, pick(core));
-      writeNotes(notes);
-      const codemap = await import('./codemap.ts');
-      if (subcommand === 'features') {
-        const requested = options.path ?? options.feature;
-        if (!requested) throw new Error('matrix features requires a path: <path> or --path <path>');
-        const absolute = path.resolve(process.cwd(), requested);
-        const relative = path.relative(core.root, absolute).split(path.sep).join('/');
-        const isDirectory = fs.existsSync(absolute) && fs.statSync(absolute).isDirectory();
-        const result = await codemap.codemapFeatures({
-          hopPath: options.hop,
-          modelId: options.model,
-          path: isDirectory && !relative.endsWith('/') ? `${relative}/` : relative,
-        });
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        return 0;
-      }
-      if (subcommand === 'stale') {
-        const result = await codemap.codemapStale({
-          hopPath: options.hop,
-          modelId: options.model,
-          dir: options.dir ?? process.cwd(),
-        });
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        return 0;
-      }
-      if (!options.feature) throw new Error(`matrix ${subcommand} requires a feature: <deliverable id> or --feature <dimensionId>:<memberId>`);
-      options.feature = normalizeFeature(options.feature);
-      if (subcommand === 'files') {
-        const result = await codemap.codemapFiles({
-          hopPath: options.hop,
-          modelId: options.model,
-          feature: options.feature,
-        });
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        return 0;
-      }
-      const result = await codemap.codemapContext({
-        hopPath: options.hop,
-        modelId: options.model,
-        feature: options.feature,
-        max: options.max,
-      });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return 0;
-    } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
-    }
-  }
-  if (argv[0] === 'qc') {
-    const { runLinkQc } = await import('./link-qc.ts');
-    return runLinkQc(argv.slice(1));
-  }
-  if (argv[0] === 'graph') {
-    const { runGraph } = await import('./context-graph.ts');
-    return runGraph(argv.slice(1));
-  }
-  if (argv[0] === 'jtbd') {
-    const { runJtbd } = await import('./jtbd-bridge.ts');
-    return runJtbd(argv.slice(1));
-  }
-  if (argv[0] === 'plan-from-spec') {
-    const { runPlanFromSpec } = await import('./spec-bridge.ts');
-    return runPlanFromSpec(argv.slice(1));
-  }
-  if (argv[0] === 'analyze') {
-    const { runAnalyze } = await import('./matrix-analyze.ts');
-    return runAnalyze(argv.slice(1));
-  }
-  if (argv[0] === 'adr') {
-    const { runAdrCli } = await import('./adr-cli.ts');
-    return runAdrCli(argv.slice(1));
-  }
-  if (argv[0] !== 'export') {
-    process.stdout.write(`${MATRIX_USAGE}\n`);
-    return 1;
-  }
-  try {
-    const options = parseMatrixArgs(argv.slice(1));
-    if (options.sources.length === 0) {
-      options.sources = defaultSources(projectRoot(options.dir), options.planFile !== undefined || (options.hop !== undefined && options.plan !== undefined));
-    }
-    const written: string[] = [];
-    const unchanged: string[] = [];
-    for (const source of options.sources) {
-      const dimensionSetId = options.set ?? `project-${source}`;
-      const dimensions = await dimensionsForSource(options, source);
-      const doc = buildDimensionSet(dimensionSetId, dimensions);
-      const outDir = options.out ?? path.join(options.dir, '.crossmatrix');
-      const result = writeDimensionSet(outDir, doc);
-      if (result.unchanged) unchanged.push(result.path);
-      else written.push(result.path);
-    }
-    process.stdout.write(`${JSON.stringify({ written, unchanged }, null, 2)}\n`);
-    return 0;
-  } catch (err) {
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    return 1;
-  }
+  const command = MATRIX_COMMANDS.get(argv[0]);
+  if (command) return command(argv);
+  process.stdout.write(`${MATRIX_USAGE}\n`);
+  return 1;
 }
