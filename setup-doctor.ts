@@ -360,26 +360,17 @@ export function detectSlowMount(cwd:string, deps:SetupDeps = {}):string|null {
  return best===null ? null : slowMountWarning(cwd,bestType,best);
 }
 
-/** Read-only readiness check. No installation, config writes or paid calls. */
-export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorResult {
- const env=deps.env ?? process.env;
- const version=deps.nodeVersion ?? process.versions.node;
- const cwd=deps.cwd ?? process.cwd();
- const supported=compareSemver(version,SUPPORTED_NODE_MIN) >= 0;
- const testedPi=loadTestedPi(cwd,deps);
- const pi=checkPi(deps,testedPi.version);
- const defaults=loadDefaults(cwd,deps);
- const provider=defaults.provider;
- const credentials=checkCredentials(provider,deps);
+function inspectDoctorModel(deps:SetupDeps, env:NodeJS.ProcessEnv, cwd:string, provider:string, modelId:string):ModelCheck {
  const config=loadModelConfig(cwd);
  const catalog=readLocalCatalog(agentDir(deps));
  const cached=readCachedCatalog(env);
  const catalogIdList=[...new Set([...catalog.entries.map((e)=>e.id), ...(cached?.ids ?? [])])];
  const localPrices=Object.fromEntries(catalog.entries.filter((e)=>e.price).map((e)=>[e.id, e.price as ModelPrice]));
  const priceTable={ ...localPrices, ...(cached?.prices ?? {}) };
- const model:ModelCheck={ ...checkModel(provider,defaults.model,deps), ...describeModel(config,catalogIdList,priceTable) };
- const policyOk=model.policy ? model.policy.class === 'commodity' : true;
+ return { ...checkModel(provider,modelId,deps), ...describeModel(config,catalogIdList,priceTable) };
+}
 
+function baseRemediation(supported:boolean, pi:PiCheck, credentials:CredentialCheck, model:ModelCheck, provider:string, modelId:string, policyOk:boolean):string[] {
  const remediation:string[]=[];
  if (!supported) remediation.push(`Install Node ${SUPPORTED_NODE_MIN} or newer (for example \`nvm install 24\`) and re-run \`doctor\`.`);
  if (!pi.found) remediation.push(`Install Pi with \`node worker.ts init --install\` (or \`npm install -g --ignore-scripts ${PI_PACKAGE}\`) using the active Node/nvm.`);
@@ -390,13 +381,14 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  if (pi.versionWarning && pi.versionNote) remediation.push(pi.versionNote);
  if (!credentials.present) remediation.push('Authenticate with Pi: start `pi` and run `/login`, then select the model with `/model`.');
  if (!model.available) {
-  if (model.storeStatus === 'populated') remediation.push(`Model ${provider}/${defaults.model} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`);
+  if (model.storeStatus === 'populated') remediation.push(`Model ${provider}/${modelId} is not in the local catalog; start \`pi\` and choose a model with \`/model\`.`);
   else remediation.push(`The ${provider} model catalog is missing or empty; run \`pi update --models\` to refresh it after \`/login\`.`);
  }
  if (model.policy && !policyOk) remediation.push(`Junior executes only commodity/open-weight models: ${model.policy.reason}. Pin a commodity model in delivery.config.json (see \`junior model status\`).`);
+ return remediation;
+}
 
- const warnings:string[]=[];
- if (pi.probeBlocked) warnings.push(BLOCKED_PROBE_WARNING);
+function collectProjectWarnings(deps:SetupDeps, cwd:string, provider:string, warnings:string[], remediation:string[]):void {
  const storeLockdown=inspectStoreDenyRules(cwd,{ existsSync:deps.exists, readFileSync:deps.readFile ? (path:string)=>readText(deps,path) : undefined });
  if (storeLockdown.storeExists && storeLockdown.state === 'outdated') {
   warnings.push('The .crossmatrix/ store has outdated Claude Code deny rules (retired spellings); agents may read it directly.');
@@ -431,6 +423,9 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
    warnings.push(`delivery.config.json: could not read models.dataPolicy (${(error as Error).message})`);
   }
  }
+}
+
+function collectModelWarnings(model:ModelCheck, warnings:string[]):void {
  for (const update of model.newer ?? []) {
   const parity=update.comparable === false
    ? `; waiting for price parity (${update.inputRatio ?? '?'}x/${update.outputRatio ?? '?'}x)`
@@ -438,13 +433,39 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
   warnings.push(`Newer commodity models available: ${update.profile} ${update.current} -> ${update.newer[0]}${parity}`);
  }
  for (const rejected of model.rejected ?? []) warnings.push(`Roster profile '${rejected.id}' rejected: ${rejected.reason}`);
+}
 
- const checks:DoctorCheck[]=[
+function doctorChecks(supported:boolean, version:string, pi:PiCheck, credentials:CredentialCheck, model:ModelCheck, provider:string, modelId:string):DoctorCheck[] {
+ return [
   { id:'node', ok:supported, detail:`node ${version} (minimum ${SUPPORTED_NODE_MIN})` },
   { id:'pi', ok:pi.found && (!!pi.version || pi.probeBlocked), detail:pi.found ? `${pi.executable} (${pi.version ?? (pi.probeBlocked ? 'version probe blocked by EPERM' : 'version unknown')}, tested ${pi.testedVersion})` : 'pi not found on PATH' },
   { id:'credentials', ok:credentials.present, detail:credentials.present ? `${provider} credential present (${credentials.sources.join(', ')})` : `no ${provider} credential` },
-  { id:'model', ok:model.available, detail:model.available ? `${provider}/${defaults.model} in ${model.source}` : (model.note as string) },
+  { id:'model', ok:model.available, detail:model.available ? `${provider}/${modelId} in ${model.source}` : (model.note as string) },
  ];
+}
+
+/** Read-only readiness check. No installation, config writes or paid calls. */
+export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorResult {
+ const env=deps.env ?? process.env;
+ const version=deps.nodeVersion ?? process.versions.node;
+ const cwd=deps.cwd ?? process.cwd();
+ const supported=compareSemver(version,SUPPORTED_NODE_MIN) >= 0;
+ const testedPi=loadTestedPi(cwd,deps);
+ const pi=checkPi(deps,testedPi.version);
+ const defaults=loadDefaults(cwd,deps);
+ const provider=defaults.provider;
+ const credentials=checkCredentials(provider,deps);
+ const model=inspectDoctorModel(deps,env,cwd,provider,defaults.model);
+ const policyOk=model.policy ? model.policy.class === 'commodity' : true;
+
+ const remediation=baseRemediation(supported,pi,credentials,model,provider,defaults.model,policyOk);
+
+ const warnings:string[]=[];
+ if (pi.probeBlocked) warnings.push(BLOCKED_PROBE_WARNING);
+ collectProjectWarnings(deps,cwd,provider,warnings,remediation);
+ collectModelWarnings(model,warnings);
+
+ const checks=doctorChecks(supported,version,pi,credentials,model,provider,defaults.model);
  const skill=inspectSkill(deps);
  const integrations=inspectIntegrations({ env, cwd: deps.cwd, installRoot: deps.toolsRoot });
  const retention=retainedWorktreeSummary(cwd);
