@@ -122,6 +122,7 @@ test('installer.ts keeps its runtime exports', async () => {
 
 test('runtime.ts keeps its runtime exports', async () => {
   assert.deepEqual(await exportsOf('./runtime.ts'), [
+    'CODE_WORKFLOW_BUDGET',
     'DEFAULT_MAX_OUTPUT_BYTES',
     'EXECUTION_BOUNDS',
     'EXECUTION_DEFAULTS',
