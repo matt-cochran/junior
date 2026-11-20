@@ -26,6 +26,8 @@ location to `delivery.config.json` only after you confirm:
 | `gate` | `enforce`, `advisory`, `off` | `enforce` blocks on findings. `advisory` only reports them. Defaults to `enforce` when accepted ADRs exist, and `off` otherwise. |
 | `minConfidence` | 0..1 (optional) | Also flags any check whose confidence is below this |
 | `flagUncertain` | `true` / `false` (default `false`) | Let low-confidence findings block under `enforce` too. By default only likely contradictions block; uncertain ones are listed as advisory. |
+| `minDiscriminationCells` | number (optional, default `10`) | Minimum number of checked cells before a mostly-uncertain result can report `NO_DISCRIMINATION`. |
+| `maxUncertainRatio` | number (optional, default `0.9`) | Uncertain-to-checked ratio at or above which a sufficiently large result reports `NO_DISCRIMINATION`. |
 
 ADRs without Junior front matter work as they are. Junior can draft `applies_to` and `rules` for them, but
 only as a proposal under `.delivery/adr-proposals/`. Your ADR files are never edited.
@@ -113,6 +115,50 @@ unavailable, or a recorded result worktree is gone, the check falls back to the 
 `CLAUDE.md` (Claude Code) and `AGENTS.md` (Codex and Cursor), so the agents you use know to run them. Junior
 owns only that block. Everything else in those files is left exactly as you wrote it.
 
+### Judging the whole change
+
+By default an implementation check judges each changed file on its own. Add `--whole-change` to send one
+subject for the whole change instead:
+
+```bash
+junior adr check --stage implementation --base origin/main --whole-change
+```
+
+The subject is `change` (kind `diff`), carries every changed path, and sends the unified diff followed by a
+`Relationships` section. The diff is capped at 60,000 characters, keeping whole hunks. The relationships list
+cross-tool relative imports, `$ref`s between different tools' OpenAPI or JSON Schema specs, and a module
+imported from two or more tools. Each retrieved ADR is judged once over that subject. Without the flag,
+implementation checks keep the per-file default.
+
+### Which ADRs are retrieved
+
+Before the relevance and `applies_to` filters can skip an ADR, Junior checks whether the ADR must be judged.
+The reasons are tried in this order:
+
+1. `cited`: the subject text names the ADR id as a token, such as `0007`, `ADR-0007`, `ADR 7`, the id form
+   from `adr.filePattern`, or the ADR's file name. Matching uses word boundaries, so `0071` does not cite
+   `0007`.
+2. `scope`: one of the subject's files matches an ADR `applies_to` entry. `**` matches zero or more path
+   segments (`tools/_shared/**` matches both `tools/_shared/a.ts` and `tools/_shared/x/y.ts`), a directory
+   entry such as `tools/_shared/` matches everything below it, and `./` prefixes and backslashes are
+   normalised.
+3. `topic`: the subject has no files, and the ADR title shares at least two significant words with the
+   subject text, or one significant multi-word phrase from the title appears in it. Stop words, words under
+   four letters and simple plural `s` endings are ignored, so a design about “bulk import messaging”
+   retrieves an ADR titled “Claim-check messaging for bulk jobs”.
+
+When retrieval forces an ADR, the result lists it under `retrieved` with the reason:
+
+```json
+"retrieved": [
+  { "adrId": "0007", "reason": "cited" },
+  { "adrId": "0012", "reason": "topic" }
+]
+```
+
+A retrieved ADR is judged even when the normal relevance filter or path scope would otherwise skip it, so a
+cited or on-topic decision is not silently ignored.
+
 ## What a check does
 
 For each accepted ADR rule whose `applies_to` matches the work, Jev (on the commodity default model) rates
@@ -125,6 +171,23 @@ the report for you to review.
 Jev never passes or fails anything by itself. With no findings the check passes. Under `enforce`, a likely
 contradiction stops the stage until you decide; uncertain findings are listed for you to review but do not
 block unless you set `flagUncertain: true`.
+
+### NO_DISCRIMINATION
+
+A check that asks enough questions but gets almost no decisive answers cannot support a PASS. When
+`checked >= adr.minDiscriminationCells` (default `10`) and `uncertain / checked >=
+adr.maxUncertainRatio` (default `0.9`), the result is inconclusive instead. It carries a `discrimination`
+object and an `inconclusiveReason` beginning `NO_DISCRIMINATION:` that names the checked and uncertain counts:
+
+```json
+"discrimination": { "checked": 12, "uncertain": 11, "ratio": 0.9167, "noDiscrimination": true },
+"inconclusive": true,
+"inconclusiveReason": "NO_DISCRIMINATION: 11 of 12 checked cells were uncertain"
+```
+
+`junior adr check` exits 2 for an inconclusive result, the per-lane `adr-gate.md` shows a
+`NO_DISCRIMINATION` banner, and an automatic run reports its ADR gate as inconclusive. Any contradiction, or
+an uncertain ratio below the configured threshold, keeps the previous decisive behaviour.
 
 ## Deciding
 
