@@ -126,6 +126,38 @@ test('checkPlanForJunior skips a milestone deliverable', () => {
   assert.deepEqual(result.findings, []);
 });
 
+// --- contract lint in plan check -------------------------------------------
+
+test('checkPlanForJunior reports CHECK_UNFILTERED for a plan check that runs the whole suite', () => {
+  const junior = { workflow: 'test_first', acceptance: ['ok'], checks: [{ command: 'node', args: ['--test'] }] };
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/a.test.ts'], junior })));
+  assert.ok(codes(result).includes('CHECK_UNFILTERED'));
+});
+
+test('checkPlanForJunior reports CONTRACT_OVER_BUDGET for a plan deliverable whose estimate exceeds its budget', () => {
+  const junior = {
+    workflow: 'test_first',
+    acceptance: ['ok'],
+    checks: [{ command: 'true' }],
+    estimate: { changedLines: 100 },
+    budget: { maxTotalTokens: 1000 },
+  };
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/a.ts'], junior })));
+  assert.ok(codes(result).includes('CONTRACT_OVER_BUDGET'));
+});
+
+test('checkPlanForJunior carries the lint suggestion into the plan finding', () => {
+  const junior = {
+    workflow: 'test_first',
+    acceptance: ['ok'],
+    checks: [{ command: 'true' }],
+    estimate: { changedLines: 100 },
+    budget: { maxTotalTokens: 1000 },
+  };
+  const result = checkPlanForJunior(plan(agent('a', { owned_files: ['src/a.ts'], junior })));
+  assert.match(result.findings.find((finding: any) => finding.code === 'CONTRACT_OVER_BUDGET')?.suggestion ?? '', /code.*test/i);
+});
+
 // --- checkPlanForJunior cohorts --------------------------------------------
 
 test('checkPlanForJunior never puts two shared-file deliverables in one cohort', () => {
