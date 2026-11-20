@@ -269,3 +269,20 @@ export function estimateCost(receipt:Receipt, pricing:any, billing?:BillingCaptu
  }
  return finish({...out, estimatedUsd:total});
 }
+
+/**
+ * #279: what a run stopped by output_truncated or budget_exceeded proposes as
+ * its continuation, so the manager can split the remaining work instead of
+ * re-running the whole contract. Filled by worker-outcome (lane L2).
+ */
+export interface ContinuationProposal {
+  reason: 'output_truncated' | 'budget_exceeded';
+  /** Owned files the run did not change. */
+  remainingFiles: string[];
+  /** Owned files the run changed (kept as the starting point of the continuation). */
+  changedFiles: string[];
+  /** Suggested split of the remaining work, e.g. code then tests. */
+  split: {id: string; files: string[]; note: string}[];
+  /** Ready-to-validate contract skeleton for the first part, with resumeFrom set. */
+  next?: Record<string, unknown>;
+}

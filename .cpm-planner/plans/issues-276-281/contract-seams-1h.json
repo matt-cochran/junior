@@ -3,8 +3,16 @@
     {
       "id": "C1",
       "owned_files": [
+        "adr-retrieval.ts",
+        "adr-gate.ts",
+        "policy-events.ts",
+        "contract-lint.ts",
         "worker-contract.ts",
         "worker-receipt.ts",
+        "worker-preflight.ts",
+        "worker-preflight-phases.ts",
+        "worker-outcome.ts",
+        "handoff.ts",
         ".cpm-planner/plans/issues-276-281/contracts/phase1.md"
       ],
       "prerequisites": [],
@@ -14,7 +22,7 @@
         "pessimistic": 3.0
       },
       "metadata": {
-        "artifact": "Phase-1 contract on integration/0.18.8: contracts/phase1.md (ADR retrieval rules: cited ids, applies_to path scope, title/topic match; NO_DISCRIMINATION threshold and result; whole-change judging input = diff + import graph; commandPolicy guard rules and allow-flags; budget/consent token; validate lint codes CHECK_UNFILTERED / CONTRACT_OVER_BUDGET; continuation-split proposal shape) plus type stubs landed first: commandPolicy.guards + budget/consent token fields in worker-contract.ts, PolicyEvent and ContinuationProposal receipt types in worker-receipt.ts",
+        "artifact": "Phase-1 contract on integration/0.18.8: contracts/phase1.md (lane specs \u00a71-\u00a78, gate) plus landed seams with tests green: adr-retrieval.ts mustJudge stub wired into runAdrGate (retrieved list), policy-events.ts (PolicyEvent, RunState/result/compact receipt), ContinuationProposal type, contract-lint.ts stub wired into validate/contractWarnings, settleBudgetApproval stub in preflight",
         "owner": "manager",
         "repo": "junior",
         "contract": true,
@@ -33,7 +41,9 @@
         "adr-gate.ts",
         "adr-gate.test.ts",
         "worker-adr-gate.ts",
-        "worker-adr-gate.test.ts"
+        "worker-adr-gate.test.ts",
+        "adr-config.ts",
+        "adr-config.test.ts"
       ],
       "prerequisites": [
         {
@@ -66,7 +76,8 @@
               "args": [
                 "--test",
                 "adr-gate.test.ts",
-                "worker-adr-gate.test.ts"
+                "worker-adr-gate.test.ts",
+                "adr-config.test.ts"
               ]
             }
           ],
@@ -80,7 +91,11 @@
         "command-guards.ts",
         "command-guards.test.ts",
         "command-policy.ts",
-        "command-policy.test.ts"
+        "command-policy.test.ts",
+        "worker-checks.ts",
+        "worker-checks.test.ts",
+        "pi-guard.ts",
+        "pi-guard.test.ts"
       ],
       "prerequisites": [
         {
@@ -113,7 +128,9 @@
               "args": [
                 "--test",
                 "command-guards.test.ts",
-                "command-policy.test.ts"
+                "command-policy.test.ts",
+                "worker-checks.test.ts",
+                "pi-guard.test.ts"
               ]
             }
           ],
@@ -125,8 +142,13 @@
     {
       "id": "G2",
       "owned_files": [
+        "human-approval.ts",
+        "human-approval.test.ts",
         "worker-approval.ts",
-        "worker-approval-guards.test.ts"
+        "worker-preflight-phases.ts",
+        "worker-approval-guards.test.ts",
+        "auth.ts",
+        "auth.test.ts"
       ],
       "prerequisites": [
         {
@@ -159,7 +181,9 @@
               "command": "node",
               "args": [
                 "--test",
-                "worker-approval-guards.test.ts"
+                "human-approval.test.ts",
+                "worker-approval-guards.test.ts",
+                "auth.test.ts"
               ]
             }
           ],

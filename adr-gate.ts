@@ -22,6 +22,7 @@ import {
   type AdrRule,
 } from './adr.ts';
 import { loadAllAdrs } from './adr-foreign.ts';
+import { mustJudge, type MustJudgeReason } from './adr-retrieval.ts';
 import type { AdrConfig, AdrGate } from './adr-config.ts';
 import {
   activeDecision,
@@ -79,6 +80,8 @@ export interface AdrGateResult {
   /** ADR 0018 R9: checked nothing while at least one accepted ADR was skipped. */
   inconclusive?: boolean;
   inconclusiveReason?: string;
+  /** #276: ADRs judged because retrieval required it, with the reason (cited, scope, topic). */
+  retrieved?: {adrId: string; reason: MustJudgeReason}[];
 }
 
 export interface RunAdrGateOptions {
@@ -377,9 +380,22 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
   // File-less subjects are pre-filtered for relevance once each (R3).
   const irrelevantFor = await irrelevanceMap(opts, adrs);
 
+  const retrieved: {adrId: string; reason: MustJudgeReason}[] = [];
   for (const adr of adrs) {
-    const subjects = inScopeSubjects(adr, opts.subjects, skippedSet)
-      .filter((subject) => !irrelevantFor.get(subject.target)?.has(adr.id));
+    // #276: an ADR retrieval requires (cited, path-scoped, on-topic) is judged
+    // for that subject even when scope or the relevance filter would drop it.
+    const forced = new Map<string, MustJudgeReason>();
+    for (const subject of opts.subjects) {
+      const reason = mustJudge(adr, subject);
+      if (reason) forced.set(subject.target, reason);
+    }
+    const scopedSkips = new Set<string>();
+    const subjects = opts.subjects.filter((subject) =>
+      forced.has(subject.target) ||
+      (inScopeSubjects(adr, [subject], scopedSkips).length > 0 && !irrelevantFor.get(subject.target)?.has(adr.id)));
+    if (forced.size > 0) retrieved.push({adrId: adr.id, reason: [...forced.values()][0]});
+    // Same as before for unforced subjects: any out-of-scope subject marks the ADR skipped.
+    if (scopedSkips.size > 0) skippedSet.add(adr.id);
     if (subjects.length === 0) {
       if ([...irrelevantFor.values()].some((set) => set.has(adr.id))) skippedSet.add(adr.id);
       continue;
@@ -407,6 +423,7 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     skipped: [...skippedSet],
     inconclusive,
     ...(inconclusiveReason !== undefined ? {inconclusiveReason} : {}),
+    ...(retrieved.length > 0 ? {retrieved} : {}),
   };
 }
 

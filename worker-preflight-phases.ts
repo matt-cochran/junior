@@ -374,3 +374,15 @@ export function finishPreflight(state:RunState, c:PreflightCtx):any {
  commitPreflightState(state, c);
  return undefined;
 }
+
+/**
+ * #281: a contract budget above the workflow default, or above the parent run's
+ * budget on a resume, needs a human-issued approval token. Returns the blocked
+ * `needs_budget_approval` result, or undefined to continue.
+ *
+ * Phase-1 contract seam (contracts/phase1.md §3): this stub always continues;
+ * lane G2 implements it against human-approval.ts.
+ */
+export function settleBudgetApproval(_state:RunState, _c:PreflightCtx):any {
+ return undefined;
+}

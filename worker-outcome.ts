@@ -329,6 +329,7 @@ function attachRunContext(state:RunState, result:any, o:Outcome):void {
  if (review) result.review={ from:review.from, priorResult:review.priorResult, context:join(dir,REVIEW_CONTEXT_FILENAME) };
  if (mode !== 'off') result.jev=jev;
  if (o.analysis) result.analysis=o.analysis;
+ if (state.policyEvents && state.policyEvents.length > 0) result.policyEvents=state.policyEvents;
 }
 
 function buildResult(state:RunState, o:Outcome):any {
