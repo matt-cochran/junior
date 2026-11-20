@@ -219,3 +219,59 @@ test('guardBashInput does not apply the no-build guard to worker bash', () => {
   guardBashInput(input, {});
   assert.equal(input.command, 'exec </dev/null\ndotnet test --no-build');
 });
+
+// --- short flags, opaque and nested shells ----------------------------------
+
+test('guardBashInput refuses git commit -n with no policy', () => {
+  const input: any = { command: 'git commit -n' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput refuses a combined git commit short flag containing n', () => {
+  const input: any = { command: "git commit -anm 'message'" };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput leaves git push -n runnable', () => {
+  const input: any = { command: 'git push -n' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\ngit push -n');
+});
+
+test('guardBashInput raw-scans an opaque unterminated quote', () => {
+  const input: any = { command: 'echo "git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans a command substitution', () => {
+  const input: any = { command: 'echo "$(git commit --no-verify)"' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans backticks', () => {
+  const input: any = { command: 'echo `git commit --no-verify`' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans a nested bash -c', () => {
+  const input: any = { command: 'bash -c \'echo "git commit --no-verify"\'' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans xargs git', () => {
+  const input: any = { command: 'xargs git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput leaves a plain quoted mention runnable', () => {
+  const input: any = { command: 'echo "git commit --no-verify"' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\necho "git commit --no-verify"');
+});

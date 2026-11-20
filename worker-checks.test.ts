@@ -352,3 +352,43 @@ test('hookBypass off permits a git commit --no-verify check', async (t) => {
   await runChecks(state);
   assert.equal(existsSync(marker), true);
 });
+
+// --- short flags, opaque and nested shells ----------------------------------
+
+test('a check running bash -c with --no-verify is refused', async (t) => {
+  const dir = arena(t);
+  const check = {
+    command: fakeTool(dir, 'bash', 'exit 0'),
+    args: ['-c', 'git commit --no-verify'],
+  };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check running xargs git with --no-verify is refused', async (t) => {
+  const dir = arena(t);
+  const check = {
+    command: fakeTool(dir, 'xargs', 'exit 0'),
+    args: ['git', 'commit', '--no-verify'],
+  };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check running git commit -n is refused', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'git', 'exit 0'), args: ['commit', '-n'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check with a plain quoted mention is not refused', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'echo', 'exit 0'), args: ['git commit --no-verify'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, undefined);
+});

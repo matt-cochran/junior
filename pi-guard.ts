@@ -12,7 +12,7 @@
 
 import { resolve, relative, isAbsolute, delimiter } from 'node:path';
 import { COMMAND_PLACEMENT_ERROR, decideCommand, parseCommandPolicy, tokenizeCommand } from './command-policy.ts';
-import { POLICY_GUARD_ERROR, guardCommand } from './command-guards.ts';
+import { POLICY_GUARD_ERROR, guardCommand, guardRawCommand } from './command-guards.ts';
 import type { PolicyEvent } from './policy-events.ts';
 
 /** Everything `guardBashInput` may read from the environment. */
@@ -168,7 +168,13 @@ export function guardBashInput<T>(input: T, env: GuardEnv | undefined = process.
  // is not, because the worker's own bash is not contract evidence.
  const guards={ noBuild:'off' as const, hookBypass:policy?.guards?.hookBypass ?? 'refuse' as const };
  const tokenized=tokenizeCommand(target.command);
- if (!tokenized.opaque) {
+ if (tokenized.opaque) {
+  const guard=guardRawCommand(target.command, { source:'worker_bash', lastBuild:'none', guards });
+  if (guard?.action === 'refuse') {
+   target.command=commandGuardRefusal(target.command, guard.event);
+   return input;
+  }
+ } else {
   for (const segment of tokenized.segments) {
    const guard=guardCommand(segment, { source:'worker_bash', lastBuild:'none', guards });
    if (guard?.action === 'refuse') {

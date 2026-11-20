@@ -44,6 +44,8 @@ const HOOK_BYPASS_ENV: Record<string, string[]> = {
 };
 
 const TEST_GOALS = new Set(['test', 'verify', 'integration-test']);
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
+const RAW_HOOK_ENV = /\b(?:HUSKY=0|HUSKY_SKIP_HOOKS=1|SKIP_HOOKS=1|LEFTHOOK=0)\b/;
 
 /** The first token that is not an option, ignoring `--`. */
 function firstNonOption(tokens: string[]): string | undefined {
@@ -132,6 +134,46 @@ function envHookBypass(assignments: readonly string[]): string | null {
   return null;
 }
 
+const GIT_GLOBAL_VALUE_OPTIONS = new Set([
+  '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env',
+]);
+
+/** The git subcommand and the arguments that follow it, skipping global
+ * options (and their values) before the subcommand. */
+function gitSubcommand(args: string[]): { name?: string; rest: string[] } {
+  let index = 0;
+  while (index < args.length) {
+    const token = args[index];
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (!token.startsWith('-') || token === '-') break;
+    if (GIT_GLOBAL_VALUE_OPTIONS.has(token)) {
+      index += 2;
+      continue;
+    }
+    if (/^--(?:git-dir|work-tree|namespace|exec-path|config-env)=/.test(token)) {
+      index += 1;
+      continue;
+    }
+    index += 1;
+  }
+  return { name: args[index], rest: args.slice(index + 1) };
+}
+
+/** Git commit's short -n is --no-verify; combined short flags such as -anm
+ * carry it too. Other subcommands' -n (notably `git push -n`) is not a hook
+ * bypass. */
+function commitShortNoVerify(rest: string[]): string | null {
+  for (const token of rest) {
+    if (token === '--') break;
+    if (!token.startsWith('-') || token.startsWith('--')) continue;
+    if (token.slice(1).includes('n')) return token;
+  }
+  return null;
+}
+
 function gitHookBypass(tokens: string[]): string | null {
   if (tokens.length === 0 || basename(tokens[0]) !== 'git') return null;
   const args = tokens.slice(1);
@@ -149,7 +191,67 @@ function gitHookBypass(tokens: string[]): string | null {
   if (config !== -1 && args.slice(config + 1).some((token) => token.toLowerCase() === 'core.hookspath')) {
     return 'config core.hooksPath';
   }
+
+  const subcommand = gitSubcommand(args);
+  if (subcommand.name === 'commit') {
+    const shortFlag = commitShortNoVerify(subcommand.rest);
+    if (shortFlag) return `commit ${shortFlag}`;
+  }
   return null;
+}
+
+/** True when the command starts a shell that will evaluate its script text. */
+function nestedShell(tokens: string[]): boolean {
+  if (tokens.length === 0) return false;
+  const program = basename(tokens[0]);
+  if (program === 'eval') return true;
+  if (SHELLS.has(program)) {
+    return tokens.slice(1).some(
+      (token) => !token.startsWith('--') && token.startsWith('-') && token.slice(1).includes('c'),
+    );
+  }
+  if (program === 'xargs') {
+    return tokens.slice(1).some((token) => basename(token) === 'git');
+  }
+  return false;
+}
+
+/** Raw-text hook scan for an opaque or nested-shell command. Conservative by
+ * design: a harmless echo inside a nested shell is still refused. */
+function rawHookBypass(command: string): string | null {
+  if (/--no-verify\b/.test(command)) return '--no-verify';
+  if (/core\.hooksPath/i.test(command)) return 'core.hooksPath';
+  const env = RAW_HOOK_ENV.exec(command);
+  if (env) return `environment ${env[0]}`;
+
+  const commit = /\bgit\s+commit\b([^\n;&|]*)/i.exec(command);
+  if (commit) {
+    const shortFlag = commitShortNoVerify(commit[1].split(/\s+/).filter(Boolean));
+    if (shortFlag) return `commit ${shortFlag.replace(/[^\w-]+$/, '')}`;
+  }
+  return null;
+}
+
+function hookDecision(command: string, reason: string, ctx: GuardContext): GuardDecision {
+  return {
+    action: 'refuse',
+    event: {
+      kind: 'hook_bypass',
+      action: 'refused',
+      source: ctx.source,
+      command,
+      reason: `${POLICY_GUARD_ERROR}: ${command} bypasses git hooks (${reason})`,
+    },
+  };
+}
+
+/** Apply only the hook-bypass raw scan to a command the tokenizer could not
+ * parse. Pi calls this when tokenization is opaque. */
+export function guardRawCommand(command: string, ctx: GuardContext): GuardDecision | null {
+  const guards = ctx.guards ?? DEFAULT_COMMAND_GUARDS;
+  if (guards.hookBypass === 'off') return null;
+  const reason = rawHookBypass(command);
+  return reason ? hookDecision(command, reason, ctx) : null;
 }
 
 /**
@@ -161,9 +263,12 @@ export function guardCommand(argv: string[], ctx: GuardContext): GuardDecision |
   if (argv.length === 0) return null;
   const command = argv.join(' ');
   const normalized = stripCommandPrefixes(argv.slice());
-  if (normalized.opaque || normalized.argv.length === 0) return null;
-
   const guards = ctx.guards ?? DEFAULT_COMMAND_GUARDS;
+
+  if (normalized.opaque) {
+    return guardRawCommand(command, ctx);
+  }
+  if (normalized.argv.length === 0) return null;
 
   if (guards.noBuild !== 'off' && ctx.lastBuild !== 'ok' && isNoBuildTest(normalized.argv)) {
     const kind = ctx.lastBuild === 'failed' ? 'no_build_after_failed_build' : 'no_build_without_build';
@@ -184,19 +289,15 @@ export function guardCommand(argv: string[], ctx: GuardContext): GuardDecision |
   }
 
   if (guards.hookBypass !== 'off') {
-    const hookReason =
+    const exactReason =
       envHookBypass(normalized.assignments ?? []) ?? gitHookBypass(normalized.argv);
-    if (hookReason) {
-      return {
-        action: 'refuse',
-        event: {
-          kind: 'hook_bypass',
-          action: 'refused',
-          source: ctx.source,
-          command,
-          reason: `${POLICY_GUARD_ERROR}: ${command} bypasses git hooks (${hookReason})`,
-        },
-      };
+    if (exactReason) return hookDecision(command, exactReason, ctx);
+
+    const rawScanRequired =
+      nestedShell(normalized.argv) || /\$\(|`|<\(|>\(/.test(command);
+    if (rawScanRequired) {
+      const rawReason = rawHookBypass(command);
+      if (rawReason) return hookDecision(command, rawReason, ctx);
     }
   }
 
