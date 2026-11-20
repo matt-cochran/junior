@@ -211,6 +211,91 @@ test('an implementation check with --result diffs against HEAD in the recorded w
   assert.match(recorder.questions(), /resultWorktreeMarker/);
 });
 
+test('an implementation check with --whole-change sends one change subject to the classifier', async (t) => {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'src'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const base = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const wholeChangeMarker = true;\n');
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base, '--whole-change'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.match(recorder.questions(), /"target":"change"/);
+});
+
+test('an implementation check without --whole-change keeps one subject per changed file', async (t) => {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'src'), {recursive: true});
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const a = true;\n');
+  writeFileSync(join(root, 'src', 'b.ts'), 'export const b = true;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const changedA = true;\n');
+  writeFileSync(join(root, 'src', 'b.ts'), 'export const changedB = true;\n');
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.equal((recorder.questions().match(/"target":"src\//g) ?? []).length, 2);
+});
+
+function crossToolProject(t: {after(fn: () => void): void}): {root: string; git: (args: string[]) => any; base: string} {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'docs', 'adr'), {recursive: true});
+  writeFileSync(
+    join(root, 'docs', 'adr', '0002-tools.md'),
+    ADR.replace('id: ADR-0001', 'id: ADR-0002').replace("applies_to: ['src/**']", "applies_to: ['tools/**']"),
+  );
+  mkdirSync(join(root, 'tools', '_shared'), {recursive: true});
+  writeFileSync(join(root, 'tools', '_shared', 'hook.ts'), 'export function useHook(): boolean {\n  return true;\n}\n');
+  for (const app of ['app-a', 'app-b', 'app-c']) {
+    mkdirSync(join(root, 'tools', app, 'src'), {recursive: true});
+    writeFileSync(join(root, 'tools', app, 'src', 'index.ts'), `import {useHook} from '../../_shared/hook.ts';\n\nexport const value = useHook();\n`);
+  }
+  mkdirSync(join(root, 'tools', 'app-a'), {recursive: true});
+  mkdirSync(join(root, 'tools', 'app-b'), {recursive: true});
+  writeFileSync(join(root, 'tools', 'app-a', 'openapi.yaml'), 'components:\n  schemas:\n    User:\n      $ref: "../app-b/openapi.yaml#/components/schemas/User"\n');
+  writeFileSync(join(root, 'tools', 'app-b', 'openapi.yaml'), 'components:\n  schemas:\n    User:\n      type: object\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'tools base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  for (const app of ['app-a', 'app-b', 'app-c']) {
+    writeFileSync(join(root, 'tools', app, 'src', 'index.ts'), `import {useHook} from '../../_shared/hook.ts';\n\nexport const changed${app.replace('-', '')} = useHook();\n`);
+  }
+  writeFileSync(join(root, 'tools', 'app-a', 'openapi.yaml'), 'components:\n  schemas:\n    User:\n      $ref: "../app-b/openapi.yaml#/components/schemas/User"\n      description: changed\n');
+  return {root, git, base};
+}
+
+test('an implementation check with --whole-change shows a shared hook imported by three tools', async (t) => {
+  const {root, base} = crossToolProject(t);
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base, '--whole-change'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.match(recorder.questions(), /tools\/_shared\/hook\.ts is imported by 3 tools: app-a, app-b, app-c/);
+});
+
+test('an implementation check with --whole-change shows a cross-spec $ref', async (t) => {
+  const {root, base} = crossToolProject(t);
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base, '--whole-change'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+  });
+  assert.match(recorder.questions(), /tools\/app-a\/openapi\.yaml references tools\/app-b\/openapi\.yaml/);
+});
+
 test('a ticket draft check stores a ticket-stage finding', async () => {
   const root = seed(test);
   const draft = join(root, 'draft.md');
