@@ -278,7 +278,7 @@ test('launch hands the contract commandPolicy to the Pi guard environment', asyn
   });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
   await launch(state);
-  assert.deepEqual(JSON.parse(seen), { enforce: true, rules: [{ match: ['git'], placement: 'local' }] });
+  assert.deepEqual(JSON.parse(seen), { enforce: true, rules: [{ match: ['git'], placement: 'local' }], guards: { noBuild: 'refuse', hookBypass: 'refuse' } });
 });
 
 test('launch sets no command policy for a contract without commandPolicy', async (t) => {
