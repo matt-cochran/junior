@@ -151,7 +151,7 @@ function boundedWholeChangeDiff(diff: string, limit: number): string {
 }
 
 function toolOf(path: string): string | null {
-  const match = /^tools\/([^/]+)\//.exec(path);
+  const match = /(?:^|\/)tools\/([^/]+)\//.exec(posix(path));
   return match?.[1] ?? null;
 }
 
@@ -173,6 +173,54 @@ function resolveRelative(root: string, source: string, specifier: string): strin
     }
   }
   return posix(base);
+}
+
+/** A path alias such as `@/src/tools/Billing/hooks` names a tool by segment. */
+function resolveAlias(root: string, specifier: string): string | null {
+  const match = /(?:^|\/)tools\/([^/?#]+)(?:\/([^?#]*))?/.exec(specifier);
+  if (!match) return null;
+  const tail = match[2] !== undefined && match[2] !== '' ? `/${match[2]}` : '';
+  const base = posix(normalize(`tools/${match[1]}${tail}`));
+  for (const candidate of moduleCandidates(base)) {
+    try {
+      if (statSync(join(root, candidate)).isFile()) return posix(candidate);
+    } catch {
+      // A missing alias target keeps the segment-derived path.
+    }
+  }
+  return base;
+}
+
+function resolveImportTarget(root: string, source: string, specifier: string): string | null {
+  return specifier.startsWith('.') ? resolveRelative(root, source, specifier) : resolveAlias(root, specifier);
+}
+
+function moduleKey(path: string): string {
+  let key = posix(path).replace(/[?#].*$/, '');
+  for (const extension of MODULE_EXTENSIONS) {
+    if (key.endsWith(extension)) {
+      key = key.slice(0, -extension.length);
+      break;
+    }
+  }
+  return key.replace(/\/index$/, '');
+}
+
+/** The module key from its last `tools/` segment on, so an alias that names
+ * only `tools/<name>/...` matches the same module at any depth. */
+function toolSuffixKey(path: string): string | null {
+  const key = moduleKey(path);
+  const index = key.lastIndexOf('tools/');
+  return index === -1 || (index > 0 && key[index - 1] !== '/') ? null : key.slice(index);
+}
+
+function trackedTsJsFiles(root: string): string[] {
+  const result = runSync('git', ['ls-files'], {cwd: root, maxBuffer: GIT_DIFF_MAX_BUFFER});
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((path) => path !== '' && TS_JS_EXTENSIONS.has(extname(path)));
 }
 
 function importSpecifiers(text: string): string[] {
@@ -239,7 +287,7 @@ export function changeGraph({root, files}: {root: string; files: readonly string
 
     if (TS_JS_EXTENSIONS.has(extension)) {
       for (const specifier of importSpecifiers(text)) {
-        const target = resolveRelative(root, source, specifier);
+        const target = resolveImportTarget(root, source, specifier);
         if (target === null) continue;
         const targetTool = toolOf(target);
         if (sourceTool !== null) {
@@ -259,6 +307,39 @@ export function changeGraph({root, files}: {root: string; files: readonly string
         if (sourceTool !== null && targetTool !== null && targetTool !== sourceTool) {
           refEdges.push({source, target, sourceTool, targetTool});
         }
+      }
+    }
+  }
+
+  // A changed module can be used by tools that did not change in this diff.
+  // Tracked TS/JS importers supply those edges without widening the subject to
+  // unrelated files: only relative or tool-aliased imports of a changed
+  // module are considered.
+  const changedModules = new Map<string, string>();
+  const changedBySuffix = new Map<string, string>();
+  for (const file of files) {
+    if (!TS_JS_EXTENSIONS.has(extname(file))) continue;
+    changedModules.set(moduleKey(file), file);
+    const suffix = toolSuffixKey(file);
+    if (suffix !== null) changedBySuffix.set(suffix, file);
+  }
+  if (changedModules.size > 0) {
+    const changed = new Set(files);
+    for (const importer of trackedTsJsFiles(root)) {
+      if (changed.has(importer)) continue;
+      const sourceTool = toolOf(importer);
+      if (sourceTool === null) continue;
+      const text = readText(root, importer);
+      if (text === null) continue;
+      for (const specifier of importSpecifiers(text)) {
+        const target = resolveImportTarget(root, importer, specifier);
+        if (target === null) continue;
+        const suffix = specifier.startsWith('.') ? null : toolSuffixKey(target);
+        const module = changedModules.get(moduleKey(target)) ?? (suffix !== null ? changedBySuffix.get(suffix) : undefined);
+        if (module === undefined || moduleKey(importer) === moduleKey(module)) continue;
+        const tools = shared.get(module) ?? new Set<string>();
+        tools.add(sourceTool);
+        shared.set(module, tools);
       }
     }
   }

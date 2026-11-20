@@ -36,6 +36,28 @@ function gitProject(t: {after(fn: () => void): void}): {root: string; base: stri
   return {root, base: git(['rev-parse', 'HEAD']).stdout.trim()};
 }
 
+function gitRoot(t: {after(fn: () => void): void}): {root: string; git: (args: string[]) => any} {
+  const root = project(t);
+  const git = (args: string[]) => spawnSync('git', args, {cwd: root, encoding: 'utf8'});
+  git(['init', '-q']);
+  git(['config', 'user.email', 'test@example.test']);
+  git(['config', 'user.name', 'Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  return {root, git};
+}
+
+/** Only tools/_shared/useThing.ts changes; three nested, unchanged tools import it. */
+function nestedSharedFixture(t: {after(fn: () => void): void}): {root: string; base: string} {
+  const {root, git} = gitRoot(t);
+  write(root, 'tools/_shared/useThing.ts', 'export const useThing = true;\n');
+  write(root, 'src/_components/tools/A/index.ts', "import {useThing} from '../../../../tools/_shared/useThing.ts';\nexport const a = useThing;\n");
+  write(root, 'src/_components/tools/B/index.ts', "import {useThing} from '../../../../tools/_shared/useThing.ts';\nexport const b = useThing;\n");
+  write(root, 'src/_components/tools/C/index.ts', "import {useThing} from '@/tools/_shared/useThing';\nexport const c = useThing;\n");
+  git(['add', '.']);
+  git(['commit', '-qm', 'nested tools']);
+  return {root, base: git(['rev-parse', 'HEAD']).stdout.trim()};
+}
+
 /** Three micro-apps import one hook from tools/_shared; app-a's spec $refs app-b's. */
 function crossToolFixture(t: {after(fn: () => void): void}): {root: string; files: string[]} {
   const root = project(t);
@@ -133,6 +155,30 @@ test('the relationship graph names any module imported by two tools', (t) => {
   assert.match(changeGraph({root, files: ['tools/app-a/src/index.ts', 'tools/app-b/src/index.ts']}), /lib\/shared\.ts is imported by 2 tools: app-a, app-b/);
 });
 
+test('the relationship graph reads a tool name from any path depth', (t) => {
+  const root = project(t);
+  write(root, 'PresentationTier/ui/src/_components/tools/Billing/x.tsx', "import {y} from '../Inventory/y';\n");
+  write(root, 'PresentationTier/ui/src/_components/tools/Inventory/y.tsx', 'export const y = true;\n');
+  assert.match(changeGraph({root, files: ['PresentationTier/ui/src/_components/tools/Billing/x.tsx']}), /cross-tool: Billing -> Inventory/);
+});
+
+test('the relationship graph attributes an alias import to its tools segment', (t) => {
+  const root = project(t);
+  write(root, 'src/_components/tools/A/index.ts', "import {hooks} from '@/_components/tools/Billing/hooks';\n");
+  assert.match(changeGraph({root, files: ['src/_components/tools/A/index.ts']}), /cross-tool: A -> Billing/);
+});
+
+test('the relationship graph finds unchanged importers of a changed shared module', (t) => {
+  const {root} = nestedSharedFixture(t);
+  assert.match(changeGraph({root, files: ['tools/_shared/useThing.ts']}), /tools\/_shared\/useThing\.ts is imported by 3 tools: A, B, C/);
+});
+
+test('a whole-change subject names all three unchanged tools that import a changed shared module', (t) => {
+  const {root, base} = nestedSharedFixture(t);
+  write(root, 'tools/_shared/useThing.ts', 'export const useThing = false;\n');
+  assert.match(buildWholeChangeSubject({root, base}).text ?? '', /Relationships[\s\S]*tools\/_shared\/useThing\.ts is imported by 3 tools: A, B, C/);
+});
+
 test('the relationship graph ignores an import that stays inside one tool', (t) => {
   const root = project(t);
   write(root, 'tools/app-a/src/index.ts', "import {helper} from './helper.ts';\n");
@@ -145,4 +191,16 @@ test('the relationship graph ignores a $ref that stays inside one tool', (t) => 
   write(root, 'tools/app-a/openapi.yaml', '$ref: "./schemas.yaml#/User"\n');
   write(root, 'tools/app-a/schemas.yaml', 'User:\n  type: object\n');
   assert.doesNotMatch(changeGraph({root, files: ['tools/app-a/openapi.yaml']}), /\$ref/);
+});
+
+test('an alias importer of a nested _shared module counts toward the tools that use it', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'adr-change-nested-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  spawnSync('git', ['init', '-q'], {cwd: root});
+  write(root, 'src/_components/tools/_shared/useThing.ts', 'export const useThing = 1;\n');
+  write(root, 'src/_components/tools/A/index.ts', "import {useThing} from '../_shared/useThing.ts';\n");
+  write(root, 'src/_components/tools/B/index.ts', "import {useThing} from '../_shared/useThing';\n");
+  write(root, 'src/_components/tools/C/index.ts', "import {useThing} from '@/_components/tools/_shared/useThing';\n");
+  spawnSync('git', ['add', '-A'], {cwd: root});
+  assert.match(changeGraph({root, files: ['src/_components/tools/_shared/useThing.ts']}), /src\/_components\/tools\/_shared\/useThing\.ts is imported by 3 tools: A, B, C/);
 });
