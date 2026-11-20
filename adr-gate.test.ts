@@ -508,3 +508,69 @@ test('a gate that checked a rule is not inconclusive', async (t) => {
   const result = await run(root, config, fakeClassifier().classify, {adrs});
   assert.equal(result.inconclusive, false);
 });
+
+// --- NO_DISCRIMINATION (issue #276) ----------------------------------------
+
+const ALL_UNCERTAIN_ROWS = 6153;
+
+function fileRows(count: number): GateSubject[] {
+  return Array.from({ length: count }, (_, index) => {
+    const path = `src/file-${index}.ts`;
+    return { target: path, files: [path] };
+  });
+}
+
+test('a gate where nearly every checked row is uncertain reports NO_DISCRIMINATION', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier({}, {choice: 'conforms', confidence: 0.2}).classify, {
+    adrs,
+    subjects: fileRows(ALL_UNCERTAIN_ROWS),
+  });
+  assert.match(result.inconclusiveReason ?? '', /^NO_DISCRIMINATION: 6153 of 6153 checked cells were uncertain/);
+});
+
+test('renderGateMarkdown shows a NO_DISCRIMINATION banner for a gate with nearly every row uncertain', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier({}, {choice: 'conforms', confidence: 0.2}).classify, {
+    adrs,
+    subjects: fileRows(ALL_UNCERTAIN_ROWS),
+  });
+  assert.match(renderGateMarkdown(result), /^NO_DISCRIMINATION:/m);
+});
+
+test('a gate below the minimum checked rows does not report NO_DISCRIMINATION', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier({}, {choice: 'conforms', confidence: 0.2}).classify, {
+    adrs,
+    subjects: fileRows(2),
+  });
+  assert.equal(result.discrimination?.noDiscrimination, false);
+});
+
+test('a contradiction keeps a mostly uncertain gate decisive', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const classify: GateClassifier = async ({state}) => {
+    const items = Array.isArray(state.items) ? (state.items as Array<{id: string}>) : [];
+    const criteria = Array.isArray(state.criteria) ? (state.criteria as Array<{id: string}>) : [];
+    const answers: Record<string, unknown> = {};
+    for (const item of items) {
+      for (const criterion of criteria) {
+        const decisive = criterion.id === 'src/file-0.ts';
+        answers[`cell:${item.id}:${criterion.id}`] = {
+          type: 'choice',
+          choice: decisive ? 'contradicts' : 'conforms',
+          confidence: decisive ? 0.95 : 0.2,
+        };
+      }
+    }
+    return {answers};
+  };
+  const result = await run(root, config, classify, {adrs, subjects: fileRows(11)});
+  assert.equal(result.discrimination?.noDiscrimination, false);
+});
+
+test('a gate with mostly conforming rows still passes', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {adrs, subjects: fileRows(12)});
+  assert.match(renderGateMarkdown(result), /PASS\s*$/);
+});

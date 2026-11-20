@@ -77,6 +77,8 @@ export interface AdrGateResult {
   findings: AdrGateFinding[];
   checked: number;
   skipped: string[];
+  /** #276: whether the checked rows could tell conforming from contradicting subjects apart. */
+  discrimination?: {checked: number; uncertain: number; ratio: number; noDiscrimination: boolean};
   /** ADR 0018 R9: checked nothing while at least one accepted ADR was skipped. */
   inconclusive?: boolean;
   inconclusiveReason?: string;
@@ -351,6 +353,13 @@ async function checkRule(run: GateRun, adr: Adr, rule: GateRule, subjects: GateS
   return checked;
 }
 
+const DEFAULT_MIN_DISCRIMINATION_CELLS = 10;
+const DEFAULT_MAX_UNCERTAIN_RATIO = 0.9;
+
+function noDiscriminationReason(checked: number, uncertain: number, ratio: number, maxRatio: number): string {
+  return `NO_DISCRIMINATION: ${uncertain} of ${checked} checked cells were uncertain (${Math.round(ratio * 100)}%, at or above the ${maxRatio} maximum); the gate cannot tell conforming rows from contradictions, so it cannot pass.`;
+}
+
 function inconclusiveReasonFor(adrs: Adr[], skippedSet: Set<string>, inconclusive: boolean): string | undefined {
   const unscoped = adrs.filter((adr) => skippedSet.has(adr.id) && adr.appliesTo.length === 0).length;
   return inconclusive
@@ -410,8 +419,21 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
 
   // ADR 0018 R9: an implementation check that judged nothing because every
   // accepted ADR was skipped is inconclusive, not clean.
-  const inconclusive = checked === 0 && skippedSet.size > 0;
-  const inconclusiveReason = inconclusiveReasonFor(adrs, skippedSet, inconclusive);
+  const skippedInconclusive = checked === 0 && skippedSet.size > 0;
+  // #276: a gate that mostly answers "uncertain" has not discriminated between
+  // conforming and contradicting subjects, so its clean-looking result is
+  // inconclusive. Any contradiction keeps the result decisive, as before.
+  const uncertain = findings.filter((finding) => finding.verdict === 'uncertain').length;
+  const ratio = checked === 0 ? 0 : uncertain / checked;
+  const minCells = opts.config.minDiscriminationCells ?? DEFAULT_MIN_DISCRIMINATION_CELLS;
+  const maxRatio = opts.config.maxUncertainRatio ?? DEFAULT_MAX_UNCERTAIN_RATIO;
+  const decisive = findings.some((finding) => finding.verdict === 'contradicts');
+  const noDiscrimination = checked > 0 && !decisive && checked >= minCells && ratio >= maxRatio;
+  const discrimination = {checked, uncertain, ratio, noDiscrimination};
+  const inconclusive = skippedInconclusive || noDiscrimination;
+  const inconclusiveReason = noDiscrimination
+    ? noDiscriminationReason(checked, uncertain, ratio, maxRatio)
+    : inconclusiveReasonFor(adrs, skippedSet, skippedInconclusive);
 
   return {
     gate: opts.config.gate,
@@ -421,6 +443,7 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     findings,
     checked,
     skipped: [...skippedSet],
+    discrimination,
     inconclusive,
     ...(inconclusiveReason !== undefined ? {inconclusiveReason} : {}),
     ...(retrieved.length > 0 ? {retrieved} : {}),
@@ -510,6 +533,12 @@ export function renderGateMarkdown(result: AdrGateResult): string {
   for (const finding of result.findings) {
     lines.push(
       `| ${cell(`${finding.adrId}/${finding.ruleId}`)} | ${cell(finding.target)} | ${cell(finding.verdict)} | ${cell(finding.probability)} | ${cell(decisionState(finding))} |`,
+    );
+  }
+  if (result.discrimination?.noDiscrimination) {
+    lines.push(
+      '',
+      `NO_DISCRIMINATION: ${result.discrimination.uncertain} of ${result.discrimination.checked} checked cells were uncertain (${Math.round(result.discrimination.ratio * 100)}%).`,
     );
   }
   lines.push(
