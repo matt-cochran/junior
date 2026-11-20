@@ -17,6 +17,9 @@ import { estimateCost, mockReceipt } from './worker-receipt.ts';
 import { dataPolicyPreflight } from './data-policy-run.ts';
 import { ticketGate } from './worker-adr-gate.ts';
 import { renderTicketReport } from './adr-tickets.ts';
+import { effectiveBudget } from './runtime-settings.ts';
+import { findBudgetApproval } from './human-approval.ts';
+import { recordPolicyEvent } from './policy-events.ts';
 import type { RunState } from './worker-preflight.ts';
 
 // Preflight phases after the run locks are held: model routing and consent, the
@@ -375,14 +378,59 @@ export function finishPreflight(state:RunState, c:PreflightCtx):any {
  return undefined;
 }
 
+/** The parent run's total-token budget, from the stream accounting recorded on
+ * a prior result. Older results have no accounting, so the comparison is
+ * skipped rather than guessed. */
+function parentMaxTotalTokens(prior:any):number|null {
+ const candidates=[
+  prior?.budget?.requested?.maxTotalTokens,
+  prior?.outputBreakdown?.budget?.requested?.maxTotalTokens,
+  prior?.budget?.maxTotalTokens,
+  prior?.receipt?.budget?.requested?.maxTotalTokens,
+ ];
+ for (const value of candidates) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+ }
+ return null;
+}
+
 /**
  * #281: a contract budget above the workflow default, or above the parent run's
  * budget on a resume, needs a human-issued approval token. Returns the blocked
  * `needs_budget_approval` result, or undefined to continue.
- *
- * Phase-1 contract seam (contracts/phase1.md §3): this stub always continues;
- * lane G2 implements it against human-approval.ts.
  */
-export function settleBudgetApproval(_state:RunState, _c:PreflightCtx):any {
- return undefined;
+export function settleBudgetApproval(state:RunState, c:PreflightCtx):any {
+ const {sourceCwd, dir, heartbeat, emit, mock, mode} = state;
+ const t=c.t;
+ const requested=t?.budget?.maxTotalTokens;
+ if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) return undefined;
+ const workflow=c.explicitWorkflow && c.explicitWorkflow !== 'auto' ? c.explicitWorkflow : 'checks_first';
+ const defaultTokens=effectiveBudget(workflow).maxTotalTokens;
+ const parentTokens=c.prior ? parentMaxTotalTokens(c.prior) : null;
+ const exceedsDefault=typeof defaultTokens === 'number' && requested > defaultTokens;
+ const exceedsParent=parentTokens !== null && requested > parentTokens;
+ if (!exceedsDefault && !exceedsParent) return undefined;
+ if (findBudgetApproval(sourceCwd, t.id, requested)) return undefined;
+ const command=`junior auth budget approve ${t.id} --tokens ${requested} --project ${sourceCwd}`;
+ const reason=exceedsParent
+  ? `budget.maxTotalTokens ${requested} exceeds the parent run's ${parentTokens}; a human must approve the increase (${command})`
+  : `budget.maxTotalTokens ${requested} exceeds the workflow default ${defaultTokens}; a human must approve the increase (${command})`;
+ const request={ id:t.id, requested, default:defaultTokens ?? null, parent:parentTokens, command, reason };
+ recordPolicyEvent(state, {
+  kind:'budget_raise_unapproved',
+  action:'refused',
+  source:'check',
+  command:`budget.maxTotalTokens=${requested}`,
+  reason,
+ });
+ heartbeat.setState('failed',{stopReason:'needs_budget_approval'});
+ emit('finished needs_budget_approval');
+ writeFileSync(join(dir,'budget-approval.json'),JSON.stringify(request,null,2));
+ const out:any={ id:t.id, simulated:mock, status:'needs_budget_approval', workerExitCode:null,
+  workerError:reason, checks:[], artifactDir:dir, runtime:heartbeat.snapshot(), lineage:c.lineage,
+  sourceCwd, executionCwd:c.executionCwd, isolation:isolationRecord(state, c),
+  modelRouting:c.modelRoute, budgetApproval:request, policyEvents:state.policyEvents };
+ if (mode !== 'off') out.jev=c.jev;
+ writeFileSync(join(dir,'result.json'),JSON.stringify(out,null,2));
+ return out;
 }
