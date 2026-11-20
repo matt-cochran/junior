@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.8] - 2026-11-20
+
 ### Fixed
 
 - The ADR gate always judges the ADRs a change or design is about. An ADR is
