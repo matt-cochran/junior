@@ -1,0 +1,1027 @@
+{
+  "deliverables": [
+    {
+      "id": "C1",
+      "owned_files": [
+        "worker-contract.ts",
+        "worker-receipt.ts",
+        ".cpm-planner/plans/issues-276-281/contracts/phase1.md"
+      ],
+      "prerequisites": [],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "Phase-1 contract on integration/0.18.8: contracts/phase1.md (ADR retrieval rules: cited ids, applies_to path scope, title/topic match; NO_DISCRIMINATION threshold and result; whole-change judging input = diff + import graph; commandPolicy guard rules and allow-flags; budget/consent token; validate lint codes CHECK_UNFILTERED / CONTRACT_OVER_BUDGET; continuation-split proposal shape) plus type stubs landed first: commandPolicy.guards + budget/consent token fields in worker-contract.ts, PolicyEvent and ContinuationProposal receipt types in worker-receipt.ts",
+        "owner": "manager",
+        "repo": "junior",
+        "contract": true,
+        "issues": [
+          "#276",
+          "#279",
+          "#281"
+        ],
+        "scope_folded": false
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "A2",
+      "owned_files": [
+        "adr-gate.ts",
+        "adr-gate.test.ts",
+        "worker-adr-gate.ts",
+        "worker-adr-gate.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "NO_DISCRIMINATION threshold and result shape",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "ADR gate reports NO_DISCRIMINATION (not PASS) when nearly every row is uncertain, for both junior adr check and the per-lane adr-gate.md; decisive rows still pass or block as before; tests on a 6,153-row all-uncertain fixture",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#276"
+        ],
+        "junior": {
+          "acceptance": [
+            "a check where nearly every row is uncertain reports NO_DISCRIMINATION, not PASS, from junior adr check",
+            "the per-lane adr-gate.md reports NO_DISCRIMINATION for the same input",
+            "a run with decisive rows passes or blocks exactly as before"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "adr-gate.test.ts",
+                "worker-adr-gate.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      }
+    },
+    {
+      "id": "G1",
+      "owned_files": [
+        "command-guards.ts",
+        "command-guards.test.ts",
+        "command-policy.ts",
+        "command-policy.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "commandPolicy.guards type and guard rule table",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 4.5
+      },
+      "metadata": {
+        "artifact": "Default commandPolicy guards: refuse --no-build (or mark evidence stale) after a failed or missing build in the run; refuse --no-verify, git -c core.hooksPath=..., HUSKY=0-style bypasses unless explicitly allowed; each refusal recorded as a typed PolicyEvent",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#281"
+        ],
+        "junior": {
+          "acceptance": [
+            "a check running tests with --no-build after a failed build in the run is refused or marked stale evidence",
+            "git -c core.hooksPath=<path>, --no-verify and HUSKY=0 are refused in workers and checks unless explicitly allowed",
+            "each refusal appears on the receipt as a typed PolicyEvent"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "command-guards.test.ts",
+                "command-policy.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "G2",
+      "owned_files": [
+        "worker-approval.ts",
+        "worker-approval-guards.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "budget/consent token fields in worker-contract.ts",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "Agent-raised budget increase or consent change needs a human-approved token, like model approval; refusal is a typed PolicyEvent; tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#281"
+        ],
+        "scope_folded": false,
+        "junior": {
+          "acceptance": [
+            "an agent-made budget increase without a human-issued token is refused with a typed PolicyEvent",
+            "an agent-made consent change without a human-issued token is refused",
+            "a human-issued token lets the same change through"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "worker-approval-guards.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      }
+    },
+    {
+      "id": "L1",
+      "owned_files": [
+        "contract-lint.ts",
+        "contract-lint.test.ts",
+        "plan-junior.ts",
+        "plan-junior.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "CHECK_UNFILTERED / CONTRACT_OVER_BUDGET lint spec",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.5,
+        "likely": 3.5,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "junior validate / plan check lint: CHECK_UNFILTERED (whole test project/suite with no filter while owned files touch few test classes, with the suggested filtered command) and CONTRACT_OVER_BUDGET (changed-line estimate from owned files and past receipts' tokens-per-changed-line vs budget, suggests a code/test split); warn, refuse under jev.mode enforce",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#279"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior validate warns CHECK_UNFILTERED for an unfiltered whole test project check when owned files touch few test classes, with a suggested filtered command",
+            "junior validate warns CONTRACT_OVER_BUDGET when the changed-line estimate exceeds the budget, suggesting a code/test split",
+            "both refuse under jev.mode enforce"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "contract-lint.test.ts",
+                "plan-junior.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "L2",
+      "owned_files": [
+        "worker-outcome.ts",
+        "worker-outcome.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "ContinuationProposal receipt type",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.0,
+        "likely": 1.5,
+        "pessimistic": 2.5
+      },
+      "metadata": {
+        "artifact": "On output_truncated or budget_exceeded the receipt carries a ContinuationProposal (remaining owned files, split suggestion); tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#279"
+        ],
+        "junior": {
+          "acceptance": [
+            "a run stopped by output_truncated carries a ContinuationProposal on its receipt",
+            "a run stopped by budget_exceeded carries a ContinuationProposal naming the remaining owned files"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "worker-outcome.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      }
+    },
+    {
+      "id": "DOC1",
+      "owned_files": [
+        "docs/adr-support.md",
+        "docs/contracts.md"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "phase-1 user-facing behaviour text",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 1.5
+      },
+      "metadata": {
+        "artifact": "Docs for phase 1: ADR retrieval rules, NO_DISCRIMINATION, --whole-change; commandPolicy default guards and consent token; validate lint codes",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#276",
+          "#279",
+          "#281"
+        ],
+        "junior": {
+          "acceptance": [
+            "docs/adr-support.md describes retrieval rules, NO_DISCRIMINATION and --whole-change",
+            "docs/contracts.md describes the default commandPolicy guards, the budget/consent token and the validate lint codes"
+          ],
+          "checks": [
+            {
+              "command": "git",
+              "args": [
+                "diff",
+                "--check",
+                "--",
+                "docs/adr-support.md",
+                "docs/contracts.md"
+              ]
+            }
+          ],
+          "workflow": "checks_first"
+        }
+      }
+    },
+    {
+      "id": "CAND1",
+      "owned_files": [
+        "package.json",
+        "CHANGELOG.md"
+      ],
+      "prerequisites": [
+        {
+          "id": "A2",
+          "consumes": "NO_DISCRIMINATION gate branch"
+        },
+        {
+          "id": "G1",
+          "consumes": "command guards branch"
+        },
+        {
+          "id": "G2",
+          "consumes": "budget/consent token branch"
+        },
+        {
+          "id": "L1",
+          "consumes": "validate lint branch"
+        },
+        {
+          "id": "L2",
+          "consumes": "continuation proposal branch"
+        },
+        {
+          "id": "DOC1",
+          "consumes": "phase-1 docs branch"
+        },
+        {
+          "id": "A3",
+          "consumes": "ADR whole-change branch"
+        },
+        {
+          "id": "A1",
+          "consumes": "ADR retrieval branch"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 2.0
+      },
+      "metadata": {
+        "artifact": "integration/0.18.8 candidate: every phase-1 lane branch merged, new test files added to the package.json test list, CHANGELOG entries written from the lane receipts, one npm run build",
+        "owner": "manager",
+        "repo": "junior"
+      }
+    },
+    {
+      "id": "GATE1",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "CAND1",
+          "consumes": "integrated candidate"
+        }
+      ],
+      "estimated_effort_hours": 0.5,
+      "duration_hours": 0.5,
+      "metadata": {
+        "artifact": "Gate evidence on integration/0.18.8: full npm test, plus a live junior adr check on the #276 design case (DeepSeek/Jev, cents) showing the cited ADRs judged and NO_DISCRIMINATION or a decisive verdict; promotion PR to main opened when green",
+        "owner": "manager",
+        "repo": "junior",
+        "kind": "gate",
+        "evidence_scope": "gate",
+        "candidate": "CAND1",
+        "boundary_reason": "0.18.8 is a released artifact: the ADR gate's false PASS (#276) and the evidence guards must reach users now; phase 2 then changes the worker/check execution path these guards cover"
+      }
+    },
+    {
+      "id": "MERGE1",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "GATE1",
+          "consumes": "green gate evidence and the 0.18.8 promotion PR"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "duration_hours": 1.0,
+      "metadata": {
+        "artifact": "User merges the 0.18.8 promotion PR",
+        "owner": "owner",
+        "repo": "junior",
+        "kind": "manual",
+        "evidence_scope": "manual_approval"
+      }
+    },
+    {
+      "id": "REL1",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "MERGE1",
+          "consumes": "merged main"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "duration_hours": 0.5,
+      "metadata": {
+        "artifact": "v0.18.8 tagged and published to npm, #276 #279 #281 closed, back-merged to dev",
+        "owner": "manager",
+        "repo": "junior",
+        "kind": "gate",
+        "evidence_scope": "publish"
+      },
+      "milestone": true
+    },
+    {
+      "id": "C2",
+      "owned_files": [
+        "worker-contract.ts",
+        "worker-receipt.ts",
+        ".cpm-planner/plans/issues-276-281/contracts/phase2.md"
+      ],
+      "prerequisites": [
+        {
+          "id": "GATE1",
+          "consumes": "proven integration/0.18.8 head (guards + receipt PolicyEvent schema) to branch integration/0.19.0 from"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.0,
+        "pessimistic": 3.0
+      },
+      "metadata": {
+        "artifact": "Phase-2 contract on integration/0.19.0: contracts/phase2.md (machine semaphore lock-dir layout, pressure thresholds, pools by command pattern, admission_timeout; warmFrom copy/reflink rules; evidence identity = tree hash + check command/filter + SDK/lockfile hash; junior land flow; review-queue aging + notify hook) plus type stubs: machine.* and isolationSetup.warmFrom in worker-contract.ts, EvidenceIdentity / build-vs-test timing / warm flag in worker-receipt.ts",
+        "owner": "manager",
+        "repo": "junior",
+        "contract": true,
+        "issues": [
+          "#277",
+          "#278",
+          "#280"
+        ],
+        "boundary_reason": "phase 2 branches from the proven phase-1 candidate, not from the owner merge, so phase-2 lanes don't wait on the 0.18.8 release"
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "W1",
+      "owned_files": [
+        "warm-start.ts",
+        "warm-start.test.ts",
+        "worker-preflight.ts",
+        "worker-isolation.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "warmFrom rules and isolationSetup.warmFrom type",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 4.5
+      },
+      "metadata": {
+        "artifact": "isolationSetup.warmFrom: copy (reflink when available, never symlink) obj/ and optional bin/ globs into the new worktree before checks; receipts record warm vs cold; tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#278"
+        ],
+        "junior": {
+          "acceptance": [
+            "isolationSetup.warmFrom copies the configured obj/ and bin/ globs into the new worktree and never symlinks",
+            "the receipt records whether the build was warm or cold"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "warm-start.test.ts",
+                "worker-isolation.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "DOC2",
+      "owned_files": [
+        "docs/runtime.md",
+        "docs/contracts.md"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "phase-2 user-facing behaviour text",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 1.5
+      },
+      "metadata": {
+        "artifact": "Docs for phase 2: machine admission and pools, warmFrom, evidence identity and junior land, review-queue aging",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#277",
+          "#278",
+          "#280"
+        ],
+        "junior": {
+          "acceptance": [
+            "docs/runtime.md describes machine admission, pools, warmFrom and review-queue aging",
+            "docs/contracts.md describes evidence identity and junior land"
+          ],
+          "checks": [
+            {
+              "command": "git",
+              "args": [
+                "diff",
+                "--check",
+                "--",
+                "docs/runtime.md",
+                "docs/contracts.md"
+              ]
+            }
+          ],
+          "workflow": "checks_first"
+        }
+      }
+    },
+    {
+      "id": "CAND2",
+      "owned_files": [
+        "package.json",
+        "CHANGELOG.md"
+      ],
+      "prerequisites": [
+        {
+          "id": "W1",
+          "consumes": "warm-start branch"
+        },
+        {
+          "id": "DOC2",
+          "consumes": "phase-2 docs branch"
+        },
+        {
+          "id": "M2",
+          "consumes": "admission wiring branch"
+        },
+        {
+          "id": "DR1",
+          "consumes": "doctor admission/warm-start branch"
+        },
+        {
+          "id": "E2",
+          "consumes": "junior land branch"
+        },
+        {
+          "id": "E3",
+          "consumes": "review-queue aging branch"
+        },
+        {
+          "id": "M1",
+          "consumes": "admission core branch"
+        },
+        {
+          "id": "E1",
+          "consumes": "evidence identity branch"
+        }
+      ],
+      "estimate": {
+        "optimistic": 0.5,
+        "likely": 1.0,
+        "pessimistic": 2.0
+      },
+      "metadata": {
+        "artifact": "integration/0.19.0 candidate: every phase-2 lane merged, new tests added to package.json, CHANGELOG entries written from the lane receipts, one build",
+        "owner": "manager",
+        "repo": "junior"
+      }
+    },
+    {
+      "id": "GATE2",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "CAND2",
+          "consumes": "integrated candidate"
+        }
+      ],
+      "estimated_effort_hours": 0.75,
+      "duration_hours": 0.75,
+      "metadata": {
+        "artifact": "Gate evidence on integration/0.19.0: full npm test, plus a local smoke with three concurrent handoffs against a pool limit of 2 showing admission waits, a warmFrom lane and a junior land reusing evidence; promotion PR to main opened when green",
+        "owner": "manager",
+        "repo": "junior",
+        "kind": "gate",
+        "evidence_scope": "gate",
+        "candidate": "CAND2"
+      }
+    },
+    {
+      "id": "MERGE2",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "GATE2",
+          "consumes": "green gate evidence and the 0.19.0 promotion PR"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "duration_hours": 1.0,
+      "metadata": {
+        "artifact": "User merges the 0.19.0 promotion PR",
+        "owner": "owner",
+        "repo": "junior",
+        "kind": "manual",
+        "evidence_scope": "manual_approval"
+      }
+    },
+    {
+      "id": "REL2",
+      "owned_files": [],
+      "prerequisites": [
+        {
+          "id": "MERGE2",
+          "consumes": "merged main"
+        }
+      ],
+      "estimated_effort_hours": 0.25,
+      "duration_hours": 0.5,
+      "metadata": {
+        "artifact": "v0.19.0 tagged and published to npm, #277 #278 #280 closed, back-merged to dev",
+        "owner": "manager",
+        "repo": "junior",
+        "kind": "gate",
+        "evidence_scope": "publish"
+      },
+      "milestone": true
+    },
+    {
+      "id": "A3",
+      "owned_files": [
+        "adr-change.ts",
+        "adr-change.test.ts",
+        "adr-cli.ts",
+        "adr-cli.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "retrieval hook signature in AdrCheckOptions and whole-change input spec",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.5,
+        "likely": 4.0,
+        "pessimistic": 6.0
+      },
+      "metadata": {
+        "artifact": "Whole-change judging mode (junior adr check --whole-change): one judgement per ADR over the diff plus the import/$ref graph, so cross-tool imports, cross-spec $refs and one client used by several tools are visible; tests with a 3-micro-app shared-hook fixture",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#276"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior adr check --whole-change judges each retrieved ADR once over the diff plus import/$ref graph",
+            "a hook shared by three micro-apps under tools/_shared is reported against the tool-independence ADR fixture",
+            "a cross-spec $ref between two tools is visible to the judge input"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "adr-change.test.ts",
+                "adr-cli.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "M2",
+      "owned_files": [
+        "worker-launch.ts",
+        "worker-launch.test.ts",
+        "worker-checks.ts",
+        "worker-checks.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "admission API signature (acquire/release/waiting status)",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.5,
+        "pessimistic": 4.0
+      },
+      "metadata": {
+        "artifact": "Workers and check commands take an admission slot before spawning; a waiting run shows why in its status and stops with admission_timeout; tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#277"
+        ],
+        "junior": {
+          "acceptance": [
+            "a worker spawn takes an admission slot before starting",
+            "a check command takes a slot from its matching pool",
+            "a waiting run reports why it is waiting in its status"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "worker-launch.test.ts",
+                "worker-checks.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "DR1",
+      "owned_files": [
+        "setup-doctor.ts",
+        "doctor.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "admission status reader signature",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.0,
+        "likely": 1.5,
+        "pessimistic": 2.5
+      },
+      "metadata": {
+        "artifact": "junior doctor shows admission slots and memory/swap pressure, and warns when checks build large projects in cold worktrees with no warmFrom; tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#277",
+          "#278"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior doctor shows admission slots and memory/swap pressure",
+            "junior doctor warns when check commands build large projects in cold worktrees with no warmFrom"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "doctor.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      }
+    },
+    {
+      "id": "E2",
+      "owned_files": [
+        "land.ts",
+        "land.test.ts",
+        "junior.ts",
+        "cli.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "EvidenceIdentity type and junior land flow",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 4.5
+      },
+      "metadata": {
+        "artifact": "junior land: apply reviewed lanes to an integration worktree, reuse each lane's evidence when its identity is unchanged, run one compile-only check for the batch; tests; junior.ts registers junior land and calls the contract's review-queue API from statusCommand",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#280"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior land applies reviewed lanes to an integration worktree and reuses lane evidence whose identity is unchanged",
+            "junior land runs one compile-only check for the batch"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "land.test.ts",
+                "cli.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "E3",
+      "owned_files": [
+        "review-queue.ts",
+        "review-queue.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "review-queue aging threshold and notify-hook spec",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.0,
+        "likely": 1.5,
+        "pessimistic": 2.5
+      },
+      "metadata": {
+        "artifact": "review-queue.ts: lists ready_for_review runs older than N minutes and fires the optional notify hook past the threshold, behind the API the phase-2 contract names (wired into junior status by E2); tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#280"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior status lists ready_for_review runs older than N minutes and fires the optional notify hook"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "review-queue.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      }
+    },
+    {
+      "id": "A1",
+      "owned_files": [
+        "adr-retrieval.ts",
+        "adr-retrieval.test.ts",
+        "adr.ts",
+        "adr.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C1",
+          "consumes": "retrieval rules (cited ids, applies_to scope, title match) and AdrCheckOptions stub",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.0,
+        "likely": 3.0,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "adr-retrieval.ts: an ADR is always judged when the design input cites its id, when its applies_to scope covers a changed path (tools/_shared/** style globs), or when its title matches the input's topic; adrCheck uses it before ranking; tests reproduce the #276 tool-independence and claim-check cases",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#276"
+        ],
+        "junior": {
+          "acceptance": [
+            "junior adr check --stage design on an input that cites ADR ids judges every cited ADR",
+            "an ADR whose applies_to glob covers a changed path is always judged",
+            "an ADR whose title matches the input topic is judged even when ranking would drop it"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "adr-retrieval.test.ts",
+                "adr.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "M1",
+      "owned_files": [
+        "admission.ts",
+        "admission.test.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "semaphore lock-dir layout, pressure thresholds, machine.* types",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 2.5,
+        "likely": 3.5,
+        "pessimistic": 5.0
+      },
+      "metadata": {
+        "artifact": "admission.ts: machine-wide slot semaphore (lock dir in user state dir, stale-holder recovery), memory/swap-out pressure gate, per-pool limits, waiting reason + admission_timeout; injected clock and fake /proc for tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#277"
+        ],
+        "junior": {
+          "acceptance": [
+            "two processes sharing the lock dir never hold more slots than the configured limit",
+            "a slot left by a dead holder is recovered",
+            "admission refuses while available memory is below machine.minAvailableMb or swap-out is above its threshold",
+            "a waiter past its bound stops with admission_timeout"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "admission.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    },
+    {
+      "id": "E1",
+      "owned_files": [
+        "evidence-identity.ts",
+        "evidence-identity.test.ts",
+        "worker-receipt.ts"
+      ],
+      "prerequisites": [
+        {
+          "id": "C2",
+          "consumes": "EvidenceIdentity receipt type",
+          "kind": "interface"
+        }
+      ],
+      "estimate": {
+        "optimistic": 1.5,
+        "likely": 2.5,
+        "pessimistic": 4.0
+      },
+      "metadata": {
+        "artifact": "Check results on receipts carry an evidence identity (tree hash of touched projects, command + filter, SDK/lockfile hash) and build-vs-test time; tests",
+        "owner": "agent",
+        "repo": "junior",
+        "issues": [
+          "#280",
+          "#278"
+        ],
+        "junior": {
+          "acceptance": [
+            "each check result on a receipt carries an evidence identity (touched-project tree hash, command and filter, SDK/lockfile hash)",
+            "the receipt records build time and test time separately"
+          ],
+          "checks": [
+            {
+              "command": "node",
+              "args": [
+                "--test",
+                "evidence-identity.test.ts"
+              ]
+            }
+          ],
+          "workflow": "test_first"
+        }
+      },
+      "earning_rule": "fifty_fifty"
+    }
+  ]
+}
