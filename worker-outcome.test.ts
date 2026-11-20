@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { finish } from './worker-outcome.ts';
@@ -144,4 +145,96 @@ test('a run state without a clock falls back to the system clock', async () => {
   await finish(state);
   const done = updates.find((u) => u.phase === 'done');
   assert.ok(done.elapsedMs >= 0 && done.elapsedMs < 60_000);
+});
+
+
+function outcomeRepo(files: Record<string, string>): string {
+  const cwd = mkdtempSync(join(tmpdir(), 'delivery-outcome-repo-'));
+  execFileSync('git', ['init', '-q'], { cwd });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd });
+  execFileSync('git', ['config', 'user.name', 'Outcome Test'], { cwd });
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(cwd, path, '..'), { recursive: true });
+    writeFileSync(join(cwd, path), content);
+  }
+  execFileSync('git', ['add', '.'], { cwd });
+  execFileSync('git', ['commit', '-qm', 'base'], { cwd });
+  return cwd;
+}
+
+function truncatedStream(stopReason = 'output_truncated', budgetExceeded = false): any {
+  return { interrupted: false, timedOut: false, deadlineExceeded: false, outputTruncated: true,
+    budgetExceeded, stopReason, runtime: {}, outputBreakdown: {} };
+}
+
+test('an output-truncated run carries an output_truncated continuation proposal', async (t) => {
+  const cwd = outcomeRepo({ 'src/a.ts': 'base\n', 'src/b.ts': 'base\n' });
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const state = outcomeState({
+    cwd,
+    streamResult: truncatedStream(),
+    t: { id: 'task', cwd, scope: { owned: ['src/a.ts', 'src/b.ts'] } },
+  });
+  const result = await finish(state);
+  assert.equal(result.continuation.reason, 'output_truncated');
+});
+
+test('a budget-exceeded run names the remaining owned files on its continuation proposal', async (t) => {
+  const cwd = outcomeRepo({ 'src/a.ts': 'base\n', 'src/b.ts': 'base\n', 'tests/worker.test.ts': 'base\n' });
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const state = outcomeState({
+    cwd,
+    streamResult: truncatedStream('budget_exceeded', true),
+    t: { id: 'task', cwd, scope: { owned: ['src/a.ts', 'src/b.ts', 'tests/worker.test.ts'] } },
+  });
+  writeFileSync(join(cwd, 'src/b.ts'), 'changed\n');
+  const result = await finish(state);
+  assert.deepEqual(result.continuation.remainingFiles, ['src/a.ts', 'tests/worker.test.ts']);
+});
+
+test('a budget-stopped run reports the budget_exceeded terminal status', async (t) => {
+  const cwd = outcomeRepo({ 'src/a.ts': 'base\n' });
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const state = outcomeState({
+    cwd,
+    streamResult: truncatedStream('budget_exceeded', true),
+    t: { id: 'task', cwd, scope: { owned: ['src/a.ts'] } },
+  });
+  const result = await finish(state);
+  assert.equal(result.status, 'budget_exceeded');
+});
+
+test('a continuation split puts remaining code files before remaining test files', async (t) => {
+  const cwd = outcomeRepo({ 'src/a.ts': 'base\n', 'src/b.ts': 'base\n', 'tests/worker.test.ts': 'base\n' });
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const state = outcomeState({
+    cwd,
+    streamResult: truncatedStream(),
+    t: { id: 'task', cwd, scope: { owned: ['src/a.ts', 'src/b.ts', 'tests/worker.test.ts'] } },
+  });
+  writeFileSync(join(cwd, 'src/a.ts'), 'changed\n');
+  const result = await finish(state);
+  assert.deepEqual(result.continuation.split.map((part: any) => part.files), [['src/b.ts'], ['tests/worker.test.ts']]);
+});
+
+test('a continuation next contract copies the contract fields and resumes from this result', async (t) => {
+  const cwd = outcomeRepo({ 'src/a.ts': 'base\n' });
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const checks = [{ command: 'node', args: ['--test', 'worker-outcome.test.ts'] }];
+  const state = outcomeState({
+    cwd,
+    streamResult: truncatedStream(),
+    t: { id: 'task', cwd, workflow: 'test_first', acceptance: ['ships'], checks, isolation: 'worktree',
+      scope: { owned: ['src/a.ts'] } },
+  });
+  const result = await finish(state);
+  assert.deepEqual(result.continuation.next, {
+    id: 'task-cont-1', cwd, workflow: 'test_first', acceptance: ['ships'], checks,
+    isolation: 'worktree', resumeFrom: join(state.dir, 'result.json'),
+  });
+});
+
+test('a completed run carries no continuation proposal', async () => {
+  const result = await finish(outcomeState());
+  assert.equal(result.continuation, undefined);
 });

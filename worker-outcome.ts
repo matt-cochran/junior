@@ -5,12 +5,13 @@ import { designGate, implementationGate, resolveGateConfig } from './worker-adr-
 import { classifyScope, incidentalGlobsFromConfig, type ScopeResult } from './scope-check.ts';
 import { collectGitEvidence, evidenceDelta } from './evidence.ts';
 import { withinWorkspace } from './worker-contract.ts';
+import { matchesAppliesTo } from './adr.ts';
 import { reportEvidence } from './worker-workflows.ts';
 import type { ReportEvidence } from './worker-workflows.ts';
 import { assessPostflight, raceSignal, resolveOpenRouterKey, OUTPUT_LIMIT_ERROR } from './worker-gates.ts';
 import { captureBilling, BILLING_DEFAULT_TIMEOUT_MS, type BillingCapture } from './billing.ts';
 import { verifyServedProviders } from './data-policy-run.ts';
-import { estimateCost } from './worker-receipt.ts';
+import { estimateCost, type ContinuationProposal } from './worker-receipt.ts';
 import { findUnwiredExports, type UnwiredSymbol } from './wiring-check.ts';
 import { verifyIsolation, DEFAULT_PI_TOOLS } from './pi-isolation.ts';
 import { timedOutToolLine } from './worker-pi.ts';
@@ -86,6 +87,10 @@ function terminalStatus(state:RunState):string {
  const {mock, streamResult, workerStatus, receiptOk, checks, signal, deadlineDuringChecks} = state;
  if (streamResult?.interrupted || signal?.aborted) return 'interrupted';
  if (streamResult?.timedOut) return 'worker_failed';
+ const budgetStopped = streamResult?.budgetExceeded === true
+  || streamResult?.stopReason === 'budget_exceeded'
+  || streamResult?.budget?.stopReason === 'budget_exceeded';
+ if (budgetStopped) return 'budget_exceeded';
  if (streamResult?.outputTruncated) return 'output_truncated';
  if (streamResult?.deadlineExceeded || deadlineDuringChecks || outOfTime(state)) return 'deadline_exceeded';
  if (streamResult?.persistError || streamResult?.streamError) return 'worker_failed';
@@ -332,11 +337,79 @@ function attachRunContext(state:RunState, result:any, o:Outcome):void {
  if (state.policyEvents && state.policyEvents.length > 0) result.policyEvents=state.policyEvents;
 }
 
+function normalizeContractPath(value:string):string {
+ let path=value.trim().replaceAll('\\','/');
+ while (path.startsWith('./')) path=path.slice(2);
+ return path;
+}
+
+/** Owned (and, when supplied, allowed) contract files in declaration order,
+ * normalized so they compare with Git's repository-relative paths. */
+function contractScopeFiles(t:any):string[] {
+ const files:string[]=[];
+ const add=(value:any):void=>{
+  const raw=typeof value==='string' ? value : (value && typeof value==='object' && typeof value.path==='string' ? value.path : '');
+  if (!raw.trim()) return;
+  const path=normalizeContractPath(raw);
+  if (path && !files.includes(path)) files.push(path);
+ };
+ const scope=t?.scope;
+ if (!scope || typeof scope!=='object' || Array.isArray(scope)) return files;
+ for (const key of ['owned','allowed'] as const) {
+  if (!Array.isArray(scope[key])) continue;
+  for (const entry of scope[key]) add(entry);
+ }
+ return files;
+}
+
+const isTestFile=(path:string):boolean=>
+ /(^|\/)(__tests__|tests?|specs?)\//i.test(path)
+ || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(path)
+ || /(^|\/)(test_[^/]+|[^/]+_test)\.[a-z0-9]+$/i.test(path);
+
+function buildContinuation(state:RunState, status:string, evidence:any, resultPath:string):ContinuationProposal|undefined {
+ const {streamResult, t}=state;
+ const budgetStopped = status === 'budget_exceeded'
+  || streamResult?.budgetExceeded === true
+  || streamResult?.stopReason === 'budget_exceeded'
+  || streamResult?.budget?.stopReason === 'budget_exceeded';
+ const reason:ContinuationProposal['reason']|null = budgetStopped
+  ? 'budget_exceeded'
+  : status === 'output_truncated' ? 'output_truncated' : null;
+ if (reason === null) return undefined;
+
+ const changedFiles=(Array.isArray(evidence?.runChangedFiles) ? evidence.runChangedFiles : [])
+  .map((file:any)=>typeof file?.path==='string' ? normalizeContractPath(file.path) : '')
+  .filter(Boolean);
+ const remainingFiles=contractScopeFiles(t)
+  .filter((owned)=>!changedFiles.some((changed)=>owned === changed || matchesAppliesTo(owned, changed)));
+ const codeFiles=remainingFiles.filter((file)=>!isTestFile(file));
+ const testFiles=remainingFiles.filter((file)=>isTestFile(file));
+ const split:ContinuationProposal['split']=[];
+ if (codeFiles.length > 0 && testFiles.length > 0) {
+  split.push({ id:'code', files:codeFiles, note:'code files first' });
+  split.push({ id:'tests', files:testFiles, note:'test files after the code part' });
+ } else if (remainingFiles.length > 0 || codeFiles.length > 0 || testFiles.length > 0) {
+  const onlyTests=codeFiles.length === 0 && testFiles.length > 0;
+  split.push({ id:onlyTests ? 'tests' : 'code', files:remainingFiles, note:'all remaining owned files' });
+ }
+ const next:Record<string, unknown>={ id:`${t?.id}-cont-1` };
+ if (t?.cwd !== undefined) next.cwd=t.cwd;
+ if (t?.workflow !== undefined) next.workflow=t.workflow;
+ if (t?.acceptance !== undefined) next.acceptance=t.acceptance;
+ if (t?.checks !== undefined) next.checks=t.checks;
+ if (t?.isolation !== undefined) next.isolation=t.isolation;
+ next.resumeFrom=resultPath;
+ return { reason, remainingFiles, changedFiles, split, next };
+}
+
 function buildResult(state:RunState, o:Outcome):any {
  const result=baseResult(state, o);
  verifyPiIsolation(state);
  attachGateResults(state, result, o);
  attachRunContext(state, result, o);
+ const continuation=buildContinuation(state, o.status, o.evidence, join(state.dir, 'result.json'));
+ if (continuation) result.continuation=continuation;
  return result;
 }
 
