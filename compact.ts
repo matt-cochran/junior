@@ -90,6 +90,7 @@ const PENDING_DECISION_FILES: Record<string, string> = {
   needs_answers: 'clarify.md',
   needs_choice: 'brief.md',
   needs_model_approval: 'model-approval.json',
+  needs_budget_approval: 'budget-approval.json',
 };
 const ANSWERED_DECISION_FILES = ['clarified-answers.json', 'clarified-contract.json'];
 

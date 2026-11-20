@@ -419,7 +419,7 @@ export function settleBudgetApproval(state:RunState, c:PreflightCtx):any {
  recordPolicyEvent(state, {
   kind:'budget_raise_unapproved',
   action:'refused',
-  source:'check',
+  source:'cli',
   command:`budget.maxTotalTokens=${requested}`,
   reason,
  });
