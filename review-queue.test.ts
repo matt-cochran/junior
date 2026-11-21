@@ -199,9 +199,10 @@ test('reviewQueue throws on malformed delivery.config.json', (t) => {
 test('reviewQueue sends the aged run JSON to the notify hook on stdin', (t) => {
   const root = arena(t);
   writeRun(root, 'd1', '1000', ready('d1', '2026-01-01T10:00:00.000Z'));
-  const calls: any[] = [];
-  reviewQueue({ cwd: root, config: { notify: { command: 'notify' } }, clock: clock(), spawn: fakeSpawn(calls) });
-  assert.equal(JSON.parse(calls[0].options.input).id, 'd1');
+  const captured = join(root, 'stdin.json');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(captured)}, require('node:fs').readFileSync(0))`;
+  reviewQueue({ cwd: root, config: { notify: { command: process.execPath, args: ['-e', script] } }, clock: clock(), spawn: spawnSync });
+  assert.equal(JSON.parse(readFileSync(captured, 'utf8')).id, 'd1');
 });
 
 test('reviewQueue passes the configured notify arguments', (t) => {

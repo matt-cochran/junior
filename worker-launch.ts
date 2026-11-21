@@ -257,6 +257,9 @@ export async function launch(state:RunState):Promise<RunState|any> {
   if (mock) runMock(run);
   else if (preInterrupt || preDeadline) runSkipped(state, run, preInterrupt, preDeadline);
   else if (deps.spawnPi) runLegacy(state, run);
+  // Admission off (and no injected admit): spawn without an await in between,
+  // exactly as before admission existed.
+  else if (!machine.enabled && !(deps as any).admit) await runStreaming(state, run);
   else {
    // The worker slot is held only around Pi. It is released before launch
    // returns, so the checks that follow never hold two machine slots. Waiting

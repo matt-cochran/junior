@@ -4,7 +4,8 @@
 // reviewed for longer than a threshold, and fires an optional notify hook
 // once per run when one ages past it, so a stalled manager is visible.
 
-import { spawnSync } from 'node:child_process';
+import type { spawnSync } from 'node:child_process';
+import { runSync } from './spawn-sync.ts';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { systemClock, type Clock } from './clock.ts';
@@ -211,21 +212,23 @@ export function agingReviews(opts: { deliveryDir: string; agingMinutes: number; 
 }
 
 /** Run the notify argv with the review JSON on stdin. Returns an error message, or null on success. */
-function notify(review: AgingReview, hook: { command: string; args?: string[] }, spawn: typeof spawnSync): string | null {
-  let child: ReturnType<typeof spawnSync>;
+function notify(review: AgingReview, hook: { command: string; args?: string[] }, spawn: typeof spawnSync | undefined): string | null {
+  // runSync captures output to temp files, so a chatty hook cannot overflow a
+  // pipe buffer and be recorded as failed after it delivered.
+  let child: ReturnType<typeof runSync>;
   try {
-    child = spawn(hook.command, hook.args ?? [], {
+    child = runSync(hook.command, hook.args ?? [], {
       input: JSON.stringify(review),
-      encoding: 'utf8',
       timeout: NOTIFY_TIMEOUT_MS,
       shell: false,
-      stdio: ['pipe', 'ignore', 'pipe'],
-      windowsHide: true,
+      ...(spawn ? { spawn } : {}),
     });
   } catch (error) {
     return message(error);
   }
-  if (child.error) return message(child.error);
+  // Output is never read, so an output cap overflow from a hook that exited 0
+  // is still a delivered notification.
+  if (child.error && !(child.error.code === 'ENOBUFS' && child.status === 0)) return message(child.error);
   if (child.status !== 0) {
     const stderr = child.stderr ? String(child.stderr).trim() : '';
     return stderr || `notify exited ${child.status ?? 'unknown'}`;
@@ -250,7 +253,7 @@ export function reviewQueue(opts: { cwd: string; config?: ReviewQueueConfig; clo
   const newlyNotified: AgingReview[] = [];
 
   if (config?.notify) {
-    const spawn = opts.spawn ?? spawnSync;
+    const spawn = opts.spawn;
     const attempted = new Set<string>();
     for (const review of aging) {
       if (notifiedPaths.has(review.resultPath) || attempted.has(review.resultPath)) continue;
