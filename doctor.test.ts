@@ -9,12 +9,30 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectIntegrations, TOOL_REPOS } from './installer.ts';
-import { checkPi, doctor, summarizeInstall } from './setup.ts';
+import { checkPi, doctor as productionDoctor, summarizeInstall } from './setup.ts';
+import { createManualClock } from './clock.ts';
 import { sha, tmp, stateWith, fmecaAsset, doctorFixture } from './dependencies-helpers.test.ts';
+
+// Doctor exercises the live admission snapshot unless a test injects one. The
+// shared fixture points every live read at empty temporary roots, so no test
+// reads the host /proc or ~/.junior. Tests that assert forwarding pass their
+// own explicit seams to the production function directly.
+const doctorStateDir = tmp('junior-doctor-state-');
+const doctorProcRoot = tmp('junior-doctor-proc-');
+mkdirSync(doctorProcRoot, { recursive: true });
+writeFileSync(join(doctorProcRoot, 'meminfo'), 'MemAvailable: 8388608 kB\n');
+writeFileSync(join(doctorProcRoot, 'vmstat'), 'pswpout 0\n');
+function doctor(deps: any = {}, opts: any = {}) {
+  return productionDoctor({
+    ...deps,
+    stateDir: deps.stateDir ?? doctorStateDir,
+    procRoot: deps.procRoot ?? doctorProcRoot,
+    readMounts: deps.readMounts ?? (() => ''),
+  }, opts);
+}
 
 test('Doctor reports integrations readiness separately from execution readiness', async () => {
   const cwd = tmp('junior-doc-');
-  const { doctor } = await import('./setup.ts');
   const d = doctor({
     cwd,
     env: { PATH: '', HOME: cwd, PROCESSOR_ARCHITECTURE: 'x64' },
@@ -293,4 +311,206 @@ test('Doctor warns when OpenRouter has no models data policy', () => {
  const { deps } = doctorFixture();
  const d = doctor(deps);
  assert.match(d.warnings.join('\n'), /No models\.dataPolicy is set; OpenRouter may route requests to any provider and fall back between them \(see docs\/data-destination\.md\)/);
+});
+
+// Admission and cold-build advisories. Admission pressure is injected through
+// the doctor's snapshot seam so no test reads the host /proc or lock state;
+// cold-build history lives in a temporary `.delivery` fixture.
+function admissionView(over: any = {}) {
+  const base = {
+    enabled: true,
+    slots: { held: 0, limit: 4, holders: [] },
+    pools: {},
+    pressure: { availableMb: 8192, swapOutPerSec: 0, minAvailableMb: 2048, maxSwapOutPerSec: 500 },
+  };
+  return {
+    ...base,
+    ...over,
+    slots: { ...base.slots, ...(over.slots ?? {}) },
+    pools: over.pools ?? base.pools,
+    pressure: { ...base.pressure, ...(over.pressure ?? {}) },
+  };
+}
+
+function writeRun(cwd: string, id: string, stamp: number, result: any, contract?: any) {
+  const dir = join(cwd, '.delivery', id, String(stamp));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'result.json'), JSON.stringify(result));
+  if (contract) writeFileSync(join(dir, 'prompt.txt'), `Task contract (JSON):\n${JSON.stringify(contract)}`);
+}
+
+const coldBuild = (buildMs: number, warm = false) => ({
+  isolation: { mode: 'worktree' },
+  timing: { buildMs, testMs: 1000, otherMs: 0, warm },
+});
+
+test('Doctor forwards live admission state, proc root and clock to the snapshot reader', () => {
+  const { deps } = doctorFixture();
+  const clock = createManualClock(1234);
+  let seen: any;
+  doctor({
+    ...deps,
+    stateDir: '/fixture/state',
+    procRoot: '/fixture/proc',
+    clock,
+    admissionSnapshot: (opts: any) => {
+      seen = opts;
+      return admissionView();
+    },
+  } as any);
+  assert.deepEqual({ stateDir: seen.stateDir, procRoot: seen.procRoot, clock: seen.clock }, { stateDir: '/fixture/state', procRoot: '/fixture/proc', clock });
+});
+
+test('Doctor defaults live admission state to JUNIOR_STATE_DIR from the injected environment', () => {
+  const { deps } = doctorFixture();
+  const envState = tmp('junior-doctor-env-state-');
+  let seen: any;
+  productionDoctor({
+    ...deps,
+    env: { ...deps.env, JUNIOR_STATE_DIR: envState },
+    procRoot: '/fixture/proc',
+    admissionSnapshot: (opts: any) => {
+      seen = opts;
+      return admissionView();
+    },
+  } as any);
+  assert.equal(seen.stateDir, envState);
+});
+
+test('Doctor returns a complete disabled admission snapshot when the live read fails', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admissionSnapshot: () => { throw new Error('pressure unavailable'); } } as any);
+  assert.deepEqual(d.admission, {
+    enabled: false,
+    slots: { held: 0, limit: 4, holders: [] },
+    pools: {},
+    pressure: { availableMb: null, swapOutPerSec: null, minAvailableMb: 2048, maxSwapOutPerSec: 500 },
+  });
+});
+
+test('Doctor warns when the live admission snapshot cannot be read', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admissionSnapshot: () => { throw new Error('pressure unavailable'); } } as any);
+  assert.match(d.warnings.join('\n'), /admission: could not read machine pressure \(pressure unavailable\)/);
+});
+
+test('Doctor skips admission warnings when admission is disabled', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({
+    ...deps,
+    admission: admissionView({ enabled: false, slots: { held: 4, limit: 4, holders: ['A1'] }, pressure: { availableMb: 1, swapOutPerSec: 900 } }),
+  } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /memory pressure|swap pressure|admission slots/);
+});
+
+test('Doctor includes the admission snapshot in its output', () => {
+  const { deps } = doctorFixture();
+  const snapshot = admissionView({ slots: { held: 1, limit: 6, holders: ['A1'] }, pools: { dotnet: { held: 0, limit: 2, holders: [] } } });
+  const d = doctor({ ...deps, admission: snapshot } as any);
+  assert.deepEqual(d.admission, snapshot);
+});
+
+test('Doctor warns when available memory is below its admission threshold', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admission: admissionView({ pressure: { availableMb: 1024 } }) } as any);
+  assert.match(d.warnings.join('\n'), /memory pressure: available 1024 MB < 2048 MB/);
+});
+
+test('Doctor warns when swap-out is above its admission threshold', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admission: admissionView({ pressure: { swapOutPerSec: 900 } }) } as any);
+  assert.match(d.warnings.join('\n'), /swap pressure: swap-out 900\/s > 500\/s/);
+});
+
+test('Doctor warns when every admission slot is held', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admission: admissionView({ slots: { held: 4, limit: 4, holders: ['A1', 'A2', 'A3', 'A4'] } }) } as any);
+  assert.match(d.warnings.join('\n'), /admission slots: all slots are held \(4\/4\)/);
+});
+
+test('Doctor does not warn about admission while pressure is within its thresholds', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admission: admissionView({ slots: { held: 3, limit: 4, holders: ['A1', 'A2', 'A3'] } }) } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /memory pressure|swap pressure|admission slots/);
+});
+
+test('A pressure warning does not change doctor readiness', () => {
+  const { deps } = doctorFixture();
+  const d = doctor({ ...deps, admission: admissionView({ pressure: { availableMb: 512 } }) } as any);
+  assert.equal(d.ok, true);
+});
+
+test('Doctor warns after three recent cold worktree builds', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const [stamp, buildMs] of [[1, 60_000], [2, 90_000], [3, 150_000]] as const) writeRun(cwd, 'cold', stamp, coldBuild(buildMs));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.match(d.warnings.join('\n'), /checks build cold in worktrees \(median build 90 s\); set isolationSetup\.warmFrom/);
+});
+
+test('The cold-build warning points at the warm-start documentation', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'cold-docs', stamp, coldBuild(90_000));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.match(d.warnings.join('\n'), /docs\/runtime\.md#warm-start/);
+});
+
+test('Doctor does not warn about cold builds after only two cold worktree runs', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2]) writeRun(cwd, 'two-cold', stamp, coldBuild(90_000));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('Doctor does not warn about cold builds when the worktree build was warm', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'warm', stamp, coldBuild(90_000, true));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('Doctor does not warn about cold builds when a recent contract sets warmFrom', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'contracted-cold', stamp, coldBuild(90_000));
+  writeRun(cwd, 'contracted-cold', 4, coldBuild(90_000), { id: 'contracted', isolationSetup: { warmFrom: { path: '../source' } } });
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('Doctor does not warn about cold builds when delivery.config.json sets warmFrom', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'configured-cold', stamp, coldBuild(90_000));
+  writeFileSync(join(cwd, 'delivery.config.json'), JSON.stringify({ isolationSetup: { warmFrom: { path: '../source' } } }));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('Doctor reads warmFrom from delivery.config.json without the injected exists seam', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'direct-config-cold', stamp, coldBuild(90_000));
+  writeFileSync(join(cwd, 'delivery.config.json'), JSON.stringify({ isolationSetup: { warmFrom: { path: '../source' } } }));
+  const d = doctor({ ...deps, exists: () => false, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('A null warmFrom does not suppress the cold-build warning', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'null-warmfrom-cold', stamp, coldBuild(90_000));
+  writeFileSync(join(cwd, 'delivery.config.json'), JSON.stringify({ isolationSetup: { warmFrom: null } }));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.match(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('Doctor only inspects the newest twenty results for cold builds', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'old-cold', stamp, coldBuild(90_000));
+  for (let stamp = 100; stamp < 118; stamp++) writeRun(cwd, 'new-warm', stamp, coldBuild(90_000, true));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.doesNotMatch(d.warnings.join('\n'), /checks build cold in worktrees/);
+});
+
+test('A cold-build warning does not change doctor readiness', () => {
+  const { cwd, deps } = doctorFixture();
+  for (const stamp of [1, 2, 3]) writeRun(cwd, 'ready-cold', stamp, coldBuild(90_000));
+  const d = doctor({ ...deps, admission: admissionView() } as any);
+  assert.equal(d.ok, true);
 });
