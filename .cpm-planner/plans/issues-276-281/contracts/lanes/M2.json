@@ -1,0 +1,89 @@
+{
+ "id": "M2",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 74-95 (lane M2) completely and to production grade: Workers and check commands take an admission slot before spawning; a waiting run shows why in its live status and stops with admission_timeout",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "the worker admits before Pi starts and releases its slot when Pi exits, before checks",
+  "each check admits around executeCheck and releases in finally",
+  "while waiting the heartbeat shows phase admission with the wait reason",
+  "a worker or check admission timeout ends the run admission_timeout without spawning",
+  "admission waits are recorded on result.admissionWaits"
+ ],
+ "constraints": [
+  "Only modify worker-launch.ts, worker-launch.test.ts, worker-checks.ts, worker-checks.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 74-95; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "worker-launch.test.ts",
+    "worker-checks.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "worker-launch.ts",
+   "worker-launch.test.ts",
+   "worker-checks.ts",
+   "worker-checks.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 74,
+   "end": 95
+  },
+  {
+   "path": "admission.ts",
+   "start": 1,
+   "end": 140
+  },
+  {
+   "path": "worker-launch.ts",
+   "start": 190,
+   "end": 240
+  },
+  {
+   "path": "worker-checks.ts",
+   "start": 1,
+   "end": 110
+  },
+  {
+   "path": "worker-preflight.ts",
+   "start": 30,
+   "end": 60
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "M2"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

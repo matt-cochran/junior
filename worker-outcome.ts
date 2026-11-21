@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { checkTiming } from './evidence-identity.ts';
 import { join, relative, basename } from 'node:path';
 import { briefMdPath, briefPath, buildPlaceholderBrief, renderBrief } from './prepare.ts';
 import { designGate, implementationGate, resolveGateConfig } from './worker-adr-gate.ts';
@@ -86,6 +87,7 @@ async function runPostflight(state:RunState, after:any, evidence:any):Promise<vo
 function terminalStatus(state:RunState):string {
  const {mock, streamResult, workerStatus, receiptOk, checks, signal, deadlineDuringChecks} = state;
  if (streamResult?.interrupted || signal?.aborted) return 'interrupted';
+ if (state.admissionTimeout) return 'admission_timeout';
  if (streamResult?.timedOut) return 'worker_failed';
  const budgetStopped = streamResult?.budgetExceeded === true
   || streamResult?.stopReason === 'budget_exceeded'
@@ -335,6 +337,10 @@ function attachRunContext(state:RunState, result:any, o:Outcome):void {
  if (mode !== 'off') result.jev=jev;
  if (o.analysis) result.analysis=o.analysis;
  if (state.policyEvents && state.policyEvents.length > 0) result.policyEvents=state.policyEvents;
+ if (state.warmStart) result.warmStart=state.warmStart;
+ if (state.admissionWaits && state.admissionWaits.length > 0) result.admissionWaits=state.admissionWaits;
+ if (state.admissionTimeout) result.admissionTimeout=state.admissionTimeout;
+ if (Array.isArray(result.checks) && result.checks.length > 0) result.timing=checkTiming(result.checks, state.warmStart ? state.warmStart.warm : (state.isolation === 'worktree' ? false : null));
 }
 
 function normalizeContractPath(value:string):string {

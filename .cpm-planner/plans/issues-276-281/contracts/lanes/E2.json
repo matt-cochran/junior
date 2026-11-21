@@ -1,0 +1,104 @@
+{
+ "id": "E2",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 156-182 (lane E2) completely and to production grade: junior land applies reviewed lanes to an integration worktree, reuses each lane check evidence when its identity is unchanged, runs one compile-only check; junior status lists the review queue",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "junior land applies ready_for_review lanes in order into --into and refuses other statuses with E_LAND_NOT_READY",
+  "a lane check whose recomputed identity is equal is reported reused, otherwise stale with the changed fields",
+  "one compile check runs for the batch and ok is true only when every lane applied and it passed",
+  "land-report.json is written and printed; exit 0 on ok, 1 otherwise",
+  "junior status with no file prints the review-queue report"
+ ],
+ "constraints": [
+  "Only modify land.ts, land.test.ts, junior.ts, cli.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 156-182; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "land.test.ts",
+    "cli.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "land.ts",
+   "land.test.ts",
+   "junior.ts",
+   "cli.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 156,
+   "end": 182
+  },
+  {
+   "path": "apply.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "apply.ts",
+   "start": 150,
+   "end": 200
+  },
+  {
+   "path": "junior.ts",
+   "start": 25,
+   "end": 100
+  },
+  {
+   "path": "junior.ts",
+   "start": 575,
+   "end": 610
+  },
+  {
+   "path": "evidence-identity.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "review-queue.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "admission.ts",
+   "start": 60,
+   "end": 140
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "E2"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

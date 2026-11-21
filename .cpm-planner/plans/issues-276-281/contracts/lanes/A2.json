@@ -1,0 +1,89 @@
+{
+ "id": "A2",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase1.md section 44-64 (lane A2) completely and to production grade: ADR gate reports NO_DISCRIMINATION (not PASS) when nearly every row is uncertain, for both junior adr check and the per-lane adr-gate.md; decisive rows still pass or block as before; tests on a 6,153-row all-uncertain fixture",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a check where nearly every row is uncertain reports NO_DISCRIMINATION, not PASS, from junior adr check",
+  "the per-lane adr-gate.md reports NO_DISCRIMINATION for the same input",
+  "a run with decisive rows passes or blocks exactly as before"
+ ],
+ "constraints": [
+  "Only modify adr-gate.ts, adr-gate.test.ts, worker-adr-gate.ts, worker-adr-gate.test.ts, adr-config.ts, adr-config.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 44-64; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "adr-gate.test.ts",
+    "worker-adr-gate.test.ts",
+    "adr-config.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "adr-gate.ts",
+   "adr-gate.test.ts",
+   "worker-adr-gate.ts",
+   "worker-adr-gate.test.ts",
+   "adr-config.ts",
+   "adr-config.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 44,
+   "end": 64
+  },
+  {
+   "path": "adr-gate.ts",
+   "start": 40,
+   "end": 111
+  },
+  {
+   "path": "adr-gate.ts",
+   "start": 256,
+   "end": 270
+  },
+  {
+   "path": "adr-gate.ts",
+   "start": 355,
+   "end": 430
+  },
+  {
+   "path": "worker-adr-gate.ts",
+   "start": 190,
+   "end": 240
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "A2"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

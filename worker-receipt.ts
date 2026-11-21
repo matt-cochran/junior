@@ -286,3 +286,36 @@ export interface ContinuationProposal {
   /** Ready-to-validate contract skeleton for the first part, with resumeFrom set. */
   next?: Record<string, unknown>;
 }
+
+/**
+ * #280: the governed identity of one check result. Two results with equal
+ * identities prove the same thing, so `junior land` may reuse a lane's evidence
+ * instead of re-running it. Computed by evidence-identity.ts (lane E1).
+ */
+export interface EvidenceIdentity {
+  schema_version: 1;
+  /** `sha256:<hex>` over the sorted `<project dir>:<git tree hash>` pairs of the touched projects, working tree included. */
+  tree: string;
+  /** Project directories (relative to the repo root, `.` for the root) whose contents the tree hash covers. */
+  projects: string[];
+  /** The check argv joined by single spaces, with the filter included. */
+  command: string;
+  /** The test filter the command carries (`--filter X`, `-t X`, `-k X`, file paths), or null when unfiltered. */
+  filter: string | null;
+  /** `sha256:<hex>` of the lockfiles and SDK pins of the touched projects (package-lock.json, global.json, *.csproj package refs, Cargo.lock, ...). */
+  dependencyLock: string;
+  /** Tool versions the check ran on, e.g. `node v26.1.0`, `dotnet 10.0.100`. */
+  toolchain: string;
+}
+
+/** #278/#280: what kind of work a check did, for build-vs-test timing. */
+export type CheckPhase = 'build' | 'test' | 'other';
+
+/** #278: build vs test wall time across a run's checks, and whether the worktree was warm. */
+export interface CheckTiming {
+  buildMs: number;
+  testMs: number;
+  otherMs: number;
+  /** True when warmFrom copied caches into the worktree, false when it ran cold, null without worktree isolation. */
+  warm: boolean | null;
+}

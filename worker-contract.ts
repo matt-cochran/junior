@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync } from 'node:fs';
+import { validateMachineConfig } from './admission.ts';
 import { contractLint } from './contract-lint.ts';
 import { resolve, join, relative, isAbsolute, sep } from 'node:path';
 import { validateIsolationSetup } from './isolation.ts';
@@ -30,7 +31,7 @@ export const TASK_FIELDS = [
  'externalContextConsent','externalProviderConsent','approveExternalContext','externalContextAuthorization','externalContextApproved','externalConsent','consentExternalContext',
  'readScope','budget','scopeExpansion','feature','matrixContextMax',
  'execution','deadlineMs','quietMs','toolTimeoutMs','heartbeatMs','checkTimeoutMs','checkReserveMs','maxOutputBytes','continuations','isolationSetup',
- 'commandPolicy',
+ 'commandPolicy','machine',
 ] as const;
 
 /** Every field a single check object may carry. `cwd` is optional and defaults
@@ -576,6 +577,7 @@ function validateRunFields(t:any):void {
  if (t.workflow !== undefined && !['recon','test_first','checks_first','fmeca','evaluate','discover','investigate','prepare','qa','auto'].includes(t.workflow)) throw Error('Invalid workflow (expected recon, test_first, checks_first, fmeca, evaluate, discover, investigate, prepare, qa or auto)');
  if (t.isolation !== undefined && t.isolation !== 'none' && t.isolation !== 'worktree') throw Error('Invalid isolation (expected none or worktree)');
  if (t.isolationSetup !== undefined) validateIsolationSetup(t.isolationSetup);
+ if (t.machine !== undefined) validateMachineConfig(t.machine);
  if (t.commandPolicy !== undefined) parseCommandPolicy(t.commandPolicy, t.cwd);
 }
 

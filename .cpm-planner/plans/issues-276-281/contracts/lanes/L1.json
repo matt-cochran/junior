@@ -1,0 +1,81 @@
+{
+ "id": "L1",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase1.md section 143-161 (lane L1) completely and to production grade: junior validate / plan check lint: CHECK_UNFILTERED (whole test project/suite with no filter while owned files touch few test classes, with the suggested filtered command) and CONTRACT_OVER_BUDGET (changed-line estimate from owned files and past receipts' tokens-per-changed-line vs budget, suggests a code/test split); warn, refuse under jev.mode enforce",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "junior validate warns CHECK_UNFILTERED for an unfiltered whole test project check when owned files touch few test classes, with a suggested filtered command",
+  "junior validate warns CONTRACT_OVER_BUDGET when the changed-line estimate exceeds the budget, suggesting a code/test split",
+  "both refuse under jev.mode enforce"
+ ],
+ "constraints": [
+  "Only modify contract-lint.ts, contract-lint.test.ts, plan-junior.ts, plan-junior.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 143-161; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "contract-lint.test.ts",
+    "plan-junior.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "contract-lint.ts",
+   "contract-lint.test.ts",
+   "plan-junior.ts",
+   "plan-junior.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 143,
+   "end": 161
+  },
+  {
+   "path": "contract-lint.ts",
+   "start": 1,
+   "end": 30
+  },
+  {
+   "path": "worker-contract.ts",
+   "start": 636,
+   "end": 690
+  },
+  {
+   "path": "runtime-settings.ts",
+   "start": 150,
+   "end": 175
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "L1"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

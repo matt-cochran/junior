@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { warmStart, type WarmStartResult } from './warm-start.ts';
+import type { AdmissionWait } from './admission.ts';
 import { resolve, join } from 'node:path';
 import type { PolicyEvent } from './policy-events.ts';
 import { loadHopContext } from './hop-context.ts';
@@ -40,6 +42,12 @@ export interface RunState {
  clock:Clock;
  /** #281: typed policy events recorded by guards during the run (see policy-events.ts). */
  policyEvents?:PolicyEvent[];
+ /** #278: what warmFrom copied into the worktree (W1). */
+ warmStart?:WarmStartResult;
+ /** #277: every admission wait of the run, worker and checks (M2). */
+ admissionWaits?:AdmissionWait[];
+ /** #277: set when a worker or check could not be admitted in time; the run ends admission_timeout (M2). */
+ admissionTimeout?:{ kind:'worker'|'check'; waitedMs:number; wait:AdmissionWait|null; checkIndex?:number };
  // phase outputs are added as optional fields: prompt, receipt, streamResult, checks, workerError, status
  prompt?:string; receipt?:any; streamResult?:any; checks?:any[]; workerError?:string; status?:string;
  release?:()=>void;
@@ -437,6 +445,8 @@ function provisionWorktree(state:RunState, c:PreflightCtx):any {
   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, c.executionCwd, dir, { deadlineAt:c.deadlineAt, checkTimeoutMs:settings.checkTimeoutMs, commandPolicy, clock:runClock(state) });
   if (!provisioned.ok) return isolationSetupFailed(state, c, `isolationSetup failed: ${provisioned.error}`);
   if (provisioned.excludePatterns.length) ensureLocalExcludes(c.executionCwd, provisioned.excludePatterns);
+  const warmFrom=(rawSetup as IsolationSetup).warmFrom;
+  if (warmFrom) state.warmStart=warmStart(warmFrom, { sourceCwd, worktree:c.executionCwd, deadlineAt:c.deadlineAt, clock:runClock(state) });
  }
  return undefined;
 }

@@ -1,0 +1,86 @@
+{
+ "id": "DOC2",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 212-220 (lane DOC2) completely and to production grade: User docs for phase 2: machine admission and pools, warmFrom, evidence identity and junior land, review-queue aging, doctor warnings",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "checks_first",
+ "acceptance": [
+  "docs/runtime.md documents admission, warm start (anchor warm-start), evidence identity, junior land, the review queue and the doctor warnings",
+  "docs/contracts.md documents the machine contract field and isolationSetup.warmFrom"
+ ],
+ "constraints": [
+  "Only modify docs/runtime.md, docs/contracts.md",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 212-220; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "git",
+   "args": [
+    "diff",
+    "--check",
+    "--",
+    "docs/runtime.md",
+    "docs/contracts.md"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "docs/runtime.md",
+   "docs/contracts.md"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 212,
+   "end": 220
+  },
+  {
+   "path": "admission.ts",
+   "start": 1,
+   "end": 140
+  },
+  {
+   "path": "warm-start.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "review-queue.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "worker-receipt.ts",
+   "start": 290,
+   "end": 330
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "DOC2"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

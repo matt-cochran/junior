@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { checkIdentity, classifyCheck } from './evidence-identity.ts';
 import { join } from 'node:path';
 import { executeCheck, spawnChildDetached } from './runtime.ts';
 import { resolveCheckCwd, resolveCommandPolicy } from './worker-contract.ts';
@@ -74,13 +75,16 @@ export async function runChecks(state:RunState):Promise<RunState> {
     continue;
    }
    const checkCwd=resolved.cwd!;
+   const checkStartedAt=runClock(state).now();
    const r=await executeCheck({ spawnChild:spawnChildDetached, command:c.command, args:c.args, cwd:checkCwd,
     timeoutMs:timeout, deadlineAt, signal, maxOutputBytes:deps.maxOutputBytes, heartbeat, clock:runClock(state) });
    writeFileSync(join(dir,`check-${i}.log`),`${r.stdout || ''}\n${r.stderr || ''}`);
    checks.push({...c,cwd:checkCwd,timeoutMs:timeout,placement:decision.placement,exitCode:r.exitCode,
     error:stale ? STALE_EVIDENCE_ERROR : r.error,
     ...(stale ? {staleEvidence:true} : {}),
-    timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated});
+    timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated,
+    phase:classifyCheck(argv), durationMs:runClock(state).now()-checkStartedAt,
+    identity:checkIdentity({cwd:executionCwd, check:c})});
    if (isBuildCommand(argv)) {
     lastBuild = r.exitCode === 0 && !r.error && !r.timedOut && !r.interrupted ? 'ok' : 'failed';
    }
