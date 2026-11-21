@@ -22,6 +22,7 @@ import {
   type AdrRule,
 } from './adr.ts';
 import { loadAllAdrs } from './adr-foreign.ts';
+import { mustJudge, type MustJudgeReason } from './adr-retrieval.ts';
 import type { AdrConfig, AdrGate } from './adr-config.ts';
 import {
   activeDecision,
@@ -76,9 +77,13 @@ export interface AdrGateResult {
   findings: AdrGateFinding[];
   checked: number;
   skipped: string[];
+  /** #276: whether the checked rows could tell conforming from contradicting subjects apart. */
+  discrimination?: {checked: number; uncertain: number; ratio: number; noDiscrimination: boolean};
   /** ADR 0018 R9: checked nothing while at least one accepted ADR was skipped. */
   inconclusive?: boolean;
   inconclusiveReason?: string;
+  /** #276: ADRs judged because retrieval required it, with the reason (cited, scope, topic). */
+  retrieved?: {adrId: string; reason: MustJudgeReason}[];
 }
 
 export interface RunAdrGateOptions {
@@ -348,6 +353,13 @@ async function checkRule(run: GateRun, adr: Adr, rule: GateRule, subjects: GateS
   return checked;
 }
 
+const DEFAULT_MIN_DISCRIMINATION_CELLS = 10;
+const DEFAULT_MAX_UNCERTAIN_RATIO = 0.9;
+
+function noDiscriminationReason(checked: number, uncertain: number, ratio: number, maxRatio: number): string {
+  return `NO_DISCRIMINATION: ${uncertain} of ${checked} checked cells were uncertain (${Math.round(ratio * 100)}%, at or above the ${maxRatio} maximum); the gate cannot tell conforming rows from contradictions, so it cannot pass.`;
+}
+
 function inconclusiveReasonFor(adrs: Adr[], skippedSet: Set<string>, inconclusive: boolean): string | undefined {
   const unscoped = adrs.filter((adr) => skippedSet.has(adr.id) && adr.appliesTo.length === 0).length;
   return inconclusive
@@ -377,9 +389,22 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
   // File-less subjects are pre-filtered for relevance once each (R3).
   const irrelevantFor = await irrelevanceMap(opts, adrs);
 
+  const retrieved: {adrId: string; reason: MustJudgeReason}[] = [];
   for (const adr of adrs) {
-    const subjects = inScopeSubjects(adr, opts.subjects, skippedSet)
-      .filter((subject) => !irrelevantFor.get(subject.target)?.has(adr.id));
+    // #276: an ADR retrieval requires (cited, path-scoped, on-topic) is judged
+    // for that subject even when scope or the relevance filter would drop it.
+    const forced = new Map<string, MustJudgeReason>();
+    for (const subject of opts.subjects) {
+      const reason = mustJudge(adr, subject);
+      if (reason) forced.set(subject.target, reason);
+    }
+    const scopedSkips = new Set<string>();
+    const subjects = opts.subjects.filter((subject) =>
+      forced.has(subject.target) ||
+      (inScopeSubjects(adr, [subject], scopedSkips).length > 0 && !irrelevantFor.get(subject.target)?.has(adr.id)));
+    if (forced.size > 0) retrieved.push({adrId: adr.id, reason: [...forced.values()][0]});
+    // Same as before for unforced subjects: any out-of-scope subject marks the ADR skipped.
+    if (scopedSkips.size > 0) skippedSet.add(adr.id);
     if (subjects.length === 0) {
       if ([...irrelevantFor.values()].some((set) => set.has(adr.id))) skippedSet.add(adr.id);
       continue;
@@ -394,8 +419,21 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
 
   // ADR 0018 R9: an implementation check that judged nothing because every
   // accepted ADR was skipped is inconclusive, not clean.
-  const inconclusive = checked === 0 && skippedSet.size > 0;
-  const inconclusiveReason = inconclusiveReasonFor(adrs, skippedSet, inconclusive);
+  const skippedInconclusive = checked === 0 && skippedSet.size > 0;
+  // #276: a gate that mostly answers "uncertain" has not discriminated between
+  // conforming and contradicting subjects, so its clean-looking result is
+  // inconclusive. Any contradiction keeps the result decisive, as before.
+  const uncertain = findings.filter((finding) => finding.verdict === 'uncertain').length;
+  const ratio = checked === 0 ? 0 : uncertain / checked;
+  const minCells = opts.config.minDiscriminationCells ?? DEFAULT_MIN_DISCRIMINATION_CELLS;
+  const maxRatio = opts.config.maxUncertainRatio ?? DEFAULT_MAX_UNCERTAIN_RATIO;
+  const decisive = findings.some((finding) => finding.verdict === 'contradicts');
+  const noDiscrimination = checked > 0 && !decisive && checked >= minCells && ratio >= maxRatio;
+  const discrimination = {checked, uncertain, ratio, noDiscrimination};
+  const inconclusive = skippedInconclusive || noDiscrimination;
+  const inconclusiveReason = noDiscrimination
+    ? noDiscriminationReason(checked, uncertain, ratio, maxRatio)
+    : inconclusiveReasonFor(adrs, skippedSet, skippedInconclusive);
 
   return {
     gate: opts.config.gate,
@@ -405,8 +443,10 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     findings,
     checked,
     skipped: [...skippedSet],
+    discrimination,
     inconclusive,
     ...(inconclusiveReason !== undefined ? {inconclusiveReason} : {}),
+    ...(retrieved.length > 0 ? {retrieved} : {}),
   };
 }
 
@@ -493,6 +533,12 @@ export function renderGateMarkdown(result: AdrGateResult): string {
   for (const finding of result.findings) {
     lines.push(
       `| ${cell(`${finding.adrId}/${finding.ruleId}`)} | ${cell(finding.target)} | ${cell(finding.verdict)} | ${cell(finding.probability)} | ${cell(decisionState(finding))} |`,
+    );
+  }
+  if (result.discrimination?.noDiscrimination) {
+    lines.push(
+      '',
+      `NO_DISCRIMINATION: ${result.discrimination.uncertain} of ${result.discrimination.checked} checked cells were uncertain (${Math.round(result.discrimination.ratio * 100)}%).`,
     );
   }
   lines.push(

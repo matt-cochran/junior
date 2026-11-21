@@ -20,6 +20,7 @@ import {
   createAdr,
   lintAdrs,
   loadAdrs,
+  matchesAppliesTo,
   parseAdr,
 } from './adr.ts';
 import type { GateClassifier } from './worker.ts';
@@ -187,6 +188,32 @@ test('adr new writes a proposed template that parses with the requested title', 
 test('adrDimension publishes accepted ADR rules as adr: members', () => {
   const dimension = adrDimension([parseAdr(madr())]);
   assert.deepEqual(dimension.members.map((member) => member.id), ['adr:ADR-0001/R1']);
+});
+
+// --- applies_to scoping -----------------------------------------------------
+
+test('matchesAppliesTo matches a file directly below a double-star glob', () => {
+  assert.equal(matchesAppliesTo('tools/_shared/**', 'tools/_shared/a.ts'), true);
+});
+
+test('matchesAppliesTo matches a file in a nested directory below a double-star glob', () => {
+  assert.equal(matchesAppliesTo('tools/_shared/**', 'tools/_shared/x/y.ts'), true);
+});
+
+test('matchesAppliesTo matches zero segments for an infix double-star glob', () => {
+  assert.equal(matchesAppliesTo('tools/**/hook.ts', 'tools/hook.ts'), true);
+});
+
+test('matchesAppliesTo matches everything below a directory entry', () => {
+  assert.equal(matchesAppliesTo('tools/_shared/', 'tools/_shared/x/y.ts'), true);
+});
+
+test('matchesAppliesTo normalizes a dot-slash glob and a backslash path', () => {
+  assert.equal(matchesAppliesTo('./tools/_shared/**', 'tools\\_shared\\a.ts'), true);
+});
+
+test('matchesAppliesTo rejects a path outside the double-star glob', () => {
+  assert.equal(matchesAppliesTo('tools/_shared/**', 'tools/private/a.ts'), false);
 });
 
 // --- adr check scoping ------------------------------------------------------

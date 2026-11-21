@@ -372,3 +372,29 @@ test('proposeAdrConfig omits filePattern for default NNNN records', (t) => {
   touch(root, 'docs/adr/0001-store-state.md', JUNIOR_ADR);
   assert.equal(proposeAdrConfig(root)?.filePattern, undefined);
 });
+
+// --- NO_DISCRIMINATION thresholds ------------------------------------------
+
+test('readAdrConfig keeps minDiscriminationCells', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ minDiscriminationCells: 25 }) }));
+  assert.equal(readAdrConfig(root)?.minDiscriminationCells, 25);
+});
+
+test('readAdrConfig keeps maxUncertainRatio', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ maxUncertainRatio: 0.8 }) }));
+  assert.equal(readAdrConfig(root)?.maxUncertainRatio, 0.8);
+});
+
+test('readAdrConfig rejects a negative minDiscriminationCells and names the field', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ minDiscriminationCells: -1 }) }));
+  assert.throws(() => readAdrConfig(root), /minDiscriminationCells/);
+});
+
+test('readAdrConfig rejects maxUncertainRatio above one and names the field', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ maxUncertainRatio: 1.1 }) }));
+  assert.throws(() => readAdrConfig(root), /maxUncertainRatio/);
+});

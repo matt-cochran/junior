@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync } from 'node:fs';
+import { contractLint } from './contract-lint.ts';
 import { resolve, join, relative, isAbsolute, sep } from 'node:path';
 import { validateIsolationSetup } from './isolation.ts';
 import { parseCommandPolicy, type CommandPolicy } from './command-policy.ts';
@@ -633,6 +634,11 @@ function validateScopeAndJev(t:any):void {
  }
 }
 
+/** #279: past receipts under the contract's checkout give tokens per changed line. */
+function lintOptions(t:any):{deliveryDir?:string} {
+ return typeof t?.cwd === 'string' && t.cwd.trim() ? { deliveryDir: join(t.cwd, '.delivery') } : {};
+}
+
 export function validate(t: any) {
  validateIdentityAndAcceptance(t);
  validateAssumptionsAndChecks(t);
@@ -641,6 +647,9 @@ export function validate(t: any) {
  validateRoutingAndContextFields(t);
  validateScopeAndJev(t);
  for (const k of Object.keys(t)) if (!(TASK_FIELDS as readonly string[]).includes(k)) throw Error(`Unknown contract field: ${k}`);
+ // #279: under jev.mode enforce a contract-shape error refuses the contract.
+ const lintErrors = contractLint(t, lintOptions(t)).filter((f) => f.severity === 'error');
+ if (lintErrors.length > 0) throw Error(lintErrors.map((f) => `${f.code}: ${f.message}${f.suggestion ? ` (${f.suggestion})` : ''}`).join('; '));
  return t;
 }
 
@@ -665,6 +674,7 @@ export function contractWarnings(t:any):string[] {
  if (typeof maxToolOutputBytes === 'number' && maxToolOutputBytes < MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES) {
   warnings.push(`budget.maxToolOutputBytes is ${maxToolOutputBytes}; it is a cumulative per-run cap, not a per-call cap. Consider at least ${MIN_RECOMMENDED_MAX_TOOL_OUTPUT_BYTES}.`);
  }
+ for (const f of contractLint(t, lintOptions(t))) if (f.severity === 'warning') warnings.push(`${f.code}: ${f.message}${f.suggestion ? ` (${f.suggestion})` : ''}`);
  for (const field of shadowedExecutionFields(t)) {
   warnings.push(`${field} is set both at top level and in execution; execution.${field} (${t.execution[field]}) wins over the top-level value (${t[field]})`);
  }

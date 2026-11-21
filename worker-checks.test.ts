@@ -192,3 +192,203 @@ test('an invalid commandPolicy fails contract validation', (t) => {
   };
   assert.throws(() => validate(contract), /commandPolicy\.enforce/);
 });
+
+// --- default policy guards (#281) -------------------------------------------
+
+/** A disposable executable with the given shell body, named for the tool the
+ * guard classifies by basename. */
+const fakeTool = (dir: string, name: string, body: string): string => {
+  const path = join(dir, name);
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return path;
+};
+
+const failedBuild = (dir: string): any => ({ command: fakeTool(dir, 'tsc', 'exit 1') });
+
+const passingBuild = (dir: string): any => ({ command: fakeTool(dir, 'tsc', 'exit 0') });
+
+const noBuildTest = (dir: string, marker: string): any => ({
+  command: fakeTool(dir, 'dotnet', `printf ran > '${marker}'`),
+  args: ['test', '--no-build'],
+});
+
+test('a no-build test after a failed build is refused with E_POLICY_GUARD', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'guarded-marker.txt');
+  const state = checkState(dir, [failedBuild(dir), noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(state.checks[1].refused, 'E_POLICY_GUARD');
+});
+
+test('a refused no-build test after a failed build is not spawned', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'guarded-marker.txt');
+  const state = checkState(dir, [failedBuild(dir), noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(existsSync(marker), false);
+});
+
+test('a refused no-build test records no_build_after_failed_build on the receipt', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'guarded-marker.txt');
+  const state = checkState(dir, [failedBuild(dir), noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].kind, 'no_build_after_failed_build');
+});
+
+test('a refused no-build test records its check index on the event', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'guarded-marker.txt');
+  const state = checkState(dir, [failedBuild(dir), noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].checkIndex, 1);
+});
+
+test('a no-build test without a build in the run records no_build_without_build', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'guarded-marker.txt');
+  const state = checkState(dir, [noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].kind, 'no_build_without_build');
+});
+
+test('a successful build permits a no-build test in the same run', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'permitted-marker.txt');
+  const state = checkState(dir, [passingBuild(dir), noBuildTest(dir, marker)]);
+  await runChecks(state);
+  assert.equal(existsSync(marker), true);
+});
+
+test('noBuild off permits a no-build test after a failed build', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'off-marker.txt');
+  const checks = [failedBuild(dir), noBuildTest(dir, marker)];
+  const state = checkState(dir, checks, {
+    t: { checks, commandPolicy: { guards: { noBuild: 'off' } } },
+  });
+  await runChecks(state);
+  assert.equal(existsSync(marker), true);
+});
+
+test('noBuild stale marks a no-build check as stale evidence', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'stale-marker.txt');
+  const checks = [failedBuild(dir), noBuildTest(dir, marker)];
+  const state = checkState(dir, checks, {
+    t: { checks, commandPolicy: { guards: { noBuild: 'stale' } } },
+  });
+  await runChecks(state);
+  assert.equal(state.checks[1].staleEvidence, true);
+});
+
+test('a stale no-build check still runs', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'stale-run-marker.txt');
+  const checks = [failedBuild(dir), noBuildTest(dir, marker)];
+  const state = checkState(dir, checks, {
+    t: { checks, commandPolicy: { guards: { noBuild: 'stale' } } },
+  });
+  await runChecks(state);
+  assert.equal(existsSync(marker), true);
+});
+
+test('a stale no-build check carries E_STALE_EVIDENCE', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'stale-error-marker.txt');
+  const checks = [failedBuild(dir), noBuildTest(dir, marker)];
+  const state = checkState(dir, checks, {
+    t: { checks, commandPolicy: { guards: { noBuild: 'stale' } } },
+  });
+  await runChecks(state);
+  assert.equal(state.checks[1].error, 'E_STALE_EVIDENCE');
+});
+
+test('a stale no-build decision is recorded as flagged_stale', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'stale-event-marker.txt');
+  const checks = [failedBuild(dir), noBuildTest(dir, marker)];
+  const state = checkState(dir, checks, {
+    t: { checks, commandPolicy: { guards: { noBuild: 'stale' } } },
+  });
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].action, 'flagged_stale');
+});
+
+test('a check running git commit --no-verify is refused by default', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'git', 'exit 0'), args: ['commit', '--no-verify'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a refused hook-bypass check records a hook_bypass event', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'git', 'exit 0'), args: ['commit', '--no-verify'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].kind, 'hook_bypass');
+});
+
+test('a refused hook-bypass check records source check', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'git', 'exit 0'), args: ['commit', '--no-verify'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.policyEvents[0].source, 'check');
+});
+
+test('hookBypass off permits a git commit --no-verify check', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'hook-off-marker.txt');
+  const check = {
+    command: fakeTool(dir, 'git', `printf ran > '${marker}'`),
+    args: ['commit', '--no-verify'],
+  };
+  const state = checkState(dir, [check], {
+    t: { checks: [check], commandPolicy: { guards: { hookBypass: 'off' } } },
+  });
+  await runChecks(state);
+  assert.equal(existsSync(marker), true);
+});
+
+// --- short flags, opaque and nested shells ----------------------------------
+
+test('a check running bash -c with --no-verify is refused', async (t) => {
+  const dir = arena(t);
+  const check = {
+    command: fakeTool(dir, 'bash', 'exit 0'),
+    args: ['-c', 'git commit --no-verify'],
+  };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check running xargs git with --no-verify is refused', async (t) => {
+  const dir = arena(t);
+  const check = {
+    command: fakeTool(dir, 'xargs', 'exit 0'),
+    args: ['git', 'commit', '--no-verify'],
+  };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check running git commit -n is refused', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'git', 'exit 0'), args: ['commit', '-n'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_POLICY_GUARD');
+});
+
+test('a check with a plain quoted mention is not refused', async (t) => {
+  const dir = arena(t);
+  const check = { command: fakeTool(dir, 'echo', 'exit 0'), args: ['git commit --no-verify'] };
+  const state = checkState(dir, [check]);
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, undefined);
+});

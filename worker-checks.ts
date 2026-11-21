@@ -2,7 +2,9 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { executeCheck, spawnChildDetached } from './runtime.ts';
 import { resolveCheckCwd, resolveCommandPolicy } from './worker-contract.ts';
-import { COMMAND_PLACEMENT_ERROR, decideCommand, type CommandDecision } from './command-policy.ts';
+import { COMMAND_PLACEMENT_ERROR, DEFAULT_COMMAND_GUARDS, decideCommand, type CommandDecision } from './command-policy.ts';
+import { POLICY_GUARD_ERROR, STALE_EVIDENCE_ERROR, guardCommand, isBuildCommand } from './command-guards.ts';
+import { recordPolicyEvent } from './policy-events.ts';
 import { remainingMs, runClock, type RunState } from './worker-preflight.ts';
 
 /** A refusal message names the reason, the matching rule and the wrapper so a
@@ -35,20 +37,36 @@ export async function runChecks(state:RunState):Promise<RunState> {
  const checksEligible = !streamResult?.outputTruncated && (stopped ? workerDeadlineStopped : (workerStatus === 0 && receiptOk));
  if (checksEligible) {
   const policy=resolveCommandPolicy(t, sourceCwd);
+  const guards=policy?.guards ?? DEFAULT_COMMAND_GUARDS;
+  let lastBuild:'ok'|'failed'|'none'='none';
   for (let i=0;i<t.checks.length;i++) {
    const rem=remainingMs(state);
    if (rem <= 0) { deadlineDuringChecks=true; break; }
    const c=t.checks[i];
    emit(`check ${i+1}/${t.checks.length}`);
    const timeout=Math.max(1, Math.min(settings.checkTimeoutMs, settings.toolTimeoutMs, rem));
-   const decision=decideCommand(policy, [c.command, ...(Array.isArray(c.args) ? c.args : [])]);
+   const argv=[c.command, ...(Array.isArray(c.args) ? c.args : [])];
+   const decision=decideCommand(policy, argv);
    if (decision.decision === 'refuse') {
+    if (isBuildCommand(argv)) lastBuild='failed';
     const error=placementError(decision);
     writeFileSync(join(dir,`check-${i}.log`),`${error}\n`);
     checks.push({...c,timeoutMs:timeout,placement:decision.placement,exitCode:null,refused:COMMAND_PLACEMENT_ERROR,
      error,timedOut:false,interrupted:false,outputTruncated:false});
     continue;
    }
+   const guard=guardCommand(argv, {source:'check', lastBuild, guards});
+   if (guard?.action === 'refuse') {
+    recordPolicyEvent(state, {...guard.event, checkIndex:i});
+    if (isBuildCommand(argv)) lastBuild='failed';
+    const error=guard.event.reason;
+    writeFileSync(join(dir,`check-${i}.log`),`${error}\n`);
+    checks.push({...c,timeoutMs:timeout,placement:decision.placement,exitCode:null,refused:POLICY_GUARD_ERROR,
+     error,timedOut:false,interrupted:false,outputTruncated:false});
+    continue;
+   }
+   const stale=guard?.action === 'flag_stale';
+   if (stale) recordPolicyEvent(state, {...guard.event, checkIndex:i});
    const resolved=resolveCheckCwd(c.cwd, sourceCwd, executionCwd);
    if (resolved.error) {
     writeFileSync(join(dir,`check-${i}.log`),`${resolved.error}\n`);
@@ -59,8 +77,13 @@ export async function runChecks(state:RunState):Promise<RunState> {
    const r=await executeCheck({ spawnChild:spawnChildDetached, command:c.command, args:c.args, cwd:checkCwd,
     timeoutMs:timeout, deadlineAt, signal, maxOutputBytes:deps.maxOutputBytes, heartbeat, clock:runClock(state) });
    writeFileSync(join(dir,`check-${i}.log`),`${r.stdout || ''}\n${r.stderr || ''}`);
-   checks.push({...c,cwd:checkCwd,timeoutMs:timeout,placement:decision.placement,exitCode:r.exitCode,error:r.error,
+   checks.push({...c,cwd:checkCwd,timeoutMs:timeout,placement:decision.placement,exitCode:r.exitCode,
+    error:stale ? STALE_EVIDENCE_ERROR : r.error,
+    ...(stale ? {staleEvidence:true} : {}),
     timedOut:r.timedOut,interrupted:r.interrupted,outputTruncated:r.outputTruncated});
+   if (isBuildCommand(argv)) {
+    lastBuild = r.exitCode === 0 && !r.error && !r.timedOut && !r.interrupted ? 'ok' : 'failed';
+   }
    if (r.interrupted || signal?.aborted) { interruptedDuringChecks=true; break; }
    if (r.deadlineExceeded) { deadlineDuringChecks=true; break; }
   }

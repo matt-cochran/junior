@@ -774,3 +774,57 @@ test('parseCommandManifest rejects a devbox path without a slash', () => {
     /path.*contain/i,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Default command guards (#281)
+// ---------------------------------------------------------------------------
+
+test('parseCommandPolicy resolves default guards when commandPolicy has none', (t) => {
+  const policy = parseCommandPolicy(
+    { enforce: false, rules: [{ match: ['git'], placement: 'local' }] },
+    tempDir(t),
+  );
+  assert.deepEqual(policy?.guards, { noBuild: 'refuse', hookBypass: 'refuse' });
+});
+
+test('parseCommandPolicy accepts a noBuild guard override', (t) => {
+  const policy = parseCommandPolicy(
+    { enforce: false, rules: [{ match: ['git'], placement: 'local' }], guards: { noBuild: 'stale' } },
+    tempDir(t),
+  );
+  assert.equal(policy?.guards?.noBuild, 'stale');
+});
+
+test('parseCommandPolicy fills the default hookBypass beside a noBuild override', (t) => {
+  const policy = parseCommandPolicy(
+    { enforce: false, rules: [{ match: ['git'], placement: 'local' }], guards: { noBuild: 'off' } },
+    tempDir(t),
+  );
+  assert.equal(policy?.guards?.hookBypass, 'refuse');
+});
+
+test('parseCommandPolicy accepts a guards-only policy', (t) => {
+  const policy = parseCommandPolicy({ guards: { hookBypass: 'off' } }, tempDir(t));
+  assert.equal(policy?.guards?.hookBypass, 'off');
+});
+
+test('parseCommandPolicy rejects an unknown guards field', (t) => {
+  assert.throws(
+    () => parseCommandPolicy({ guards: { noBuild: 'off', nope: true } }, tempDir(t)),
+    /guards.*unknown field/i,
+  );
+});
+
+test('parseCommandPolicy rejects an unknown noBuild guard value', (t) => {
+  assert.throws(
+    () => parseCommandPolicy({ guards: { noBuild: 'ignore' } }, tempDir(t)),
+    /noBuild/i,
+  );
+});
+
+test('parseCommandPolicy rejects an unknown hookBypass guard value', (t) => {
+  assert.throws(
+    () => parseCommandPolicy({ guards: { hookBypass: 'stale' } }, tempDir(t)),
+    /hookBypass/i,
+  );
+});

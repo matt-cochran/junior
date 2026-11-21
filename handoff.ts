@@ -17,6 +17,7 @@ import { redactSecrets } from './pi-failure.ts';
 import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 import type { ScopeResult } from './scope-check.ts';
 import type { BudgetAccounting, PhaseAccounting } from './runtime.ts';
+import { compactPolicyEvents } from './policy-events.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -33,6 +34,8 @@ export type CompactHandoff = {
   /** Clarify detail: the contract part, its bounded excerpt, and the questions. */
   part?:{name:string; probability:number|null}; excerpt?:string; questions?:string[]} | null;
  id: string;
+ /** #281: typed policy events (counts by action and the kinds seen); absent when none. */
+ policyEvents?: NonNullable<ReturnType<typeof compactPolicyEvents>>;
  outcome: string;
  source: string;
  /** Requested source checkout (the task `cwd`), preserved even when execution
@@ -497,6 +500,7 @@ export function compactHandoff(result: any): CompactHandoff {
   id: String(r.id ?? 'unknown'),
   outcome: String(r.status ?? r.outcome ?? 'unknown'),
   attention: compactAttention(r),
+  ...(compactPolicyEvents(r.policyEvents) ? {policyEvents: compactPolicyEvents(r.policyEvents)!} : {}),
   source: r.simulated ? 'mock' : (r.receipt?.source ?? 'pi_message_end'),
   sourceCwd: r.sourceCwd ?? null,
   execution: {
