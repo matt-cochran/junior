@@ -1,0 +1,90 @@
+{
+ "id": "W1",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 96-119 (lane W1) completely and to production grade: isolationSetup.warmFrom copies (reflink when available, never symlink) build caches into the new worktree before checks; receipts record warm vs cold",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "warmFrom copies matching obj/ directories into the worktree and never creates a symlink",
+  "a missing warmFrom path leaves the run cold with a reason, never failing it",
+  "result.warmStart reports warm, method, files, bytes and durationMs",
+  "copied caches are excluded from change evidence",
+  "validateWarmFrom rejects unknown keys and absolute or escaping globs"
+ ],
+ "constraints": [
+  "Only modify warm-start.ts, warm-start.test.ts, worker-preflight.ts, worker-isolation.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 96-119; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "warm-start.test.ts",
+    "worker-isolation.test.ts",
+    "isolation.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "warm-start.ts",
+   "warm-start.test.ts",
+   "worker-preflight.ts",
+   "worker-isolation.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 96,
+   "end": 119
+  },
+  {
+   "path": "warm-start.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "isolation.ts",
+   "start": 136,
+   "end": 200
+  },
+  {
+   "path": "worker-preflight.ts",
+   "start": 420,
+   "end": 450
+  },
+  {
+   "path": "adr.ts",
+   "start": 1,
+   "end": 60
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "W1"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

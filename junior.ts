@@ -30,7 +30,7 @@ function usage(): string {
   '  handoff <task.json> [--mock] [--full]   run a task and print the compact handoff (default isolation=worktree; qa defaults to none)',
   '  qa      <task.json> [--mock] [--full]   run the report-only QA review workflow in place (fresh reviewer session)',
   '  run     <task.json> [--mock]            run a task with the compact-default isolation',
-  '  apply   <id|result.json> [--dry-run] [--force] [--no-link] | validate <task.json> | status <result.json> [--full]   apply a reviewed handoff, validate a contract or print a receipt',
+  '  apply   <id|result.json> [--dry-run] [--force] [--no-link] | validate <task.json> | status [<result.json>] [--full] | land <result.json|id>... --into <dir> [--compile <command...>] [--dry-run]   apply a reviewed handoff, validate, print a receipt or the review queue, or land reviewed lanes into an integration checkout',
   '  model status|list|upgrade ...; tools init|call|inspect ...; mcp register ...; matrix export --source code|tests|jevitate|cpm|fmeca; report-issue <tool> --title <t> [--file]; plan check <plan.json> [--jev] | contracts <plan.json> --out <dir>; routes [--json] [<query>] (which command for a job)',
   '  auth    set <provider> [--verify] | remove <provider>; auth consent [grant|remove|status] <provider> [--project <dir>]; doctor [--check-updates] [--online] [--harness <claude|cursor|codex>]   store a provider key; read-only readiness check',
   '  compact [--json] [--max-chars N] [--hop <hop.json>] [--capture] [--cursor]   print the session-start context block; --capture reads hook input on stdin; --cursor emits Cursor sessionStart JSON',
@@ -79,8 +79,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   help: 'Usage: junior apply <id|result.json> [--dry-run] [--force]' },
  validate: { flags: [], valueFlags: [], min: 1, max: 1,
   help: 'Usage: junior validate <task.json>' },
- status: { flags: ['--full', '--live'], valueFlags: [], min: 1, max: 1,
-  help: 'Usage: junior status <result.json|artifactDir> [--full] [--live]' },
+ status: { flags: ['--full', '--live'], valueFlags: [], min: 0, max: 1,
+  help: 'Usage: junior status [<result.json|artifactDir>] [--full] [--live]' },
+ land: { flags: ['--dry-run'], valueFlags: ['--into', '--compile'], min: 1, max: Number.MAX_SAFE_INTEGER,
+  help: 'Usage: junior land <result.json|id>... --into <dir> [--compile <command...>] [--dry-run]\n--compile takes every following argument up to a literal "--" or the end; lane ids after "--" are lanes.' },
  doctor: { flags: ['--check-updates', '--online'], valueFlags: ['--harness'], min: 0, max: 0,
   help: 'Usage: junior doctor [--check-updates] [--online] [--harness claude|cursor|codex]' },
  compact: { flags: ['--json', '--capture', '--cursor'], valueFlags: ['--max-chars', '--hop'], min: 0, max: 0,
@@ -158,6 +160,23 @@ function parseCommand(command: string, spec: CommandSpec, args: string[]): Parse
    const eq = arg.indexOf('=');
    const name = eq === -1 ? arg : arg.slice(0, eq);
    const inline = eq === -1 ? undefined : arg.slice(eq + 1);
+   // `--compile` carries a whole argv. It runs up to a literal `--` or the end
+   // of the arguments, so command flags such as `-e` belong to the compile
+   // command; a lane after `--` stays a lane. Tokens are JSON-encoded to keep
+   // their boundaries.
+   if (command === 'land' && name === '--compile') {
+    const compileArgv: string[] = [];
+    if (inline !== undefined) {
+     if (inline === '') throw Error('Option --compile requires a value');
+     compileArgv.push(inline);
+    }
+    while (i + 1 < args.length && args[i + 1] !== '--') compileArgv.push(args[++i]);
+    if (compileArgv.length === 0) throw Error('Option --compile requires a value');
+    const encoded = JSON.stringify(compileArgv);
+    values[name] = encoded;
+    (multi[name] ??= []).push(encoded);
+    continue;
+   }
    if (spec.flags.includes(name)) {
     if (inline !== undefined) throw Error(`Option ${name} does not take a value`);
     flags.add(name);
@@ -580,8 +599,24 @@ async function validateCommand({ parsed }: CommandContext): Promise<void> {
  console.log(JSON.stringify({ valid: true, id: t.id, warnings: contractWarnings(t) }, null, 2));
 }
 
+async function readReviewQueueConfig(cwd: string): Promise<any | undefined> {
+ const { readDeliveryConfig } = await import('./land.ts');
+ const config = readDeliveryConfig(cwd).reviewQueue;
+ if (config === undefined) return undefined;
+ const { validateReviewQueueConfig } = await import('./review-queue.ts');
+ validateReviewQueueConfig(config);
+ return config;
+}
+
 async function statusCommand({ parsed }: CommandContext): Promise<void> {
  const path = parsed.files[0];
+ if (!path) {
+  const { reviewQueue } = await import('./review-queue.ts');
+  const config = await readReviewQueueConfig(process.cwd());
+  const report = reviewQueue({ cwd: process.cwd(), ...(config !== undefined ? { config } : {}) });
+  console.log(JSON.stringify(report, null, 2));
+  return;
+ }
  if (parsed.flags.has('--live')) {
   const snapshot = readRuntimeSnapshot(path);
   console.log(JSON.stringify(snapshot, null, 2));
@@ -594,6 +629,38 @@ async function statusCommand({ parsed }: CommandContext): Promise<void> {
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   console.log(JSON.stringify(compactHandoff(raw), null, 2));
  }
+ const { reviewQueue } = await import('./review-queue.ts');
+ const config = await readReviewQueueConfig(process.cwd());
+ const queue = reviewQueue({ cwd: process.cwd(), ...(config !== undefined ? { config } : {}) });
+ if (queue.aging.length > 0) {
+  console.error('Aged reviews:');
+  for (const review of queue.aging) console.error(`- ${review.id} (${review.ageMinutes}m): ${review.next}`);
+ }
+}
+
+async function landCommand({ parsed }: CommandContext): Promise<void> {
+ const into = parsed.values['--into'] ?? '';
+ const rawCompile = parsed.values['--compile'];
+ let compile: string[] | undefined;
+ if (rawCompile !== undefined) {
+  try {
+   const parsedCompile = JSON.parse(rawCompile);
+   compile = Array.isArray(parsedCompile) ? parsedCompile.map(String) : [String(parsedCompile)];
+  } catch {
+   compile = [rawCompile];
+  }
+  if (compile.length === 0) throw Error('Option --compile requires a value');
+ }
+ const { land } = await import('./land.ts');
+ const report = await land({
+  cwd: process.cwd(),
+  into,
+  lanes: parsed.files,
+  ...(compile !== undefined ? { compile } : {}),
+  dryRun: parsed.flags.has('--dry-run'),
+ });
+ console.log(JSON.stringify(report, null, 2));
+ if (!report.ok) process.exitCode = 1;
 }
 
 async function applyCommand({ parsed }: CommandContext): Promise<void> {
@@ -678,6 +745,7 @@ const COMMAND_HANDLERS = new Map<string, CommandHandler>([
  ['update', initCommand],
  ['validate', validateCommand],
  ['status', statusCommand],
+ ['land', landCommand],
  ['apply', applyCommand],
  ['run', runTaskCommand],
  ['handoff', runTaskCommand],

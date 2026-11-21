@@ -11,7 +11,9 @@
 // ---------------------------------------------------------------------------
 
 import { resolve, relative, isAbsolute, delimiter } from 'node:path';
-import { COMMAND_PLACEMENT_ERROR, decideCommand, parseCommandPolicy } from './command-policy.ts';
+import { COMMAND_PLACEMENT_ERROR, decideCommand, parseCommandPolicy, tokenizeCommand } from './command-policy.ts';
+import { POLICY_GUARD_ERROR, guardCommand, guardRawCommand } from './command-guards.ts';
+import type { PolicyEvent } from './policy-events.ts';
 
 /** Everything `guardBashInput` may read from the environment. */
 export type GuardEnv = Record<string, string | undefined>;
@@ -134,6 +136,19 @@ function commandPlacementRefusal(command:string, decision:ReturnType<typeof deci
  return `printf '%s\\n' '${quoted}' >&2; exit 126`;
 }
 
+/** A stateless default-guard refusal: it prints the typed event and never runs
+ * the model's original command. */
+function commandGuardRefusal(command:string, event:PolicyEvent):string {
+ const payload:Record<string, unknown>={
+  error:POLICY_GUARD_ERROR,
+  argv:command,
+  kind:event.kind,
+  reason:event.reason,
+ };
+ const quoted=JSON.stringify(payload).replace(/'/g, `'\\''`);
+ return `printf '%s\\n' '${quoted}' >&2; exit 126`;
+}
+
 /** Rewrite a bash tool input in place: a command refused by the contract
  * command policy is replaced by a typed E_COMMAND_PLACEMENT refusal that exits
  * non-zero. Otherwise stdin comes from /dev/null, and when
@@ -148,6 +163,25 @@ export function guardBashInput<T>(input: T, env: GuardEnv | undefined = process.
  if (policy === 'invalid') {
   target.command=commandPlacementRefusal(target.command, { decision:'refuse', placement:'unknown' } as ReturnType<typeof decideCommand>);
   return input;
+ }
+ // Hook bypass is stateless and always applies to the worker's bash; no-build
+ // is not, because the worker's own bash is not contract evidence.
+ const guards={ noBuild:'off' as const, hookBypass:policy?.guards?.hookBypass ?? 'refuse' as const };
+ const tokenized=tokenizeCommand(target.command);
+ if (tokenized.opaque) {
+  const guard=guardRawCommand(target.command, { source:'worker_bash', lastBuild:'none', guards });
+  if (guard?.action === 'refuse') {
+   target.command=commandGuardRefusal(target.command, guard.event);
+   return input;
+  }
+ } else {
+  for (const segment of tokenized.segments) {
+   const guard=guardCommand(segment, { source:'worker_bash', lastBuild:'none', guards });
+   if (guard?.action === 'refuse') {
+    target.command=commandGuardRefusal(target.command, guard.event);
+    return input;
+   }
+  }
  }
  if (policy) {
   const decision=decideCommand(policy, target.command);

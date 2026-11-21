@@ -12,11 +12,13 @@
 // compact handoff never dumps one entry per emitted event.
 // ---------------------------------------------------------------------------
 
+import type { CheckPhase, CheckTiming } from './worker-receipt.ts';
 import { join } from 'node:path';
 import { redactSecrets } from './pi-failure.ts';
 import { CONFIDENCE_THRESHOLD, type ModelRoute, type ModelPolicyRecord } from './worker.ts';
 import type { ScopeResult } from './scope-check.ts';
 import type { BudgetAccounting, PhaseAccounting } from './runtime.ts';
+import { compactPolicyEvents } from './policy-events.ts';
 
 export type HandoffArtifacts = {
  result: string | null;
@@ -33,6 +35,8 @@ export type CompactHandoff = {
   /** Clarify detail: the contract part, its bounded excerpt, and the questions. */
   part?:{name:string; probability:number|null}; excerpt?:string; questions?:string[]} | null;
  id: string;
+ /** #281: typed policy events (counts by action and the kinds seen); absent when none. */
+ policyEvents?: NonNullable<ReturnType<typeof compactPolicyEvents>>;
  outcome: string;
  source: string;
  /** Requested source checkout (the task `cwd`), preserved even when execution
@@ -53,7 +57,11 @@ export type CompactHandoff = {
  /** Number of worker segments that ran (1 unless automatic continuation ran). */
  segments: number;
  changedFiles: string[];
- checks: { command: string; exitCode: number | null; passed: boolean; error?: string }[];
+ checks: { command: string; exitCode: number | null; passed: boolean; error?: string; phase?: CheckPhase; durationMs?: number }[];
+ /** #278: build vs test time and warm/cold worktree. */
+ timing?: CheckTiming;
+ /** #277: how long the run waited for admission, and why. */
+ admission?: { waitedMs: number; reasons: string[] };
  unresolved: string[];
  /** Streaming output accounting: raw versus retained bytes and the largest
   * tool results. Null when the result has no stream breakdown (mock/legacy). */
@@ -389,12 +397,22 @@ function compactPiIsolation(r: any): CompactHandoff['piIsolation'] {
  } : null;
 }
 
+/** #277: total admission wait and the distinct reasons, or undefined when the run never waited. */
+function compactAdmission(waits: any): { waitedMs: number; reasons: string[] } | undefined {
+ if (!Array.isArray(waits) || waits.length === 0) return undefined;
+ const waitedMs = waits.reduce((n: number, w: any) => n + (typeof w?.waitedMs === 'number' ? w.waitedMs : 0), 0);
+ const reasons = [...new Set(waits.map((w: any) => String(w?.reason ?? 'unknown')))] as string[];
+ return { waitedMs, reasons };
+}
+
 function compactChecks(r: any): CompactHandoff['checks'] {
  return (Array.isArray(r.checks) ? r.checks : []).map((c: any) => ({
   command: [c?.command, ...(Array.isArray(c?.args) ? c.args : [])].filter(Boolean).join(' '),
   exitCode: c?.exitCode ?? null,
   passed: c?.exitCode === 0 && !c?.error && !c?.timedOut && !c?.outputTruncated,
   ...(c?.error ? { error: String(c.error) } : {}),
+  ...(c?.phase ? { phase: c.phase } : {}),
+  ...(typeof c?.durationMs === 'number' ? { durationMs: c.durationMs } : {}),
  }));
 }
 
@@ -497,6 +515,9 @@ export function compactHandoff(result: any): CompactHandoff {
   id: String(r.id ?? 'unknown'),
   outcome: String(r.status ?? r.outcome ?? 'unknown'),
   attention: compactAttention(r),
+  ...(compactPolicyEvents(r.policyEvents) ? {policyEvents: compactPolicyEvents(r.policyEvents)!} : {}),
+  ...(r.timing ? {timing: r.timing} : {}),
+  ...(compactAdmission(r.admissionWaits) ? {admission: compactAdmission(r.admissionWaits)!} : {}),
   source: r.simulated ? 'mock' : (r.receipt?.source ?? 'pi_message_end'),
   sourceCwd: r.sourceCwd ?? null,
   execution: {

@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-21
+
+### Added
+
+- Machine-wide admission control across concurrent Junior runs. A worker or a
+  check takes a slot from a semaphore shared by every Junior process on the
+  machine (`~/.junior/admission`, or `$JUNIOR_STATE_DIR`) before it starts, and
+  nothing starts while available memory is below `machine.minAvailableMb`
+  (default 2,048) or swap-out is above `machine.maxSwapOutPerSec` (default
+  500 pages/s). `machine.pools` (for example `{"dotnet": {"match": ["dotnet"],
+  "limit": 2}}`) caps checks whose command matches. Configure `machine` in
+  `delivery.config.json` or on a contract; `JUNIOR_ADMISSION=off` or
+  `machine.enabled: false` turns it off. A waiting run shows phase `admission`
+  and the reason in `junior status --live`, its receipt lists the waits, and a
+  run not admitted within `machine.admissionTimeoutMs` (default 30 minutes,
+  bounded by the run deadline) ends `admission_timeout` (#277). The swap-out rate
+  reuses a reading from the last 1–60 seconds, so only the first admission in
+  a while waits one second to sample it.
+- `isolationSetup.warmFrom` copies build caches (`**/obj/` by default, more by
+  glob) from a pre-built tree into each new worktree before checks, with
+  reflink where the filesystem supports it. It never symlinks, never writes
+  through a symlink into the source tree, and never fails the run: a missing
+  source or a deadline leaves the run cold or partly warm with a reason.
+  Copied caches are not change evidence. Receipts report `warmStart` (#278).
+- Each check result carries its phase (`build`, `test` or `other`), its
+  duration and a governed evidence identity: the working-tree hash of the
+  touched projects, the command and its test filter, the lockfile hash and the
+  toolchain. Receipts report `timing` (build vs test time, warm or cold)
+  (#278, #280).
+- `junior land <result.json|id>... --into <dir> [--compile <argv> --]` applies
+  reviewed lanes to an integration checkout, recomputes each lane check's
+  identity on the final tree and reports it `reused` or `stale` with the
+  fields that changed, then runs one compile check for the batch
+  (`land.compile`, bounded by `land.compileTimeoutMs`, default 10 minutes).
+  It writes `land-report.json` and exits 1 unless every lane applied and the
+  compile passed (#280).
+- `junior status` with no file lists `ready_for_review` runs older than
+  `reviewQueue.agingMinutes` (default 30) with the command to apply each, and
+  runs the optional `reviewQueue.notify` hook once per aged run (#280).
+- `junior doctor` shows admission slots, pools and memory/swap pressure, and
+  warns when recent worktree runs built cold for a minute or more with no
+  `warmFrom` set (#277, #278).
+
+- `junior adr check --stage implementation --whole-change` judges each ADR
+  once over the whole change: the unified diff plus a `Relationships` section
+  listing cross-tool imports, cross-tool spec `$ref`s and modules imported by
+  two or more tools (#276).
+- Default command guards, on even without a `commandPolicy`: a test check with
+  `--no-build` after a failed build, or with no build in the run, is refused
+  (`noBuild: refuse`, or `stale` to run it with `E_STALE_EVIDENCE`), and git
+  hook bypasses (`--no-verify`, `core.hooksPath` overrides, `HUSKY=0` and
+  similar) are refused in checks and in the worker's bash. Configure with
+  `commandPolicy.guards` (#281).
+- Typed policy events: every guard decision is recorded as a `PolicyEvent` on
+  `result.policyEvents`, and the compact receipt carries `policyEvents` counts
+  (#281).
+- A contract budget above the workflow default, or above the parent run's on a
+  resume, stops at `needs_budget_approval` until a human runs
+  `junior auth budget approve <id> --tokens <n>`. That command and
+  `junior auth consent grant` refuse with `E_HUMAN_APPROVAL_REQUIRED` in an
+  agent shell without a terminal, and on a terminal ask for a six-character
+  code typed back (#281).
+- `junior validate`, handoff preflight and `junior plan check` report
+  `CHECK_UNFILTERED` (a whole test project or suite with no filter while the
+  contract names a few test files, with the filtered command) and
+  `CONTRACT_OVER_BUDGET` (estimated changed lines times tokens per line from
+  past receipts exceed the budget, with a code/test split). Both are warnings,
+  and errors that refuse the contract under `jev.mode: enforce` (#279).
+- A run stopped by `output_truncated` or `budget_exceeded` carries
+  `result.continuation`: the changed and remaining owned files, a code/test
+  split and a ready contract skeleton with `resumeFrom` set. A budget stop now
+  ends with status `budget_exceeded` instead of `output_truncated` (#279).
+
+### Changed
+
+- `junior status` takes an optional result file.
+- `npm test` runs with `JUNIOR_ADMISSION=off` (from `test.env`); the admission
+  tests set their own state directory and `/proc`.
+
+### Fixed
+
+- The ADR gate always judges the ADRs a change or design is about. An ADR is
+  judged when the design input cites its id (`ADR-0007`, `ADR 7`, `0007` or its
+  file name), when its `applies_to` covers a changed path, or, for a design with
+  no files, when its title shares the design's topic. The relevance filter and
+  scope can no longer drop it, and the result lists each in `retrieved` with
+  its reason. `**/` in `applies_to` now matches zero or more whole path
+  segments, and `./` prefixes and backslashes are normalized (#276).
+- A gate that answers `uncertain` for nearly every row reports
+  `NO_DISCRIMINATION` instead of passing: when at least
+  `adr.minDiscriminationCells` (default 10) were checked, at least
+  `adr.maxUncertainRatio` (default 0.9) of them are uncertain and none
+  contradicts, the result is inconclusive. `junior adr check` exits 2, and the
+  lane `adr-gate.md` shows the counts (#276).
+
 ## [0.18.7] - 2026-11-17
 
 ### Fixed

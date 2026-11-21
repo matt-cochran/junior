@@ -1,0 +1,74 @@
+{
+ "id": "A3-r1",
+ "deliverable": "Repair adr-change.ts so whole-change judging sees real-world tool layouts and unchanged importers (repair of lane A3; spec contracts/phase1.md)",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "changeGraph recognises a tool at any path depth: a path segment 'tools/<name>/' anywhere in the path (for example PresentationTier/ui/src/_components/tools/Billing/x.tsx is tool 'Billing', and .../tools/_shared/... is '_shared'), not only at the repository root",
+  "When a changed file lives under a tools/_shared/ directory (or is imported by any tool), changeGraph also finds its importers that did not change: scan tracked files with git ls-files for TS/JS files whose relative imports resolve to the changed module, and report '<module> is imported by N tools: a, b, c' when N >= 2",
+  "Non-relative specifiers that contain a tools/<name>/ segment (path aliases such as '@/_components/tools/Billing/hooks') are attributed to that tool by segment, so cross-tool alias imports appear as cross-tool edges",
+  "The #276 fixture: only tools/_shared/useThing.ts changes, three unchanged micro-apps under src/_components/tools/{A,B,C}/ import it (two by relative path, one by '@/' alias); the Relationships section names all three tools"
+ ],
+ "constraints": [
+  "Only modify adr-change.ts, adr-change.test.ts, adr-cli.ts, adr-cli.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 65-86; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "adr-change.test.ts",
+    "adr-cli.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "adr-change.ts",
+   "adr-change.test.ts",
+   "adr-cli.ts",
+   "adr-cli.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 65,
+   "end": 86
+  },
+  {
+   "path": "adr-gate.ts",
+   "start": 44,
+   "end": 52
+  },
+  {
+   "path": "adr-cli.ts",
+   "start": 380,
+   "end": 450
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/A3/1795213751149/result.json"
+}

@@ -1,5 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { warmStart, type WarmStartResult } from './warm-start.ts';
+import type { AdmissionWait } from './admission.ts';
 import { resolve, join } from 'node:path';
+import type { PolicyEvent } from './policy-events.ts';
 import { loadHopContext } from './hop-context.ts';
 import { resolveIsolation, sourceDirty, createDetachedWorktree, worktreeWriteRemediation, isWorktreeOf, acquireLock, ensureLocalExcludes, validateIsolationSetup, provisionIsolationSetup, configuredIsolationSetup, type IsolationMode, type LockHandle, type IsolationSetup } from './isolation.ts';
 import { resolveExecutionSettings, RuntimeHeartbeat, type ExecutionSettings } from './runtime.ts';
@@ -19,7 +22,7 @@ import { contractFeature, matrixContextFor, type MatrixContext } from './matrix-
 import type { ReceiptModelSource } from './worker-contract.ts';
 import { taskWorkflow } from './worker-workflows.ts';
 import { readDataPolicy } from './data-policy.ts';
-import { isolationRecord, decideRoute, settleModelApproval, applyDataPolicy, runTicketGate, clarificationApplies, prepareWorkflowDecision, finishPreflight, type PreflightCtx } from './worker-preflight-phases.ts';
+import { isolationRecord, decideRoute, settleModelApproval, settleBudgetApproval, applyDataPolicy, runTicketGate, clarificationApplies, prepareWorkflowDecision, finishPreflight, type PreflightCtx } from './worker-preflight-phases.ts';
 
 import type { JevProvider } from './gateway.ts';
 import { systemClock, type Clock } from './clock.ts';
@@ -37,6 +40,14 @@ export interface RunState {
  signal?:AbortSignal; locks:LockHandle[];
  /** The run's clock (`deps.clock`, default `systemClock`); the runtime layer reads `state.clock`. */
  clock:Clock;
+ /** #281: typed policy events recorded by guards during the run (see policy-events.ts). */
+ policyEvents?:PolicyEvent[];
+ /** #278: what warmFrom copied into the worktree (W1). */
+ warmStart?:WarmStartResult;
+ /** #277: every admission wait of the run, worker and checks (M2). */
+ admissionWaits?:AdmissionWait[];
+ /** #277: set when a worker or check could not be admitted in time; the run ends admission_timeout (M2). */
+ admissionTimeout?:{ kind:'worker'|'check'; waitedMs:number; wait:AdmissionWait|null; checkIndex?:number };
  // phase outputs are added as optional fields: prompt, receipt, streamResult, checks, workerError, status
  prompt?:string; receipt?:any; streamResult?:any; checks?:any[]; workerError?:string; status?:string;
  release?:()=>void;
@@ -434,6 +445,10 @@ function provisionWorktree(state:RunState, c:PreflightCtx):any {
   const provisioned=provisionIsolationSetup(rawSetup as IsolationSetup, sourceCwd, c.executionCwd, dir, { deadlineAt:c.deadlineAt, checkTimeoutMs:settings.checkTimeoutMs, commandPolicy, clock:runClock(state) });
   if (!provisioned.ok) return isolationSetupFailed(state, c, `isolationSetup failed: ${provisioned.error}`);
   if (provisioned.excludePatterns.length) ensureLocalExcludes(c.executionCwd, provisioned.excludePatterns);
+  const warmFrom=(rawSetup as IsolationSetup).warmFrom;
+  if (warmFrom) state.warmStart=warmStart(warmFrom, { sourceCwd, worktree:c.executionCwd, deadlineAt:c.deadlineAt, clock:runClock(state) });
+  const warmDirs=state.warmStart?.dirs ?? [];
+  if (warmDirs.length) ensureLocalExcludes(c.executionCwd, warmDirs.map((d)=>`/${d}`));
  }
  return undefined;
 }
@@ -663,6 +678,8 @@ export async function preflight(state:RunState):Promise<RunState|any> {
  decideRoute(state, c);
  const approvalHeld=settleModelApproval(state, c);
  if (approvalHeld) return approvalHeld;
+ const budgetHeld=settleBudgetApproval(state, c);
+ if (budgetHeld) return budgetHeld;
  rememberStickyRoute(state, c);
 
  // ADR 0017 R4: resolve the data-destination policy before the final disclosure

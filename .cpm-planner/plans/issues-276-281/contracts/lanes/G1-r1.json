@@ -1,0 +1,95 @@
+{
+ "id": "G1-r1",
+ "deliverable": "Harden the hook-bypass guard against short flags and nested or opaque shells (repair of lane G1; spec contracts/phase1.md)",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "git commit -n and combined short flags that include n for commit (for example -anm 'msg') are refused as hook bypass; git push -n (dry run) is NOT refused",
+  "git merge --no-verify and git am --no-verify are refused",
+  "A command the tokenizer marks opaque, or one that runs a nested shell (bash -c, sh -c, zsh -c, eval, $(...), backticks, xargs git), is scanned as raw text: --no-verify, core.hooksPath, git commit -n, and the HUSKY=0 / HUSKY_SKIP_HOOKS=1 / SKIP_HOOKS=1 / LEFTHOOK=0 assignments are refused in worker bash and in checks",
+  "A harmless command that merely mentions the words in a quoted echo string is still refused only when the raw-text scan applies (opaque or nested shell); plain tokenized commands keep exact matching"
+ ],
+ "constraints": [
+  "Only modify command-guards.ts, command-guards.test.ts, command-policy.ts, command-policy.test.ts, worker-checks.ts, worker-checks.test.ts, pi-guard.ts, pi-guard.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 87-119; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "command-guards.test.ts",
+    "command-policy.test.ts",
+    "worker-checks.test.ts",
+    "pi-guard.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "command-guards.ts",
+   "command-guards.test.ts",
+   "command-policy.ts",
+   "command-policy.test.ts",
+   "worker-checks.ts",
+   "worker-checks.test.ts",
+   "pi-guard.ts",
+   "pi-guard.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 87,
+   "end": 119
+  },
+  {
+   "path": "command-policy.ts",
+   "start": 339,
+   "end": 540
+  },
+  {
+   "path": "command-policy.ts",
+   "start": 1140,
+   "end": 1152
+  },
+  {
+   "path": "worker-checks.ts",
+   "start": 18,
+   "end": 80
+  },
+  {
+   "path": "pi-guard.ts",
+   "start": 117,
+   "end": 170
+  },
+  {
+   "path": "policy-events.ts",
+   "start": 1,
+   "end": 50
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/G1/1795213755173/result.json"
+}

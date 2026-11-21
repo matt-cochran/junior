@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AdrConfig } from './adr-config.ts';
@@ -497,4 +497,29 @@ test('implementationGate does not stop an unattended inconclusive run', async (t
   const { classify } = fakeGateClassifier('conforms');
   const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify, unattended: true });
   assert.equal(outcome.status, null);
+});
+
+// --- NO_DISCRIMINATION (issue #276) ----------------------------------------
+
+function configureDiscrimination(root: string, values: {minDiscriminationCells: number; maxUncertainRatio?: number}): void {
+  const path = join(root, 'delivery.config.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  document.adr = {...document.adr, ...values};
+  writeFileSync(path, JSON.stringify(document));
+}
+
+test('implementationGate marks a mostly uncertain check inconclusive', async (t) => {
+  const root = adrProject(t);
+  configureDiscrimination(root, {minDiscriminationCells: 1});
+  const { classify } = fakeGateClassifier('conforms', 0.2);
+  const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify });
+  assert.equal(outcome.inconclusive, true);
+});
+
+test('implementationGate renders a mostly uncertain check with a NO_DISCRIMINATION banner', async (t) => {
+  const root = adrProject(t);
+  configureDiscrimination(root, {minDiscriminationCells: 1});
+  const { classify } = fakeGateClassifier('conforms', 0.2);
+  const outcome = await implementationGate({ cwd: root, changedFiles: ['src/app.ts'], classify });
+  assert.match(outcome.markdown ?? '', /^NO_DISCRIMINATION:/m);
 });

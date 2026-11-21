@@ -35,6 +35,10 @@ export interface AdrConfig {
   minConfidence?: number;
   /** Uncertain (low-confidence) findings also block under enforce. Default false: only likely contradictions block. */
   flagUncertain?: boolean;
+  /** NO_DISCRIMINATION checks at least this many cells before comparing the ratio. Default 10. */
+  minDiscriminationCells?: number;
+  /** NO_DISCRIMINATION fires when uncertain/checked reaches this ratio. Default 0.9. */
+  maxUncertainRatio?: number;
 }
 
 export interface AdrPatternConfig {
@@ -134,6 +138,20 @@ export function readAdrConfig(root: string): AdrConfig | null {
   if (block.flagUncertain !== undefined) {
     if (typeof block.flagUncertain !== 'boolean') throw new Error('adr.flagUncertain must be a boolean');
     config.flagUncertain = block.flagUncertain;
+  }
+  if (block.minDiscriminationCells !== undefined) {
+    const minDiscriminationCells = block.minDiscriminationCells;
+    if (typeof minDiscriminationCells !== 'number' || !Number.isFinite(minDiscriminationCells) || minDiscriminationCells < 0) {
+      throw new Error('adr.minDiscriminationCells must be a non-negative number');
+    }
+    config.minDiscriminationCells = minDiscriminationCells;
+  }
+  if (block.maxUncertainRatio !== undefined) {
+    const maxUncertainRatio = block.maxUncertainRatio;
+    if (typeof maxUncertainRatio !== 'number' || !Number.isFinite(maxUncertainRatio) || maxUncertainRatio < 0 || maxUncertainRatio > 1) {
+      throw new Error('adr.maxUncertainRatio must be a number between 0 and 1');
+    }
+    config.maxUncertainRatio = maxUncertainRatio;
   }
   return config;
 }

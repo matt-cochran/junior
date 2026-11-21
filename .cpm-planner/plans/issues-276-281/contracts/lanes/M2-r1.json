@@ -1,0 +1,61 @@
+{
+ "id": "M2-r1",
+ "deliverable": "Repair lane M2 (admission wiring) for these review findings: (1) Thread deps.admissionStateDir and deps.procRoot (when present) into every admit call from launch and runChecks, so tests and embedders can keep admission off the real ~/.junior and /proc. (2) The worker admission wait must be bounded by the worker's remaining time: timeoutMs = Math.min(config.admissionTimeoutMs, workerRemainingMs(state)) (or the existing worker-deadline helper); when that is <= 0, end admission_timeout without spawning. (3) Keep everything else. Add one behavioural test for each item. Note: the real admission.ts is being repaired in parallel; keep using only the API declared in admission.ts on this branch.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "deps.admissionStateDir and deps.procRoot reach admit for worker and check admission",
+  "the worker admission wait never exceeds the worker's remaining time"
+ ],
+ "constraints": [
+  "Only modify worker-launch.ts, worker-launch.test.ts, worker-checks.ts, worker-checks.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "worker-launch.test.ts",
+    "worker-checks.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "worker-launch.ts",
+   "worker-launch.test.ts",
+   "worker-checks.ts",
+   "worker-checks.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 74,
+   "end": 95
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/M2/1795221954378/result.json"
+}

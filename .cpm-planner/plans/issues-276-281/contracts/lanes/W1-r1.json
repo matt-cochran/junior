@@ -1,0 +1,65 @@
+{
+ "id": "W1-r1",
+ "deliverable": "Repair lane W1 (warm start) for these review findings: (1) The deadline is only checked between directories; one huge obj/ copied by cpSync overruns deadlineAt. Make the cpSync filter return false once clock.now() >= deadlineAt and record the deadline reason (what was copied is kept, warm stays true when anything was copied). (2) One unreadable subdirectory in the source tree aborts the whole warm start; skip it, keep walking, and name it in reason. (3) If the worktree target path (or a parent inside the worktree) is already a symlink (for example from isolationSetup.links), skip that directory with a reason instead of copying through it into the source tree; lstat before copying. (4) validateWarmFrom must reject include/exclude globs with leading or trailing whitespace. (5) Add one behavioural test per untested branch: deadline reached during discovery, deadline reached mid-copy (manual clock advancing inside the walk), copy error, unreadable directory, path that is a file not a directory, reflink success (inject the copy seam or skip with t.skip when the filesystem cannot reflink, but the test must assert the method reported), non-array include, a symlinked target, whitespace globs.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a copy that passes the deadline stops inside the directory and reports the deadline reason",
+  "an unreadable subdirectory is skipped and named while other obj/ dirs are still copied",
+  "a target that is a symlink is never written through",
+  "whitespace-padded globs are rejected",
+  "every branch named in the deliverable has a test"
+ ],
+ "constraints": [
+  "Only modify warm-start.ts, warm-start.test.ts, worker-preflight.ts, worker-isolation.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "warm-start.test.ts",
+    "worker-isolation.test.ts",
+    "isolation.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "warm-start.ts",
+   "warm-start.test.ts",
+   "worker-preflight.ts",
+   "worker-isolation.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 96,
+   "end": 119
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/W1/1795222660821/result.json"
+}

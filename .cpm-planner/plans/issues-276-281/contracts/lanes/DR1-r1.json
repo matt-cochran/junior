@@ -1,0 +1,62 @@
+{
+ "id": "DR1-r1",
+ "deliverable": "Repair lane DR1 (junior doctor admission block and cold-build warning) for these review findings: (1) doctor() reads the live admission snapshot for every caller that does not inject deps.admission, so once admission.ts is real every existing doctor test reads the host /proc and ~/.junior and waits ~1 s on the swap sample. Add clock?: Clock to the doctor deps and forward it to admissionSnapshot; default stateDir from deps.env.JUNIOR_STATE_DIR (then the admission default); add procRoot to the deps; in doctor.test.ts make the shared fixture (doctorFixture or equivalent) inject a fake procRoot and temp stateDir so no doctor test reads the host. (2) The catch fallback (around setup-doctor.ts:587) returns a non-AdmissionSnapshot shape; return {enabled:false, slots:{held:0,limit:DEFAULT_MACHINE_CONFIG.slots,holders:[]}, pools:{}, pressure:{availableMb:null,swapOutPerSec:null,minAvailableMb:DEFAULT_MACHINE_CONFIG.minAvailableMb,maxSwapOutPerSec:DEFAULT_MACHINE_CONFIG.maxSwapOutPerSec}} plus the warning. (3) Add tests for the live path forwarding stateDir/procRoot, the catch fallback and its warning, and the disabled-admission early return. (4) warmFromConfigured must count only a non-null object warmFrom as configured. (5) Read delivery.config.json directly (readJsonFile returns null on ENOENT) instead of gating on deps.exists.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "doctor tests never read the host /proc or ~/.junior: the shared fixture injects procRoot and stateDir",
+  "the admission error fallback is a full AdmissionSnapshot with a pressure block",
+  "warmFrom: null does not suppress the cold-build warning",
+  "new tests cover the live forwarding path, the error fallback and disabled admission"
+ ],
+ "constraints": [
+  "Only modify setup-doctor.ts, doctor.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "doctor.test.ts",
+    "doctor-model.test.ts",
+    "readiness.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "setup-doctor.ts",
+   "doctor.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 198,
+   "end": 211
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/DR1/1795221969257/result.json"
+}

@@ -175,3 +175,103 @@ test('a sanctioned matrix command chained with a store read is blocked', () => {
   const blocked = guardPathAccess('bash', { command: 'junior matrix stale; cat .crossmatrix/state/x.json' }, {}, '/work');
   assert.equal(blocked?.reason, CROSSMATRIX_STORE_REASON);
 });
+
+// --- default hook-bypass guard (#281) ---------------------------------------
+
+test('guardBashInput refuses git commit --no-verify with no policy', () => {
+  const input: any = { command: 'git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput refuses an env-prefixed HUSKY=0 with no policy', () => {
+  const input: any = { command: 'env HUSKY=0 git commit' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput refuses git -c core.hooksPath with no policy', () => {
+  const input: any = { command: 'git -c core.hooksPath=.husky commit' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput names the hook_bypass kind in the refusal', () => {
+  const input: any = { command: 'git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /"kind":"hook_bypass"/);
+});
+
+test('guardBashInput permits --no-verify when hookBypass is off', () => {
+  const input: any = { command: 'git commit --no-verify' };
+  guardBashInput(input, { JUNIOR_COMMAND_POLICY: JSON.stringify({ guards: { hookBypass: 'off' } }) });
+  assert.equal(input.command, 'exec </dev/null\ngit commit --no-verify');
+});
+
+test('guardBashInput leaves a normal git commit runnable', () => {
+  const input: any = { command: 'git commit -m message' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\ngit commit -m message');
+});
+
+test('guardBashInput does not apply the no-build guard to worker bash', () => {
+  const input: any = { command: 'dotnet test --no-build' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\ndotnet test --no-build');
+});
+
+// --- short flags, opaque and nested shells ----------------------------------
+
+test('guardBashInput refuses git commit -n with no policy', () => {
+  const input: any = { command: 'git commit -n' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput refuses a combined git commit short flag containing n', () => {
+  const input: any = { command: "git commit -anm 'message'" };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput leaves git push -n runnable', () => {
+  const input: any = { command: 'git push -n' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\ngit push -n');
+});
+
+test('guardBashInput raw-scans an opaque unterminated quote', () => {
+  const input: any = { command: 'echo "git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans a command substitution', () => {
+  const input: any = { command: 'echo "$(git commit --no-verify)"' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans backticks', () => {
+  const input: any = { command: 'echo `git commit --no-verify`' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans a nested bash -c', () => {
+  const input: any = { command: 'bash -c \'echo "git commit --no-verify"\'' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput raw-scans xargs git', () => {
+  const input: any = { command: 'xargs git commit --no-verify' };
+  guardBashInput(input, {});
+  assert.match(input.command, /E_POLICY_GUARD/);
+});
+
+test('guardBashInput leaves a plain quoted mention runnable', () => {
+  const input: any = { command: 'echo "git commit --no-verify"' };
+  guardBashInput(input, {});
+  assert.equal(input.command, 'exec </dev/null\necho "git commit --no-verify"');
+});

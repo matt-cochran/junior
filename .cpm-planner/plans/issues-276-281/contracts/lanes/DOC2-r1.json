@@ -1,0 +1,64 @@
+{
+ "id": "DOC2-r1",
+ "deliverable": "Repair lane DOC2 (phase-2 docs) for these review findings, matching phase2.md and these decisions: (1) junior land: --compile takes its argv up to a literal -- or the end of the arguments; add the example `junior land A1 B2 --into ../integ --compile dotnet build --no-restore -- ` and say lane ids go before --compile or after --. (2) junior land: ok is true when every lane applied and the compile passed; when no compile check is configured the report has compile:null and a warnings entry 'no compile check configured; the batch was not compiled', and ok can still be true. (3) Document land.compileTimeoutMs in delivery.config.json (default 600000 ms); a timeout fails the compile with error 'compile timed out'. (4) Review queue: the notify hook runs once per aged run; notified result paths are recorded in .delivery/review-queue.json, and entries for runs no longer aging are dropped. (5) Warm start: a deadline stops the copy and keeps what was already copied, with a reason (warm is true if anything was copied); unreadable source directories and symlinked targets are skipped with a reason. (6) Drop claims the spec does not define: describe --dry-run only as 'checks the lanes and prints the report without applying them'; say exclude globs remove matching paths (directories or files). (7) Doctor: document both pressure warnings, memory (available below minAvailableMb) and swap (swap-out above maxSwapOutPerSec), and the all-slots-held warning.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "checks_first",
+ "acceptance": [
+  "the land syntax documents the -- terminator with an example",
+  "compile:null, its warning and land.compileTimeoutMs are documented",
+  "the review queue is documented as once per run keyed by result path",
+  "warm-start deadline and skip behaviour match the code",
+  "the doctor section lists the memory, swap and slot warnings"
+ ],
+ "constraints": [
+  "Only modify docs/runtime.md, docs/contracts.md",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "git",
+   "args": [
+    "diff",
+    "--check",
+    "--",
+    "docs/runtime.md",
+    "docs/contracts.md"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "docs/runtime.md",
+   "docs/contracts.md"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 156,
+   "end": 220
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/DOC2/1795222672223/result.json"
+}

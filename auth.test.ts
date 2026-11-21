@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { removeProviderKey, setProviderKey, recordExternalContextConsent, removeExternalContextConsent, readExternalContextConsent, verifyExternalContextConsentToken, doctorExternalContextAuthorization, policyWidens } from './auth.ts';
+import { removeProviderKey, setProviderKey, recordExternalContextConsent, removeExternalContextConsent, readExternalContextConsent, verifyExternalContextConsentToken, doctorExternalContextAuthorization, policyWidens, main as authMain } from './auth.ts';
 
 const ROOT = import.meta.dirname;
 const JUNIOR = join(ROOT, 'junior.ts');
@@ -44,10 +44,31 @@ function fileMode(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-function runAuth(args: string[], dir: string, input = '') {
+const AGENT_ENV_KEYS = ['CLAUDECODE', 'PI_CODING_AGENT', 'JUNIOR_WORKER', 'CODEX_SANDBOX', 'CURSOR_AGENT'];
+
+function humanEnv(dir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: dir };
   delete env.OPENROUTER_API_KEY;
+  for (const key of AGENT_ENV_KEYS) delete env[key];
+  return env;
+}
+
+function runAuth(args: string[], dir: string, input = '') {
+  return spawnSync(NODE, [JUNIOR, 'auth', ...args], { cwd: dir, encoding: 'utf8', input, env: humanEnv(dir) });
+}
+
+function runAuthAsAgent(args: string[], dir: string, marker = 'CLAUDECODE', input = '') {
+  const env = humanEnv(dir);
+  env[marker] = '1';
   return spawnSync(NODE, [JUNIOR, 'auth', ...args], { cwd: dir, encoding: 'utf8', input, env });
+}
+
+function budgetApprovals(dir: string): any[] {
+  try {
+    return JSON.parse(readFileSync(join(dir, '.junior', 'budget-approvals.json'), 'utf8'));
+  } catch {
+    return [];
+  }
 }
 
 // --- setProviderKey ---------------------------------------------------------
@@ -159,6 +180,61 @@ test('junior auth consent grant records consent for the named provider and proje
   const dir = workdir();
   const project = workdir();
   runAuth(['consent', 'grant', 'openrouter', '--project', project], dir);
+  assert.equal(readExternalContextConsent(project, 'openrouter').granted, true);
+});
+
+test('junior auth budget approve records the approved contract amount', () => {
+  const dir = workdir();
+  const project = workdir();
+  runAuth(['budget', 'approve', 'G2', '--tokens', '17000000', '--project', project], dir);
+  assert.equal(budgetApprovals(project)[0].maxTotalTokens, 17000000);
+});
+
+test('junior auth budget approve refuses an agent without a human terminal', () => {
+  const dir = workdir();
+  const project = workdir();
+  assert.notEqual(runAuthAsAgent(['budget', 'approve', 'G2', '--tokens', '17000000', '--project', project], dir).status, 0);
+});
+
+test('junior auth budget approve records nothing when an agent is refused', () => {
+  const dir = workdir();
+  const project = workdir();
+  runAuthAsAgent(['budget', 'approve', 'G2', '--tokens', '17000000', '--project', project], dir);
+  assert.deepEqual(budgetApprovals(project), []);
+});
+
+test('junior auth consent grant refuses an agent without a human terminal', () => {
+  const dir = workdir();
+  const project = workdir();
+  assert.notEqual(runAuthAsAgent(['consent', 'grant', 'openrouter', '--project', project], dir).status, 0);
+});
+
+test('junior auth consent grant records nothing when an agent is refused', () => {
+  const dir = workdir();
+  const project = workdir();
+  runAuthAsAgent(['consent', 'grant', 'openrouter', '--project', project], dir);
+  assert.equal(readExternalContextConsent(project, 'openrouter').granted, false);
+});
+
+test('a human typing the shown budget code lets auth budget approve record it', async () => {
+  const dir = workdir();
+  const project = workdir();
+  let shown = '';
+  await authMain(['budget', 'approve', 'G2', '--tokens', '17000000', '--project', project], {
+    env: { PI_CODING_AGENT_DIR: dir },
+    humanApproval: { isTTY: true, prompt: (question: string) => { shown = /Enter code ([A-Z0-9]{6})/.exec(question)?.[1] ?? ''; return shown; } },
+    clock: { iso: () => '2026-01-01T00:00:00.000Z' },
+  } as any);
+  assert.equal(budgetApprovals(project)[0].token, shown);
+});
+
+test('a human typing the shown consent code lets auth consent grant record it', async () => {
+  const dir = workdir();
+  const project = workdir();
+  await authMain(['consent', 'grant', 'openrouter', '--project', project], {
+    env: { PI_CODING_AGENT_DIR: dir },
+    humanApproval: { isTTY: true, prompt: (question: string) => /Enter code ([A-Z0-9]{6})/.exec(question)?.[1] ?? '' },
+  } as any);
   assert.equal(readExternalContextConsent(project, 'openrouter').granted, true);
 });
 
