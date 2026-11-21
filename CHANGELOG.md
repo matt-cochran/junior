@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An agent can no longer fake a human budget or consent approval by writing the
+  approval file directly. The Pi worker guard blocks a `write` or `edit` of
+  `.junior/budget-approvals.json` or `.delivery/external-context-consent.json`
+  (in the execution checkout or the source root) and any worker bash command
+  that names either file, and `junior setup --yes` adds matching Claude Code
+  `Edit(...)` deny rules. Reading the files stays allowed. Existing projects
+  show the deny rules as outdated in `junior doctor` until `junior setup` runs
+  (#289).
+
 ## [0.20.0] - 2026-11-21
 
 ### Added

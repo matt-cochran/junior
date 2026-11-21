@@ -336,6 +336,11 @@ Consent changes use the same human rule. `junior auth consent grant <provider> -
 the human check; if it is refused, nothing is recorded and Junior prints the exact command for the human to
 run in their own terminal.
 
+The approval files themselves are closed to agents. The Pi guard blocks a worker `write` or `edit` of
+`.junior/budget-approvals.json` or `.delivery/external-context-consent.json` (in the execution checkout or the
+source root) and any worker bash command that names either file; reading them stays allowed. `junior setup --yes`
+adds the matching Claude Code `Edit(...)` deny rules, and `junior doctor` reports them as outdated until it has.
+
 #### Contract lint
 
 `junior validate` (and therefore the `junior handoff` preflight), plus `junior plan check` through
