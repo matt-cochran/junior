@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Machine-wide admission control across concurrent Junior runs. A worker or a
+  check takes a slot from a semaphore shared by every Junior process on the
+  machine (`~/.junior/admission`, or `$JUNIOR_STATE_DIR`) before it starts, and
+  nothing starts while available memory is below `machine.minAvailableMb`
+  (default 2,048) or swap-out is above `machine.maxSwapOutPerSec` (default
+  500 pages/s). `machine.pools` (for example `{"dotnet": {"match": ["dotnet"],
+  "limit": 2}}`) caps checks whose command matches. Configure `machine` in
+  `delivery.config.json` or on a contract; `JUNIOR_ADMISSION=off` or
+  `machine.enabled: false` turns it off. A waiting run shows phase `admission`
+  and the reason in `junior status --live`, its receipt lists the waits, and a
+  run not admitted within `machine.admissionTimeoutMs` (default 30 minutes,
+  bounded by the run deadline) ends `admission_timeout` (#277).
+- `isolationSetup.warmFrom` copies build caches (`**/obj/` by default, more by
+  glob) from a pre-built tree into each new worktree before checks, with
+  reflink where the filesystem supports it. It never symlinks, never writes
+  through a symlink into the source tree, and never fails the run: a missing
+  source or a deadline leaves the run cold or partly warm with a reason.
+  Copied caches are not change evidence. Receipts report `warmStart` (#278).
+- Each check result carries its phase (`build`, `test` or `other`), its
+  duration and a governed evidence identity: the working-tree hash of the
+  touched projects, the command and its test filter, the lockfile hash and the
+  toolchain. Receipts report `timing` (build vs test time, warm or cold)
+  (#278, #280).
+- `junior land <result.json|id>... --into <dir> [--compile <argv> --]` applies
+  reviewed lanes to an integration checkout, recomputes each lane check's
+  identity on the final tree and reports it `reused` or `stale` with the
+  fields that changed, then runs one compile check for the batch
+  (`land.compile`, bounded by `land.compileTimeoutMs`, default 10 minutes).
+  It writes `land-report.json` and exits 1 unless every lane applied and the
+  compile passed (#280).
+- `junior status` with no file lists `ready_for_review` runs older than
+  `reviewQueue.agingMinutes` (default 30) with the command to apply each, and
+  runs the optional `reviewQueue.notify` hook once per aged run (#280).
+- `junior doctor` shows admission slots, pools and memory/swap pressure, and
+  warns when recent worktree runs built cold for a minute or more with no
+  `warmFrom` set (#277, #278).
+
+### Changed
+
+- `junior status` takes an optional result file.
+- `npm test` runs with `JUNIOR_ADMISSION=off` (from `test.env`); the admission
+  tests set their own state directory and `/proc`.
+
 ## [0.19.0] - 2026-11-20
 
 ### Fixed
