@@ -227,7 +227,38 @@ test('mergeStoreDenyRules on empty settings writes the current Claude deny list'
   'Bash(cat .crossmatrix*)',
   'Bash(grep * .crossmatrix*)',
   'Bash(jq * .crossmatrix*)',
+  'Edit(./.junior/budget-approvals.json)',
+  'Edit(./.delivery/external-context-consent.json)',
  ]);
+});
+
+test('mergeStoreDenyRules installs the budget approvals deny rule', () => {
+ const deny = (mergeStoreDenyRules({}).settings.permissions as any).deny;
+ assert.equal(deny.includes('Edit(./.junior/budget-approvals.json)'), true);
+});
+
+test('mergeStoreDenyRules installs the external context consent deny rule', () => {
+ const deny = (mergeStoreDenyRules({}).settings.permissions as any).deny;
+ assert.equal(deny.includes('Edit(./.delivery/external-context-consent.json)'), true);
+});
+
+test('inspectStoreDenyRules reports a crossmatrix list without approval-store rules as outdated', () => {
+ const settings = JSON.stringify({
+  permissions: {
+   deny: [
+    'Read(./.crossmatrix/**)',
+    'Edit(./.crossmatrix/**)',
+    'Bash(cat .crossmatrix*)',
+    'Bash(grep * .crossmatrix*)',
+    'Bash(jq * .crossmatrix*)',
+   ],
+  },
+ });
+ const state = inspectStoreDenyRules('/project', {
+  existsSync: () => true,
+  readFileSync: () => settings,
+ }).state;
+ assert.equal(state, 'outdated');
 });
 
 test('inspectStoreDenyRules reports the current Claude deny list as present', () => {
@@ -239,6 +270,8 @@ test('inspectStoreDenyRules reports the current Claude deny list as present', ()
     'Bash(cat .crossmatrix*)',
     'Bash(grep * .crossmatrix*)',
     'Bash(jq * .crossmatrix*)',
+    'Edit(./.junior/budget-approvals.json)',
+    'Edit(./.delivery/external-context-consent.json)',
    ],
   },
  });
@@ -327,6 +360,8 @@ test('mergeStoreDenyRules migrates the 0.16.0 list while preserving a user rule'
   'Bash(jq * .crossmatrix*)',
   'Read(./secrets/**)',
   'Bash(cat .crossmatrix*)',
+  'Edit(./.junior/budget-approvals.json)',
+  'Edit(./.delivery/external-context-consent.json)',
  ]);
 });
 

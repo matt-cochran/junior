@@ -34,6 +34,11 @@ function writeRoots(env:GuardEnv|undefined):string[] {
 
 export const CROSSMATRIX_STORE_REASON='Junior: the .crossmatrix/ store is read only through `junior matrix context|files|features|stale` (or the crossmatrix MCP); do not read its files.';
 
+export const APPROVAL_STORE_REASON='Junior: the approval stores (.junior/budget-approvals.json, .delivery/external-context-consent.json) are written only by `junior auth budget approve` and `junior auth consent grant` run by a human on a terminal.';
+
+/** Human approval records, relative to the execution checkout or source root. */
+const APPROVAL_STORE_FILES=['.junior/budget-approvals.json','.delivery/external-context-consent.json'];
+
 /** Read-type tools that may name a file or directory directly. */
 const PATH_READ_TOOLS=new Set(['read','grep','find','ls']);
 
@@ -49,6 +54,22 @@ function mentionsStore(command:string):boolean {
  return /(?:^|[\\/\s'"`=])\.crossmatrix(?:[\\/]|(?=$|[\s'";&|)]))/.test(command);
 }
 
+/** True when `target` resolves to one of the human approval store files under
+ * an allowed root. Only the exact file is guarded, not a similarly named file
+ * in another directory. */
+function insideApprovalStore(target:string, roots:string[]):boolean {
+ const resolved=resolve(target);
+ for (const root of roots) for (const file of APPROVAL_STORE_FILES) if (resolve(root,file)===resolved) return true;
+ return false;
+}
+
+/** True when a bash command text names an approval store file as a path
+ * token: the name is not part of a longer file name, so a redirect such as
+ * `>budget-approvals.json` is caught and `budget-approvals.json.md` is not. */
+function mentionsApprovalStore(command:string):boolean {
+ return /(?<![\w.-])(?:budget-approvals|external-context-consent)\.json(?![\w.-])/.test(command);
+}
+
 /** A command that is itself the sanctioned store interface, not a file read.
  * `guardBashInput` may already have prefixed the stdin redirect. */
 function isStoreCli(command:string):boolean {
@@ -60,8 +81,9 @@ function isStoreCli(command:string):boolean {
 
 /** Enforce worktree isolation at the tool boundary. Returns a blocking
  * instruction for a write/edit outside the configured write roots, for a bash
- * command that reaches into the source checkout outside `.delivery`, or for a
- * tool call that touches the read-only `.crossmatrix/` store. Everything else
+ * command that reaches into the source checkout outside `.delivery`, for a
+ * tool call that touches the read-only `.crossmatrix/` store, or for a write,
+ * edit or bash command that touches a human approval store. Everything else
  * (including any tool when its guard variable is unset) is allowed via null. */
 export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:string):{block:true; reason:string}|null {
  const storeRoots=[cwd, ...(typeof env?.JUNIOR_PI_SOURCE_ROOT==='string' && env.JUNIOR_PI_SOURCE_ROOT.trim() ? [env.JUNIOR_PI_SOURCE_ROOT] : [])];
@@ -73,6 +95,7 @@ export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:st
  if (toolName === 'write' || toolName === 'edit') {
   const path=input && typeof input === 'object' ? input.path : undefined;
   if (typeof path === 'string' && path.trim() && insideStore(resolve(cwd,path),storeRoots)) return { block:true, reason:CROSSMATRIX_STORE_REASON };
+  if (typeof path === 'string' && path.trim() && insideApprovalStore(resolve(cwd,path),storeRoots)) return { block:true, reason:APPROVAL_STORE_REASON };
   const roots=writeRoots(env);
   if (!roots.length) return null;
   if (typeof path !== 'string' || !path.trim()) return null;
@@ -86,6 +109,7 @@ export function guardPathAccess(toolName:string, input:any, env:GuardEnv, cwd:st
   const command=input && typeof input === 'object' ? input.command : undefined;
   if (typeof command !== 'string') return null;
   if (!isStoreCli(command) && mentionsStore(command)) return { block:true, reason:CROSSMATRIX_STORE_REASON };
+  if (mentionsApprovalStore(command)) return { block:true, reason:APPROVAL_STORE_REASON };
   const source=env?.JUNIOR_PI_SOURCE_ROOT;
   if (typeof source !== 'string' || !source.trim()) return null;
   const root=resolve(source);

@@ -53,7 +53,9 @@ The committed `.crossmatrix/` store is read only through the CLI or MCP. Never
 read its files directly; use `junior matrix context|files|features|stale|refresh`
 or the Crossmatrix MCP through `junior tools call <hop> crossmatrix`. The Pi
 guard blocks worker tool calls that touch the store, and `junior setup --yes`
-adds Claude Code deny rules while `junior doctor` warns when they are missing.
+adds Claude Code deny rules (for the store and for the human approval files, see
+[contracts](contracts.md#human-approval-for-budgets-and-consent)) while `junior doctor` warns when they are
+missing.
 
 `scientific-process` keeps its session in process memory and the wrapper spawns
 a fresh server per call, so a `scientific-process` call that is not itself
