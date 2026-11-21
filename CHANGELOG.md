@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-21
+
 ### Added
 
 - Machine-wide admission control across concurrent Junior runs. A worker or a
@@ -48,32 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warns when recent worktree runs built cold for a minute or more with no
   `warmFrom` set (#277, #278).
 
-### Changed
-
-- `junior status` takes an optional result file.
-- `npm test` runs with `JUNIOR_ADMISSION=off` (from `test.env`); the admission
-  tests set their own state directory and `/proc`.
-
-## [0.19.0] - 2026-11-20
-
-### Fixed
-
-- The ADR gate always judges the ADRs a change or design is about. An ADR is
-  judged when the design input cites its id (`ADR-0007`, `ADR 7`, `0007` or its
-  file name), when its `applies_to` covers a changed path, or, for a design with
-  no files, when its title shares the design's topic. The relevance filter and
-  scope can no longer drop it, and the result lists each in `retrieved` with
-  its reason. `**/` in `applies_to` now matches zero or more whole path
-  segments, and `./` prefixes and backslashes are normalized (#276).
-- A gate that answers `uncertain` for nearly every row reports
-  `NO_DISCRIMINATION` instead of passing: when at least
-  `adr.minDiscriminationCells` (default 10) were checked, at least
-  `adr.maxUncertainRatio` (default 0.9) of them are uncertain and none
-  contradicts, the result is inconclusive. `junior adr check` exits 2, and the
-  lane `adr-gate.md` shows the counts (#276).
-
-### Added
-
 - `junior adr check --stage implementation --whole-change` judges each ADR
   once over the whole change: the unified diff plus a `Relationships` section
   listing cross-tool imports, cross-tool spec `$ref`s and modules imported by
@@ -103,6 +79,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `result.continuation`: the changed and remaining owned files, a code/test
   split and a ready contract skeleton with `resumeFrom` set. A budget stop now
   ends with status `budget_exceeded` instead of `output_truncated` (#279).
+
+### Changed
+
+- `junior status` takes an optional result file.
+- `npm test` runs with `JUNIOR_ADMISSION=off` (from `test.env`); the admission
+  tests set their own state directory and `/proc`.
+
+### Fixed
+
+- The ADR gate always judges the ADRs a change or design is about. An ADR is
+  judged when the design input cites its id (`ADR-0007`, `ADR 7`, `0007` or its
+  file name), when its `applies_to` covers a changed path, or, for a design with
+  no files, when its title shares the design's topic. The relevance filter and
+  scope can no longer drop it, and the result lists each in `retrieved` with
+  its reason. `**/` in `applies_to` now matches zero or more whole path
+  segments, and `./` prefixes and backslashes are normalized (#276).
+- A gate that answers `uncertain` for nearly every row reports
+  `NO_DISCRIMINATION` instead of passing: when at least
+  `adr.minDiscriminationCells` (default 10) were checked, at least
+  `adr.maxUncertainRatio` (default 0.9) of them are uncertain and none
+  contradicts, the result is inconclusive. `junior adr check` exits 2, and the
+  lane `adr-gate.md` shows the counts (#276).
 
 ## [0.18.7] - 2026-11-17
 
