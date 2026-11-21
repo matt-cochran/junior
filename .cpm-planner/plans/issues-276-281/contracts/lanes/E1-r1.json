@@ -1,0 +1,60 @@
+{
+ "id": "E1-r1",
+ "deliverable": "Repair lane E1 (evidence identity) for these review findings: (1) git status in the default touched-files path collapses a new untracked directory to 'packages/new/', so the project resolves to the parent; use --untracked-files=all so every untracked file is listed. (2) porcelain paths are relative to the repository root but are resolved against input.cwd (around evidence-identity.ts:301); resolve them against the repository root so a check whose cwd is a subdirectory still finds the right projects. (3) Add tests: checkIdentity on a non-git directory returns a tree starting 'unknown:' without throwing; a new untracked package directory resolves to that package's project; a subdirectory cwd resolves the same projects as the root; and classifyCheck has one case per family named in the spec (tsc --noEmit, dotnet build, cargo check, node --test, npm test, npm run test:unit, npx jest, npx vitest, pytest, dotnet test, cargo test, go test, mvn test, gradle test, and an env/timeout-prefixed command).",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a lane adding a new untracked package reports that package as its project",
+  "a subdirectory check cwd resolves projects relative to the repository root",
+  "checkIdentity on a non-git directory returns an unknown: tree and does not throw",
+  "classifyCheck covers every command family in the spec"
+ ],
+ "constraints": [
+  "Only modify evidence-identity.ts, evidence-identity.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "evidence-identity.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "evidence-identity.ts",
+   "evidence-identity.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 120,
+   "end": 155
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/E1/1795221960833/result.json"
+}

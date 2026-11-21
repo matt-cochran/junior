@@ -169,7 +169,8 @@ are captured; classify covers each family with one case.
   (`reason:'no identity'`).
 - Run one compile-only check for the batch: `--compile`, else the
   `delivery.config.json` `land.compile` argv, else the first `phase:'build'`
-  check from the landed contracts, else none (reported as `compile:null`).
+  check from the landed contracts, else none (reported as `compile:null`,
+  with a `warnings` entry; `ok` can still be true).
   It goes through `admit` like any check.
 - Write `land-report.json` into `<into>/.delivery/land/<timestamp>/` and print
   it: `{lanes:[{id, applied, checks:[{command, verdict, changed?}]}], compile,
