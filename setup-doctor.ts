@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { inspectIntegrations, type IntegrationsResult } from './installer.ts';
 import { inspectCompanions, inspectCompanionSkills, type CompanionsReport, type CompanionSkillsReport } from './companions.ts';
 import { retainedWorktreeSummary, type RetentionSummary } from './retention.ts';
@@ -15,6 +16,8 @@ import type { InitResult } from './setup-init.ts';
 import { resolveGateConfig } from './worker-adr-gate.ts';
 import { inspectAgentInstructions } from './agent-instructions.ts';
 import { readDataPolicy } from './data-policy.ts';
+import { DEFAULT_MACHINE_CONFIG, admissionSnapshot, resolveMachineConfig, type AdmissionSnapshot } from './admission.ts';
+import type { Clock } from './clock.ts';
 
 export type CredentialCheck = { provider:string; present:boolean; sources:string[]; providers:string[] };
 
@@ -306,6 +309,8 @@ export type DoctorResult = {
  /** Non-blocking advisories, such as running on a slow Windows-mounted
   * checkout. They never change Pi execution readiness (`ok`). */
  warnings:string[];
+ /** Machine-wide admission slots, pools and current pressure; advisory only. */
+ admission:AdmissionSnapshot;
  node:{ version:string; supported:boolean; minimum:string };
  pi:PiCheck;
  credentials:CredentialCheck;
@@ -425,6 +430,185 @@ function collectProjectWarnings(deps:SetupDeps, cwd:string, provider:string, war
  }
 }
 
+/** Doctor-only dependency seams. Admission pressure and the delivery archive
+ * are injectable so tests never read the host /proc or a real project archive. */
+export type DoctorDeps = SetupDeps & {
+ /** A pre-read admission snapshot, for tests. */
+ admission?:AdmissionSnapshot;
+ /** Test seam replacing the live snapshot reader. */
+ admissionSnapshot?:typeof admissionSnapshot;
+ /** Test seams forwarded to the live admission snapshot. */
+ stateDir?:string;
+ procRoot?:string;
+ clock?:Clock;
+ /** Run archive root; defaults to `<cwd>/.delivery`. */
+ deliveryDir?:string;
+};
+
+const RESULT_HISTORY_LIMIT=20;
+const COLD_BUILD_MIN_MS=60_000;
+const COLD_BUILD_MIN_RUNS=3;
+
+/** Admission advisories for conditions that prevent or slow a new run right
+ * now. They are warnings only: doctor readiness never depends on pressure. */
+function admissionWarnings(snapshot:AdmissionSnapshot):string[] {
+ if (!snapshot.enabled) return [];
+ const warnings:string[]=[];
+ const { pressure, slots }=snapshot;
+ if (pressure.availableMb !== null && pressure.availableMb < pressure.minAvailableMb) {
+  warnings.push(`memory pressure: available ${pressure.availableMb} MB < ${pressure.minAvailableMb} MB`);
+ }
+ if (pressure.swapOutPerSec !== null && pressure.swapOutPerSec > pressure.maxSwapOutPerSec) {
+  warnings.push(`swap pressure: swap-out ${pressure.swapOutPerSec}/s > ${pressure.maxSwapOutPerSec}/s`);
+ }
+ if (slots.limit > 0 && slots.held >= slots.limit) {
+  const holders=slots.holders.length > 0 ? ` by ${slots.holders.join(', ')}` : '';
+  warnings.push(`admission slots: all slots are held (${slots.held}/${slots.limit})${holders}`);
+ }
+ return warnings;
+}
+
+/** Every `result.json` below the archive root, without following symlinks or
+ * descending into retained worktrees and Pi session stores. */
+function resultFilesUnder(root:string, depth=0):string[] {
+ if (depth > 6) return [];
+ let entries:ReturnType<typeof readdirSync>;
+ try { entries=readdirSync(root,{ withFileTypes:true }); }
+ catch { return []; }
+ const out:string[]=[];
+ for (const entry of entries) {
+  if (entry.isSymbolicLink()) continue;
+  const full=join(root,entry.name);
+  if (entry.isDirectory()) {
+   if (entry.name === 'worktree' || entry.name === 'pi-agent') continue;
+   out.push(...resultFilesUnder(full,depth+1));
+  } else if (entry.isFile() && entry.name === 'result.json') {
+   out.push(full);
+  }
+ }
+ return out;
+}
+
+/** The newest result files by numeric run stamp, with file mtime as the tie
+ * breaker for archives that do not use the `.delivery/<id>/<stamp>` layout. */
+function newestResultFiles(root:string):string[] {
+ const ranked=resultFilesUnder(root).map((path)=>{
+  let mtime=0;
+  try { mtime=statSync(path).mtimeMs; } catch { /* an unreadable file sorts last */ }
+  const stampText=basename(dirname(path));
+  const stamp=/^\d+$/.test(stampText) ? Number(stampText) : null;
+  return { path, stamp, mtime };
+ });
+ ranked.sort((a,b)=>{
+  if (a.stamp !== null && b.stamp !== null && a.stamp !== b.stamp) return b.stamp-a.stamp;
+  if (a.stamp !== b.stamp) return a.stamp === null ? 1 : -1;
+  return b.mtime-a.mtime;
+ });
+ return ranked.slice(0,RESULT_HISTORY_LIMIT).map((entry)=>entry.path);
+}
+
+function readJsonFile(path:string):any {
+ try { return JSON.parse(readFileSync(path,'utf8')); }
+ catch { return null; }
+}
+
+function warmFromConfigured(setup:any):boolean {
+ return !!setup
+  && typeof setup === 'object'
+  && !Array.isArray(setup)
+  && !!setup.warmFrom
+  && typeof setup.warmFrom === 'object'
+  && !Array.isArray(setup.warmFrom);
+}
+
+/** Read the contract recorded beside a run, if any. Worker prompts carry the
+ * exact contract as their final JSON block; older archives may store it as a
+ * separate contract/task file. An unreadable record is not evidence either way. */
+function contractWarmsFrom(resultPath:string):boolean {
+ const dir=dirname(resultPath);
+ for (const name of ['prompt.txt','contract.json','task.json']) {
+  let text:string;
+  try { text=readFileSync(join(dir,name),'utf8'); }
+  catch { continue; }
+  try {
+   let contract:any;
+   if (name === 'prompt.txt') {
+    const marker='Task contract (JSON):';
+    const at=text.lastIndexOf(marker);
+    if (at < 0) continue;
+    contract=JSON.parse(text.slice(at+marker.length).trim());
+   } else {
+    contract=JSON.parse(text);
+   }
+   if (warmFromConfigured(contract?.isolationSetup)) return true;
+  } catch { /* a malformed record is not a warmFrom setting */ }
+ }
+ return false;
+}
+
+function median(values:number[]):number {
+ const sorted=[...values].sort((a,b)=>a-b);
+ const middle=Math.floor(sorted.length/2);
+ return sorted.length % 2 === 0 ? (sorted[middle-1]+sorted[middle])/2 : sorted[middle];
+}
+
+/** Warn when recent runs repeatedly compiled cold in isolated worktrees and
+ * no contract or project config has enabled warm-start caches. */
+function coldBuildWarning(cwd:string, deps:DoctorDeps, results:string[]):string|null {
+ const builds:number[]=[];
+ let warms=false;
+ try {
+  const config=readJsonFile(join(cwd,'delivery.config.json'));
+  if (warmFromConfigured(config?.isolationSetup)) warms=true;
+ } catch { /* an unreadable project config is not a warmFrom setting */ }
+ for (const path of results) {
+  if (contractWarmsFrom(path)) warms=true;
+  const result=readJsonFile(path);
+  if (warmFromConfigured(result?.isolationSetup) || warmFromConfigured(result?.task?.isolationSetup) || warmFromConfigured(result?.contract?.isolationSetup)) warms=true;
+  const isolation=result?.isolation;
+  const mode=isolation && typeof isolation === 'object' ? isolation.mode : isolation;
+  const timing=result?.timing;
+  if (mode === 'worktree' && timing?.warm === false && typeof timing.buildMs === 'number' && Number.isFinite(timing.buildMs) && timing.buildMs >= COLD_BUILD_MIN_MS) {
+   builds.push(timing.buildMs);
+  }
+ }
+ if (warms || builds.length < COLD_BUILD_MIN_RUNS) return null;
+ return `checks build cold in worktrees (median build ${Math.round(median(builds)/1000)} s); set isolationSetup.warmFrom (see docs/runtime.md#warm-start).`;
+}
+
+/** Use an injected snapshot when provided; otherwise read the live machine
+ * view. A read failure is advisory and leaves readiness unchanged. */
+function inspectAdmission(deps:DoctorDeps,cwd:string):{snapshot:AdmissionSnapshot, warning?:string} {
+ if (deps.admission) return { snapshot:deps.admission };
+ try {
+  const config=resolveMachineConfig(cwd);
+  const stateDir=deps.stateDir ?? deps.env?.JUNIOR_STATE_DIR;
+  const readSnapshot=deps.admissionSnapshot ?? admissionSnapshot;
+  const snapshot=readSnapshot({
+   config,
+   ...(stateDir ? { stateDir } : {}),
+   ...(deps.procRoot ? { procRoot:deps.procRoot } : {}),
+   ...(deps.clock ? { clock:deps.clock } : {}),
+  });
+  return { snapshot };
+ } catch (error) {
+  return {
+   snapshot:{
+    enabled:false,
+    slots:{ held:0, limit:DEFAULT_MACHINE_CONFIG.slots, holders:[] },
+    pools:{},
+    pressure:{
+     availableMb:null,
+     swapOutPerSec:null,
+     minAvailableMb:DEFAULT_MACHINE_CONFIG.minAvailableMb,
+     maxSwapOutPerSec:DEFAULT_MACHINE_CONFIG.maxSwapOutPerSec,
+    },
+   },
+   warning:`admission: could not read machine pressure (${(error as Error).message})`,
+  };
+ }
+}
+
 function collectModelWarnings(model:ModelCheck, warnings:string[]):void {
  for (const update of model.newer ?? []) {
   const parity=update.comparable === false
@@ -445,7 +629,7 @@ function doctorChecks(supported:boolean, version:string, pi:PiCheck, credentials
 }
 
 /** Read-only readiness check. No installation, config writes or paid calls. */
-export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorResult {
+export function doctor(deps:DoctorDeps = {}, opts:{harness?:string} = {}):DoctorResult {
  const env=deps.env ?? process.env;
  const version=deps.nodeVersion ?? process.versions.node;
  const cwd=deps.cwd ?? process.cwd();
@@ -464,6 +648,12 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  if (pi.probeBlocked) warnings.push(BLOCKED_PROBE_WARNING);
  collectProjectWarnings(deps,cwd,provider,warnings,remediation);
  collectModelWarnings(model,warnings);
+ const admission=inspectAdmission(deps,cwd);
+ if (admission.warning) warnings.push(admission.warning);
+ warnings.push(...admissionWarnings(admission.snapshot));
+ const deliveryRoot=resolve(cwd,deps.deliveryDir ?? '.delivery');
+ const coldBuild=coldBuildWarning(cwd,deps,newestResultFiles(deliveryRoot));
+ if (coldBuild) warnings.push(coldBuild);
 
  const checks=doctorChecks(supported,version,pi,credentials,model,provider,defaults.model);
  const skill=inspectSkill(deps);
@@ -493,7 +683,7 @@ export function doctor(deps:SetupDeps = {}, opts:{harness?:string} = {}):DoctorR
  remediation.push(...skillLines);
  const ok=checks.every((c)=>c.ok) && policyOk;
  const verdict:DoctorVerdict=ok ? (pi.probeBlocked ? 'degraded' : 'ready') : 'failed';
- return { command:'doctor', ok, verdict, exitCode:verdict === 'failed' ? 1 : 0, degraded:verdict === 'degraded', warnings, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, gateways, checks, remediation };
+ return { command:'doctor', ok, verdict, exitCode:verdict === 'failed' ? 1 : 0, degraded:verdict === 'degraded', warnings, admission:admission.snapshot, node:{version,supported,minimum:SUPPORTED_NODE_MIN}, pi, credentials, model, skill, companions, companionSkills, integrations, integrationsReady:integrations.ready, retention, readiness, gateways, checks, remediation };
 }
 
 export type InitInstallAttempt = { attempted:boolean; ok:boolean };

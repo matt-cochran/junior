@@ -207,6 +207,45 @@ failure and never a half-provisioned worker start. The step log is written to
 `isolation-setup.log` in the artifact directory, and linked/copied paths are
 added to the local Git exclude so they do not appear in change evidence.
 
+#### Warm start
+`isolationSetup.warmFrom` copies build caches from a pre-built tree into the
+fresh worktree before checks run, so a lane does not compile unchanged projects
+from cold. It is a worktree-only option and is ignored when `isolation` is
+`none`.
+
+```json
+"isolation": "worktree",
+"isolationSetup": {
+  "warmFrom": {
+    "path": "../prebuilt",
+    "include": ["**/obj/", "**/bin/"],
+    "exclude": ["**/obj/Debug/net*/ref/"]
+  }
+}
+```
+
+- `path` is the pre-built tree, absolute or relative to the source checkout.
+- `include` selects cache directories by relative glob. It defaults to
+  `["**/obj/"]`; add `"**/bin/"` to warm build output as well.
+- `exclude` removes matching paths, whether directories or files, from the
+  copy.
+- Each matching directory is copied to the same relative path in the worktree.
+  The copy is never a symlink, so a lane's build cannot write back into the
+  source tree's caches; a symlink found in the source tree is skipped. Junior
+  asks the filesystem for a reflink and falls back to a plain copy when
+  reflinks are unsupported.
+
+The worktree result carries `warmStart` with `warm`, `method` (`reflink`,
+`copy` or `null`), `files`, `bytes`, `durationMs`, `dirs` and an optional
+`reason`. A deadline stops the copy and keeps what was already copied, with a
+reason; `warm` is `true` whenever anything was copied. Unreadable source
+directories and symlinked targets are skipped with a reason. A missing source,
+no matches or a copy error before anything is copied leaves `warm:false` with a
+reason; warm-start failure never fails the run. Copied cache directories are
+added to the local Git exclude, exactly like `copy` entries, so they do not
+appear as changed files. The contract value takes precedence over
+`isolationSetup` in `delivery.config.json`.
+
 #### Retained worktrees and `prune`
 Each `worktree` run retains its linked checkout at
 `.delivery/<id>/<timestamp>/worktree` for review, alongside the run's
@@ -344,6 +383,89 @@ After the run, `result.scope` and the compact handoff `scope` contain `checked`,
 and non-incidental changes are not labelled out of scope. An out-of-scope path
 adds an unresolved line `out of scope: <paths>` to the handoff. Scope is
 advisory evidence for review: it never changes the run status.
+
+#### Evidence identity and check timing
+Every executed check records the inputs its result actually proves:
+
+- `phase`: `build`, `test` or `other`, classified from the command argv.
+- `durationMs`: the check's own wall time, excluding any admission wait.
+- `identity`: the governed evidence identity, with `schema_version: 1`,
+  `tree`, `projects`, `command`, `filter`, `dependencyLock` and `toolchain`.
+  `tree` hashes the working-tree contents (including uncommitted edits) of the
+  projects touched by the lane; `filter` records `--filter`, `-t`,
+  `--testNamePattern`, `-k` or test file paths; `dependencyLock` covers the
+  relevant lockfiles and SDK pins; `toolchain` records the tool versions used.
+
+A check that could not compute a tree records `unknown:<reason>`; such an
+identity is never equal to another identity. Two identities are reusable only
+when every field is equal. The full receipt exposes the per-check fields, and
+`result.timing` sums `buildMs`, `testMs` and `otherMs` and records `warm` as
+`true` for a warm worktree, `false` for a cold one, or `null` without worktree
+isolation. Compact checks carry `phase` and `durationMs`, with compact `timing`.
+Identity does not claim more than its inputs: a changed project tree, lockfile,
+filter or toolchain makes the check stale for reuse.
+
+
+### Machine admission
+Each machine shares a small admission semaphore across concurrent Junior runs.
+Live workers and independent checks take a slot before they start and release
+it when they exit, so many lanes cannot exhaust memory together. Slots and pools
+are lock files under `$JUNIOR_STATE_DIR/admission/` (default
+`~/.junior/admission/`). A slot left by a crashed process is reclaimed when its
+pid is no longer alive.
+
+```json
+"machine": {
+  "enabled": true,
+  "slots": 4,
+  "minAvailableMb": 2048,
+  "maxSwapOutPerSec": 500,
+  "admissionTimeoutMs": 1800000,
+  "pools": {
+    "dotnet": { "match": ["dotnet", "msbuild"], "limit": 2 }
+  }
+}
+```
+
+All fields are optional. The defaults are four machine slots, a 2048 MB minimum
+available memory, 500 pages swapped out per second, a 30-minute admission
+timeout and no pools. Set `machine` in `delivery.config.json`, in a contract, or
+both: the contract overrides the project value field by field.
+`JUNIOR_ADMISSION=off` or `enabled:false` grants admission immediately and
+turns the gate off for that project or contract.
+
+- **Slots** are shared by workers and checks. A pool slot is taken before a
+  machine slot; if no machine slot is free, the pool slot is released before
+  waiting again, so a waiter never holds one resource while queueing for the
+  other.
+- **Pools** limit commands that compete for a special resource. A pool's
+  `match` entries are command prefixes after `env`, assignments, `command`,
+  `exec`, `timeout` and `nice` prefixes are stripped. The first matching pool
+  in key order wins; workers never take a pool. In the example, a third
+  concurrent `dotnet test` waits while an `npm test` can still use a machine
+  slot.
+- **Pressure** reads `MemAvailable` and the swap-out rate from `/proc`. Missing
+  or unreadable pressure data counts as unknown and never blocks (for example
+  on macOS or Windows). While available memory is below `minAvailableMb` or
+  swap-out is above `maxSwapOutPerSec`, no new worker or check starts; holders
+  that are already running continue.
+- **Waiting** polls every two seconds. The wait reason is `slots`, `pool`,
+  `memory` or `swap`, with a human-readable detail. Waiting ends when a slot is
+  granted, after `admissionTimeoutMs` with `E_ADMISSION_TIMEOUT`, or on an abort
+  with `E_ADMISSION_INTERRUPTED`.
+
+A worker timeout ends the run with the terminal status `admission_timeout` and
+records `admissionTimeout`; the worker slot is released before checks start, so
+a run never holds two machine slots. A check timeout records that check with
+`refused: "E_ADMISSION_TIMEOUT"` and `exitCode: null`, sets
+`admissionTimeout`, and stops the check loop. Admission wait time is bounded by
+the remaining run deadline but does not count against the check's own
+`timeoutMs`. The result carries `admissionWaits` with each wait and its
+`waitedMs`, and the compact handoff carries `admission: {waitedMs, reasons}`.
+
+During a wait, `runtime.json` has `phase: "admission"` and an `admission`
+detail; `junior status --live` shows that phase and detail. Once admitted, the
+phase advances and `admission` is `null`.
 
 
 ### Runtime, deadlines and handoff
@@ -612,9 +734,112 @@ junior handoff task.json --mock --quiet  # nothing on stderr
 
 `junior status <result.json|artifactDir> --live` prints a small live snapshot
 directly from the run's `runtime.json` (`phase`, `state`, `elapsedMs`,
-`remainingMs`, `currentTool`) without requiring `result.json` or executing
-anything. It also accepts a direct `runtime.json` path. A missing or malformed
-snapshot prints a concise error and exits nonzero.
+`remainingMs`, `currentTool`, and `admission` while waiting for a machine slot)
+without requiring `result.json` or executing anything. It also accepts a direct
+`runtime.json` path. A missing or malformed snapshot prints a concise error and
+exits nonzero. `junior status` with no file prints the review queue instead
+(see [Review queue aging](#review-queue-aging)).
+
+### Landing reviewed lanes (`junior land`)
+`junior land` applies several reviewed lane patches into one integration
+checkout and reuses their evidence where the identity still matches:
+
+```bash
+junior land <result.json|id>... --into <dir> [--dry-run] [--compile <command...>]
+```
+
+All arguments after `--compile` are the compile argv, up to a literal `--` or
+the end of the command. Put lane ids before `--compile`, or after `--` when a
+compile command is also given. For example:
+
+```bash
+junior land A1 B2 --into ../integ --compile dotnet build --no-restore --
+```
+
+`--into` must be a clean integration checkout or branch worktree. Lanes are
+processed in the order given. A lane that is not `ready_for_review` is refused
+with `E_LAND_NOT_READY`. Each accepted lane's patch is applied with the same
+handoff apply logic used by `junior apply`; nothing is committed. If an apply
+conflicts, the batch stops at that lane, names the conflict, and leaves the
+earlier lanes applied. `--dry-run` checks the lanes and prints the report
+without applying them.
+
+After all lanes apply, each lane's executed checks are re-evaluated on the
+integration checkout using that lane's changed files. A check whose recomputed
+identity equals the stored identity is reported as `reused`; otherwise it is
+`stale`, with the differing fields. A check with no stored identity is stale
+with reason `no identity`. The report's `rerun` array contains the argv of each
+stale check.
+
+The batch runs one compile-only check: `--compile`, else `land.compile` from
+`delivery.config.json`, else the first `phase: "build"` check from the landed
+contracts, else none. It goes through machine admission like any check. The
+compile is bounded by `land.compileTimeoutMs` (default `600000` ms); a timeout
+fails the compile with error `compile timed out`.
+
+```json
+"land": {
+  "compile": ["dotnet", "build", "--no-restore"],
+  "compileTimeoutMs": 600000
+}
+```
+
+When no compile check is configured, the report has `compile: null` and a
+`warnings` entry `"no compile check configured; the batch was not compiled"`;
+`ok` can still be true.
+
+The report is written to `<into>/.delivery/land/<timestamp>/land-report.json`
+and printed. It contains `lanes` (each with `id`, `applied` and per-check
+`command`, `verdict`, `changed`), `compile`, `warnings`, `rerun` and `ok`. `ok`
+is true when every lane applied and the compile passed (or no compile was
+configured); the command exits 0 when `ok` is true and 1 otherwise.
+
+### Review queue aging
+`reviewQueue` in `delivery.config.json` makes a stalled `ready_for_review` run
+visible:
+
+```json
+"reviewQueue": {
+  "agingMinutes": 30,
+  "notify": { "command": "scripts/notify-review", "args": [] }
+}
+```
+
+`agingMinutes` is a positive number and defaults to 30. The config accepts only
+`agingMinutes` and `notify` (`command`, plus optional `args`); unknown keys or
+invalid values are rejected. A run is aged when its `status` is
+`ready_for_review`, its run end time (`runtime.finishedAt`, else the result
+file's mtime) is older than the threshold, and no `applied.json` or newer
+applied run for the same id exists. Aged runs are listed oldest first, with
+`next` set to `junior apply <resultPath>`.
+
+`junior status` with no file prints the queue report
+(`agingMinutes`, `aging`, `notified`, `notifyErrors`). `junior status
+<result.json>` keeps printing the compact handoff and additionally lists aged
+runs on stderr when any exist. The optional `notify.command`/`notify.args` hook
+runs once per aged run, keyed by its result path, with the aging-review JSON on
+stdin; it uses argv without a shell and a 10-second timeout. Successful result
+paths are recorded in `.delivery/review-queue.json`, and entries for runs that
+are no longer aging are dropped. The report's `notified` lists the result paths
+notified in this run. A failed notification appears in `notifyErrors` and is
+retried on the next run.
+
+### Doctor admission and build warnings
+`junior doctor` adds an `admission` block from the same read-only snapshot the
+gate uses: whether admission is enabled, machine and pool holders against their
+limits, and current `availableMb`/`swapOutPerSec` against the configured
+thresholds. Doctor never takes a slot. It warns on memory pressure when
+available memory is below `minAvailableMb` (`memory pressure: available X MB < Y MB`)
+and on swap pressure when swap-out is above `maxSwapOutPerSec`. It also warns
+when every machine slot is held.
+
+Doctor also checks the newest 20 `result.json` files under `.delivery`. When at
+least three worktree-isolated runs built cold (`timing.warm === false` and
+`timing.buildMs >= 60000`) and neither the contracts nor
+`delivery.config.json` set `isolationSetup.warmFrom`, it warns `checks build
+cold in worktrees (median build N s); set isolationSetup.warmFrom` and points to
+[docs/runtime.md#warm-start](#warm-start). These are warnings only: doctor
+readiness stays true, and no run is blocked or changed.
 
 #### Prompt search restriction
 The common prompt restricts file reads and searches to the execution checkout

@@ -1,0 +1,62 @@
+{
+ "id": "M1-r1",
+ "deliverable": "Repair lane M1 (admission core) for these review findings: (1) Slot files are created with writeFileSync flag 'wx', which makes the file visible empty before its JSON is written; a concurrent reader then sees an unparseable file, treats it as stale and unlinks it, so two runs hold one slot. Write the JSON to a unique temp file in the same directory, then linkSync(tmp, slotPath) (EEXIST means taken), then unlink the temp; additionally treat an unparseable slot file as live unless its mtime is older than 60 s on the injected clock. (2) Stale-slot reclaim races: two waiters that both saw a dead pid can each unlink, the second deleting the first's fresh slot. Reclaim by renameSync(slot, '<slot>.stale-<holder>-<pid>-<n>'); only the process whose rename succeeds re-reads the renamed file, confirms the pid is still the dead one, and deletes it; if the renamed file holds a live pid (it was fresh), rename it back with linkSync and treat the slot as held. (3) An empty JUNIOR_STATE_DIR must fall back to ~/.junior (use || not ??). (4) Pass req.signal to the 1 s swap-out sample sleep so an abort during the sample returns E_ADMISSION_INTERRUPTED promptly. (5) JUNIOR_ADMISSION=off is honoured by resolveMachineConfig (enabled:false); admit itself obeys only config.enabled, so tests that pass an explicit config still exercise it. Read the environment through an injectable env (resolveMachineConfig(cwd, task, env = process.env)). Add one behavioural test per item.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a slot file is never visible to other processes before its JSON is complete",
+  "an unparseable fresh slot file is not reclaimed",
+  "two concurrent reclaims of one stale slot leave exactly one holder",
+  "an empty JUNIOR_STATE_DIR does not create admission state in the current directory",
+  "an abort during the pressure sample returns E_ADMISSION_INTERRUPTED",
+  "JUNIOR_ADMISSION=off disables admission via resolveMachineConfig"
+ ],
+ "constraints": [
+  "Only modify admission.ts, admission.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "admission.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "admission.ts",
+   "admission.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 32,
+   "end": 73
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/M1/1795221951099/result.json"
+}

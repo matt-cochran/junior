@@ -22,7 +22,7 @@ import { systemClock, type Clock } from './clock.ts';
 /** Outcomes that stop a run to wait for the manager or the human: the lease is
  * kept (a rerun by the same caller is re-entrant) and the deliverable is not
  * marked failed. */
-export const HOLD_OUTCOMES: readonly string[] = ['needs_answers', 'needs_choice', 'needs_model_approval'];
+export const HOLD_OUTCOMES: readonly string[] = ['needs_answers', 'needs_choice', 'needs_model_approval', 'needs_budget_approval'];
 
 export function isHoldOutcome(status: unknown): boolean {
   return typeof status === 'string' && HOLD_OUTCOMES.includes(status);

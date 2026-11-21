@@ -33,9 +33,26 @@ export interface CommandRule {
   localCommand?: string;
 }
 
+export type NoBuildGuard = 'refuse' | 'stale' | 'off';
+export type HookBypassGuard = 'refuse' | 'off';
+
+/** The resolved default command guards (#281). An absent field in a contract's
+ * `commandPolicy.guards` takes the default; `off` is an explicit opt-out. */
+export interface ResolvedGuards {
+  noBuild: NoBuildGuard;
+  hookBypass: HookBypassGuard;
+}
+
+export const DEFAULT_COMMAND_GUARDS: ResolvedGuards = {
+  noBuild: 'refuse',
+  hookBypass: 'refuse',
+};
+
 export interface CommandPolicy {
   enforce: boolean;
   rules: CommandRule[];
+  /** Fully resolved: omitted contract fields already carry their defaults. */
+  guards: ResolvedGuards;
 }
 
 export interface CommandDecision {
@@ -55,7 +72,10 @@ export class CommandPolicyError extends Error {
   }
 }
 
-const CONTRACT_FIELDS = ['enforce', 'manifest', 'rules', 'remoteWrapper'];
+const CONTRACT_FIELDS = ['enforce', 'manifest', 'rules', 'remoteWrapper', 'guards'];
+const GUARD_FIELDS = ['noBuild', 'hookBypass'];
+const NO_BUILD_GUARDS = ['refuse', 'stale', 'off'];
+const HOOK_BYPASS_GUARDS = ['refuse', 'off'];
 const MANIFEST_FIELDS = ['version', 'rules'];
 const DEVBOX_MANIFEST_FIELDS = ['schemaVersion', 'commands'];
 const DEVBOX_ENTRY_FIELDS = ['path', 'placement', 'reason', 'remoteWrapperPolicy', 'localCommand'];
@@ -133,6 +153,31 @@ function validateRule(raw: unknown, source: string, cwd?: string): CommandRule {
 
   if ('wrapper' in raw) fail(`${source}.wrapper: only valid for a remote rule`);
   return { match, placement: 'local' };
+}
+
+/** Validate `commandPolicy.guards` and fill every omitted field with its
+ * default. Unknown keys and values are errors, never silent no-ops. */
+function validateGuards(raw: unknown, source: string): ResolvedGuards {
+  if (!isPlainObject(raw)) fail(`${source}: expected an object`);
+  assertKnownFields(raw, GUARD_FIELDS, source);
+
+  let noBuild: NoBuildGuard = DEFAULT_COMMAND_GUARDS.noBuild;
+  if ('noBuild' in raw) {
+    if (!NO_BUILD_GUARDS.includes(raw.noBuild as string)) {
+      fail(`${source}.noBuild: expected "refuse", "stale" or "off"`);
+    }
+    noBuild = raw.noBuild as NoBuildGuard;
+  }
+
+  let hookBypass: HookBypassGuard = DEFAULT_COMMAND_GUARDS.hookBypass;
+  if ('hookBypass' in raw) {
+    if (!HOOK_BYPASS_GUARDS.includes(raw.hookBypass as string)) {
+      fail(`${source}.hookBypass: expected "refuse" or "off"`);
+    }
+    hookBypass = raw.hookBypass as HookBypassGuard;
+  }
+
+  return { noBuild, hookBypass };
 }
 
 function requiredString(value: unknown, source: string): string {
@@ -292,9 +337,17 @@ export function parseCommandPolicy(value: unknown, cwd: string): CommandPolicy |
   if (!isPlainObject(raw)) fail('commandPolicy: expected an object');
   assertKnownFields(raw, CONTRACT_FIELDS, 'commandPolicy');
 
+  const guards = 'guards' in raw
+    ? validateGuards(raw.guards, 'commandPolicy.guards')
+    : { ...DEFAULT_COMMAND_GUARDS };
+  const hasPlacement = 'rules' in raw || 'manifest' in raw;
   if (typeof raw.enforce !== 'boolean') {
-    fail('commandPolicy.enforce: expected a boolean');
+    // A guards-only policy does not place commands, so it may omit enforce.
+    if (hasPlacement || !('guards' in raw)) {
+      fail('commandPolicy.enforce: expected a boolean');
+    }
   }
+  const enforce = typeof raw.enforce === 'boolean' ? raw.enforce : false;
 
   let remoteWrapper: string | undefined;
   if ('remoteWrapper' in raw) {
@@ -320,13 +373,14 @@ export function parseCommandPolicy(value: unknown, cwd: string): CommandPolicy |
     manifestRules = readCommandManifest(raw.manifest, cwd, remoteWrapper);
   }
 
-  if (contractRules.length === 0 && manifestRules.length === 0) {
+  if (contractRules.length === 0 && manifestRules.length === 0 && !('guards' in raw)) {
     fail('commandPolicy: expected rules or a manifest');
   }
 
   const policy: CommandPolicy = {
-    enforce: raw.enforce,
+    enforce,
     rules: [...contractRules, ...manifestRules],
+    guards,
   };
   policyCwds.set(policy, resolve(cwd));
   return policy;
@@ -336,9 +390,11 @@ export function parseCommandPolicy(value: unknown, cwd: string): CommandPolicy |
 // Direct argv normalization
 // ---------------------------------------------------------------------------
 
-interface PrefixResult {
+export interface PrefixResult {
   argv: string[];
   opaque?: string;
+  /** Prefix assignments (`FOO=bar`, `env HUSKY=0`), before they are stripped. */
+  assignments?: string[];
 }
 
 function stripEnv(rest: string[]): PrefixResult {
@@ -384,8 +440,12 @@ function stripEnv(rest: string[]): PrefixResult {
     }
     break;
   }
-  while (index < rest.length && ASSIGNMENT.test(rest[index])) index += 1;
-  return { argv: rest.slice(index) };
+  const assignments: string[] = [];
+  while (index < rest.length && ASSIGNMENT.test(rest[index])) {
+    assignments.push(rest[index]);
+    index += 1;
+  }
+  return { argv: rest.slice(index), ...(assignments.length > 0 ? { assignments } : {}) };
 }
 
 function stripCommand(rest: string[]): PrefixResult {
@@ -510,12 +570,14 @@ function stripNice(rest: string[]): PrefixResult {
 
 /** Strip leading assignments and transparent env/command/exec/timeout/nice
  * prefixes. Unrecognized prefix options are opaque, not silently ignored. */
-function stripPrefixes(argv: string[]): PrefixResult {
+export function stripCommandPrefixes(argv: string[]): PrefixResult {
   let tokens = argv.slice();
   let opaque: string | undefined;
+  const assignments: string[] = [];
   for (let guard = 0; guard < 64; guard += 1) {
     if (tokens.length === 0) break;
     if (ASSIGNMENT.test(tokens[0])) {
+      assignments.push(tokens[0]);
       tokens = tokens.slice(1);
       continue;
     }
@@ -529,23 +591,24 @@ function stripPrefixes(argv: string[]): PrefixResult {
     else if (program === 'nice') result = stripNice(tokens.slice(1));
 
     if (!result) break;
+    if (result.assignments) assignments.push(...result.assignments);
     tokens = result.argv;
     if (result.opaque) {
       opaque = result.opaque;
       break;
     }
   }
-  return { argv: tokens, opaque };
+  return { argv: tokens, opaque, ...(assignments.length > 0 ? { assignments } : {}) };
+}
+
+/** Tokenize a shell-like command string for a stateless guard. */
+export function tokenizeCommand(input: string): Tokenized {
+  return tokenize(input);
 }
 
 // ---------------------------------------------------------------------------
 // Tokenization and chain splitting (string input only)
 // ---------------------------------------------------------------------------
-
-interface Tokenized {
-  segments: string[][];
-  opaque?: string;
-}
 
 interface TokenizerState {
   segments: string[][];
@@ -672,6 +735,11 @@ function stepUnquoted(state: TokenizerState, input: string, index: number): numb
   if (separator !== undefined) return separator;
   appendText(state, input[index]);
   return index;
+}
+
+export interface Tokenized {
+  segments: string[][];
+  opaque?: string;
 }
 
 function tokenize(input: string): Tokenized {
@@ -1035,7 +1103,7 @@ function decideSegment(
   depth: number,
   seen: Set<string>,
 ): CommandDecision {
-  const normalized = stripPrefixes(tokens);
+  const normalized = stripCommandPrefixes(tokens);
   if (normalized.opaque) {
     if (enforce) return refusal('unknown', `cannot prove placement for ${normalized.opaque}`);
     return allow('unknown');

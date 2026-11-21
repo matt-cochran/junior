@@ -17,6 +17,11 @@ import process from 'node:process';
 import { checkCredentialsOnline, type SetupDeps } from './setup.ts';
 import { readDataPolicy, type DataPolicy } from './data-policy.ts';
 import { systemClock, type Clock } from './clock.ts';
+import {
+  requireHuman,
+  recordBudgetApproval,
+  type HumanApprovalOptions,
+} from './human-approval.ts';
 
 export const AUTH_USAGE = [
   'Usage: junior auth set <provider> [--verify]',
@@ -24,6 +29,7 @@ export const AUTH_USAGE = [
   '       junior auth consent [grant] <provider> [--project <dir>]',
   '       junior auth consent remove <provider> [--project <dir>]',
   '       junior auth consent status [provider] [--project <dir>]',
+  '       junior auth budget approve <contract-id> --tokens <n> [--project <dir>]',
 ].join('\n');
 
 /** The agent directory that holds `auth.json`; mirrors setup.ts resolution. */
@@ -553,7 +559,12 @@ function printConsentStatus(project: string, provider: string): number {
   return 0;
 }
 
-function runConsent(rest: string[]): number {
+function humanApprovalOptions(deps: SetupDeps): HumanApprovalOptions {
+  const injected = (deps as any).humanApproval ?? {};
+  return { ...injected, env: injected.env ?? deps.env ?? process.env };
+}
+
+async function runConsent(rest: string[], deps: SetupDeps = {}): Promise<number> {
   const parsed = parseConsentArgs(rest);
   if (parsed.error) return fail(parsed.error);
   const { project, token, positional } = parsed;
@@ -567,6 +578,10 @@ function runConsent(rest: string[]): number {
     if (resolvedAction === 'remove') {
       removeExternalContextConsent(project, provider);
     } else {
+      // A grant changes where repository text may go; an agent cannot grant it
+      // for the human. A refusal records nothing.
+      const action = `junior auth consent grant ${provider} --project ${project}`;
+      await requireHuman(action, humanApprovalOptions(deps));
       dataPolicy = readDataPolicy(project);
       recordExternalContextConsent(project, provider, { ...(token ? { scope: [token] } : {}), dataPolicy });
     }
@@ -578,6 +593,68 @@ function runConsent(rest: string[]): number {
   return 0;
 }
 
+interface BudgetArgs {
+  id: string;
+  tokens: number | null;
+  project: string;
+  error?: string;
+}
+
+function parseBudgetArgs(rest: string[]): BudgetArgs {
+  let project = process.cwd();
+  let tokens: number | null = null;
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === '--project') { project = rest[++i] ?? ''; continue; }
+    if (arg.startsWith('--project=')) { project = arg.slice('--project='.length); continue; }
+    if (arg === '--tokens') {
+      const raw = rest[++i];
+      tokens = raw === undefined ? NaN : Number(raw);
+      continue;
+    }
+    if (arg.startsWith('--tokens=')) {
+      tokens = Number(arg.slice('--tokens='.length));
+      continue;
+    }
+    if (arg.startsWith('-')) return { id: '', tokens, project, error: `Unknown option for auth budget: ${arg}\n${AUTH_USAGE}` };
+    positional.push(arg);
+  }
+  if (positional[0] !== 'approve') return { id: '', tokens, project, error: `auth budget requires the 'approve' action\n${AUTH_USAGE}` };
+  const id = positional[1] ?? '';
+  if (positional.length !== 2 || !id.trim()) return { id: '', tokens, project, error: `auth budget approve requires exactly one contract id\n${AUTH_USAGE}` };
+  if (!project) return { id, tokens, project, error: AUTH_USAGE };
+  if (tokens === null || !Number.isInteger(tokens) || tokens <= 0) {
+    return { id, tokens, project, error: 'auth budget approve requires --tokens <positive integer>' };
+  }
+  return { id: id.trim(), tokens, project };
+}
+
+async function runBudget(rest: string[], deps: SetupDeps = {}): Promise<number> {
+  const parsed = parseBudgetArgs(rest);
+  if (parsed.error) return fail(parsed.error);
+  const action = `junior auth budget approve ${parsed.id} --tokens ${parsed.tokens} --project ${parsed.project}`;
+  let token: string;
+  try {
+    token = await requireHuman(action, humanApprovalOptions(deps));
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  const clock: Clock = (deps as any).clock ?? systemClock;
+  let stored;
+  try {
+    stored = recordBudgetApproval(parsed.project, {
+      id: parsed.id,
+      maxTotalTokens: parsed.tokens as number,
+      token,
+    }, clock);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  process.stdout.write(`${JSON.stringify({ ...stored.approval, path: stored.path }, null, 2)}\n`);
+  return 0;
+}
+
 export async function main(argv: string[], deps: SetupDeps = {}): Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === '--help' || command === '-h' || command === 'help') {
@@ -586,6 +663,7 @@ export async function main(argv: string[], deps: SetupDeps = {}): Promise<number
   }
   if (command === 'set') return runSet(rest, deps);
   if (command === 'remove') return runRemove(rest, deps);
-  if (command === 'consent' || command === 'approve' || command === 'authorize') return runConsent(rest);
+  if (command === 'consent' || command === 'approve' || command === 'authorize') return runConsent(rest, deps);
+  if (command === 'budget') return runBudget(rest, deps);
   return fail(`Unknown auth command: ${command}\n${AUTH_USAGE}`);
 }

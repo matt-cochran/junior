@@ -1,0 +1,88 @@
+{
+ "id": "E1",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 120-155 (lane E1) completely and to production grade: Check results carry a governed evidence identity (tree hash of touched projects, command and filter, lockfile hash, toolchain) and build-vs-test timing",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "editing a file in one project changes only that project tree in the identity",
+  "an untracked file changes the tree hash",
+  "two identities of the same tree, command and lockfiles are identityEqual",
+  "a changed lockfile breaks equality",
+  "test filters (-t, --filter, -k, file paths) are captured",
+  "classifyCheck labels build, test and other commands"
+ ],
+ "constraints": [
+  "Only modify evidence-identity.ts, evidence-identity.test.ts, worker-receipt.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 120-155; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "evidence-identity.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "evidence-identity.ts",
+   "evidence-identity.test.ts",
+   "worker-receipt.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 120,
+   "end": 155
+  },
+  {
+   "path": "evidence-identity.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "worker-receipt.ts",
+   "start": 290,
+   "end": 330
+  },
+  {
+   "path": "command-guards.ts",
+   "start": 1,
+   "end": 60
+  },
+  {
+   "path": "worker-checks.ts",
+   "start": 70,
+   "end": 100
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "E1"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

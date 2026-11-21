@@ -1,0 +1,59 @@
+{
+ "id": "E3-r1",
+ "deliverable": "Repair lane E3 (review-queue aging) for these review findings: (1) notify state in review-queue.json is keyed by run id and never pruned, so after A1/ts1 is notified and applied, a later aging run A1/ts2 is never notified. Key the notified set by resultPath (one notification per run), and drop entries whose run is no longer aging when the file is rewritten. Keep reading an old file whose notified list holds bare ids without crashing (treat them as not matching any resultPath). (2) The notify spawnSync buffers stdout (default 1 MB maxBuffer); a chatty hook gets ENOBUFS and a delivered notification is recorded as a failure. Use stdio ['pipe','ignore','pipe'] and keep the 10 s timeout and JSON on stdin.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a later run of an already-notified id is notified when it ages",
+  "entries for runs no longer aging are pruned from review-queue.json",
+  "a notify hook that writes more than 1 MB to stdout is recorded as notified"
+ ],
+ "constraints": [
+  "Only modify review-queue.ts, review-queue.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "review-queue.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "review-queue.ts",
+   "review-queue.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 183,
+   "end": 197
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/E3/1795221966515/result.json"
+}

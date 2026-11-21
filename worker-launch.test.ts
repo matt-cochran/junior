@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { launch } from './worker-launch.ts';
+import { finish } from './worker-outcome.ts';
 import { createRunState, outOfTime, remainingMs } from './worker-preflight.ts';
 import { createManualClock, systemClock } from './clock.ts';
 import { resolveOpenRouterKey } from './worker-gates.ts';
@@ -52,6 +53,9 @@ const completeStream = (fake: ReturnType<typeof fakeChild>) => {
   fake.end(0);
 };
 
+/** Let the launch phase reach its child spawn after the admission await. */
+const spawned = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 const launchState = (extra: any = {}) => {
   const cwd = extra.cwd ?? mkdtempSync(join(tmpdir(), 'worker-launch-'));
   const task = {
@@ -62,7 +66,10 @@ const launchState = (extra: any = {}) => {
     checks: [],
     ...(extra.task ?? {}),
   };
-  const state = createRunState(task, false, extra.deps ?? {});
+  const state = createRunState(task, false, {
+    admit: async () => ({ ok: true, grant: { waitedMs: 0, pool: null, release() {} } }),
+    ...(extra.deps ?? {}),
+  });
   state.prompt = 'launch fixture prompt';
   state.decision = { selected: extra.workflow ?? 'test_first' };
   state.isolationArgs = [];
@@ -121,6 +128,7 @@ test('a contract budget stops a streamed run with budget_exceeded', async (t) =>
   });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
   const running = launch(state);
+  await spawned();
   fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'true' } });
   fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'bash', args: { command: 'true' } });
   fake.end(0);
@@ -133,6 +141,7 @@ test('an evaluate run without a contract budget passes the report defaults to th
   const state = launchState({ workflow: 'evaluate', deps: { spawnChild: () => fake.child } });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
   const running = launch(state);
+  await spawned();
   completeStream(fake);
   await running;
   assert.deepEqual(state.streamResult.budget.requested, { maxToolCalls: 25, maxTotalTokens: 400000, mode: 'enforce' });
@@ -278,7 +287,7 @@ test('launch hands the contract commandPolicy to the Pi guard environment', asyn
   });
   t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
   await launch(state);
-  assert.deepEqual(JSON.parse(seen), { enforce: true, rules: [{ match: ['git'], placement: 'local' }] });
+  assert.deepEqual(JSON.parse(seen), { enforce: true, rules: [{ match: ['git'], placement: 'local' }], guards: { noBuild: 'refuse', hookBypass: 'refuse' } });
 });
 
 test('launch sets no command policy for a contract without commandPolicy', async (t) => {
@@ -323,6 +332,7 @@ test('a budget stop is not reported as a Pi failure', async (t) => {
   // Pi traps SIGTERM and exits 143, as the real CLI does when Junior stops it.
   fake.child.kill = () => { fake.end(143); return true; };
   const running = launch(state);
+  await spawned();
   fake.stderr.write('Warning: Model "m" not found for provider "openrouter". Using custom model id.\n');
   fake.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'bash', args: { command: 'true' } });
   fake.emit({ type: 'tool_execution_start', toolCallId: 'c2', toolName: 'bash', args: { command: 'true' } });
@@ -342,4 +352,212 @@ test('eventErrorMessages collects Pi event errors and ignores tool output (#203)
     "Credential store read failed for openrouter: EROFS: read-only file system, mkdir '/home/u/.pi/agent/auth.json.lock'",
     'Connection error.',
   ]);
+});
+
+// --- machine admission (#277, M2) -------------------------------------------
+
+const admissionWait = (overrides: any = {}) => ({
+  reason: 'slots', detail: 'slots 4/4 held by r-1', pool: null, since: '2026-01-01T00:00:00.000Z', ...overrides,
+});
+
+const granted = (overrides: any = {}) => ({ waitedMs: 0, pool: null, release() {}, ...overrides });
+
+test('a streamed worker acquires admission before Pi starts', async (t) => {
+  const order: string[] = [];
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admit: async (req: any) => { order.push(req.kind); return { ok: true, grant: granted() }; },
+      spawnChild: () => { order.push('spawn'); setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(order, ['worker', 'spawn']);
+});
+
+test('a streamed worker releases its admission slot when Pi exits', async (t) => {
+  let released = false;
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admit: async () => ({ ok: true, grant: granted({ release: () => { released = true; } }) }),
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(released, true);
+});
+
+test('a waiting worker reports the admission phase and wait reason in its heartbeat', async (t) => {
+  let live: any;
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admit: async (req: any) => {
+        req.onWait(admissionWait());
+        const snapshot = state.heartbeat.snapshot();
+        live = { phase: snapshot.phase, reason: snapshot.admission?.reason };
+        return { ok: true, grant: granted({ waitedMs: 10 }) };
+      },
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(live, { phase: 'admission', reason: 'slots' });
+});
+
+test('a waiting worker emits the admission detail', async (t) => {
+  const lines: string[] = [];
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admit: async (req: any) => { req.onWait(admissionWait({ detail: 'available 512 MB < 2,048 MB' })); return { ok: true, grant: granted() }; },
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  state.emit = (line: string) => lines.push(line);
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(lines.filter((line) => line.startsWith('waiting for admission')), ['waiting for admission: available 512 MB < 2,048 MB']);
+});
+
+test('a worker admission timeout prevents Pi from starting', async (t) => {
+  let spawns = 0;
+  const state = launchState({
+    deps: {
+      admit: async () => ({ ok: false, error: 'E_ADMISSION_TIMEOUT', wait: admissionWait(), waitedMs: 250 }),
+      spawnChild: () => { spawns += 1; return fakeChild().child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(spawns, 0);
+});
+
+test('a worker admission timeout is recorded as a worker timeout', async (t) => {
+  const state = launchState({
+    deps: { admit: async () => ({ ok: false, error: 'E_ADMISSION_TIMEOUT', wait: admissionWait(), waitedMs: 250 }) },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(state.admissionTimeout, { kind: 'worker', waitedMs: 250, wait: admissionWait() });
+});
+
+/** A run whose worker deadline is one clock tick away at launch: the
+ * pre-launch check sees time left, admission sees none. */
+const noAdmissionBudgetState = (spawnChild: () => any) => {
+  const state = launchState({ deps: { spawnChild } });
+  const base = 1_000_000;
+  let calls = 0;
+  state.clock = { ...systemClock, now: () => base + calls++ };
+  state.deadlineAt = base + state.settings.checkReserveMs + 1;
+  return state;
+};
+
+test('a worker with no admission budget does not spawn Pi', async (t) => {
+  let spawns = 0;
+  const fake = fakeChild();
+  const state = noAdmissionBudgetState(() => {
+    spawns += 1;
+    setImmediate(() => completeStream(fake));
+    return fake.child;
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(spawns, 0);
+});
+
+test('a worker with no admission budget records an admission timeout', async (t) => {
+  const fake = fakeChild();
+  const state = noAdmissionBudgetState(() => {
+    setImmediate(() => completeStream(fake));
+    return fake.child;
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(state.admissionTimeout, { kind: 'worker', waitedMs: 0, wait: null });
+});
+
+test('worker admission receives the injected state directory and proc root', async (t) => {
+  let observed: any;
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admissionStateDir: '/fixture/admission',
+      procRoot: '/fixture/proc',
+      admit: async (req: any) => { observed = { stateDir: req.stateDir, procRoot: req.procRoot }; return { ok: true, grant: granted() }; },
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(observed, { stateDir: '/fixture/admission', procRoot: '/fixture/proc' });
+});
+
+test('worker admission waits no longer than the worker deadline allows', async (t) => {
+  let observed: number | undefined;
+  const clock = createManualClock(Date.now());
+  const fake = fakeChild();
+  const state = launchState({
+    task: { execution: { deadlineMs: 120000, checkReserveMs: 100000 } },
+    deps: {
+      clock,
+      admit: async (req: any) => { observed = req.config.admissionTimeoutMs; return { ok: true, grant: granted() }; },
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(observed, 20000);
+});
+
+test('a disabled machine config starts the worker without waiting for admission', async (t) => {
+  let spawns = 0;
+  const fake = fakeChild();
+  const state = launchState({
+    task: { machine: { enabled: false } },
+    deps: {
+      admit: undefined,
+      spawnChild: () => { spawns += 1; setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(spawns, 1);
+});
+
+test('an interrupted worker admission does not record a timeout', async (t) => {
+  const state = launchState({
+    deps: { admit: async () => ({ ok: false, error: 'E_ADMISSION_INTERRUPTED', wait: admissionWait(), waitedMs: 25 }) },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.equal(state.admissionTimeout, undefined);
+});
+
+test('a worker admission timeout ends the run admission_timeout', async (t) => {
+  const state = launchState({
+    deps: { admit: async () => ({ ok: false, error: 'E_ADMISSION_TIMEOUT', wait: admissionWait(), waitedMs: 250 }) },
+  });
+  state.before = { changedFiles: [] };
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  const result = await finish(state);
+  assert.equal(result.status, 'admission_timeout');
+});
+
+test('an admitted worker wait is recorded with its waited time', async (t) => {
+  const fake = fakeChild();
+  const state = launchState({
+    deps: {
+      admit: async (req: any) => { req.onWait(admissionWait()); return { ok: true, grant: granted({ waitedMs: 42 }) }; },
+      spawnChild: () => { setImmediate(() => completeStream(fake)); return fake.child; },
+    },
+  });
+  t.after(() => rmSync(state.sourceCwd, { recursive: true, force: true }));
+  await launch(state);
+  assert.deepEqual(state.admissionWaits, [{ ...admissionWait(), waitedMs: 42 }]);
 });

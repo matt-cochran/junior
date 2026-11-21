@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scorePlanContracts, vetPlanEdges, type PlanQualityReport } from './plan-quality.ts';
+import { contractLint } from './contract-lint.ts';
 import type { GateClassifier } from './worker.ts';
 
 /** Registration files whose edits serialize otherwise independent cohorts. */
@@ -46,6 +47,8 @@ export interface PlanFinding {
   severity: FindingSeverity;
   ids: string[];
   message: string;
+  /** Concrete fix from the contract lint, when the finding came from it. */
+  suggestion?: string;
 }
 
 export interface CriticalPathStep {
@@ -105,6 +108,12 @@ export interface PlanCheckOptions {
   expectedCriticalPath?: readonly string[];
   /** A cpm plan.status snapshot to reconcile before execution. */
   status?: unknown;
+  /** Base checkout used to read owned files and package.json. */
+  cwd?: string;
+  /** Repo name -> checkout, used for deliverables with metadata.repo. */
+  repos?: Record<string, string>;
+  /** Past delivery receipts used to estimate tokens per changed line. */
+  deliveryDir?: string;
 }
 
 export interface ContractOptions {
@@ -547,10 +556,13 @@ interface DeliverableCheckContext {
   registeredTests: PlanCheckOptions['registeredTests'];
   byId: Map<string, Record<string, any>>;
   planApprovedProfiles: string[];
+  cwd: string;
+  repos?: Record<string, string>;
+  deliveryDir?: string;
 }
 
 function deliverableFindings(deliverable: Record<string, any>, ctx: DeliverableCheckContext, findings: PlanFinding[]): void {
-  const { maxHours, hotFiles, registeredTests, byId, planApprovedProfiles } = ctx;
+  const { maxHours, hotFiles, registeredTests, byId, planApprovedProfiles, cwd, repos, deliveryDir } = ctx;
   const id = text(deliverable.id);
   const files = ownedFiles(deliverable);
 
@@ -618,6 +630,27 @@ function deliverableFindings(deliverable: Record<string, any>, ctx: DeliverableC
       `${id} depends on ${dependency || 'a prerequisite'} without consumes text`,
     ));
   }
+
+  const repo = text(deliverable.metadata?.repo).trim();
+  const repoCwd = repo ? repos?.[repo] : undefined;
+  const scopedFiles = files.map((file) =>
+    repo && file.startsWith(`${repo}:`) ? file.slice(repo.length + 1) : file,
+  );
+  const lintTarget: Record<string, any> = {
+    ...junior,
+    cwd: typeof junior.cwd === 'string' && junior.cwd.trim() ? junior.cwd : repoCwd || cwd,
+    ...(isRecord(junior.scope) ? {} : { scope: { owned: scopedFiles } }),
+    ...(isRecord(junior.estimate) ? {} : isRecord(deliverable.estimate) ? { estimate: deliverable.estimate } : {}),
+  };
+  for (const lint of contractLint(lintTarget, deliveryDir ? { deliveryDir } : {})) {
+    findings.push({
+      code: lint.code,
+      severity: lint.severity,
+      ids: [id],
+      message: `${id}: ${lint.message}`,
+      ...(lint.suggestion ? { suggestion: lint.suggestion } : {}),
+    });
+  }
 }
 
 function sharedFileFindings(agent: Array<Record<string, any>>, byId: Map<string, Record<string, any>>, findings: PlanFinding[]): void {
@@ -653,7 +686,17 @@ export function checkPlanForJunior(plan: unknown, opts: PlanCheckOptions = {}): 
   const planApprovedProfiles = approvedProfilesOf(plan);
   const findings: PlanFinding[] = [];
 
-  const ctx: DeliverableCheckContext = { maxHours, hotFiles, registeredTests, byId, planApprovedProfiles };
+  const cwd = opts.cwd ?? process.cwd();
+  const ctx: DeliverableCheckContext = {
+    maxHours,
+    hotFiles,
+    registeredTests,
+    byId,
+    planApprovedProfiles,
+    cwd,
+    ...(opts.repos !== undefined ? { repos: opts.repos } : {}),
+    deliveryDir: opts.deliveryDir ?? path.join(cwd, '.delivery'),
+  };
   for (const deliverable of agent) deliverableFindings(deliverable, ctx, findings);
 
   sharedFileFindings(agent, byId, findings);
@@ -814,10 +857,13 @@ export function runPlanCommand(argv: string[], deps: PlanCommandDeps = {}): { ex
     const plan = JSON.parse(fs.readFileSync(path.resolve(cwd, file), 'utf8'));
     const registeredTests = registeredTestsIn(cwd);
     const status = statusFile ? JSON.parse(fs.readFileSync(path.resolve(cwd, statusFile), 'utf8')) : undefined;
+    const repos = planReposIn(cwd);
     const result = checkPlanForJunior(plan, {
       maxHours,
+      cwd,
       ...(registeredTests !== undefined ? { registeredTests } : {}),
       ...(status !== undefined ? { status } : {}),
+      ...(repos !== undefined ? { repos } : {}),
     });
     out(JSON.stringify(result, null, 2));
     return { exitCode: result.ok ? 0 : 1, result };

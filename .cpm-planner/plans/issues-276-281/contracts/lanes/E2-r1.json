@@ -1,0 +1,65 @@
+{
+ "id": "E2-r1",
+ "deliverable": "Repair lane E2 (junior land) for these review findings: (1) HIGH: land.ts verifies each lane's identity right after that lane applies (around land.ts:389). Apply every lane first, then recompute identities on the final integration tree for every lane; if the batch stopped at an apply conflict, skip verification and mark those checks stale with reason 'batch incomplete'. Add a test where lanes A and B both touch one project: A's check must be stale after B applies. (2) compile:null (no --compile, no land.compile, no build check): keep ok true when every lane applied, add a top-level warnings entry 'no compile check configured; the batch was not compiled', and test it. (3) When --into is missing or not a directory, print the report but do not create any directory or write land-report.json. (4) The compile LandCompileReport built when resolveMachineConfig throws (around land.ts:259) must carry command (argv joined by spaces). (5) Run the compile with a timeout: land.compileTimeoutMs from delivery.config.json, default 600000 ms; a timeout fails the compile with error 'compile timed out'. (6) In junior.ts, --compile takes its argv up to a literal '--' terminator or the end of the arguments; document this in the land help text and test that a lane id after '--' is a lane. (7) Add tests for: E_LAND_DIRTY, E_LAND_LANE, CLI exit code 1 when ok is false, --compile overriding land.compile, and each item above.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "identities are recomputed only after every lane applies, so a lane whose project a later lane also changed is stale",
+  "a batch with no compile check is ok with a warning and compile:null",
+  "a missing --into creates no directory",
+  "the compile is bounded by a timeout",
+  "--compile argv ends at -- or end of arguments",
+  "tests cover E_LAND_DIRTY, E_LAND_LANE, exit code 1 and --compile precedence"
+ ],
+ "constraints": [
+  "Only modify land.ts, land.test.ts, junior.ts, cli.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Keep everything the first pass did that these findings do not name",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "land.test.ts",
+    "cli.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "land.ts",
+   "land.test.ts",
+   "junior.ts",
+   "cli.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 2400000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 156,
+   "end": 182
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off",
+ "resumeFrom": ".delivery/E2/1795221964117/result.json"
+}

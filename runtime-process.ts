@@ -22,11 +22,13 @@ export type RuntimeState =
  | 'starting' | 'running' | 'quiet' | 'tool_timed_out' | 'deadline_exceeded'
  | 'failed' | 'interrupted' | 'ready_for_review';
 
-export type RuntimePhase = 'readiness' | 'isolation' | 'classifier' | 'worker' | 'checks' | 'postflight' | 'done';
+export type RuntimePhase = 'readiness' | 'isolation' | 'classifier' | 'admission' | 'worker' | 'checks' | 'postflight' | 'done';
 
 export type RuntimeSnapshot = {
  state: RuntimeState;
  phase: RuntimePhase;
+ /** #277: why the run is waiting for admission, while it waits. */
+ admission?: { reason: string; detail: string; pool: string | null; since: string } | null;
  startedAt: string;
  heartbeatAt: string;
  lastActivityAt: string;

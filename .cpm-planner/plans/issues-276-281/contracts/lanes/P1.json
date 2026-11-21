@@ -1,0 +1,60 @@
+{
+ "id": "P1",
+ "deliverable": "Admission no longer sleeps one second per admit to measure swap-out: measurePressure in admission.ts reuses the previous pswpout reading for the same procRoot (kept in module memory with the injected clock's time) when it is at least 1 s and at most 60 s old, computing pages per second from it with no sleep; only when there is no usable previous reading does it take the two samples one second apart as today. Every reading updates the remembered sample. Tests use createManualClock and a fake procRoot.",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a second admit within 60 s of the first computes swap-out from the remembered reading without sleeping",
+  "a remembered reading under 1 s old or over 60 s old is not used and the two-sample measurement runs",
+  "readings for different procRoots are kept apart",
+  "the reported swap rate equals the pswpout delta divided by the elapsed seconds"
+ ],
+ "constraints": [
+  "Only modify admission.ts, admission.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "admission.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "admission.ts",
+   "admission.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": "admission.ts",
+   "start": 420,
+   "end": 460
+  },
+  {
+   "path": "admission.test.ts",
+   "start": 1,
+   "end": 60
+  }
+ ],
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

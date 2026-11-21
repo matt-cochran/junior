@@ -11,6 +11,7 @@
 // is reported with an actionable diagnostic and never auto-deleted.
 // ---------------------------------------------------------------------------
 
+import { validateWarmFrom, type WarmFrom } from './warm-start.ts';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, copyFileSync, readdirSync, statSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute, sep } from 'node:path';
 import { runSync, type RunSyncOptions } from './spawn-sync.ts';
@@ -139,9 +140,11 @@ export type IsolationSetup = {
  links?: IsolationSetupLink[];
  copy?: string[];
  commands?: IsolationSetupCommand[];
+ /** #278: copy build caches from a pre-built tree before checks (warm-start.ts). */
+ warmFrom?: WarmFrom;
 };
 
-const SETUP_FIELDS = ['links', 'copy', 'commands'] as const;
+const SETUP_FIELDS = ['links', 'copy', 'commands', 'warmFrom'] as const;
 const LINK_FIELDS = ['from', 'to'] as const;
 const COMMAND_FIELDS = ['command', 'args', 'cwd'] as const;
 
@@ -184,6 +187,7 @@ export function validateIsolationSetup(setup: unknown): void {
    if ((c as any).cwd !== undefined && !relativeSetupPath((c as any).cwd)) throw Error('Invalid isolationSetup.commands.cwd (expected a relative path)');
   }
  }
+ if (s.warmFrom !== undefined) validateWarmFrom(s.warmFrom);
 }
 
 /** Read the project `isolationSetup` value from delivery.config.json. Returns

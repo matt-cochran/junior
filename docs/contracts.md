@@ -6,7 +6,7 @@
 `validate` recognizes exactly the supported top-level fields (`id`,
 `deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `context`,
 `provider`, `model`, `thinking`, `pricing`, `billing`, `jev`, `workflow`,
-`isolation`, `isolationSetup`, `resumeFrom`, `repairFrom`,
+`isolation`, `isolationSetup`, `machine`, `resumeFrom`, `repairFrom`,
 `reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `preparedFrom`, `checkBack`,
 `plan`, `hopFrom`, `hopRevision`, `hopContext`, `piContext`, `clarifiedFrom`,
 `scope`, `execution`, and the six execution settings directly:
@@ -124,6 +124,66 @@ reads Pi's own system message and reports `isolation not honored: ...` in
 `unresolved` when ambient skills or tools outside the allowlist still appear.
 `junior doctor` reports any missing isolation flag in its remediation text.
 
+#### Machine admission (`machine`)
+A contract can override machine-wide admission for its workers and checks with
+the `machine` field. It is resolved over `DEFAULT_MACHINE_CONFIG`, with the
+contract winning over `delivery.config.json` field by field:
+
+```json
+"machine": {
+  "enabled": true,
+  "slots": 4,
+  "minAvailableMb": 2048,
+  "maxSwapOutPerSec": 500,
+  "admissionTimeoutMs": 1800000,
+  "pools": {
+    "dotnet": { "match": ["dotnet", "msbuild"], "limit": 2 }
+  }
+}
+```
+
+All fields are optional: `enabled` (default `true`), `slots` (4),
+`minAvailableMb` (2048), `maxSwapOutPerSec` (500), `admissionTimeoutMs`
+(30 minutes) and `pools` (empty). A pool has a non-empty `match` array of
+command prefixes and a positive integer `limit`. Prefixes match the command
+argv at a word boundary after `env`, assignments and `command`/`exec`/
+`timeout`/`nice` wrappers are stripped; the first matching pool in key order
+wins. Workers share machine slots but never take a pool. `JUNIOR_ADMISSION=off`
+or `enabled:false` grants admission immediately.
+
+`validateMachineConfig` rejects an unknown key, a non-positive integer `slots`
+or pool `limit`, a negative number, and a pool without a non-empty `match`
+array of strings. A timeout ends a run as `admission_timeout`; see
+[Machine admission](runtime.md#machine-admission) for the pressure gate, the
+waiting phase and the result fields.
+
+#### Worktree warm start (`isolationSetup.warmFrom`)
+A worktree contract can copy build caches from a pre-built tree before checks:
+
+```json
+"isolation": "worktree",
+"isolationSetup": {
+  "warmFrom": {
+    "path": "../prebuilt",
+    "include": ["**/obj/", "**/bin/"],
+    "exclude": ["**/obj/Debug/net*/ref/"]
+  }
+}
+```
+
+`path` is required, non-empty and resolved against the source checkout.
+`include` and `exclude` are optional arrays of non-empty relative globs;
+`include` defaults to `["**/obj/"]`. Unknown keys, a missing or empty `path`,
+and invalid glob entries are rejected before any paid call. `isolationSetup` is
+ignored when `isolation` is `none`; a contract value takes precedence over the
+project's `delivery.config.json` value. Warm start copies, never symlinks, and
+exclude globs remove matching paths, whether directories or files. A deadline
+keeps what was already copied and records a reason; unreadable source
+directories and symlinked targets are skipped with a reason. A missing source,
+no matches or a copy error before anything is copied leaves the run cold. A
+warm-start failure never fails the run. The result carries `warmStart`; see
+[Warm start](runtime.md#warm-start) for the fields and cache exclusion.
+
 #### Scope check (`scope`)
 `scope` declares the files a run may change:
 
@@ -207,7 +267,95 @@ code is `E_COMMAND_PLACEMENT`:
 - A refused `isolationSetup` command ends the run as `isolation_setup_failed`
   before Pi starts.
 
-Contracts without `commandPolicy` behave exactly as before.
+Contracts without `commandPolicy` keep their previous placement behaviour, but the default command guards
+below still apply.
+
+#### Default command guards
+
+Two guards are on even when a contract has no `commandPolicy`. A contract that configures placement can
+override them next to its rules or manifest:
+
+```json
+"commandPolicy": {
+  "enforce": true,
+  "guards": { "noBuild": "stale", "hookBypass": "off" },
+  "rules": [
+    { "match": ["npm test"], "placement": "remote", "wrapper": "./npm-safe.sh" }
+  ]
+}
+```
+
+| Guard | Values | Default | Meaning |
+|---|---|---|---|
+| `noBuild` | `refuse`, `stale`, `off` | `refuse` | Refuse tests that skip the build, or run them with stale evidence. |
+| `hookBypass` | `refuse`, `off` | `refuse` | Refuse git and environment tricks that disable hooks. |
+
+An unknown guard key or value is a contract error. The guards apply with no `commandPolicy` at all, so a
+project does not have to opt in to be protected.
+
+`noBuild` tracks whether a build ran in the contract's checks. A check whose command is a build, such as
+`dotnet build`, `npm run build`, `tsc`, `cargo build` or `mvn compile`, records `ok` or `failed` from its exit
+code. A later test command that carries `--no-build` (dotnet), `--no-restore --no-build`, or
+`-Dmaven.main.skip` is guarded when the last build is `failed` or when no build ran:
+
+- `refuse` (default) does not run the check and fails it with `refused: "E_POLICY_GUARD"`.
+- `stale` runs the check, but records `staleEvidence: true` and `error: "E_STALE_EVIDENCE"`, so the run is
+  `checks_failed` rather than accepted as fresh evidence.
+- `off` disables this guard.
+
+`hookBypass` refuses `git ... --no-verify`, `git -c core.hooksPath=...`, `git config core.hooksPath`, and the
+environment prefixes `HUSKY=0`, `HUSKY_SKIP_HOOKS=1`, `SKIP_HOOKS=1` and `LEFTHOOK=0`. The guard looks through
+`env`, assignments, `command`, `exec`, `timeout` and `nice` prefixes, so those prefixes cannot hide the
+command. It applies to contract checks and to the worker's own bash calls; on worker bash it is stateless and
+uses the same refusal path as command placement. `PRE_COMMIT_ALLOW_NO_CONFIG` is out of scope. `noBuild` is
+not applied to the worker's own bash, because that shell is not test evidence.
+
+Each guard decision is recorded as a typed `PolicyEvent`. The full result carries `policyEvents` and the
+compact receipt carries `policy` with the event counts and kinds.
+
+#### Human approval for budgets and consent
+
+Junior treats `CLAUDECODE`, `PI_CODING_AGENT`, `JUNIOR_WORKER`, `CODEX_SANDBOX` and `CURSOR_AGENT` as an agent
+shell. A human-only action refuses with `E_HUMAN_APPROVAL_REQUIRED` when it runs in an agent shell without a
+TTY. On a TTY it shows a six-character code that must be typed back. There is no `--yes` bypass.
+
+A budget increase above the workflow default, or above the parent run's budget on a `resumeFrom`, needs a
+recorded human approval. Approve one contract id and amount in your own terminal:
+
+```bash
+junior auth budget approve <contract-id> --tokens <n> [--project <dir>]
+```
+
+This writes `{ id, maxTotalTokens, approvedAt, token }` to `.junior/budget-approvals.json`. When a contract's
+`budget.maxTotalTokens` exceeds the default or parent budget and no approval covers that id and amount, the
+run stops before the worker with status `needs_budget_approval`. It writes `budget-approval.json` with the
+requested, default and parent budgets and the command to run, and records a `budget_raise_unapproved`
+`PolicyEvent`. Rerun the handoff after approving the amount.
+
+Consent changes use the same human rule. `junior auth consent grant <provider> --project <dir>` goes through
+the human check; if it is refused, nothing is recorded and Junior prints the exact command for the human to
+run in their own terminal.
+
+#### Contract lint
+
+`junior validate` (and therefore the `junior handoff` preflight), plus `junior plan check` through
+`checkPlanForJunior`, report two contract-shape lint codes. They are warnings by default. Under
+`jev.mode: "enforce"` they are errors, and `validate` refuses the contract instead of starting a worker.
+
+- `CHECK_UNFILTERED`: a check runs a whole test project or suite with no filter while the contract's owned or
+  allowed files name at most three test files. The unfiltered forms include `dotnet test <proj>` without
+  `--filter`, `npx jest` or `vitest run` without a path or `-t`, `pytest` without a path or `-k`, `node --test`
+  without a file, and `npm test` when the package's test script is unfiltered. The suggestion is a filtered
+  command built from the named test files or classes.
+- `CONTRACT_OVER_BUDGET`: the estimated changed lines are the sum of the owned files' current line counts times
+  0.5 for edited files, plus 150 per new file, or the contract's `estimate.changedLines` when given. The
+  estimate is multiplied by tokens per changed line: the median of past receipts under `opts.deliveryDir`
+  (usage total divided by evidence changed lines, using runs with at least 50 changed lines), otherwise 7,000.
+  The code is flagged when the estimate exceeds `effectiveBudget().maxTotalTokens`, with a code/test split as
+  the suggestion.
+
+A warning is listed in the contract warnings; an error names the code, message and suggestion in the
+validation failure.
 
 
 ### Micro-deliverable stages
@@ -357,6 +505,17 @@ Cache reuse across a continuation is **best effort and never guaranteed**. The
 receipt always preserves the observed `cacheRead` counters, the requested and
 observed provider/model, and does not claim actual billing. Each result carries
 a `cache` note to that effect.
+
+#### Continuation proposal
+
+When a run stops with `output_truncated` or `budget_exceeded`, the result carries
+`continuation` describing the remaining work:
+
+- `changedFiles`: the files the run changed.
+- `remainingFiles`: owned or allowed files from the contract that were not changed.
+- `split`: the suggested parts, code files before test files when both remain, otherwise one part.
+- `next`: a ready-to-edit contract skeleton for the first part. It copies `id` (suffixed `-cont-1`), `cwd`,
+  `workflow`, `acceptance`, `checks` and `isolation`, and sets `resumeFrom` to this run's `result.json`.
 
 
 ### Contract clarity before delegation

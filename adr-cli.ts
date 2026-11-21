@@ -67,6 +67,7 @@ import type { GateClassifier } from './worker.ts';
 import { readExternalContextConsent } from './auth.ts';
 import { runSync } from './spawn-sync.ts';
 import { boundedDiff, changedFileDiff, changedFileText } from './worker-adr-gate.ts';
+import { buildWholeChangeSubject } from './adr-change.ts';
 import { systemClock, type Clock } from './clock.ts';
 
 export type AdrGit = (args: string[]) => {status: number; stdout: string};
@@ -87,7 +88,7 @@ export const ADR_CLI_USAGE = [
   'Usage: junior adr <command> [options]',
   '  init [--dir <dir>] [--record-decision] [--yes]',
   '  check --stage design --input <file> [--json]',
-  '  check --stage implementation [--base <ref>] [--result <result.json>] [--json]',
+  '  check --stage implementation [--base <ref>] [--result <result.json>] [--whole-change] [--json]',
   '  check --stage ticket (--ticket <id> | --draft <file>) [--json]',
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
@@ -215,6 +216,17 @@ function implementationSubject(root: string, path: string, base: string): GateSu
     : {target: path, files: [path], text: boundedDiff(diff), kind: 'diff'};
 }
 
+function implementationDiffBase(argv: string[], deps: AdrCliDeps): string {
+  const base = valueAfter(argv, '--base') ?? defaultBase(deps);
+  try {
+    const merged = gitOutput(deps, ['merge-base', base, 'HEAD']).trim();
+    if (merged !== '') return merged;
+  } catch {
+    // A missing merge base falls back to the requested ref.
+  }
+  return base;
+}
+
 function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[] {
   const root = deps.cwd ?? process.cwd();
   const result = valueAfter(argv, '--result');
@@ -238,14 +250,20 @@ function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[]
   }
   for (const path of changedPaths(gitOutput(deps, ['status', '--porcelain=v1']))) add(path);
 
-  let diffBase = base;
-  try {
-    const merged = gitOutput(deps, ['merge-base', base, 'HEAD']).trim();
-    if (merged !== '') diffBase = merged;
-  } catch {
-    // A missing merge base falls back to the requested ref.
-  }
+  const diffBase = implementationDiffBase(argv, deps);
   return paths.map((path) => implementationSubject(root, path, diffBase));
+}
+
+function wholeChangeSubject(argv: string[], deps: AdrCliDeps): GateSubject {
+  const root = deps.cwd ?? process.cwd();
+  const result = valueAfter(argv, '--result');
+  const git = deps.git !== undefined ? {git: deps.git} : {};
+  if (result) {
+    const worktree = resultWorktree(result);
+    const contentRoot = worktree !== undefined && existsSync(worktree) ? worktree : root;
+    return buildWholeChangeSubject({root: contentRoot, base: 'HEAD', ...git});
+  }
+  return buildWholeChangeSubject({root, base: implementationDiffBase(argv, deps), ...git});
 }
 
 function printFindings(markdown: string, ids: readonly string[]): string {
@@ -400,7 +418,9 @@ async function checkGateStage(
     if (!input) return failure(output(deps), 'check --stage design needs --input <file>');
     subjects = [{target: input, text: readFileSync(input, 'utf8')}];
   } else {
-    subjects = implementationSubjects(argv, deps);
+    subjects = flagSet(argv, '--whole-change')
+      ? [wholeChangeSubject(argv, deps)]
+      : implementationSubjects(argv, deps);
   }
 
   const gate = await runAdrGate({

@@ -531,7 +531,7 @@ export function adrDimension(adrs: Adr[]): MatrixDimension {
 // ---------------------------------------------------------------------------
 
 function normalizePath(input: string): string {
-  return input.replace(/\\/g, '/').replace(/^\.\//, '');
+  return input.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
 }
 
 function isDeliveryPath(p: string): boolean {
@@ -545,6 +545,8 @@ function isGlob(entry: string): boolean {
 /** Match one `applies_to` entry (glob, literal path or `loc:` member) to a path. */
 export function matchesAppliesTo(entry: string, path: string): boolean {
   if (entry.startsWith('loc:')) entry = entry.slice(4);
+  entry = normalizePath(entry);
+  path = normalizePath(path);
   if (isGlob(entry)) return globToRegExp(entry).test(path);
   if (entry.endsWith('/')) return path.startsWith(entry);
   return entry === path;
@@ -552,14 +554,20 @@ export function matchesAppliesTo(entry: string, path: string): boolean {
 
 /** Compile a glob where `**` crosses path separators and `*` stays in a segment. */
 export function globToRegExp(glob: string): RegExp {
+  glob = normalizePath(glob);
   let source = '^';
   for (let i = 0; i < glob.length; i++) {
     const char = glob[i];
     if (char === '*') {
       if (glob[i + 1] === '*') {
-        source += '.*';
         i += 1;
-        if (glob[i + 1] === '/') i += 1;
+        if (glob[i + 1] === '/') {
+          // `**/` means zero or more complete path segments.
+          source += '(?:[^/]+/)*';
+          i += 1;
+        } else {
+          source += '.*';
+        }
       } else {
         source += '[^/]*';
       }
