@@ -1,0 +1,76 @@
+{
+ "id": "A3",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase1.md section 65-86 (lane A3) completely and to production grade: Whole-change judging mode (junior adr check --whole-change): one judgement per ADR over the diff plus the import/$ref graph, so cross-tool imports, cross-spec $refs and one client used by several tools are visible; tests with a 3-micro-app shared-hook fixture",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "junior adr check --whole-change judges each retrieved ADR once over the diff plus import/$ref graph",
+  "a hook shared by three micro-apps under tools/_shared is reported against the tool-independence ADR fixture",
+  "a cross-spec $ref between two tools is visible to the judge input"
+ ],
+ "constraints": [
+  "Only modify adr-change.ts, adr-change.test.ts, adr-cli.ts, adr-cli.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 65-86; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "adr-change.test.ts",
+    "adr-cli.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "adr-change.ts",
+   "adr-change.test.ts",
+   "adr-cli.ts",
+   "adr-cli.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 65,
+   "end": 86
+  },
+  {
+   "path": "adr-gate.ts",
+   "start": 44,
+   "end": 52
+  },
+  {
+   "path": "adr-cli.ts",
+   "start": 380,
+   "end": 450
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "A3"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

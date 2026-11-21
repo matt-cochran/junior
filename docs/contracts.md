@@ -6,7 +6,7 @@
 `validate` recognizes exactly the supported top-level fields (`id`,
 `deliverable`, `cwd`, `acceptance`, `checks`, `constraints`, `context`,
 `provider`, `model`, `thinking`, `pricing`, `billing`, `jev`, `workflow`,
-`isolation`, `isolationSetup`, `resumeFrom`, `repairFrom`,
+`isolation`, `isolationSetup`, `machine`, `resumeFrom`, `repairFrom`,
 `reviewFrom`, `maxRepairs`, `lineageDeadlineMs`, `preparedFrom`, `checkBack`,
 `plan`, `hopFrom`, `hopRevision`, `hopContext`, `piContext`, `clarifiedFrom`,
 `scope`, `execution`, and the six execution settings directly:
@@ -123,6 +123,66 @@ The result and compact handoff carry `piIsolation` with `applied`, `missing`,
 reads Pi's own system message and reports `isolation not honored: ...` in
 `unresolved` when ambient skills or tools outside the allowlist still appear.
 `junior doctor` reports any missing isolation flag in its remediation text.
+
+#### Machine admission (`machine`)
+A contract can override machine-wide admission for its workers and checks with
+the `machine` field. It is resolved over `DEFAULT_MACHINE_CONFIG`, with the
+contract winning over `delivery.config.json` field by field:
+
+```json
+"machine": {
+  "enabled": true,
+  "slots": 4,
+  "minAvailableMb": 2048,
+  "maxSwapOutPerSec": 500,
+  "admissionTimeoutMs": 1800000,
+  "pools": {
+    "dotnet": { "match": ["dotnet", "msbuild"], "limit": 2 }
+  }
+}
+```
+
+All fields are optional: `enabled` (default `true`), `slots` (4),
+`minAvailableMb` (2048), `maxSwapOutPerSec` (500), `admissionTimeoutMs`
+(30 minutes) and `pools` (empty). A pool has a non-empty `match` array of
+command prefixes and a positive integer `limit`. Prefixes match the command
+argv at a word boundary after `env`, assignments and `command`/`exec`/
+`timeout`/`nice` wrappers are stripped; the first matching pool in key order
+wins. Workers share machine slots but never take a pool. `JUNIOR_ADMISSION=off`
+or `enabled:false` grants admission immediately.
+
+`validateMachineConfig` rejects an unknown key, a non-positive integer `slots`
+or pool `limit`, a negative number, and a pool without a non-empty `match`
+array of strings. A timeout ends a run as `admission_timeout`; see
+[Machine admission](runtime.md#machine-admission) for the pressure gate, the
+waiting phase and the result fields.
+
+#### Worktree warm start (`isolationSetup.warmFrom`)
+A worktree contract can copy build caches from a pre-built tree before checks:
+
+```json
+"isolation": "worktree",
+"isolationSetup": {
+  "warmFrom": {
+    "path": "../prebuilt",
+    "include": ["**/obj/", "**/bin/"],
+    "exclude": ["**/obj/Debug/net*/ref/"]
+  }
+}
+```
+
+`path` is required, non-empty and resolved against the source checkout.
+`include` and `exclude` are optional arrays of non-empty relative globs;
+`include` defaults to `["**/obj/"]`. Unknown keys, a missing or empty `path`,
+and invalid glob entries are rejected before any paid call. `isolationSetup` is
+ignored when `isolation` is `none`; a contract value takes precedence over the
+project's `delivery.config.json` value. Warm start copies, never symlinks, and
+exclude globs remove matching paths, whether directories or files. A deadline
+keeps what was already copied and records a reason; unreadable source
+directories and symlinked targets are skipped with a reason. A missing source,
+no matches or a copy error before anything is copied leaves the run cold. A
+warm-start failure never fails the run. The result carries `warmStart`; see
+[Warm start](runtime.md#warm-start) for the fields and cache exclusion.
 
 #### Scope check (`scope`)
 `scope` declares the files a run may change:

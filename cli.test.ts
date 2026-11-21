@@ -49,7 +49,7 @@ function nestedHop(dir: string, name: string, revision: number): string {
   return path;
 }
 
-const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact', 'note'];
+const SUBCOMMANDS = ['handoff', 'qa', 'run', 'apply', 'land', 'validate', 'status', 'doctor', 'setup', 'init', 'update', 'prune', 'compact', 'note'];
 
 // --- top-level help ---------------------------------------------------------
 
@@ -370,6 +370,15 @@ test('junior handoff --mock prefixes progress lines with junior: on stderr', () 
 test('junior handoff --mock --quiet writes nothing to stderr', () => {
   const dir = workdir();
   assert.equal(runJunior(['handoff', mockTask(dir), '--mock', '--quiet'], dir).stderr, '');
+});
+
+test('junior status with no result prints the review-queue report', () => {
+  const dir = workdir();
+  assert.equal(JSON.parse(runJunior(['status'], dir).stdout).agingMinutes, 30);
+});
+
+test('junior status with no result exits successfully', () => {
+  assert.equal(runJunior(['status'], workdir()).status, 0);
 });
 
 test('junior status --live prints the phase from runtime.json', () => {

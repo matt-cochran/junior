@@ -1,0 +1,77 @@
+{
+ "id": "L2",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase1.md section 162-173 (lane L2) completely and to production grade: On output_truncated or budget_exceeded the receipt carries a ContinuationProposal (remaining owned files, split suggestion); tests",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "a run stopped by output_truncated carries a ContinuationProposal on its receipt",
+  "a run stopped by budget_exceeded carries a ContinuationProposal naming the remaining owned files"
+ ],
+ "constraints": [
+  "Only modify worker-outcome.ts, worker-outcome.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md); if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase1.md lines 162-173; the seams listed in its table at the top are already landed on this branch and must be used, not re-created",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies; no network calls in tests"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "worker-outcome.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "worker-outcome.ts",
+   "worker-outcome.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 1,
+   "end": 22
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase1.md",
+   "start": 162,
+   "end": 173
+  },
+  {
+   "path": "worker-outcome.ts",
+   "start": 80,
+   "end": 100
+  },
+  {
+   "path": "worker-outcome.ts",
+   "start": 300,
+   "end": 345
+  },
+  {
+   "path": "worker-receipt.ts",
+   "start": 272,
+   "end": 300
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "L2"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}

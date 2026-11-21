@@ -571,3 +571,43 @@ test('a contract isolationSetup takes precedence over delivery.config.json',asyn
  assert.equal(r.status,'simulation_passed');
 });
 
+const warmRepo=()=>{
+ const repo=gitRepo();
+ commitFile(repo,'.gitignore','.delivery/\nwarm/\n');
+ mkdirSync(join(repo.dir,'warm','src','App','obj'),{recursive:true});
+ writeFileSync(join(repo.dir,'warm','src','App','obj','cache.bin'),'cache\n');
+ return repo;
+};
+
+const warmTask=(repo:any,path='warm')=>okTask(repo,{isolation:'worktree',isolationSetup:{warmFrom:{path}}});
+
+test('warmFrom copies a cache directory into the isolated worktree',async()=>{
+ const r=await run(warmTask(warmRepo()),true);
+ assert.equal(readFileSync(join(r.executionCwd,'src','App','obj','cache.bin'),'utf8'),'cache\n');
+});
+
+test('warmFrom reports a warm run',async()=>{
+ const r=await run(warmTask(warmRepo()),true);
+ assert.equal(r.warmStart.warm,true);
+});
+
+test('a warmed cache directory is absent from run change evidence',async()=>{
+ const r=await run(warmTask(warmRepo()),true);
+ assert.ok(!r.evidence.runChangedFiles.some((f:any)=>f.path==='src/App/obj'||f.path.startsWith('src/App/obj/')));
+});
+
+test('a missing warmFrom path leaves the run cold',async()=>{
+ const r=await run(warmTask(warmRepo(),'missing'),true);
+ assert.equal(r.warmStart.warm,false);
+});
+
+test('a missing warmFrom path explains the cold start',async()=>{
+ const r=await run(warmTask(warmRepo(),'missing'),true);
+ assert.match(r.warmStart.reason,/does not exist/);
+});
+
+test('a missing warmFrom path never fails the run',async()=>{
+ const r=await run(warmTask(warmRepo(),'missing'),true);
+ assert.equal(r.status,'simulation_passed');
+});
+

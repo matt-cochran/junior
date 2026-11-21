@@ -1,0 +1,82 @@
+{
+ "id": "M1",
+ "deliverable": "Implement .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 32-73 (lane M1) completely and to production grade: Machine-wide admission core in admission.ts: slot semaphore lock dir with stale-holder recovery, memory/swap pressure gate, per-pool limits, waiting reason and admission_timeout",
+ "cwd": "/home/mc/working/junior",
+ "workflow": "test_first",
+ "acceptance": [
+  "concurrent requests beyond the slot limit wait with reason slots and are admitted when a slot is released",
+  "a pool limit of 2 makes a third matching check wait with reason pool while a non-matching check is admitted",
+  "a slot held by a dead pid is reclaimed",
+  "low MemAvailable or high swap-out blocks admission with reason memory or swap; unreadable /proc never blocks",
+  "a request not admitted within admissionTimeoutMs returns E_ADMISSION_TIMEOUT",
+  "validateMachineConfig rejects unknown keys and bad values"
+ ],
+ "constraints": [
+  "Only modify admission.ts, admission.test.ts",
+  "Work only inside the current working directory; no commits or pushes; no nested workers",
+  "Do not edit registration files you do not own (package.json, package-lock.json, scripts/build.mjs, junior.ts, cli.test.ts, CHANGELOG.md, README.md) unless listed above; if your change needs registering there, say so in your final message instead",
+  "The specification is .cpm-planner/plans/issues-276-281/contracts/phase2.md lines 32-73; the seams listed in its table at the top are already landed on this branch and must be used, not re-created or renamed",
+  "Production-grade: no TODOs, stubs or placeholders; handle every error path the spec names; keep existing behaviour for anything the spec does not change",
+  "Every new or changed test is an atomic scenario with a declarative name and exactly one behavioural assertion against a public outcome",
+  "Any time logic reads the injected clock (clock.ts); never Date.now(), new Date() or global timers in production code",
+  "Tests never read the real /proc, the real home directory or the network; inject procRoot, stateDir and spawn",
+  "Do not run the full npm test suite; run only this contract's checks and any single test file you add",
+  "No new dependencies"
+ ],
+ "checks": [
+  {
+   "command": "node",
+   "args": [
+    "--test",
+    "admission.test.ts"
+   ]
+  }
+ ],
+ "scope": {
+  "owned": [
+   "admission.ts",
+   "admission.test.ts"
+  ]
+ },
+ "isolation": "worktree",
+ "jev": {
+  "mode": "shadow"
+ },
+ "modelProfile": "general",
+ "execution": {
+  "deadlineMs": 3600000
+ },
+ "context": [
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 1,
+   "end": 31
+  },
+  {
+   "path": ".cpm-planner/plans/issues-276-281/contracts/phase2.md",
+   "start": 32,
+   "end": 73
+  },
+  {
+   "path": "admission.ts",
+   "start": 1,
+   "end": 140
+  },
+  {
+   "path": "command-policy.ts",
+   "start": 1,
+   "end": 40
+  },
+  {
+   "path": "clock.ts",
+   "start": 1,
+   "end": 40
+  }
+ ],
+ "plan": {
+  "id": "plan_1a892be58bc94e449fee9079eafc54a4",
+  "deliverable": "M1"
+ },
+ "hopFrom": "/home/mc/working/junior/.delivery/setup/hop.json",
+ "checkBack": "off"
+}
