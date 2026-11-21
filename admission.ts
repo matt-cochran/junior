@@ -99,6 +99,7 @@ const POOL_FIELDS = ['match', 'limit'] as const;
 const POLL_INTERVAL_MS = 2_000;
 const PRESSURE_SAMPLE_MS = 1_000;
 const UNPARSEABLE_STALE_MS = 60_000;
+const PRESSURE_REUSE_MAX_MS = 60_000;
 
 interface SlotRecord {
   holder: string;
@@ -425,11 +426,31 @@ interface PressureSample {
   pswpout: number | null;
 }
 
+interface RememberedPswpout {
+  pswpout: number | null;
+  at: number;
+}
+
+const rememberedPswpout = new Map<string, RememberedPswpout>();
+
 function readPressureSample(procRoot: string): PressureSample {
   return {
     availableMb: parseMemAvailable(readEntry(join(procRoot, 'meminfo'))),
     pswpout: parsePswpout(readEntry(join(procRoot, 'vmstat'))),
   };
+}
+
+function rememberPswpout(procRoot: string, sample: PressureSample, at: number): void {
+  rememberedPswpout.set(procRoot, { pswpout: sample.pswpout, at });
+}
+
+/** A previous pswpout between one and sixty seconds old can stand in for a first sample. */
+function reusablePswpout(procRoot: string, now: number): { pswpout: number; at: number } | null {
+  const previous = rememberedPswpout.get(procRoot);
+  if (!previous || previous.pswpout === null) return null;
+  const age = now - previous.at;
+  if (age < PRESSURE_SAMPLE_MS || age > PRESSURE_REUSE_MAX_MS) return null;
+  return { pswpout: previous.pswpout, at: previous.at };
 }
 
 /** Available memory from one read; a swap rate needs two samples, so it is unknown here. */
@@ -438,19 +459,32 @@ function readPressureOnce(procRoot: string): { availableMb: number | null; swapO
   return { availableMb: sample.availableMb, swapOutPerSec: null };
 }
 
-/** Sample meminfo and vmstat, one second apart on the injected clock, for a swap rate. */
+/**
+ * Sample meminfo and vmstat for a swap rate. A remembered pswpout from the
+ * last one to sixty seconds gives the rate from one read; otherwise take two
+ * samples one second apart on the injected clock.
+ */
 async function measurePressure(
   procRoot: string,
   clock: Clock,
   signal?: AbortSignal,
 ): Promise<{ availableMb: number | null; swapOutPerSec: number | null }> {
   const first = readPressureSample(procRoot);
+  const firstAt = clock.now();
+  const previous = reusablePswpout(procRoot, firstAt);
+  rememberPswpout(procRoot, first, firstAt);
   if (first.pswpout === null) return { availableMb: first.availableMb, swapOutPerSec: null };
-  const started = clock.now();
+  if (previous) {
+    const elapsedSeconds = Math.max((firstAt - previous.at) / 1000, 0.001);
+    const pagesPerSecond = Math.max(0, first.pswpout - previous.pswpout) / elapsedSeconds;
+    return { availableMb: first.availableMb, swapOutPerSec: pagesPerSecond };
+  }
   await clock.sleep(PRESSURE_SAMPLE_MS, signal);
   const second = readPressureSample(procRoot);
+  const secondAt = clock.now();
+  rememberPswpout(procRoot, second, secondAt);
   if (second.pswpout === null) return { availableMb: second.availableMb, swapOutPerSec: null };
-  const elapsedSeconds = Math.max((clock.now() - started) / 1000, 0.001);
+  const elapsedSeconds = Math.max((secondAt - firstAt) / 1000, 0.001);
   const pagesPerSecond = Math.max(0, second.pswpout - first.pswpout) / elapsedSeconds;
   return { availableMb: second.availableMb, swapOutPerSec: pagesPerSecond };
 }

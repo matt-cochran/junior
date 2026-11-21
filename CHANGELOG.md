@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `machine.enabled: false` turns it off. A waiting run shows phase `admission`
   and the reason in `junior status --live`, its receipt lists the waits, and a
   run not admitted within `machine.admissionTimeoutMs` (default 30 minutes,
-  bounded by the run deadline) ends `admission_timeout` (#277).
+  bounded by the run deadline) ends `admission_timeout` (#277). The swap-out rate
+  reuses a reading from the last 1–60 seconds, so only the first admission in
+  a while waits one second to sample it.
 - `isolationSetup.warmFrom` copies build caches (`**/obj/` by default, more by
   glob) from a pre-built tree into each new worktree before checks, with
   reflink where the filesystem supports it. It never symlinks, never writes

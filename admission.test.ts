@@ -415,3 +415,150 @@ test('two concurrent reclaims of one stale slot leave exactly one holder', async
   await Promise.all([first, second]);
   assert.equal(granted, 1);
 });
+
+test('a second admit reuses a remembered reading that is exactly 60 seconds old', async () => {
+  const stateDir = tempDir('junior-admission-state-');
+  const procRoot = tempDir('junior-admission-proc-');
+  writeMeminfo(procRoot, 8_000_000);
+  writePswpout(procRoot, 1_000);
+  const clock = createManualClock('2026-01-01T00:00:00.000Z');
+  const first = admit({ kind: 'worker', holder: 'r-1', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot, clock });
+  await clock.advanceAsync(1_000);
+  const firstResult = await first;
+  if (firstResult.ok) firstResult.grant.release();
+  clock.advance(60_000);
+  writePswpout(procRoot, 1_600);
+  let settled: boolean | null = null;
+  const second = admit({ kind: 'worker', holder: 'r-2', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot, clock }).then((result) => {
+    settled = result.ok;
+  });
+  await clock.advanceAsync(0);
+  assert.equal(settled, true);
+  await second;
+});
+
+test('swap-out rate from a remembered reading is the pswpout delta over elapsed seconds', async () => {
+  const stateDir = tempDir('junior-admission-state-');
+  const procRoot = tempDir('junior-admission-proc-');
+  writeMeminfo(procRoot, 8_000_000);
+  writePswpout(procRoot, 1_000);
+  const clock = createManualClock('2026-01-01T00:00:00.000Z');
+  const first = admit({ kind: 'worker', holder: 'r-1', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot, clock });
+  await clock.advanceAsync(1_000);
+  const firstResult = await first;
+  if (firstResult.ok) firstResult.grant.release();
+  clock.advance(1_000);
+  writePswpout(procRoot, 1_400);
+  const controller = new AbortController();
+  const waits: AdmissionWait[] = [];
+  const second = admit({
+    kind: 'worker',
+    holder: 'r-2',
+    config: config({ maxSwapOutPerSec: 100 }),
+    stateDir,
+    procRoot,
+    clock,
+    signal: controller.signal,
+    onWait: (wait) => waits.push(wait),
+  });
+  await clock.advanceAsync(0);
+  const detail = waits[0]?.detail;
+  controller.abort(new Error('stop'));
+  await clock.advanceAsync(2_000);
+  await second;
+  assert.equal(detail, 'swap-out 400/s > 100/s');
+});
+
+test('a remembered reading under one second old is not reused', async () => {
+  const stateDir = tempDir('junior-admission-state-');
+  const procRoot = tempDir('junior-admission-proc-');
+  writeMeminfo(procRoot, 8_000_000);
+  writePswpout(procRoot, 1_000);
+  const clock = createManualClock('2026-01-01T00:00:00.000Z');
+  const first = admit({ kind: 'worker', holder: 'r-1', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot, clock });
+  await clock.advanceAsync(1_000);
+  const firstResult = await first;
+  if (firstResult.ok) firstResult.grant.release();
+  clock.advance(500);
+  writePswpout(procRoot, 1_400);
+  const waits: AdmissionWait[] = [];
+  const second = admit({
+    kind: 'worker',
+    holder: 'r-2',
+    config: config({ maxSwapOutPerSec: 600 }),
+    stateDir,
+    procRoot,
+    clock,
+    onWait: (wait) => waits.push(wait),
+  });
+  await clock.advanceAsync(0);
+  writePswpout(procRoot, 1_800);
+  await clock.advanceAsync(1_000);
+  await second;
+  assert.equal(waits.length, 0);
+});
+
+test('a remembered reading over 60 seconds old is not reused', async () => {
+  const stateDir = tempDir('junior-admission-state-');
+  const procRoot = tempDir('junior-admission-proc-');
+  writeMeminfo(procRoot, 8_000_000);
+  writePswpout(procRoot, 1_000);
+  const clock = createManualClock('2026-01-01T00:00:00.000Z');
+  const first = admit({ kind: 'worker', holder: 'r-1', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot, clock });
+  await clock.advanceAsync(1_000);
+  const firstResult = await first;
+  if (firstResult.ok) firstResult.grant.release();
+  clock.advance(61_000);
+  writePswpout(procRoot, 2_000);
+  const controller = new AbortController();
+  const waits: AdmissionWait[] = [];
+  const second = admit({
+    kind: 'worker',
+    holder: 'r-2',
+    config: config({ maxSwapOutPerSec: 500 }),
+    stateDir,
+    procRoot,
+    clock,
+    signal: controller.signal,
+    onWait: (wait) => waits.push(wait),
+  });
+  await clock.advanceAsync(0);
+  writePswpout(procRoot, 3_000);
+  await clock.advanceAsync(1_000);
+  const reason = waits[0]?.reason;
+  controller.abort(new Error('stop'));
+  await clock.advanceAsync(2_000);
+  await second;
+  assert.equal(reason, 'swap');
+});
+
+test('remembered readings for different procRoots are kept apart', async () => {
+  const stateDir = tempDir('junior-admission-state-');
+  const firstProcRoot = tempDir('junior-admission-proc-');
+  const secondProcRoot = tempDir('junior-admission-proc-');
+  writeMeminfo(firstProcRoot, 8_000_000);
+  writePswpout(firstProcRoot, 1_000);
+  writeMeminfo(secondProcRoot, 8_000_000);
+  const clock = createManualClock('2026-01-01T00:00:00.000Z');
+  const first = admit({ kind: 'worker', holder: 'r-1', config: config({ maxSwapOutPerSec: 500 }), stateDir, procRoot: firstProcRoot, clock });
+  await clock.advanceAsync(1_000);
+  const firstResult = await first;
+  if (firstResult.ok) firstResult.grant.release();
+  clock.advance(5_000);
+  writePswpout(secondProcRoot, 2_000);
+  const waits: AdmissionWait[] = [];
+  const second = admit({
+    kind: 'worker',
+    holder: 'r-2',
+    config: config({ maxSwapOutPerSec: 150 }),
+    stateDir,
+    procRoot: secondProcRoot,
+    clock,
+    onWait: (wait) => waits.push(wait),
+  });
+  await clock.advanceAsync(0);
+  writePswpout(secondProcRoot, 2_100);
+  await clock.advanceAsync(1_000);
+  await second;
+  assert.equal(waits.length, 0);
+});
