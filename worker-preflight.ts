@@ -447,6 +447,8 @@ function provisionWorktree(state:RunState, c:PreflightCtx):any {
   if (provisioned.excludePatterns.length) ensureLocalExcludes(c.executionCwd, provisioned.excludePatterns);
   const warmFrom=(rawSetup as IsolationSetup).warmFrom;
   if (warmFrom) state.warmStart=warmStart(warmFrom, { sourceCwd, worktree:c.executionCwd, deadlineAt:c.deadlineAt, clock:runClock(state) });
+  const warmDirs=state.warmStart?.dirs ?? [];
+  if (warmDirs.length) ensureLocalExcludes(c.executionCwd, warmDirs.map((d)=>`/${d}`));
  }
  return undefined;
 }
