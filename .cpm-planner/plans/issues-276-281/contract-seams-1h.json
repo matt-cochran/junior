@@ -433,7 +433,7 @@
       "estimated_effort_hours": 0.25,
       "duration_hours": 0.5,
       "metadata": {
-        "artifact": "v0.18.8 tagged and published to npm, #276 #279 #281 closed, back-merged to dev",
+        "artifact": "Phase 1 (#276 #279 #281) ships in v0.20.0: tagged and published to npm, issues closed, back-merged to dev",
         "owner": "manager",
         "repo": "junior",
         "kind": "gate",
@@ -651,7 +651,7 @@
       "estimated_effort_hours": 0.25,
       "duration_hours": 1.0,
       "metadata": {
-        "artifact": "User merges the 0.19.0 promotion PR",
+        "artifact": "User merges the 0.20.0 promotion PRs (dev to staging to main)",
         "owner": "owner",
         "repo": "junior",
         "kind": "manual",
@@ -670,7 +670,7 @@
       "estimated_effort_hours": 0.25,
       "duration_hours": 0.5,
       "metadata": {
-        "artifact": "v0.19.0 tagged and published to npm, #277 #278 #280 closed, back-merged to dev",
+        "artifact": "v0.20.0 tagged and published to npm, #277 #278 #280 closed, back-merged to dev",
         "owner": "manager",
         "repo": "junior",
         "kind": "gate",
