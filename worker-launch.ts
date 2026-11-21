@@ -8,8 +8,46 @@ import { addUsage, emptyUsage, mockReceipt, parseReceipt, receiptValid } from '.
 import { resolveCommandPolicy, type Receipt } from './worker-contract.ts';
 import { blockedResult, runClock, workerDeadlineAt, workerOutOfTime, workerRemainingMs, type RunState } from './worker-preflight.ts';
 import { readDataPolicy, toRoutingPreferences } from './data-policy.ts';
+import { admit, resolveMachineConfig, type AdmissionGrant, type AdmissionResult, type AdmissionWait, type ResolvedMachineConfig } from './admission.ts';
 
 type SegmentRecord={index:number; eventsPath:string; stopReason:string; outputTruncated:boolean; outputLimited:boolean; checkpointPath:string|null};
+
+type AdmissionFn=(req:Parameters<typeof admit>[0])=>ReturnType<typeof admit>;
+
+export type AdmissionAttempt =
+ | { admitted:true; grant:AdmissionGrant }
+ | { admitted:false; error:'E_ADMISSION_TIMEOUT'|'E_ADMISSION_INTERRUPTED'; wait:AdmissionWait|null; waitedMs:number };
+
+/** Take a machine slot for a worker or check, publishing each wait to the live
+ * heartbeat and the run's admission log. A caller that gets a grant must
+ * release it in a finally; a failed attempt has already published its wait. */
+export async function acquireAdmission(state:RunState, req:{kind:'worker'|'check'; holder:string; argv?:string[]; config:ResolvedMachineConfig; timeoutMs?:number; nextPhase:'worker'|'checks'}):Promise<AdmissionAttempt> {
+ const {deps, heartbeat, emit, signal}=state;
+ const admissionDeps=deps as typeof deps & {admit?:AdmissionFn; admissionStateDir?:string; procRoot?:string};
+ const injected=admissionDeps.admit;
+ const config=req.timeoutMs === undefined ? req.config : {...req.config, admissionTimeoutMs:req.timeoutMs};
+ if (!config.enabled && !injected) {
+  heartbeat.update({phase:req.nextPhase, admission:null});
+  return {admitted:true, grant:{waitedMs:0, pool:null, release(){}}};
+ }
+ const admitFn=injected ?? admit;
+ let lastWait:AdmissionWait|null=null;
+ const result:AdmissionResult=await admitFn({kind:req.kind, holder:req.holder, argv:req.argv, config,
+  clock:runClock(state), signal,
+  ...(admissionDeps.admissionStateDir === undefined ? {} : {stateDir:admissionDeps.admissionStateDir}),
+  ...(admissionDeps.procRoot === undefined ? {} : {procRoot:admissionDeps.procRoot}),
+  onWait:(wait)=>{ lastWait=wait; heartbeat.update({phase:'admission', admission:wait}); emit(`waiting for admission: ${wait.detail}`); }});
+ const waitedMs=result.ok ? result.grant.waitedMs : result.waitedMs;
+ const wait=result.ok ? lastWait : (result.wait ?? lastWait);
+ if (wait) {
+  const entry={...wait, waitedMs} as AdmissionWait & {waitedMs:number};
+  state.admissionWaits=[...(state.admissionWaits ?? []), entry];
+ }
+ heartbeat.update({phase:req.nextPhase, admission:null});
+ return result.ok
+  ? {admitted:true, grant:result.grant}
+  : {admitted:false, error:result.error, wait, waitedMs};
+}
 
 type LaunchRun={
  stdout:string; stderr:string; legacyError:string|undefined; workerStatus:number;
@@ -194,9 +232,10 @@ function assembleReceipt(state:RunState, run:LaunchRun):Receipt {
 
 /** Launch: Pi overlay/guard env, spawn or stream the worker, continuations and the receipt. */
 export async function launch(state:RunState):Promise<RunState|any> {
- const {mock, deps, settings, dir, heartbeat, emit, signal} = state;
+ const {mock, deps, settings, dir, heartbeat, emit, signal, t} = state;
  // Execute the worker. Live runs use the streaming async child lifecycle and
  // never spawnSync; the injected spawnPi seam remains for legacy offline tests.
+ const machine=resolveMachineConfig(state.sourceCwd, t);
  heartbeat.update({phase:'worker'});
  emit('worker started');
  const preInterrupt = !!signal?.aborted;
@@ -213,12 +252,40 @@ export async function launch(state:RunState):Promise<RunState|any> {
  applyGuardEnv(state, piBashEnv, policyRouting);
  const run:LaunchRun={ stdout:'', stderr:'', legacyError:undefined, workerStatus:0, streamResult:undefined, workerFailure:undefined,
   segments:[], segmentReceipts:[], retriedFailure:false, eventsPath:join(dir,'events.jsonl'), logPath:join(dir,'worker.log'), piBashEnv };
+ let workerGrant:AdmissionGrant|undefined;
  try {
   if (mock) runMock(run);
   else if (preInterrupt || preDeadline) runSkipped(state, run, preInterrupt, preDeadline);
   else if (deps.spawnPi) runLegacy(state, run);
-  else await runStreaming(state, run);
+  else {
+   // The worker slot is held only around Pi. It is released before launch
+   // returns, so the checks that follow never hold two machine slots. Waiting
+   // for that slot may not consume the time reserved for the contract checks.
+   const admissionTimeoutMs=Math.max(0, Math.min(machine.admissionTimeoutMs, workerRemainingMs(state)));
+   if (admissionTimeoutMs <= 0) {
+    run.workerStatus=1;
+    writeFileSync(run.eventsPath,''); writeFileSync(run.logPath,'');
+    state.admissionTimeout={kind:'worker', waitedMs:0, wait:null};
+    run.legacyError='Worker admission timed out: no worker time remains before the reserved check window.';
+   } else {
+    const attempt=await acquireAdmission(state, {kind:'worker', holder:`${t.id}:worker`, config:machine, timeoutMs:admissionTimeoutMs, nextPhase:'worker'});
+    if (!attempt.admitted) {
+     run.workerStatus=1;
+     writeFileSync(run.eventsPath,''); writeFileSync(run.logPath,'');
+     if (attempt.error === 'E_ADMISSION_TIMEOUT') {
+      state.admissionTimeout={kind:'worker', waitedMs:attempt.waitedMs, wait:attempt.wait};
+      run.legacyError=`Worker admission timed out after ${attempt.waitedMs} ms${attempt.wait ? `: ${attempt.wait.detail}` : ''}.`;
+     } else {
+      run.legacyError=`Worker admission interrupted${attempt.wait ? `: ${attempt.wait.detail}` : ''}.`;
+     }
+    } else {
+     workerGrant=attempt.grant;
+     await runStreaming(state, run);
+    }
+   }
+  }
  } finally {
+  workerGrant?.release();
   // Pi has finished on every path; copied credentials and lock files never
   // outlive the process that needed them. Session files stay for resume.
   cleanupPiAgentOverlay(piOverlay.dir);

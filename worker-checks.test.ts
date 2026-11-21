@@ -13,6 +13,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runChecks } from './worker-checks.ts';
+import { finish } from './worker-outcome.ts';
 import { validate } from './worker-contract.ts';
 import { COMMAND_PLACEMENT_ERROR, parseCommandPolicy } from './command-policy.ts';
 import { stopReasonSummary } from './handoff.ts';
@@ -26,7 +27,7 @@ const arena = (t: any): string => {
   return dir;
 };
 
-const noopHeartbeat = { update: () => {}, poll: () => {} };
+const noopHeartbeat = { update: () => {}, setState: () => {}, poll: () => {}, snapshot: () => ({}) };
 
 /** A minimal RunState whose only job is to run the contract's checks. Its
  * heartbeat carries a manual clock that never advances, so the check timeout
@@ -35,7 +36,10 @@ const noopHeartbeat = { update: () => {}, poll: () => {} };
 const checkState = (dir: string, checks: any[], overrides: Record<string, unknown> = {}) => ({
   t: { checks },
   mock: true,
-  deps: { maxOutputBytes: 1024 * 1024 },
+  deps: {
+    maxOutputBytes: 1024 * 1024,
+    admit: async () => ({ ok: true, grant: { waitedMs: 0, pool: null, release() {} } }),
+  },
   settings: { checkTimeoutMs: 150, toolTimeoutMs: 5000 },
   sourceCwd: dir,
   executionCwd: dir,
@@ -391,4 +395,177 @@ test('a check with a plain quoted mention is not refused', async (t) => {
   const state = checkState(dir, [check]);
   await runChecks(state);
   assert.equal(state.checks[0].refused, undefined);
+});
+
+// --- machine admission around checks (#277, M2) -----------------------------
+
+const admissionWait = (overrides: any = {}) => ({
+  reason: 'pool', detail: 'pool dotnet 2/2 held by r-1, r-2', pool: 'dotnet', since: '2026-01-01T00:00:00.000Z', ...overrides,
+});
+
+const granted = (overrides: any = {}) => ({ waitedMs: 0, pool: null, release() {}, ...overrides });
+
+const admissionFailure = (overrides: any = {}) => ({
+  ok: false, error: 'E_ADMISSION_TIMEOUT', wait: admissionWait(), waitedMs: 250, ...overrides,
+});
+
+test('check admission receives the injected state directory and proc root', async (t) => {
+  const dir = arena(t);
+  let observed: any;
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admissionStateDir: join(dir, 'admission'),
+      procRoot: join(dir, 'proc'),
+      admit: async (req: any) => { observed = { stateDir: req.stateDir, procRoot: req.procRoot }; return { ok: true, grant: granted() }; },
+    },
+  });
+  await runChecks(state);
+  assert.deepEqual(observed, { stateDir: join(dir, 'admission'), procRoot: join(dir, 'proc') });
+});
+
+test('a check acquires admission before it starts', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'admitted-marker.txt');
+  const check = {
+    command: process.execPath,
+    args: ['-e', `process.exit(require('node:fs').existsSync(${JSON.stringify(marker)}) ? 0 : 1)`],
+  };
+  const state = checkState(dir, [check], {
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admit: async () => { writeFileSync(marker, 'admitted'); return { ok: true, grant: granted() }; },
+    },
+  });
+  await runChecks(state);
+  assert.equal(state.checks[0].exitCode, 0);
+});
+
+test('a completed check releases its admission slot', async (t) => {
+  const dir = arena(t);
+  let released = false;
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admit: async () => ({ ok: true, grant: granted({ release: () => { released = true; } }) }),
+    },
+  });
+  await runChecks(state);
+  assert.equal(released, true);
+});
+
+test('a check admission timeout records E_ADMISSION_TIMEOUT', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure() },
+  });
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_ADMISSION_TIMEOUT');
+});
+
+test('a check admission timeout does not spawn the check', async (t) => {
+  const dir = arena(t);
+  const marker = join(dir, 'unadmitted-marker.txt');
+  const state = checkState(dir, [markerCheck(dir, marker)], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure() },
+  });
+  await runChecks(state);
+  assert.equal(existsSync(marker), false);
+});
+
+test('a check admission timeout is recorded with its check index', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure() },
+  });
+  await runChecks(state);
+  assert.deepEqual(state.admissionTimeout, { kind: 'check', waitedMs: 250, wait: admissionWait(), checkIndex: 0 });
+});
+
+test('a check admission timeout stops later checks', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [
+    { command: process.execPath, args: ['-e', ''] },
+    { command: process.execPath, args: ['-e', ''] },
+  ], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure() },
+  });
+  await runChecks(state);
+  assert.equal(state.checks.length, 1);
+});
+
+test('an interrupted check admission records E_ADMISSION_INTERRUPTED', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure({ error: 'E_ADMISSION_INTERRUPTED' }) },
+  });
+  await runChecks(state);
+  assert.equal(state.checks[0].refused, 'E_ADMISSION_INTERRUPTED');
+});
+
+test('an interrupted check admission marks the check phase interrupted', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure({ error: 'E_ADMISSION_INTERRUPTED' }) },
+  });
+  await runChecks(state);
+  assert.equal(state.interruptedDuringChecks, true);
+});
+
+test('a check admission timeout ends the run admission_timeout', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: { maxOutputBytes: 1024 * 1024, admit: async () => admissionFailure() },
+  });
+  state.before = { changedFiles: [] };
+  state.receipt = { outputLimited: false, malformed: false, errored: false, aborted: false, assistantMessages: 1, usage: { cost: null, available: false }, observed: [] };
+  await runChecks(state);
+  const result = await finish(state);
+  assert.equal(result.status, 'admission_timeout');
+});
+
+test('a waiting check reports the admission phase and wait reason in its heartbeat', async (t) => {
+  const dir = arena(t);
+  const updates: any[] = [];
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    heartbeat: {
+      clock: createManualClock(Date.now()),
+      update: (patch: any) => updates.push({ ...patch }),
+      poll: () => {},
+    },
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admit: async (req: any) => { req.onWait(admissionWait()); return { ok: true, grant: granted({ waitedMs: 5 }) }; },
+    },
+  });
+  await runChecks(state);
+  assert.equal(updates.some((patch) => patch.phase === 'admission' && patch.admission?.reason === 'pool'), true);
+});
+
+test('a check admission wait is bounded by the remaining run deadline', async (t) => {
+  const dir = arena(t);
+  const clock = createManualClock(Date.now());
+  let observedTimeout: number | undefined;
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deadlineAt: clock.now() + 5000,
+    heartbeat: { ...noopHeartbeat, clock },
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admit: async (req: any) => { observedTimeout = req.config.admissionTimeoutMs; return { ok: true, grant: granted() }; },
+    },
+  });
+  await runChecks(state);
+  assert.equal(observedTimeout, 5000);
+});
+
+test('a waiting check is recorded on the run admission waits', async (t) => {
+  const dir = arena(t);
+  const state = checkState(dir, [{ command: process.execPath, args: ['-e', ''] }], {
+    deps: {
+      maxOutputBytes: 1024 * 1024,
+      admit: async (req: any) => { req.onWait(admissionWait()); return { ok: true, grant: granted({ waitedMs: 7 }) }; },
+    },
+  });
+  await runChecks(state);
+  assert.deepEqual(state.admissionWaits, [{ ...admissionWait(), waitedMs: 7 }]);
 });
