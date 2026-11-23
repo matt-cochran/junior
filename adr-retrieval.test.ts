@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { loadAdrs, type Adr } from './adr.ts';
 import type { AdrConfig } from './adr-config.ts';
 import type { GateClassifier } from './worker.ts';
-import { mustJudge } from './adr-retrieval.ts';
+import { lexicallyRelevant, mustJudge } from './adr-retrieval.ts';
 import { runAdrGate, type GateSubject } from './adr-gate.ts';
 
 const NOW = new Date('2026-06-01T12:00:00.000Z');
@@ -245,4 +245,16 @@ test('a changed file under a double-star applies_to glob is always judged', asyn
     'implementation',
   );
   assert.equal(result.findings[0]?.target, 'change');
+});
+
+// --- Lexical pre-filter (issue #291) ----------------------------------------
+
+test('lexicallyRelevant keeps a diff that shares an identifier word with the ADR', () => {
+  const record = adr({title: 'Structured logging', rules: [{id: 'R1', text: 'Log through ILogger, never Console.WriteLine.'}]});
+  assert.equal(lexicallyRelevant(record, {target: 'src/a.cs', files: ['src/a.cs'], text: '+ Console.WriteLine("hi");'}), true);
+});
+
+test('lexicallyRelevant drops a diff that shares no significant word with the ADR', () => {
+  const record = adr({title: 'Structured logging', decision: 'Use structured logging.', rules: [{id: 'R1', text: 'Log through ILogger.'}]});
+  assert.equal(lexicallyRelevant(record, {target: 'src/math.ts', files: ['src/math.ts'], text: '+ export const sum = (a, b) => a + b;'}), false);
 });

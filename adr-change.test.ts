@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildWholeChangeSubject, changeGraph } from './adr-change.ts';
+import { buildWholeChangeSubject, changeGraph, excludeDiffSections } from './adr-change.ts';
 
 function project(t: {after(fn: () => void): void}): string {
   const root = mkdtempSync(join(tmpdir(), 'junior-adr-change-'));
@@ -203,4 +203,17 @@ test('an alias importer of a nested _shared module counts toward the tools that 
   write(root, 'src/_components/tools/C/index.ts', "import {useThing} from '@/_components/tools/_shared/useThing';\n");
   spawnSync('git', ['add', '-A'], {cwd: root});
   assert.match(changeGraph({root, files: ['src/_components/tools/_shared/useThing.ts']}), /src\/_components\/tools\/_shared\/useThing\.ts is imported by 3 tools: A, B, C/);
+});
+
+test('excludeDiffSections drops the diff of an excluded path and keeps the rest', () => {
+  const diff = [
+    'diff --git a/src/generated/api.ts b/src/generated/api.ts',
+    '@@ -1 +1 @@',
+    '+generated',
+    'diff --git a/src/real.ts b/src/real.ts',
+    '@@ -1 +1 @@',
+    '+real',
+    '',
+  ].join('\n');
+  assert.equal(excludeDiffSections(diff, (path) => path.includes('/generated/')), 'diff --git a/src/real.ts b/src/real.ts\n@@ -1 +1 @@\n+real\n');
 });

@@ -28,6 +28,9 @@ location to `delivery.config.json` only after you confirm:
 | `flagUncertain` | `true` / `false` (default `false`) | Let low-confidence findings block under `enforce` too. By default only likely contradictions block; uncertain ones are listed as advisory. |
 | `minDiscriminationCells` | number (optional, default `10`) | Minimum number of checked cells before a mostly-uncertain result can report `NO_DISCRIMINATION`. |
 | `maxUncertainRatio` | number (optional, default `0.9`) | Uncertain-to-checked ratio at or above which a sufficiently large result reports `NO_DISCRIMINATION`. |
+| `exclude` | array of globs (optional) | Extra paths an implementation check never judges, added to the default generated/vendored list (see [Large change sets](#large-change-sets)). Matching ignores case. |
+| `excludeDefaults` | `true` / `false` (default `true`) | `false` drops the default generated/vendored list, so only `exclude` applies. |
+| `prefilterCells` | number (optional, default `500`) | Above this many planned per-file cells, a path-scoped ADR/file pair is judged only when the file shares a word with the ADR. |
 
 ADRs without Junior front matter work as they are. Junior can draft `applies_to` and `rules` for them, but
 only as a proposal under `.delivery/adr-proposals/`. Your ADR files are never edited.
@@ -97,7 +100,7 @@ ADR itself.
 | Before accepting a design, plan or brief | `junior adr check --stage design --input <file>` |
 | Before filing a ticket | `junior adr check --stage ticket --draft <file>` |
 | Before starting work on a ticket | `junior adr check --stage ticket --ticket <id>` |
-| Before opening a pull request | `junior adr check --stage implementation [--base <ref>] [--result <result.json>]` |
+| Before opening a pull request | `junior adr check --stage implementation [--base <ref>] [--result <result.json>] [--whole-change] [--no-exclude] [--no-prefilter]` |
 | Across open tickets (read-only report) | `junior adr check-tickets` |
 
 Junior also runs the gate automatically in two places. A prepare brief gates every option, and an option
@@ -129,6 +132,41 @@ The subject is `change` (kind `diff`), carries every changed path, and sends the
 cross-tool relative imports, `$ref`s between different tools' OpenAPI or JSON Schema specs, and a module
 imported from two or more tools. Each retrieved ADR is judged once over that subject. Without the flag,
 implementation checks keep the per-file default.
+
+### Large change sets
+
+Without filtering, a per-file check pairs every matching ADR rule with every changed file, so a change of a
+thousand files against sixty ADRs means tens of thousands of questions. Four things keep a large check
+usable:
+
+- **Progress on stderr.** When a check plans at least 100 cells it prints its size first, for example
+  `ADR check: judging 30604 cells (64 ADRs x 942 subjects); 120 generated/vendored files skipped`. While it
+  judges, it prints at most one line every 10 seconds, such as
+  `ADR 12/64 (ADR-0012), cells 5400/30604 (17%), ~14m 2s left`. Progress goes to stderr only, so stdout
+  and `--json` output are unchanged. A plan of 2,000 cells or more also says to narrow the check with
+  `junior adr scope --adr <ADR-id>` (tighter `applies_to`), a closer `--base`, or `--whole-change`.
+- **Generated and vendored files are skipped.** A changed file is not judged when it matches one of these
+  globs (case-insensitive): `**/node_modules/**`, `**/vendor/**`, `**/dist/**`, `**/generated/**`,
+  `**/__generated__/**`, `**/generated.*`, `**/*.generated.*`, `**/*.g.cs`, `**/*.g.i.cs`,
+  `**/*.designer.cs`, `**/*.min.js`, `**/*.min.css`, and the lock files `package-lock.json`,
+  `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`, `Cargo.lock`, `Gemfile.lock`,
+  `poetry.lock`, `Pipfile.lock`, `uv.lock`, `composer.lock`, `go.sum` and `packages.lock.json` at any depth.
+  Add globs with `adr.exclude`, drop the defaults with `adr.excludeDefaults: false`, or judge everything
+  for one run with `--no-exclude`. With `--whole-change`, excluded files are left out of the diff and the
+  file list. The result lists the skipped subjects under `excluded`.
+- **A lexical pre-filter on large plans.** When a plan has more than `adr.prefilterCells` (default 500)
+  per-file cells, a pair matched only by `applies_to` is judged only when the file's path or diff shares at
+  least one significant word with the ADR's title, decision or rules (identifiers such as
+  `Console.WriteLine` are split into words). A cited ADR, a subject without files and a subject without
+  text are always judged. The result reports `prefiltered: {pairs, cells, threshold}`, and the Markdown
+  report names the count. Use `--no-prefilter` to judge every pair.
+- **A compact `latest.json`.** When a run ends `NO_DISCRIMINATION`, `.delivery/adr-check/latest.json` keeps
+  every finding under its original `F` id, but slims the unscored ones (no probability) to `id`, `adrId`,
+  `ruleId`, `target`, `verdict`, `probability`, `confidence`, `adrHash`, `stage`, `deliverable` (when set)
+  and `cleared`, dropping the rule text and the decision, lapsed and carried fields. Scored findings stay
+  complete, so `junior adr decide` still works on any finding. The file carries `"compact": true` and a
+  `summary` with the `checked`, `findings`, `scored` and `unscored` counts and `unscoredByAdr`. `--json`
+  on stdout still prints every finding in full.
 
 ### Which ADRs are retrieved
 

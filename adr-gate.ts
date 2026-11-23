@@ -22,8 +22,8 @@ import {
   type AdrRule,
 } from './adr.ts';
 import { loadAllAdrs } from './adr-foreign.ts';
-import { mustJudge, type MustJudgeReason } from './adr-retrieval.ts';
-import type { AdrConfig, AdrGate } from './adr-config.ts';
+import { lexicallyRelevant, mustJudge, type MustJudgeReason } from './adr-retrieval.ts';
+import { adrExcludePatterns, excludeMatcher, type AdrConfig, type AdrGate } from './adr-config.ts';
 import {
   activeDecision,
   adrContentHash,
@@ -84,6 +84,10 @@ export interface AdrGateResult {
   inconclusiveReason?: string;
   /** #276: ADRs judged because retrieval required it, with the reason (cited, scope, topic). */
   retrieved?: {adrId: string; reason: MustJudgeReason}[];
+  /** #291: subjects never judged because every file matched an exclude glob. */
+  excluded?: string[];
+  /** #291: ADR/file pairs the lexical pre-filter dropped from a large plan. */
+  prefiltered?: {pairs: number; cells: number; threshold: number};
 }
 
 export interface RunAdrGateOptions {
@@ -100,7 +104,18 @@ export interface RunAdrGateOptions {
   clock?: Clock;
   /** Skip the relevance pre-filter for file-less subjects (the caller already ran it). */
   relevance?: boolean;
+  /** #291: exclude globs for this run, replacing the configured and default ones (`[]` judges every file). */
+  exclude?: readonly string[];
+  /** #291: false judges every planned pair even above `adr.prefilterCells`. */
+  prefilter?: boolean;
+  /** #291: called once with the plan, then after each rule is judged. */
+  progress?: (event: GateProgress) => void;
 }
+
+/** #291: what a long check reports while it runs. */
+export type GateProgress =
+  | {phase: 'plan'; adrs: number; subjects: number; cells: number; excluded: number; prefiltered: number}
+  | {phase: 'judge'; adrIndex: number; adrs: number; adrId: string; cellsDone: number; cells: number};
 
 export interface GateDecisionInput {
   by: string;
@@ -353,6 +368,61 @@ async function checkRule(run: GateRun, adr: Adr, rule: GateRule, subjects: GateS
   return checked;
 }
 
+interface PlannedAdr {
+  adr: Adr;
+  subjects: GateSubject[];
+  forced: Map<string, MustJudgeReason>;
+}
+
+/** #291: above this many planned per-file cells, path-scoped pairs are pre-filtered. */
+export const DEFAULT_PREFILTER_CELLS = 500;
+
+/** #291: drop subjects whose every file matches an exclude glob (generated, vendored, lock files). */
+function excludeSubjects(opts: RunAdrGateOptions): {kept: GateSubject[]; excluded: string[]} {
+  const isExcluded = excludeMatcher(opts.exclude ?? adrExcludePatterns(opts.config));
+  const kept: GateSubject[] = [];
+  const excluded: string[] = [];
+  for (const subject of opts.subjects) {
+    const files = subject.files ?? [];
+    if (files.length > 0 && files.every(isExcluded)) excluded.push(subject.target);
+    else kept.push(subject);
+  }
+  return {kept, excluded};
+}
+
+/**
+ * #291: a large per-file change pairs every path-scoped ADR rule with every
+ * file it matches. Above `adr.prefilterCells` planned cells, a path-scoped
+ * (not cited) pair is judged only when the file shares a significant word with
+ * the ADR (`lexicallyRelevant`). A cited ADR, a file-less subject and a subject
+ * with no text are never pre-filtered; `prefilter: false` turns it off. Mutates `planned` and returns what it dropped, or null when
+ * the plan was small enough to judge in full.
+ */
+function prefilterPlan(planned: PlannedAdr[], config: AdrConfig, enabled: boolean): {pairs: number; cells: number; threshold: number} | null {
+  if (!enabled) return null;
+  const threshold = config.prefilterCells ?? DEFAULT_PREFILTER_CELLS;
+  const fileCells = planned.reduce(
+    (total, entry) => total + entry.adr.rules.length * entry.subjects.filter((subject) => (subject.files ?? []).length > 0).length,
+    0,
+  );
+  if (fileCells <= threshold) return null;
+  let pairs = 0;
+  let cells = 0;
+  for (const entry of planned) {
+    entry.subjects = entry.subjects.filter((subject) => {
+      if ((subject.files ?? []).length === 0) return true;
+      // Without text there is nothing to compare, so the pair is kept.
+      if ((subject.text ?? '').trim() === '') return true;
+      if (entry.forced.get(subject.target) === 'cited') return true;
+      if (lexicallyRelevant(entry.adr, subject)) return true;
+      pairs += 1;
+      cells += entry.adr.rules.length;
+      return false;
+    });
+  }
+  return {pairs, cells, threshold};
+}
+
 const DEFAULT_MIN_DISCRIMINATION_CELLS = 10;
 const DEFAULT_MAX_UNCERTAIN_RATIO = 0.9;
 
@@ -386,34 +456,59 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
   const run: GateRun = {opts, allAdrs, now, entries, findings};
   let checked = 0;
 
-  // File-less subjects are pre-filtered for relevance once each (R3).
-  const irrelevantFor = await irrelevanceMap(opts, adrs);
+  // #291: generated, vendored and lock files are never judged.
+  const {kept: gateSubjects, excluded} = excludeSubjects(opts);
+  const scopedOpts: RunAdrGateOptions = {...opts, subjects: gateSubjects};
 
-  const retrieved: {adrId: string; reason: MustJudgeReason}[] = [];
+  // File-less subjects are pre-filtered for relevance once each (R3).
+  const irrelevantFor = await irrelevanceMap(scopedOpts, adrs);
+
+  const planned: PlannedAdr[] = [];
   for (const adr of adrs) {
     // #276: an ADR retrieval requires (cited, path-scoped, on-topic) is judged
     // for that subject even when scope or the relevance filter would drop it.
     const forced = new Map<string, MustJudgeReason>();
-    for (const subject of opts.subjects) {
+    for (const subject of gateSubjects) {
       const reason = mustJudge(adr, subject);
       if (reason) forced.set(subject.target, reason);
     }
     const scopedSkips = new Set<string>();
-    const subjects = opts.subjects.filter((subject) =>
+    const subjects = gateSubjects.filter((subject) =>
       forced.has(subject.target) ||
       (inScopeSubjects(adr, [subject], scopedSkips).length > 0 && !irrelevantFor.get(subject.target)?.has(adr.id)));
-    if (forced.size > 0) retrieved.push({adrId: adr.id, reason: [...forced.values()][0]});
     // Same as before for unforced subjects: any out-of-scope subject marks the ADR skipped.
     if (scopedSkips.size > 0) skippedSet.add(adr.id);
     if (subjects.length === 0) {
       if ([...irrelevantFor.values()].some((set) => set.has(adr.id))) skippedSet.add(adr.id);
       continue;
     }
+    planned.push({adr, subjects, forced});
+  }
 
+  const prefilter = prefilterPlan(planned, opts.config, opts.prefilter !== false);
+  const work = planned.filter((entry) => entry.subjects.length > 0);
+  const retrieved: {adrId: string; reason: MustJudgeReason}[] = [];
+  for (const entry of work) {
+    const reason = entry.subjects.map((subject) => entry.forced.get(subject.target)).find((value) => value !== undefined);
+    if (reason) retrieved.push({adrId: entry.adr.id, reason});
+  }
+
+  const cells = work.reduce((total, entry) => total + entry.adr.rules.length * entry.subjects.length, 0);
+  const subjectTargets = new Set(work.flatMap((entry) => entry.subjects.map((subject) => subject.target)));
+  opts.progress?.({
+    phase: 'plan',
+    adrs: work.length,
+    subjects: subjectTargets.size,
+    cells,
+    excluded: excluded.length,
+    prefiltered: prefilter?.pairs ?? 0,
+  });
+
+  for (const [index, {adr, subjects}] of work.entries()) {
     const adrHash = adrTextHash(adr);
-
     for (const rule of adr.rules) {
       checked += await checkRule(run, adr, rule, subjects, adrHash);
+      opts.progress?.({phase: 'judge', adrIndex: index + 1, adrs: work.length, adrId: adr.id, cellsDone: checked, cells});
     }
   }
 
@@ -447,6 +542,8 @@ export async function runAdrGate(opts: RunAdrGateOptions): Promise<AdrGateResult
     inconclusive,
     ...(inconclusiveReason !== undefined ? {inconclusiveReason} : {}),
     ...(retrieved.length > 0 ? {retrieved} : {}),
+    ...(excluded.length > 0 ? {excluded} : {}),
+    ...(prefilter !== null ? {prefiltered: prefilter} : {}),
   };
 }
 
@@ -533,6 +630,12 @@ export function renderGateMarkdown(result: AdrGateResult): string {
   for (const finding of result.findings) {
     lines.push(
       `| ${cell(`${finding.adrId}/${finding.ruleId}`)} | ${cell(finding.target)} | ${cell(finding.verdict)} | ${cell(finding.probability)} | ${cell(decisionState(finding))} |`,
+    );
+  }
+  if (result.prefiltered && result.prefiltered.pairs > 0) {
+    lines.push(
+      '',
+      `Pre-filtered: ${result.prefiltered.pairs} ADR/file pair${result.prefiltered.pairs === 1 ? '' : 's'} (${result.prefiltered.cells} cell${result.prefiltered.cells === 1 ? '' : 's'}) shared no words with their ADR and were not judged; rerun with --no-prefilter to judge them.`,
     );
   }
   if (result.discrimination?.noDiscrimination) {

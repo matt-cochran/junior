@@ -10,10 +10,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, isAbsolute, join } from 'node:path';
 import { adrDiscovery, adrDiscoveryMessage, lintAdrs, runAdr } from './adr.ts';
 import {
+  adrExcludePatterns,
   defaultGate,
   detectAdrDir,
   detectAdrFormat,
   detectFilePattern,
+  excludeMatcher,
   proposeAdrConfig,
   readAdrConfig,
   writeAdrConfig,
@@ -27,6 +29,7 @@ import {
   type AdrGateFinding,
   type AdrGateResult,
   type GateDecisionInput,
+  type GateProgress,
   type GateSubject,
 } from './adr-gate.ts';
 import {
@@ -82,13 +85,16 @@ export interface AdrCliDeps {
   now?: Date;
   /** Time source when `now` is not given (default: the system clock). */
   clock?: Clock;
+  /** #291: minimum milliseconds between progress lines on stderr (default 10,000). */
+  progressIntervalMs?: number;
 }
 
 export const ADR_CLI_USAGE = [
   'Usage: junior adr <command> [options]',
   '  init [--dir <dir>] [--record-decision] [--yes]',
   '  check --stage design --input <file> [--json]',
-  '  check --stage implementation [--base <ref>] [--result <result.json>] [--whole-change] [--json]',
+  '  check --stage implementation [--base <ref>] [--result <result.json>] [--whole-change]',
+  '        [--no-exclude] [--no-prefilter] [--json]',
   '  check --stage ticket (--ticket <id> | --draft <file>) [--json]',
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
@@ -227,13 +233,18 @@ function implementationDiffBase(argv: string[], deps: AdrCliDeps): string {
   return base;
 }
 
-function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[] {
+/** #291: an excluded path is never judged, so it is listed without reading its diff. */
+function subjectFor(root: string, path: string, base: string, isExcluded: (path: string) => boolean): GateSubject {
+  return isExcluded(path) ? {target: path, files: [path]} : implementationSubject(root, path, base);
+}
+
+function implementationSubjects(argv: string[], deps: AdrCliDeps, isExcluded: (path: string) => boolean): GateSubject[] {
   const root = deps.cwd ?? process.cwd();
   const result = valueAfter(argv, '--result');
   if (result) {
     const worktree = resultWorktree(result);
     const contentRoot = worktree !== undefined && existsSync(worktree) ? worktree : root;
-    return resultChangedPaths(result).map((path) => implementationSubject(contentRoot, path, 'HEAD'));
+    return resultChangedPaths(result).map((path) => subjectFor(contentRoot, path, 'HEAD', isExcluded));
   }
 
   const paths: string[] = [];
@@ -251,13 +262,13 @@ function implementationSubjects(argv: string[], deps: AdrCliDeps): GateSubject[]
   for (const path of changedPaths(gitOutput(deps, ['status', '--porcelain=v1']))) add(path);
 
   const diffBase = implementationDiffBase(argv, deps);
-  return paths.map((path) => implementationSubject(root, path, diffBase));
+  return paths.map((path) => subjectFor(root, path, diffBase, isExcluded));
 }
 
-function wholeChangeSubject(argv: string[], deps: AdrCliDeps): GateSubject {
+function wholeChangeSubject(argv: string[], deps: AdrCliDeps, isExcluded: (path: string) => boolean): GateSubject {
   const root = deps.cwd ?? process.cwd();
   const result = valueAfter(argv, '--result');
-  const git = deps.git !== undefined ? {git: deps.git} : {};
+  const git = {...(deps.git !== undefined ? {git: deps.git} : {}), exclude: isExcluded};
   if (result) {
     const worktree = resultWorktree(result);
     const contentRoot = worktree !== undefined && existsSync(worktree) ? worktree : root;
@@ -413,14 +424,16 @@ async function checkGateStage(
   classify: GateClassifier,
 ): Promise<{gate: AdrGateResult; markdown: string} | number> {
   let subjects: GateSubject[];
+  const exclude = flagSet(argv, '--no-exclude') ? [] : adrExcludePatterns(ready.config);
+  const isExcluded = excludeMatcher(exclude);
   if (stage === 'design') {
     const input = valueAfter(argv, '--input');
     if (!input) return failure(output(deps), 'check --stage design needs --input <file>');
     subjects = [{target: input, text: readFileSync(input, 'utf8')}];
   } else {
     subjects = flagSet(argv, '--whole-change')
-      ? [wholeChangeSubject(argv, deps)]
-      : implementationSubjects(argv, deps);
+      ? [wholeChangeSubject(argv, deps, isExcluded)]
+      : implementationSubjects(argv, deps, isExcluded);
   }
 
   const gate = await runAdrGate({
@@ -430,9 +443,124 @@ async function checkGateStage(
     config: ready.config,
     adrs: ready.adrs,
     classify,
+    exclude,
+    ...(flagSet(argv, '--no-prefilter') ? {prefilter: false} : {}),
+    progress: progressReporter(deps),
     ...(deps.clock ? {clock: deps.clock} : {}),
   });
   return {gate, markdown: renderGateMarkdown(gate)};
+}
+
+/** #291: a plan of at least this many cells prints its size before judging starts. */
+const PLAN_LINE_MIN_CELLS = 100;
+/** #291: a plan of at least this many cells also says how to narrow the check. */
+export const LARGE_CHECK_CELLS = 2000;
+const DEFAULT_PROGRESS_INTERVAL_MS = 10_000;
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? '' : 's'}`;
+}
+
+function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/**
+ * #291: progress for a long check, on stderr only so stdout and --json stay
+ * machine-readable. The plan line names the size (and, for a large change, how
+ * to narrow it); judging prints at most one line per interval with an ETA.
+ */
+function progressReporter(deps: AdrCliDeps): (event: GateProgress) => void {
+  const err = errorOutput(deps);
+  const clock = deps.clock ?? systemClock;
+  const interval = deps.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS;
+  let started = 0;
+  let last = 0;
+  return (event) => {
+    if (event.phase === 'plan') {
+      started = clock.now();
+      last = started;
+      const skipped = [
+        ...(event.excluded > 0 ? [`${plural(event.excluded, 'generated/vendored file')} skipped`] : []),
+        ...(event.prefiltered > 0 ? [`${plural(event.prefiltered, 'unrelated ADR/file pair')} pre-filtered`] : []),
+      ];
+      if (event.cells >= PLAN_LINE_MIN_CELLS || skipped.length > 0) {
+        err(`ADR check: judging ${plural(event.cells, 'cell')} (${plural(event.adrs, 'ADR')} x ${plural(event.subjects, 'subject')})${skipped.length > 0 ? `; ${skipped.join(', ')}` : ''}\n`);
+      }
+      if (event.cells >= LARGE_CHECK_CELLS) {
+        err(`ADR check: this is a large change set; narrow it with \`junior adr scope --adr <ADR-id>\` (tighter applies_to), a closer --base, or --whole-change\n`);
+      }
+      return;
+    }
+    const now = clock.now();
+    if (event.cellsDone < event.cells && now - last < interval) return;
+    if (event.cellsDone >= event.cells && last === started && now - started < interval) return;
+    last = now;
+    const elapsed = now - started;
+    const percent = event.cells === 0 ? 100 : Math.floor((event.cellsDone / event.cells) * 100);
+    const eta = event.cellsDone > 0 && event.cellsDone < event.cells
+      ? `, ~${duration((elapsed / event.cellsDone) * (event.cells - event.cellsDone))} left`
+      : event.cellsDone >= event.cells ? `, done in ${duration(elapsed)}` : '';
+    err(`ADR ${event.adrIndex}/${event.adrs} (${event.adrId}), cells ${event.cellsDone}/${event.cells} (${percent}%)${eta}\n`);
+  };
+}
+
+/**
+ * #291: the fields an unscored finding keeps in a compact latest.json: enough
+ * for `decide F<n>` and a rule-level decide to find and record it, without the
+ * rule text and ledger lookups repeated on every row.
+ */
+function slimFinding(finding: {id: string} & AdrGateFinding): Record<string, unknown> {
+  return {
+    id: finding.id,
+    adrId: finding.adrId,
+    ruleId: finding.ruleId,
+    target: finding.target,
+    verdict: finding.verdict,
+    probability: finding.probability,
+    confidence: finding.confidence,
+    adrHash: finding.adrHash,
+    stage: finding.stage,
+    ...(finding.deliverable !== undefined ? {deliverable: finding.deliverable} : {}),
+    cleared: finding.cleared,
+  };
+}
+
+/**
+ * #291: an inconclusive, mostly-uncertain run keeps every finding in
+ * latest.json under its original id, but slims the unscored (null-probability)
+ * ones, so a large run does not write tens of megabytes of repeated rule text.
+ */
+function compactDocument(
+  document: {stage: CheckStage; at: string; gate: AdrGateResult; findings: ({id: string} & AdrGateFinding)[]},
+): Record<string, unknown> | null {
+  if (!document.gate.discrimination?.noDiscrimination) return null;
+  const scored = document.findings.filter((finding) => finding.probability !== null);
+  const unscored = document.findings.length - scored.length;
+  if (unscored === 0) return null;
+  const byAdr: Record<string, number> = {};
+  for (const finding of document.findings) {
+    if (finding.probability === null) byAdr[finding.adrId] = (byAdr[finding.adrId] ?? 0) + 1;
+  }
+  const {findings: _omitted, ...gate} = document.gate;
+  return {
+    stage: document.stage,
+    at: document.at,
+    compact: true,
+    summary: {
+      checked: document.gate.checked,
+      findings: document.findings.length,
+      scored: scored.length,
+      unscored,
+      unscoredByAdr: byAdr,
+    },
+    gate,
+    findings: document.findings.map((finding) => (finding.probability === null ? slimFinding(finding) : finding)),
+  };
 }
 
 function reportCheck(
@@ -452,7 +580,8 @@ function reportCheck(
   };
 
   mkdirSync(dirname(latestPath(root)), {recursive: true});
-  writeFileSync(latestPath(root), `${JSON.stringify(document, null, 2)}\n`);
+  const compact = compactDocument(document);
+  writeFileSync(latestPath(root), `${JSON.stringify(compact ?? document, null, 2)}\n`);
 
   if (flagSet(argv, '--json')) {
     out(`${JSON.stringify(document, null, 2)}\n`);
@@ -462,6 +591,10 @@ function reportCheck(
     out(`${printFindings(markdown, findings.map((finding) => finding.id))}\n`);
   }
 
+  if (compact) {
+    const summary = compact.summary as {scored: number; unscored: number};
+    errorOutput(deps)(`${latestPath(root)}: kept ${plural(summary.scored, 'scored finding')}; ${plural(summary.unscored, 'unscored uncertain finding')} slimmed\n`);
+  }
   if (gate.inconclusive && gate.inconclusiveReason) errorOutput(deps)(`${gate.inconclusiveReason}\n`);
   return gate.blocked ? 3 : gate.inconclusive ? 2 : 0;
 }
