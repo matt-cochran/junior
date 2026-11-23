@@ -325,16 +325,35 @@ function writeReport(into: string, stamp: string, report: LandReport): LandRepor
   }
 }
 
-/** Apply lanes in order, verify their stored evidence on the final tree, run one
- * compile check and write `land-report.json` into the integration checkout.
- * Never commits. */
-export async function land(opts: LandOptions, deps: LandDeps = {}): Promise<LandReport> {
-  const clock = opts.clock ?? systemClock;
-  const cwd = resolve(opts.cwd);
-  const intoValue = typeof opts.into === 'string' ? opts.into.trim() : '';
-  const into = intoValue ? resolve(cwd, intoValue) : '';
-  const stamp = stampFor(clock);
-  const resolvedDeps = {
+type ResolvedLandDeps = Required<LandDeps>;
+
+/** Everything one `land` invocation shares across its phases. */
+interface LandRun {
+  opts: LandOptions;
+  cwd: string;
+  into: string;
+  stamp: string;
+  dryRun: boolean;
+  clock: Clock;
+  deps: ResolvedLandDeps;
+  base: (extra: Partial<LandReport>) => LandReport;
+}
+
+type LandStop = { error: string; code: string };
+
+interface ApplyOutcome {
+  laneReports: LandLaneReport[];
+  attempted: { lane: LaneInput; apply: ApplyHandoffResult }[];
+  stop?: LandStop;
+}
+
+interface CompileOutcome {
+  argv: string[] | null;
+  compile: LandCompileReport | null;
+}
+
+function resolveLandDeps(deps: LandDeps): ResolvedLandDeps {
+  return {
     applyHandoff: deps.applyHandoff ?? applyHandoff,
     checkIdentity: deps.checkIdentity ?? checkIdentity,
     identityEqual: deps.identityEqual ?? identityEqual,
@@ -342,117 +361,134 @@ export async function land(opts: LandOptions, deps: LandDeps = {}): Promise<Land
     resolveMachineConfig: deps.resolveMachineConfig ?? resolveMachineConfig,
     runSync: deps.runSync ?? runSync,
   };
-  const dryRun = opts.dryRun === true;
+}
 
-  const base = (extra: Partial<LandReport>): LandReport => ({
-    lanes: [], compile: null, rerun: [], ok: false, dryRun, into, ...extra,
-  });
+function laneId(lane: LaneInput): string {
+  return String(lane.result?.id ?? lane.target);
+}
 
-  if (!intoValue) return base({ error: 'missing --into integration checkout', code: 'E_LAND_INTO' });
-  if (!existsSync(into) || !statSync(into).isDirectory()) {
-    return base({ error: `integration checkout is not a directory: ${into}`, code: 'E_LAND_INTO' });
+/** Refuse a missing, non-directory or dirty integration checkout. */
+function checkInto(run: LandRun, intoValue: string): LandReport | null {
+  if (!intoValue) return run.base({ error: 'missing --into integration checkout', code: 'E_LAND_INTO' });
+  if (!existsSync(run.into) || !statSync(run.into).isDirectory()) {
+    return run.base({ error: `integration checkout is not a directory: ${run.into}`, code: 'E_LAND_INTO' });
   }
-  const status = gitStatus(into);
-  if (status.error) return writeReport(into, stamp, base({ error: `could not check the integration checkout: ${status.error}`, code: 'E_LAND_INTO' }));
-  if (!status.clean) return writeReport(into, stamp, base({ error: `integration checkout is not clean: ${into}`, code: 'E_LAND_DIRTY' }));
+  const status = gitStatus(run.into);
+  if (status.error) return writeReport(run.into, run.stamp, run.base({ error: `could not check the integration checkout: ${status.error}`, code: 'E_LAND_INTO' }));
+  if (!status.clean) return writeReport(run.into, run.stamp, run.base({ error: `integration checkout is not clean: ${run.into}`, code: 'E_LAND_DIRTY' }));
+  return null;
+}
 
+/** Resolve every lane and require all of them ready_for_review, before
+ * anything is written. */
+function resolveBatch(run: LandRun): { inputs: LaneInput[] } | { report: LandReport } {
   const inputs: LaneInput[] = [];
-  for (const target of opts.lanes) {
-    const resolved = resolveLane(target, cwd);
-    if (!resolved.lane) return writeReport(into, stamp, base({ error: resolved.error, code: 'E_LAND_LANE' }));
+  for (const target of run.opts.lanes) {
+    const resolved = resolveLane(target, run.cwd);
+    if (!resolved.lane) return { report: writeReport(run.into, run.stamp, run.base({ error: resolved.error, code: 'E_LAND_LANE' })) };
     inputs.push(resolved.lane);
   }
 
   const notReady = inputs.find(({ result }) => result?.status !== 'ready_for_review');
-  if (notReady) {
-    const id = String(notReady.result?.id ?? notReady.target);
-    return writeReport(into, stamp, base({
+  if (!notReady) return { inputs };
+  const id = laneId(notReady);
+  return {
+    report: writeReport(run.into, run.stamp, run.base({
       lanes: [{ id, applied: false, checks: [], error: `lane status is "${notReady.result?.status ?? 'unknown'}"; expected "ready_for_review"`, code: 'E_LAND_NOT_READY' }],
       error: `lane ${id} is not ready_for_review`,
       code: 'E_LAND_NOT_READY',
-    }));
-  }
+    })),
+  };
+}
 
-  // A result that records the lane's own source checkout is redirected to the
-  // integration checkout: land applies to --into, never back into the lane.
-  const scratch = mkdtempSync(join(tmpdir(), 'junior-land-'));
-  const laneReports: LandLaneReport[] = [];
-  const attempted: { lane: LaneInput; apply: ApplyHandoffResult }[] = [];
-  let stop: { error: string; code: string } | undefined;
+/** A result that records the lane's own source checkout is redirected to the
+ * integration checkout: land applies to --into, never back into the lane. */
+function redirectedTarget(lane: LaneInput, run: LandRun, scratch: string, index: number): string {
+  const sourceCwd = lane.result?.sourceCwd;
+  if (typeof sourceCwd !== 'string' || !sourceCwd.trim()) return lane.resultPath;
+  if (resolve(run.cwd, sourceCwd) === run.into) return lane.resultPath;
+  const artifact = join(scratch, `lane-${index}`);
+  mkdirSync(artifact, { recursive: true });
+  writeFileSync(join(artifact, 'result.json'), JSON.stringify({ ...lane.result, sourceCwd: run.into }));
+  return join(artifact, 'result.json');
+}
+
+function applyLane(lane: LaneInput, target: string, run: LandRun): ApplyHandoffResult {
   try {
-    for (const laneInput of inputs) {
-      const id = String(laneInput.result?.id ?? laneInput.target);
-      let target = laneInput.resultPath;
-      if (typeof laneInput.result?.sourceCwd === 'string' && laneInput.result.sourceCwd.trim()) {
-        const recorded = resolve(cwd, laneInput.result.sourceCwd);
-        if (recorded !== into) {
-          const artifact = join(scratch, `lane-${laneReports.length}`);
-          mkdirSync(artifact, { recursive: true });
-          writeFileSync(join(artifact, 'result.json'), JSON.stringify({ ...laneInput.result, sourceCwd: into }));
-          target = join(artifact, 'result.json');
-        }
-      }
-      let applied: ApplyHandoffResult;
-      try {
-        applied = resolvedDeps.applyHandoff(target, { cwd: into, dryRun, noLink: true, clock });
-      } catch (e) {
-        applied = { applied: false, dryRun, files: [], artifactDir: laneInput.artifactDir, error: message(e) };
-      }
+    return run.deps.applyHandoff(target, { cwd: run.into, dryRun: run.dryRun, noLink: true, clock: run.clock });
+  } catch (e) {
+    return { applied: false, dryRun: run.dryRun, files: [], artifactDir: lane.artifactDir, error: message(e) };
+  }
+}
+
+/** Keep the applied record beside the original lane artifact when a
+ * redirected result was used. */
+function keepAppliedRecord(target: string, lane: LaneInput): void {
+  try { cpSync(join(dirname(target), 'applied.json'), join(lane.artifactDir, 'applied.json')); }
+  catch { /* best effort; the apply itself already succeeded */ }
+}
+
+/** Apply lanes in order; the first failed apply stops the batch. */
+function applyLanes(inputs: LaneInput[], run: LandRun): ApplyOutcome {
+  const scratch = mkdtempSync(join(tmpdir(), 'junior-land-'));
+  const outcome: ApplyOutcome = { laneReports: [], attempted: [] };
+  try {
+    for (const lane of inputs) {
+      const id = laneId(lane);
+      const target = redirectedTarget(lane, run, scratch, outcome.laneReports.length);
+      const applied = applyLane(lane, target, run);
+      outcome.attempted.push({ lane, apply: applied });
       if (applied.error) {
-        laneReports.push({
-          id,
-          applied: false,
-          checks: [],
-          error: applied.error,
-          code: applied.conflicts?.length ? 'E_LAND_CONFLICT' : 'E_LAND_APPLY',
-        });
-        attempted.push({ lane: laneInput, apply: applied });
-        stop = { error: `lane ${id}: ${applied.error}`, code: applied.conflicts?.length ? 'E_LAND_CONFLICT' : 'E_LAND_APPLY' };
+        const code = applied.conflicts?.length ? 'E_LAND_CONFLICT' : 'E_LAND_APPLY';
+        outcome.laneReports.push({ id, applied: false, checks: [], error: applied.error, code });
+        outcome.stop = { error: `lane ${id}: ${applied.error}`, code };
         break;
       }
-      // Keep the applied record beside the original lane artifact when a
-      // redirected result was used.
-      if (target !== laneInput.resultPath) {
-        try { cpSync(join(dirname(target), 'applied.json'), join(laneInput.artifactDir, 'applied.json')); }
-        catch { /* best effort; the apply itself already succeeded */ }
-      }
-      laneReports.push({ id, applied: applied.applied, checks: [] });
-      attempted.push({ lane: laneInput, apply: applied });
+      if (target !== lane.resultPath) keepAppliedRecord(target, lane);
+      outcome.laneReports.push({ id, applied: applied.applied, checks: [] });
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+  return outcome;
+}
 
-  // Identity is a property of the final integration tree: verify every lane
-  // only after the whole batch applied. A stopped batch proves nothing.
-  for (let i = 0; i < laneReports.length; i++) {
-    laneReports[i].checks = stop
-      ? incompleteChecks(attempted[i].lane)
-      : verifyChecks(attempted[i].lane, attempted[i].apply, into, resolvedDeps);
+/** Identity is a property of the final integration tree: verify every lane
+ * only after the whole batch applied. A stopped batch proves nothing. */
+function attachChecks(outcome: ApplyOutcome, run: LandRun): void {
+  outcome.laneReports.forEach((laneReport, i) => {
+    const { lane, apply } = outcome.attempted[i];
+    laneReport.checks = outcome.stop ? incompleteChecks(lane) : verifyChecks(lane, apply, run.into, run.deps);
+  });
+}
+
+/** Run the batch's one compile check, unless the batch stopped or is a dry run. */
+async function compileBatch(inputs: LaneInput[], outcome: ApplyOutcome, run: LandRun): Promise<CompileOutcome | { report: LandReport }> {
+  if (outcome.stop || run.dryRun) return { argv: null, compile: null };
+  let argv: string[] | null;
+  let timeoutMs: number;
+  try {
+    argv = chosenCompile(run.opts, inputs, run.into);
+    timeoutMs = compileTimeoutMs(run.opts, run.into);
+  } catch (e) {
+    return { report: writeReport(run.into, run.stamp, run.base({ lanes: outcome.laneReports, error: message(e), code: 'E_LAND_COMPILE' })) };
   }
+  const compile = argv ? await runCompile(argv, run.into, run.opts, run.deps, `land/${run.stamp}:compile`, timeoutMs) : null;
+  return { argv, compile };
+}
 
-  let argv: string[] | null = null;
-  let timeoutMs = 600_000;
-  let compile: LandCompileReport | null = null;
-  if (!stop && !dryRun) {
-    try {
-      argv = chosenCompile(opts, inputs, into);
-      timeoutMs = compileTimeoutMs(opts, into);
-    } catch (e) {
-      return writeReport(into, stamp, base({ lanes: laneReports, error: message(e), code: 'E_LAND_COMPILE' }));
-    }
-    if (argv) compile = await runCompile(argv, into, opts, resolvedDeps, `land/${stamp}:compile`, timeoutMs);
-  }
-
+function finalReport(inputs: LaneInput[], outcome: ApplyOutcome, compiled: CompileOutcome, run: LandRun): LandReport {
+  const { laneReports, stop } = outcome;
+  const { argv, compile } = compiled;
   const rerun = laneReports.flatMap((laneReport) => laneReport.checks.filter((check) => check.verdict === 'stale').map((check) => check.argv));
   const allApplied = laneReports.length === inputs.length && laneReports.every((laneReport) => laneReport.applied);
-  const ok = dryRun
+  const ok = run.dryRun
     ? !stop && laneReports.length === inputs.length
     : !stop && allApplied && (compile === null || compile.passed);
-  const warnings = !stop && !dryRun && argv === null
+  const warnings = !stop && !run.dryRun && argv === null
     ? ['no compile check configured; the batch was not compiled']
     : undefined;
-  const report = base({
+  return run.base({
     lanes: laneReports,
     compile,
     rerun,
@@ -461,5 +497,32 @@ export async function land(opts: LandOptions, deps: LandDeps = {}): Promise<Land
     ...(stop ? { error: stop.error, code: stop.code } : {}),
     ...(compile && !compile.passed ? { error: `compile failed: ${compile.error ?? compile.argv.join(' ')}`, code: compile.code ?? 'E_LAND_COMPILE' } : {}),
   });
-  return writeReport(into, stamp, report);
+}
+
+/** Apply lanes in order, verify their stored evidence on the final tree, run one
+ * compile check and write `land-report.json` into the integration checkout.
+ * Never commits. */
+export async function land(opts: LandOptions, deps: LandDeps = {}): Promise<LandReport> {
+  const clock = opts.clock ?? systemClock;
+  const cwd = resolve(opts.cwd);
+  const intoValue = typeof opts.into === 'string' ? opts.into.trim() : '';
+  const into = intoValue ? resolve(cwd, intoValue) : '';
+  const dryRun = opts.dryRun === true;
+  const run: LandRun = {
+    opts, cwd, into, dryRun, clock,
+    stamp: stampFor(clock),
+    deps: resolveLandDeps(deps),
+    base: (extra) => ({ lanes: [], compile: null, rerun: [], ok: false, dryRun, into, ...extra }),
+  };
+
+  const refused = checkInto(run, intoValue);
+  if (refused) return refused;
+  const batch = resolveBatch(run);
+  if ('report' in batch) return batch.report;
+
+  const outcome = applyLanes(batch.inputs, run);
+  attachChecks(outcome, run);
+  const compiled = await compileBatch(batch.inputs, outcome, run);
+  if ('report' in compiled) return compiled.report;
+  return writeReport(into, run.stamp, finalReport(batch.inputs, outcome, compiled, run));
 }

@@ -510,114 +510,148 @@ function pressureBlock(
   return null;
 }
 
+type Pressure = { availableMb: number | null; swapOutPerSec: number | null };
+type AdmissionBlock = { reason: AdmissionWait['reason']; detail: string; pool: string | null };
+
+/** What one admission attempt needs to take slots. */
+interface AdmissionContext {
+  req: AdmissionRequest;
+  clock: Clock;
+  root: string;
+  pid: number;
+  pool: string | null;
+  poolLimit: number;
+}
+
+/** Slot files this admission currently holds. */
+interface HeldSlots {
+  poolPath: string | null;
+  machinePath: string | null;
+}
+
+/** An idempotent release of every slot `held` names. */
+function slotReleaser(held: HeldSlots): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (held.poolPath) removeQuietly(held.poolPath);
+    if (held.machinePath) removeQuietly(held.machinePath);
+    held.poolPath = null;
+    held.machinePath = null;
+  };
+}
+
+/** Report a wait to `onWait` once, and again only when its reason changes. */
+function waitTracker(clock: Clock, onWait: AdmissionRequest['onWait']): { record(block: AdmissionBlock): void; last(): AdmissionWait | null } {
+  let lastWait: AdmissionWait | null = null;
+  let waitSince: string | null = null;
+  return {
+    record(block) {
+      if (waitSince === null) waitSince = clock.iso();
+      const wait: AdmissionWait = { reason: block.reason, detail: block.detail, pool: block.pool, since: waitSince };
+      const changed = !lastWait || lastWait.reason !== wait.reason || lastWait.detail !== wait.detail || lastWait.pool !== wait.pool;
+      lastWait = wait;
+      if (changed) onWait?.(wait);
+    },
+    last: () => lastWait,
+  };
+}
+
+/** Sample memory pressure; null when the request was interrupted. An
+ * unreadable /proc never blocks admission. */
+async function samplePressure(procRoot: string, clock: Clock, signal: AbortSignal | undefined): Promise<Pressure | null> {
+  if (signal?.aborted) return null;
+  let pressure: Pressure;
+  try {
+    pressure = await measurePressure(procRoot, clock, signal);
+  } catch {
+    // An interrupted pressure sample is reported as an interruption, not a
+    // pressure block.
+    if (signal?.aborted) return null;
+    pressure = { availableMb: null, swapOutPerSec: null };
+  }
+  return signal?.aborted ? null : pressure;
+}
+
+function slotRecord(ctx: AdmissionContext): SlotRecord {
+  return { holder: ctx.req.holder, pid: ctx.pid, kind: ctx.req.kind, pool: ctx.pool, acquiredAt: ctx.clock.iso() };
+}
+
+/** Take the pool slot, if the check belongs to a pool. */
+function takePoolSlot(ctx: AdmissionContext, held: HeldSlots): AdmissionBlock | null {
+  if (!ctx.pool) return null;
+  const dir = poolDir(ctx.root, ctx.pool);
+  held.poolPath = acquireSlot(dir, ctx.poolLimit, slotRecord(ctx), ctx.clock);
+  if (held.poolPath) return null;
+  const holders = liveHolders(dir);
+  return {
+    reason: 'pool',
+    detail: `pool ${ctx.pool} ${holders.length}/${ctx.poolLimit} held by ${holders.join(', ') || 'unknown'}`,
+    pool: ctx.pool,
+  };
+}
+
+/** Take a machine slot. On failure the pool slot is given back: no hold-and-wait. */
+function takeMachineSlot(ctx: AdmissionContext, held: HeldSlots): AdmissionBlock | null {
+  const dir = slotsDir(ctx.root);
+  held.machinePath = acquireSlot(dir, ctx.req.config.slots, slotRecord(ctx), ctx.clock);
+  if (held.machinePath) return null;
+  if (held.poolPath) removeQuietly(held.poolPath);
+  held.poolPath = null;
+  const holders = liveHolders(dir);
+  return {
+    reason: 'slots',
+    detail: `slots ${holders.length}/${ctx.req.config.slots} held by ${holders.join(', ') || 'unknown'}`,
+    pool: null,
+  };
+}
+
+/** Sleep one poll interval; false when interrupted. */
+async function pollSleep(clock: Clock, signal: AbortSignal | undefined): Promise<boolean> {
+  try {
+    await clock.sleep(POLL_INTERVAL_MS, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Wait for a slot (and pool slot) under the pressure gate. */
 export async function admit(req: AdmissionRequest): Promise<AdmissionResult> {
   const clock = req.clock ?? systemClock;
-  const root = admissionDir(req.stateDir);
-  const pid = req.pid ?? process.pid;
   const pool = req.kind === 'check' ? poolFor(req.argv ?? [], req.config) : null;
-  const poolLimit = pool ? req.config.pools[pool]?.limit ?? 0 : 0;
+  const ctx: AdmissionContext = {
+    req,
+    clock,
+    root: admissionDir(req.stateDir),
+    pid: req.pid ?? process.pid,
+    pool,
+    poolLimit: pool ? req.config.pools[pool]?.limit ?? 0 : 0,
+  };
   const procRoot = req.procRoot ?? '/proc';
   const startedAt = clock.now();
-  let poolPath: string | null = null;
-  let machinePath: string | null = null;
-  let released = false;
-  let waitedMs = 0;
-  let lastWait: AdmissionWait | null = null;
-  let waitSince: string | null = null;
+  const held: HeldSlots = { poolPath: null, machinePath: null };
+  const release = slotReleaser(held);
 
-  const release = (): void => {
-    if (released) return;
-    released = true;
-    if (poolPath) removeQuietly(poolPath);
-    if (machinePath) removeQuietly(machinePath);
-    poolPath = null;
-    machinePath = null;
-  };
+  if (!req.config.enabled) return { ok: true, grant: { waitedMs: 0, pool, release } };
 
-  const immediateGrant = (): AdmissionResult => ({
-    ok: true,
-    grant: { waitedMs: 0, pool, release },
-  });
-
-  if (!req.config.enabled) return immediateGrant();
-
-  const recordWait = (reason: AdmissionWait['reason'], detail: string, waitPool: string | null): void => {
-    if (waitSince === null) waitSince = clock.iso();
-    const wait: AdmissionWait = { reason, detail, pool: waitPool, since: waitSince };
-    const changed = !lastWait || lastWait.reason !== wait.reason || lastWait.detail !== wait.detail || lastWait.pool !== wait.pool;
-    lastWait = wait;
-    if (changed) req.onWait?.(wait);
-  };
-
-  const waitingResult = (error: 'E_ADMISSION_TIMEOUT' | 'E_ADMISSION_INTERRUPTED'): AdmissionResult => {
+  const waits = waitTracker(clock, req.onWait);
+  const fail = (error: 'E_ADMISSION_TIMEOUT' | 'E_ADMISSION_INTERRUPTED'): AdmissionResult => {
     release();
-    return { ok: false, error, wait: lastWait, waitedMs: clock.now() - startedAt };
+    return { ok: false, error, wait: waits.last(), waitedMs: clock.now() - startedAt };
   };
 
   for (;;) {
-    if (req.signal?.aborted) return waitingResult('E_ADMISSION_INTERRUPTED');
+    const pressure = await samplePressure(procRoot, clock, req.signal);
+    if (!pressure) return fail('E_ADMISSION_INTERRUPTED');
 
-    let pressure: { availableMb: number | null; swapOutPerSec: number | null };
-    try {
-      pressure = await measurePressure(procRoot, clock, req.signal);
-    } catch {
-      // An interrupted pressure sample is reported as an interruption, not a
-      // pressure block: an unreadable /proc never blocks admission.
-      if (req.signal?.aborted) return waitingResult('E_ADMISSION_INTERRUPTED');
-      pressure = { availableMb: null, swapOutPerSec: null };
-    }
-    if (req.signal?.aborted) return waitingResult('E_ADMISSION_INTERRUPTED');
+    const block = pressureBlock(pressure, req.config) ?? takePoolSlot(ctx, held) ?? takeMachineSlot(ctx, held);
+    if (!block) return { ok: true, grant: { waitedMs: clock.now() - startedAt, pool, release } };
 
-    let block: { reason: AdmissionWait['reason']; detail: string; pool: string | null } | null = pressureBlock(pressure, req.config);
-
-    if (!block && pool) {
-      const dir = poolDir(root, pool);
-      poolPath = acquireSlot(dir, poolLimit, { holder: req.holder, pid, kind: req.kind, pool, acquiredAt: clock.iso() }, clock);
-      if (!poolPath) {
-        const holders = liveHolders(dir);
-        block = {
-          reason: 'pool',
-          detail: `pool ${pool} ${holders.length}/${poolLimit} held by ${holders.join(', ') || 'unknown'}`,
-          pool,
-        };
-      }
-    }
-
-    if (!block) {
-      machinePath = acquireSlot(
-        slotsDir(root),
-        req.config.slots,
-        { holder: req.holder, pid, kind: req.kind, pool, acquiredAt: clock.iso() },
-        clock,
-      );
-      if (!machinePath) {
-        // No hold-and-wait: give the pool slot back before waiting again.
-        if (poolPath) removeQuietly(poolPath);
-        poolPath = null;
-        const holders = liveHolders(slotsDir(root));
-        block = {
-          reason: 'slots',
-          detail: `slots ${holders.length}/${req.config.slots} held by ${holders.join(', ') || 'unknown'}`,
-          pool: null,
-        };
-      }
-    }
-
-    if (!block) {
-      waitedMs = clock.now() - startedAt;
-      return { ok: true, grant: { waitedMs, pool, release } };
-    }
-
-    recordWait(block.reason, block.detail, block.pool);
-    waitedMs = clock.now() - startedAt;
-    if (waitedMs >= req.config.admissionTimeoutMs) return waitingResult('E_ADMISSION_TIMEOUT');
-
-    try {
-      await clock.sleep(POLL_INTERVAL_MS, req.signal);
-    } catch {
-      return waitingResult('E_ADMISSION_INTERRUPTED');
-    }
+    waits.record(block);
+    if (clock.now() - startedAt >= req.config.admissionTimeoutMs) return fail('E_ADMISSION_TIMEOUT');
+    if (!(await pollSleep(clock, req.signal))) return fail('E_ADMISSION_INTERRUPTED');
   }
 }
 
