@@ -10,8 +10,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  adrExcludePatterns,
   adrFilePattern,
   adrIdFromFileName,
+  excludeMatcher,
   defaultGate,
   detectAdrDir,
   detectAdrFormat,
@@ -397,4 +399,53 @@ test('readAdrConfig rejects maxUncertainRatio above one and names the field', (t
   const root = project(t);
   touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ maxUncertainRatio: 1.1 }) }));
   assert.throws(() => readAdrConfig(root), /maxUncertainRatio/);
+});
+
+// --- Exclude globs (issue #291) ---------------------------------------------
+
+const DEFAULT_EXCLUDED = excludeMatcher(adrExcludePatterns({}));
+
+for (const path of [
+  'src/generated/client.ts',
+  'Api/Generated.cs',
+  'Api/Models.Generated.cs',
+  'vendor/lib/a.go',
+  'web/node_modules/x/index.js',
+  'package-lock.json',
+  'app/yarn.lock',
+  'dist/cli.js',
+]) {
+  test(`the default exclude globs skip ${path}`, () => {
+    assert.equal(DEFAULT_EXCLUDED(path), true);
+  });
+}
+
+test('the default exclude globs keep an ordinary source file', () => {
+  assert.equal(DEFAULT_EXCLUDED('src/generator.ts'), false);
+});
+
+test('adr.exclude adds globs to the defaults', () => {
+  assert.equal(excludeMatcher(adrExcludePatterns({exclude: ['proto/**']}))('proto/a.pb.go'), true);
+});
+
+test('adr.excludeDefaults false leaves only adr.exclude', () => {
+  assert.equal(excludeMatcher(adrExcludePatterns({excludeDefaults: false, exclude: ['proto/**']}))('src/generated/a.ts'), false);
+});
+
+test('readAdrConfig reads adr.exclude', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ exclude: ['proto/**'] }) }));
+  assert.deepEqual(readAdrConfig(root)?.exclude, ['proto/**']);
+});
+
+test('readAdrConfig rejects a non-array adr.exclude', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ exclude: 'proto/**' } as any) }));
+  assert.throws(() => readAdrConfig(root), /adr\.exclude/);
+});
+
+test('readAdrConfig rejects a negative adr.prefilterCells', (t) => {
+  const root = project(t);
+  touch(root, 'delivery.config.json', JSON.stringify({ adr: adrBlock({ prefilterCells: -1 }) }));
+  assert.throws(() => readAdrConfig(root), /prefilterCells/);
 });

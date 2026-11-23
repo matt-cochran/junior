@@ -342,6 +342,150 @@ test('decide with an unknown finding id exits 1', async () => {
   assert.equal(status, 1);
 });
 
+const TWO_RULE_ADR = ADR.replace(
+  "    text: Source changes stay within the approved tree.\n",
+  "    text: Source changes stay within the approved tree.\n  - id: R2\n    text: Source files keep their headers.\n",
+);
+
+async function implementationCheck(root: string, files: string[]): Promise<number> {
+  return runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(files),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+}
+
+async function decide(root: string, args: string[]): Promise<{status: number; text: string}> {
+  const out = capture();
+  const status = await runAdrCli(['decide', ...args], {cwd: root, git: fakeGit(), stdout: out.stdout});
+  return {status, text: out.text()};
+}
+
+test('#291: decide --adr --rule records one ledger line for every finding of the rule', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.deepEqual(
+    readLedger(root).map((entry) => [entry.adrId, entry.ruleId, entry.target]),
+    [['ADR-0001', 'R1', '*']],
+  );
+});
+
+test('#291: decide --adr --rule reports how many findings it covers', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  const {text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.match(text, /ADR-0001\/R1: covers 3 findings/);
+});
+
+test('#291: a rule-level override clears every finding of the rule, including new targets', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/new.ts']), 0);
+});
+
+test('#291: a rule-level decision leaves the other rules of the ADR blocked', async () => {
+  const root = seed(test);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), TWO_RULE_ADR);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 3);
+});
+
+test('#291: decide --adr without --rule covers every rule of the ADR', async () => {
+  const root = seed(test);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), TWO_RULE_ADR);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 0);
+});
+
+test('#291: a rule-level amendment records the --amendment ADR', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--amend', '--amendment', 'ADR-0002']);
+  assert.equal(readLedger(root)[0]?.amendmentAdr, 'ADR-0002');
+});
+
+test('#291: a rule-level amendment without --amendment exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--amend']);
+  assert.equal(status, 1);
+});
+
+test('#291: a rule-level decision for an unknown rule exits 1 and records nothing', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R9', '--revise']);
+  assert.deepEqual([status, readLedger(root).length], [1, 0]);
+});
+
+test('#291: a rule-level decision for an unknown ADR exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0999', '--revise']);
+  assert.equal(status, 1);
+});
+
+test('#291: a rule-level decision that matches no finding needs --standing', async () => {
+  const root = seed(test);
+  const {status, text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r', '--stage', 'implementation']);
+  assert.deepEqual([status, /no finding .* add --standing/.test(text)], [1, true]);
+});
+
+test('#291: a standing rule-level decision can be recorded before any finding', async () => {
+  const root = seed(test);
+  await decide(root, [
+    '--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r',
+    '--standing', '--expires', 'until-adr-change', '--stage', 'implementation',
+  ]);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 0);
+});
+
+test('#291: a standing until-adr-change rule-level decision lapses when the ADR changes', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, [
+    '--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r',
+    '--standing', '--expires', 'until-adr-change',
+  ]);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), ADR.replace('Decision.', 'Decision, revised.'));
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 3);
+});
+
+test('#291: a standing rule-level decision without --expires exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status, text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r', '--standing']);
+  assert.deepEqual([status, /needs expires/.test(text)], [1, true]);
+});
+
+test('#291: decide rejects a finding id together with --rule', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['F1', '--rule', 'R1', '--revise']);
+  assert.equal(status, 1);
+});
+
+test('#291: per-finding decide --amend --adr still names the amendment ADR', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts']);
+  await decide(root, ['F2', '--amend', '--adr', 'ADR-0002']);
+  const [entry] = readLedger(root);
+  assert.deepEqual([entry?.target, entry?.amendmentAdr], ['src/b.ts', 'ADR-0002']);
+});
+
+test('#291: decide --help shows the rule-level form', async () => {
+  const root = seed(test);
+  const out = capture();
+  await runAdrCli(['decide', '--help'], {cwd: root, git: fakeGit(), stdout: out.stdout});
+  assert.match(out.text(), /decide --adr <ADR-id> \[--rule <rule-id>\]/);
+});
+
 test('check-tickets without --post does not comment on the adapter', async () => {
   const root = seed(test);
   let comments = 0;
@@ -1068,4 +1212,160 @@ test('#249: an implementation check with no --base diffs against origin/HEAD on 
   assert.doesNotMatch(stderr, /origin\/main/);
   assert.notEqual(status, 1, stderr);
   assert.match(recorder.questions(), /devOnlyMarker/);
+});
+
+// --- Scaling a large check (issue #291) -------------------------------------
+
+function mostlyUnscored(): GateClassifier {
+  // The first question of each batch gets a low-confidence (scored) answer; the rest get none.
+  return async ({questions}) => {
+    const ids = Object.keys(questions);
+    return {answers: ids.length > 0 ? {[ids[0]]: {type: 'choice', choice: 'conforms', confidence: 0.3}} : {}};
+  };
+}
+
+function manyFiles(count: number): string[] {
+  return Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+}
+
+async function largeCheck(root: string, extra: Partial<NonNullable<Parameters<typeof runAdrCli>[1]>> = {}, argv: string[] = []) {
+  const out = capture();
+  const err = capture();
+  const code = await runAdrCli(['check', '--stage', 'implementation', ...argv], {
+    cwd: root,
+    classify: mostlyUnscored(),
+    git: fakeGit(manyFiles(120)),
+    stdout: out.stdout,
+    stderr: err.stdout,
+    ...extra,
+  });
+  return {code, out: out.text(), err: err.text()};
+}
+
+test('a large implementation check prints its plan size on stderr before judging', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root);
+  assert.match(err, /^ADR check: judging 120 cells \(1 ADR x 120 subjects\)/m);
+});
+
+test('an implementation check prints ADR and cell progress on stderr', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root, {progressIntervalMs: 0});
+  assert.match(err, /^ADR 1\/1 \(ADR-0001\), cells 120\/120 \(100%\), done in /m);
+});
+
+test('progress output keeps --json stdout parseable', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {progressIntervalMs: 0}, ['--json']);
+  assert.equal(JSON.parse(out).gate.checked, 120);
+});
+
+test('an inconclusive mostly-unscored check keeps every finding in a compact latest.json', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  const document = latest(root);
+  assert.deepEqual(
+    {compact: document.compact, findings: document.findings.length, scored: document.summary.scored, unscored: document.summary.unscored},
+    {compact: true, findings: 120, scored: 6, unscored: 114},
+  );
+});
+
+test('a compacted latest.json keeps every finding under its original id', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.equal(latest(root).findings[20].id, 'F21');
+});
+
+test('a compacted latest.json slims unscored findings to the decide fields', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.deepEqual(Object.keys(latest(root).findings[1]).sort(), [
+    'adrHash', 'adrId', 'cleared', 'confidence', 'id', 'probability', 'ruleId', 'stage', 'target', 'verdict',
+  ]);
+});
+
+test('a compacted latest.json keeps the rule text of a scored finding', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.equal(latest(root).findings[0].rule, 'Source changes stay within the approved tree.');
+});
+
+test('decide records a ledger line for a slimmed unscored finding of a compacted check', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  const code = await runAdrCli(['decide', 'F2', '--override', '--reason', 'generated scaffolding'], {
+    cwd: root,
+    git: fakeGit(),
+    stdout: capture().stdout,
+  });
+  const entry = readLedger(root)[0];
+  assert.deepEqual(
+    {code, adrId: entry?.adrId, ruleId: entry?.ruleId, target: entry?.target, verdict: entry?.verdict, probability: entry?.probability},
+    {code: 0, adrId: 'ADR-0001', ruleId: 'R1', target: 'src/file-1.ts', verdict: 'uncertain', probability: null},
+  );
+});
+
+test('a compact latest.json is less than half the size of the full document for a large run', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {git: fakeGit(manyFiles(200))}, ['--json']);
+  const full = Buffer.byteLength(out);
+  const compact = Buffer.byteLength(readFileSync(join(root, '.delivery', 'adr-check', 'latest.json'), 'utf8'));
+  process.stdout.write(`# compact latest.json: ${compact} of ${full} bytes (${Math.round((compact / full) * 100)}%)\n`);
+  assert.ok(compact < full / 2, `compact ${compact} bytes vs full ${full} bytes`);
+});
+
+test('a compacted check still prints every finding on --json stdout', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {}, ['--json']);
+  assert.equal(JSON.parse(out).findings.length, 120);
+});
+
+test('an implementation check skips a generated file by default', async () => {
+  const root = seed(test);
+  await runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(['src/generated/client.ts', 'src/Api.Generated.cs', 'src/real.ts']),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.deepEqual(latest(root).findings.map((finding: any) => finding.target), ['src/real.ts']);
+});
+
+test('an implementation check with --no-exclude judges generated files too', async () => {
+  const root = seed(test);
+  await runAdrCli(['check', '--stage', 'implementation', '--no-exclude'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(['src/generated/client.ts', 'src/real.ts']),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.equal(latest(root).findings.length, 2);
+});
+
+test('a check of a very large change says to narrow it with junior adr scope', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root, {git: fakeGit(manyFiles(2000))}, ['--no-prefilter']);
+  assert.match(err, /junior adr scope --adr <ADR-id>/);
+});
+
+test('an implementation check with --whole-change leaves generated files out of the diff', async (t) => {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'src', 'generated'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const base = true;\n');
+  writeFileSync(join(root, 'src', 'generated', 'api.ts'), 'export const gen = 0;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const wholeChangeMarker = true;\n');
+  writeFileSync(join(root, 'src', 'generated', 'api.ts'), 'export const generatedMarker = 1;\n');
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base, '--whole-change'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.doesNotMatch(recorder.questions(), /generatedMarker/);
 });

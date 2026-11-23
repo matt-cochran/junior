@@ -154,6 +154,8 @@ export const CLAUDE_STORE_DENY_RULES: readonly string[] = [
   'Bash(cat .crossmatrix*)',
   'Bash(grep * .crossmatrix*)',
   'Bash(jq * .crossmatrix*)',
+  'Edit(./.junior/budget-approvals.json)',
+  'Edit(./.delivery/external-context-consent.json)',
 ];
 
 /** Older spellings Junior may have written; upgrades replace them. */

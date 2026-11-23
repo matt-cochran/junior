@@ -9,6 +9,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join , dirname} from 'node:path';
 import {
+  ANY_RULE,
+  ANY_TARGET,
   LEDGER_PATH,
   activeDecision,
   adrContentHash,
@@ -262,4 +264,55 @@ test('appendDecision accepts a Clock as its clock', () => {
 test('an explicit now wins over a Clock', () => {
   const stored = appendDecision(rootDir(), decision(), {clock: createManualClock(0), now: NOW});
   assert.equal(stored.at, '2026-06-01T12:00:00.000Z');
+});
+
+test('#291: a rule-level entry (target *) applies to any target of that rule', () => {
+  const root = rootDir();
+  const stored = appendDecision(root, decision({target: ANY_TARGET}), {clock: () => NOW});
+  assert.equal(activeDecision(readLedger(root), key({target: 'src/other.ts'}), ctx())?.id, stored.id);
+});
+
+test('#291: a rule-level entry does not apply to another rule of the ADR', () => {
+  const root = rootDir();
+  appendDecision(root, decision({target: ANY_TARGET}), {clock: () => NOW});
+  assert.equal(activeDecision(readLedger(root), key({ruleId: 'R2'}), ctx()), null);
+});
+
+test('#291: an ADR-level entry (rule * and target *) applies to every rule of the ADR', () => {
+  const root = rootDir();
+  const stored = appendDecision(root, decision({ruleId: ANY_RULE, target: ANY_TARGET}), {clock: () => NOW});
+  assert.equal(activeDecision(readLedger(root), key({ruleId: 'R2', target: 'src/x.ts'}), ctx())?.id, stored.id);
+});
+
+test('#291: an ADR-level entry does not apply to another ADR', () => {
+  const root = rootDir();
+  appendDecision(root, decision({ruleId: ANY_RULE, target: ANY_TARGET}), {clock: () => NOW});
+  assert.equal(activeDecision(readLedger(root), key({adrId: 'ADR-0002'}), ctx()), null);
+});
+
+test('#291: a later per-target entry wins over an earlier rule-level entry', () => {
+  const root = rootDir();
+  appendDecision(root, decision({target: ANY_TARGET}), {clock: () => NOW});
+  const later = appendDecision(root, decision({decision: 'revise', rationale: ''}), {clock: () => NOW});
+  assert.equal(activeDecision(readLedger(root), key(), ctx())?.id, later.id);
+});
+
+test('#291: a lapsed standing rule-level entry is cited for any target', () => {
+  const root = rootDir();
+  const stored = appendDecision(
+    root,
+    decision({target: ANY_TARGET, standing: true, expires: 'until-adr-change', adrHash: 'hash-a'}),
+    {clock: () => NOW},
+  );
+  assert.equal(lapsedStanding(readLedger(root), key({target: 'src/new.ts'}), ctx('hash-b'))?.id, stored.id);
+});
+
+test('#291: a ticket-stage ADR-level entry is carried forward for any rule', () => {
+  const root = rootDir();
+  const stored = appendDecision(root, decision({stage: 'ticket', ruleId: ANY_RULE, target: ANY_TARGET}), {clock: () => NOW});
+  assert.equal(carriedForward(readLedger(root), {adrId: 'ADR-0001', ruleId: 'R2', deliverable: 'D1'})?.id, stored.id);
+});
+
+test('#291: appendDecision rejects an ADR-level rule with a specific target', () => {
+  assert.throws(() => appendDecision(rootDir(), decision({ruleId: ANY_RULE})), /target \*/);
 });
