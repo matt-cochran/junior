@@ -225,102 +225,125 @@ function dotnetFilter(files: string[]): string {
   return files.map((file) => `FullyQualifiedName~${dotnetClass(file)}`).join('|');
 }
 
-function analyzeUnfiltered(argv: string[], cwd: string, depth = 0): { label: string; suggestion: (files: string[]) => string } | null {
+type UnfilteredFinding = { label: string; suggestion: (files: string[]) => string };
+
+/** A test command with any package-runner launcher (`npx`, `pnpm exec`, `yarn exec`) peeled off. */
+interface TestInvocation {
+  argv: string[];
+  /** Index of the tool token in `argv`. */
+  command: number;
+  launcher: string[];
+  tool: string;
+  args: string[];
+  cwd: string;
+  depth: number;
+}
+
+/** Peel a package-runner launcher off the command at `start`. Null when the
+ * launcher names no tool. */
+function resolveInvocation(argv: string[], start: number, cwd: string, depth: number): TestInvocation | null {
+  const name = commandName(argv[start]);
+  const at = (command: number, launcher: string[]): TestInvocation | null => command >= argv.length
+    ? null
+    : { argv, command, launcher, tool: commandName(argv[command]), args: argv.slice(command + 1), cwd, depth };
+  if (['npx', 'pnpx', 'bunx'].includes(name)) {
+    let i = start + 1;
+    while (i < argv.length && argv[i].startsWith('-')) i += 1;
+    return at(i, [argv[start]]);
+  }
+  const sub = commandName(argv[start + 1] ?? '');
+  if ((name === 'pnpm' && ['exec', 'dlx'].includes(sub)) || (name === 'yarn' && sub === 'exec')) {
+    return at(start + 2, argv.slice(start, start + 2));
+  }
+  return { argv, command: start, launcher: [], tool: name, args: argv.slice(start + 1), cwd, depth };
+}
+
+const isPython = (tool: string): boolean => tool === 'python' || tool === 'python3';
+
+/** Each runner: does the invocation use it, and is it unfiltered? */
+const UNFILTERED_RUNNERS: { matches: (inv: TestInvocation) => boolean; analyze: (inv: TestInvocation) => UnfilteredFinding | null }[] = [
+  {
+    matches: ({ tool }) => tool === 'node' || tool === 'nodejs',
+    analyze: ({ args }) => {
+      const testIndex = args.indexOf('--test');
+      if (testIndex === -1) return null;
+      if (positionalArgs(args.slice(testIndex + 1), NODE_TEST_VALUE_OPTIONS).length > 0) return null;
+      return {
+        label: 'node --test without a file',
+        suggestion: (testFiles) => ['node', '--test', ...testFiles].join(' '),
+      };
+    },
+  },
+  {
+    matches: ({ tool }) => tool === 'jest' || tool === 'jest-cli',
+    analyze: ({ args, launcher }) => {
+      if (optionPresent(args, JEST_FILTERS)) return null;
+      if (positionalArgs(args, JEST_VALUE_OPTIONS).length > 0) return null;
+      return {
+        label: 'jest without a path or name filter',
+        suggestion: (testFiles) => [...launcher, 'jest', ...testFiles].join(' '),
+      };
+    },
+  },
+  {
+    matches: ({ tool }) => tool === 'vitest',
+    analyze: ({ args, launcher }) => {
+      if (optionPresent(args, VITEST_FILTERS)) return null;
+      const subcommand = args[0] === 'run' || args[0] === 'watch' || args[0] === 'dev' ? args[0] : '';
+      const rest = subcommand ? args.slice(1) : args;
+      if (positionalArgs(rest, VITEST_VALUE_OPTIONS).length > 0) return null;
+      return {
+        label: 'vitest without a path or name filter',
+        suggestion: (testFiles) => [...launcher, 'vitest', ...(subcommand ? [subcommand] : []), ...testFiles].join(' '),
+      };
+    },
+  },
+  {
+    matches: ({ tool, args }) => tool === 'pytest' || tool === 'py.test' || (isPython(tool) && args[0] === '-m' && args[1] === 'pytest'),
+    analyze: ({ argv, command, tool, args, launcher }) => {
+      const pytestArgs = isPython(tool) ? args.slice(2) : args;
+      const commandTokens = isPython(tool) ? [argv[command], '-m', 'pytest'] : [argv[command]];
+      if (optionPresent(pytestArgs, PYTEST_FILTERS)) return null;
+      if (positionalArgs(pytestArgs, PYTEST_VALUE_OPTIONS).length > 0) return null;
+      return {
+        label: 'pytest without a path or keyword filter',
+        suggestion: (testFiles) => [...launcher, ...commandTokens, ...testFiles].join(' '),
+      };
+    },
+  },
+  {
+    matches: ({ tool, args }) => tool === 'dotnet' && commandName(args[0] ?? '') === 'test',
+    analyze: ({ argv, command, args }) => {
+      if (optionPresent(args, ['--filter'])) return null;
+      const base = argv.slice(command);
+      return {
+        label: 'dotnet test without --filter',
+        suggestion: (testFiles) => `${base.join(' ')} --filter "${dotnetFilter(testFiles)}"`,
+      };
+    },
+  },
+  {
+    matches: ({ tool, args }) => tool === 'npm' && (args[0] === 'test' || (args[0] === 'run' && args[1] === 'test')),
+    analyze: ({ cwd, depth }) => {
+      const script = packageTestScript(cwd);
+      if (!script) return null;
+      if (!analyzeUnfiltered(tokenize(script), cwd, depth + 1)) return null;
+      return {
+        label: `npm test script "${script}"`,
+        suggestion: (testFiles) => `npm test -- ${testFiles.join(' ')}`,
+      };
+    },
+  },
+];
+
+function analyzeUnfiltered(argv: string[], cwd: string, depth = 0): UnfilteredFinding | null {
   if (depth > 2) return null;
   const start = commandStart(argv);
   if (start >= argv.length) return null;
-  const name = commandName(argv[start]);
-  let command = start;
-  let launcher: string[] = [];
-  let tool = name;
-  let args = argv.slice(start + 1);
-
-  if (['npx', 'pnpx', 'bunx'].includes(name)) {
-    launcher = [argv[start]];
-    let i = start + 1;
-    while (i < argv.length && argv[i].startsWith('-')) i += 1;
-    if (i >= argv.length) return null;
-    command = i;
-    tool = commandName(argv[i]);
-    args = argv.slice(i + 1);
-  } else if (name === 'pnpm' && ['exec', 'dlx'].includes(commandName(argv[start + 1] ?? ''))) {
-    launcher = argv.slice(start, start + 2);
-    command = start + 2;
-    if (command >= argv.length) return null;
-    tool = commandName(argv[command]);
-    args = argv.slice(command + 1);
-  } else if (name === 'yarn' && commandName(argv[start + 1] ?? '') === 'exec') {
-    launcher = argv.slice(start, start + 2);
-    command = start + 2;
-    if (command >= argv.length) return null;
-    tool = commandName(argv[command]);
-    args = argv.slice(command + 1);
-  }
-
-  if (tool === 'node' || tool === 'nodejs') {
-    const testIndex = args.indexOf('--test');
-    if (testIndex === -1) return null;
-    const after = args.slice(testIndex + 1);
-    const files = positionalArgs(after, NODE_TEST_VALUE_OPTIONS);
-    if (files.length > 0) return null;
-    return {
-      label: 'node --test without a file',
-      suggestion: (testFiles) => ['node', '--test', ...testFiles].join(' '),
-    };
-  }
-
-  if (tool === 'jest' || tool === 'jest-cli') {
-    if (optionPresent(args, JEST_FILTERS)) return null;
-    if (positionalArgs(args, JEST_VALUE_OPTIONS).length > 0) return null;
-    return {
-      label: 'jest without a path or name filter',
-      suggestion: (testFiles) => [...launcher, 'jest', ...testFiles].join(' '),
-    };
-  }
-
-  if (tool === 'vitest') {
-    if (optionPresent(args, VITEST_FILTERS)) return null;
-    const subcommand = args[0] === 'run' || args[0] === 'watch' || args[0] === 'dev' ? args[0] : '';
-    const rest = subcommand ? args.slice(1) : args;
-    if (positionalArgs(rest, VITEST_VALUE_OPTIONS).length > 0) return null;
-    return {
-      label: 'vitest without a path or name filter',
-      suggestion: (testFiles) => [...launcher, 'vitest', ...(subcommand ? [subcommand] : []), ...testFiles].join(' '),
-    };
-  }
-
-  if (tool === 'pytest' || tool === 'py.test' || (['python', 'python3'].includes(tool) && args[0] === '-m' && args[1] === 'pytest')) {
-    const pytestArgs = ['python', 'python3'].includes(tool) ? args.slice(2) : args;
-    const commandTokens = ['python', 'python3'].includes(tool) ? [argv[command], '-m', 'pytest'] : [argv[command]];
-    if (optionPresent(pytestArgs, PYTEST_FILTERS)) return null;
-    if (positionalArgs(pytestArgs, PYTEST_VALUE_OPTIONS).length > 0) return null;
-    return {
-      label: 'pytest without a path or keyword filter',
-      suggestion: (testFiles) => [...launcher, ...commandTokens, ...testFiles].join(' '),
-    };
-  }
-
-  if (tool === 'dotnet' && commandName(args[0] ?? '') === 'test') {
-    if (optionPresent(args, ['--filter'])) return null;
-    const base = argv.slice(command);
-    return {
-      label: 'dotnet test without --filter',
-      suggestion: (testFiles) => `${base.join(' ')} --filter "${dotnetFilter(testFiles)}"`,
-    };
-  }
-
-  if (tool === 'npm' && (args[0] === 'test' || (args[0] === 'run' && args[1] === 'test'))) {
-    const script = packageTestScript(cwd);
-    if (!script) return null;
-    const nested = analyzeUnfiltered(tokenize(script), cwd, depth + 1);
-    if (!nested) return null;
-    return {
-      label: `npm test script "${script}"`,
-      suggestion: (testFiles) => `npm test -- ${testFiles.join(' ')}`,
-    };
-  }
-
-  return null;
+  const inv = resolveInvocation(argv, start, cwd, depth);
+  if (!inv) return null;
+  const runner = UNFILTERED_RUNNERS.find((candidate) => candidate.matches(inv));
+  return runner ? runner.analyze(inv) : null;
 }
 
 function packageTestScript(cwd: string): string {
