@@ -23,7 +23,9 @@ import {
 } from './adr-config.ts';
 import { initAdrs } from './adr-init.ts';
 import {
+  findingsForRule,
   recordGateDecision,
+  recordRuleDecision,
   renderGateMarkdown,
   runAdrGate,
   type AdrGateFinding,
@@ -98,6 +100,9 @@ export const ADR_CLI_USAGE = [
   '  check --stage ticket (--ticket <id> | --draft <file>) [--json]',
   '  decide <F#> (--override --reason <text> | --amend --adr <ADR-NNNN> | --revise)',
   '         [--standing --expires <date|until-adr-change>] [--by <name>]',
+  '    decide --adr <ADR-id> [--rule <rule-id>] (--override --reason <text> | --amend --amendment <ADR-NNNN> | --revise)',
+  '         [--standing --expires <date|until-adr-change>] [--stage <stage>] [--by <name>]',
+  '         one decision for every finding of that ADR rule (of every rule without --rule), now and later',
   '  check-tickets [--state open|all] [--limit N] [--markdown <file>] [--post]',
   '  scope [--adr <ADR-id>]... [--max-candidates <n>] [--samples <k>] [--fresh] [--json]',
   '  new|lint|sync delegate to `junior matrix adr`',
@@ -629,7 +634,11 @@ async function runDecide(argv: string[], deps: AdrCliDeps): Promise<number> {
   const root = deps.cwd ?? process.cwd();
   const out = output(deps);
   const id = argv.find((arg) => !arg.startsWith('--') && !argv[argv.indexOf(arg) - 1]?.startsWith('--'));
-  if (!id) return failure(out, 'decide needs a finding id such as F1');
+  const ruleLevel = !id && (flagSet(argv, '--adr') || flagSet(argv, '--rule'));
+  if (!id && !ruleLevel) {
+    return failure(out, 'decide needs a finding id such as F1, or --adr <ADR-id> [--rule <rule-id>] for every finding of an ADR rule');
+  }
+  if (id && flagSet(argv, '--rule')) return failure(out, 'decide takes a finding id or --adr/--rule, not both');
 
   const override = flagSet(argv, '--override');
   const amend = flagSet(argv, '--amend');
@@ -639,6 +648,8 @@ async function runDecide(argv: string[], deps: AdrCliDeps): Promise<number> {
 
   const reason = valueAfter(argv, '--reason');
   if (override && reason === undefined) return failure(out, 'an override needs --reason');
+
+  if (ruleLevel) return runRuleDecide(argv, deps, {override, amend, reason});
 
   const amendmentAdr = valueAfter(argv, '--adr');
   if (amend && !amendmentAdr) return failure(out, 'an amendment needs --adr <ADR-NNNN>');
@@ -674,6 +685,116 @@ async function runDecide(argv: string[], deps: AdrCliDeps): Promise<number> {
   };
   const decision = recordGateDecision(root, finding, input);
   out(`${decision.id}\n`);
+  return 0;
+}
+
+const DECISION_STAGES = new Set<string>(['design', 'implementation', 'ticket']);
+
+/** A flag's value; null when the flag is present without one. */
+function flagValue(argv: string[], flag: string): string | undefined | null {
+  if (!flagSet(argv, flag)) return undefined;
+  const value = valueAfter(argv, flag);
+  return value === undefined || value.startsWith('--') ? null : value;
+}
+
+function decidedBy(argv: string[], deps: AdrCliDeps): string {
+  let by = 'unknown';
+  if (deps.git) {
+    const result = deps.git(['config', 'user.name']);
+    const name = result.stdout.trim();
+    if (result.status === 0 && name !== '') by = name;
+  }
+  return valueAfter(argv, '--by') ?? by;
+}
+
+/**
+ * #291: `decide --adr <ADR-id> [--rule <rule-id>]` records one decision for
+ * every finding of that ADR rule (or of every rule of the ADR) as a single
+ * ledger entry whose target is '*', so it also covers targets later checks
+ * flag. Here --adr names the ADR being decided, so an amendment names its
+ * proposed ADR with --amendment. Like every decision, only a human records it.
+ */
+function runRuleDecide(
+  argv: string[],
+  deps: AdrCliDeps,
+  kind: {override: boolean; amend: boolean; reason: string | undefined},
+): number {
+  const root = deps.cwd ?? process.cwd();
+  const out = output(deps);
+
+  const adrId = flagValue(argv, '--adr');
+  if (!adrId) return failure(out, 'a rule-level decision needs --adr <ADR-id>');
+  const ruleId = flagValue(argv, '--rule');
+  if (ruleId === null) return failure(out, '--rule needs a rule id such as R1');
+  const amendmentAdr = flagValue(argv, '--amendment');
+  if (amendmentAdr === null || (kind.amend && amendmentAdr === undefined)) {
+    return failure(out, 'a rule-level amendment needs --amendment <ADR-NNNN> (--adr names the ADR being decided)');
+  }
+
+  const config = resolveGateConfig(root)?.config ?? readAdrConfig(root) ?? proposeAdrConfig(root);
+  if (!config) return failure(out, 'no ADR directory found');
+  let adrs: Adr[];
+  try {
+    adrs = loadGateAdrs(root, config);
+  } catch (error) {
+    return failure(out, `cannot read ADRs: ${(error as Error).message}`);
+  }
+  const adr = adrs.find((entry) => entry.id === adrId);
+  if (!adr) return failure(out, `unknown ADR ${adrId}`);
+  if (ruleId !== undefined && !adr.rules.some((rule) => rule.id === ruleId)) {
+    return failure(out, `unknown rule ${ruleId} in ${adrId}`);
+  }
+  let adrHash = '';
+  try {
+    if (adr.path) adrHash = adrContentHash(readFileSync(adr.path, 'utf8'));
+  } catch {
+    adrHash = '';
+  }
+
+  let document: any;
+  try {
+    document = JSON.parse(readFileSync(latestPath(root), 'utf8'));
+  } catch {
+    document = undefined;
+  }
+  const findings: AdrGateFinding[] = Array.isArray(document?.findings) ? document.findings : [];
+  const scope = {adrId, ...(ruleId !== undefined ? {ruleId} : {})};
+  const covered = findingsForRule(findings, scope);
+  const label = ruleId === undefined ? `${adrId} (every rule)` : `${adrId}/${ruleId}`;
+  const standing = flagSet(argv, '--standing');
+  if (covered.length === 0 && !standing) {
+    return failure(
+      out,
+      `no finding of the last ADR check matches ${label}; add --standing --expires <date|until-adr-change> to decide for future findings`,
+    );
+  }
+
+  const stage = valueAfter(argv, '--stage') ?? covered[0]?.stage ?? document?.stage;
+  if (typeof stage !== 'string' || !DECISION_STAGES.has(stage)) {
+    return failure(out, 'a rule-level decision needs --stage design|implementation|ticket when no ADR check names one');
+  }
+  const deliverable = covered[0]?.deliverable ?? findings[0]?.deliverable;
+
+  const expires = valueAfter(argv, '--expires');
+  const input: GateDecisionInput = {
+    by: decidedBy(argv, deps),
+    decision: kind.override ? 'override' : kind.amend ? 'amend' : 'revise',
+    rationale: kind.reason ?? '',
+    stage: stage as GateDecisionInput['stage'],
+    ...(deliverable !== undefined ? {deliverable} : {}),
+    ...(amendmentAdr !== undefined ? {amendmentAdr} : {}),
+    ...(standing ? {standing: true} : {}),
+    ...(expires !== undefined ? {expires} : {}),
+  };
+  let decision: ReturnType<typeof recordRuleDecision>;
+  try {
+    decision = recordRuleDecision(root, {...scope, adrHash, covered}, input);
+  } catch (error) {
+    return failure(out, (error as Error).message);
+  }
+  const plural = covered.length === 1 ? '' : 's';
+  out(`${decision.id}\n`);
+  out(`${label}: covers ${covered.length} finding${plural} of the last ADR check and later findings on any target${standing ? ' until it lapses' : ''}\n`);
   return 0;
 }
 

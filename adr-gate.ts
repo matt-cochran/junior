@@ -25,6 +25,8 @@ import { loadAllAdrs } from './adr-foreign.ts';
 import { lexicallyRelevant, mustJudge, type MustJudgeReason } from './adr-retrieval.ts';
 import { adrExcludePatterns, excludeMatcher, type AdrConfig, type AdrGate } from './adr-config.ts';
 import {
+  ANY_RULE,
+  ANY_TARGET,
   activeDecision,
   adrContentHash,
   appendDecision,
@@ -574,6 +576,60 @@ export function recordGateDecision(
     ...(input.standing !== undefined ? {standing: input.standing} : {}),
     ...(input.expires !== undefined ? {expires: input.expires} : {}),
     ...(finding.adrHash ? {adrHash: finding.adrHash} : {}),
+  };
+  return appendDecision(root, entry);
+}
+
+/** #291: the ADR (and optionally one rule) a rule-level decision covers. */
+export interface GateRuleScope {
+  adrId: string;
+  /** Omitted: every rule of the ADR. */
+  ruleId?: string;
+}
+
+/** #291: the findings of a check that a rule- or ADR-level decision covers. */
+export function findingsForRule<T extends Pick<AdrGateFinding, 'adrId' | 'ruleId'>>(
+  findings: readonly T[],
+  scope: GateRuleScope,
+): T[] {
+  return findings.filter(
+    (finding) => finding.adrId === scope.adrId && (scope.ruleId === undefined || finding.ruleId === scope.ruleId),
+  );
+}
+
+/**
+ * #291: record one decision for every target of an ADR rule (or of every rule
+ * of the ADR) as a single ledger entry with target '*'. It covers each matching
+ * finding of the last check and, like a per-finding decision, later findings:
+ * a standing one across deliverables until it lapses, otherwise for the same
+ * deliverable. The verdict is the worst among the covered findings.
+ */
+export function recordRuleDecision(
+  root: string,
+  scope: GateRuleScope & {adrHash: string; covered: readonly Pick<AdrGateFinding, 'verdict'>[]},
+  input: GateDecisionInput,
+): AdrDecision {
+  const verdict: AdrDecisionVerdict = scope.covered.some((finding) => finding.verdict === 'contradicts')
+    ? 'contradicts'
+    : 'uncertain';
+  const entry: AdrDecisionInput = {
+    by: input.by,
+    stage: input.stage,
+    adrId: scope.adrId,
+    ruleId: scope.ruleId ?? ANY_RULE,
+    target: ANY_TARGET,
+    verdict,
+    probability: null,
+    confidence: null,
+    decision: input.decision,
+    rationale: input.rationale,
+    ...(input.deliverable !== undefined ? {deliverable: input.deliverable} : {}),
+    ...(input.pr !== undefined ? {pr: input.pr} : {}),
+    ...(input.ticket !== undefined ? {ticket: input.ticket} : {}),
+    ...(input.amendmentAdr !== undefined ? {amendmentAdr: input.amendmentAdr} : {}),
+    ...(input.standing !== undefined ? {standing: input.standing} : {}),
+    ...(input.expires !== undefined ? {expires: input.expires} : {}),
+    ...(scope.adrHash ? {adrHash: scope.adrHash} : {}),
   };
   return appendDecision(root, entry);
 }

@@ -654,8 +654,10 @@ behalf.
 
 Exit code 3 means a likely contradiction blocks under `enforce`. Show the findings
 to the human. The human records the decision with `junior adr decide <F#>`:
-`--override --reason`, `--amend --adr <id>` or `--revise`. Never record a decision
-yourself. Uncertain findings are advisory unless `adr.flagUncertain` is true.
+`--override --reason`, `--amend --adr <id>` or `--revise`. To decide every finding
+of one rule at once, the human runs `junior adr decide --adr <ADR-id> --rule <rule-id>`
+with the same kinds (`--amend --amendment <id>` names the amendment there); without
+`--rule` it covers every rule of the ADR. Never record a decision yourself. Uncertain findings are advisory unless `adr.flagUncertain` is true.
 Decisions are kept in `.junior/adr-decisions.jsonl`; commit that file. Junior's
 own prepare briefs, code handoffs and ticket contracts (a contract `ticket` field)
 go through the same gate. With no ADRs, offer `junior adr init`, and run it with

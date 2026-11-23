@@ -15,7 +15,9 @@ import { adrContentHash, appendDecision, readLedger, type AdrDecisionInput } fro
 import type { GateClassifier, GateQuestion } from './worker.ts';
 import {
   confirmCarried,
+  findingsForRule,
   recordGateDecision,
+  recordRuleDecision,
   renderGateMarkdown,
   runAdrGate,
   type GateSubject,
@@ -378,6 +380,50 @@ test('recordGateDecision appends the finding to the ledger', async (t) => {
     standing: false,
   });
   assert.equal(readLedger(root).length, 1);
+});
+
+test('#291: findingsForRule keeps only the findings of that ADR rule', () => {
+  const findings = [
+    {adrId: 'ADR-0001', ruleId: 'R1'},
+    {adrId: 'ADR-0001', ruleId: 'R2'},
+    {adrId: 'ADR-0002', ruleId: 'R1'},
+  ];
+  assert.equal(findingsForRule(findings, {adrId: 'ADR-0001', ruleId: 'R1'}).length, 1);
+});
+
+test('#291: findingsForRule without a rule keeps every rule of the ADR', () => {
+  const findings = [
+    {adrId: 'ADR-0001', ruleId: 'R1'},
+    {adrId: 'ADR-0001', ruleId: 'R2'},
+    {adrId: 'ADR-0002', ruleId: 'R1'},
+  ];
+  assert.equal(findingsForRule(findings, {adrId: 'ADR-0001'}).length, 2);
+});
+
+test('#291: recordRuleDecision records target * with the worst covered verdict', (t) => {
+  const root = project(t);
+  const entry = recordRuleDecision(
+    root,
+    {adrId: 'ADR-0001', ruleId: 'R1', adrHash: 'hash-a', covered: [{verdict: 'uncertain'}, {verdict: 'contradicts'}]},
+    {by: 'reviewer', decision: 'override', rationale: 'accepted', stage: 'implementation'},
+  );
+  assert.deepEqual([entry.target, entry.ruleId, entry.verdict], ['*', 'R1', 'contradicts']);
+});
+
+test('#291: a rule-level override clears the gate for a target it never saw', async (t) => {
+  const {root, adrs, config} = seed(t);
+  recordRuleDecision(
+    root,
+    {adrId: 'ADR-0001', ruleId: 'R1', adrHash: '', covered: []},
+    {by: 'reviewer', decision: 'override', rationale: 'accepted', stage: 'design', deliverable: 'D1'},
+  );
+  const result = await run(
+    root,
+    config,
+    fakeClassifier({'ADR-0001/R1': {choice: 'contradicts', confidence: 0.95}}).classify,
+    {adrs},
+  );
+  assert.equal(result.findings[0]?.cleared, true);
 });
 
 test('confirmCarried appends the carried decision at the current stage', async (t) => {
