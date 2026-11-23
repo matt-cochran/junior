@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `junior adr decide --adr <ADR-id> [--rule <rule-id>]` records one decision for
+  every finding of an ADR rule, or of every rule of the ADR without `--rule`,
+  instead of picking one finding id out of thousands. It takes the same kinds
+  as the per-finding form (`--override --reason`, `--revise`, `--amend`, where
+  the amendment ADR is named with `--amendment` because `--adr` names the ADR
+  being decided) and the same `--standing --expires <date|until-adr-change>`.
+  The ledger stores it as one entry with `target` `*` (and `ruleId` `*` at ADR
+  level), so it also covers targets a later check flags; the latest matching
+  entry still wins. It prints how many findings of the last check it covers,
+  refuses an unknown ADR or rule, and refuses when nothing matches unless the
+  decision is standing. The per-finding form is unchanged (#291).
+
 ### Fixed
 
 - An agent can no longer fake a human budget or consent approval by writing the

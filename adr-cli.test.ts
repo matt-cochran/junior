@@ -342,6 +342,150 @@ test('decide with an unknown finding id exits 1', async () => {
   assert.equal(status, 1);
 });
 
+const TWO_RULE_ADR = ADR.replace(
+  "    text: Source changes stay within the approved tree.\n",
+  "    text: Source changes stay within the approved tree.\n  - id: R2\n    text: Source files keep their headers.\n",
+);
+
+async function implementationCheck(root: string, files: string[]): Promise<number> {
+  return runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(files),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+}
+
+async function decide(root: string, args: string[]): Promise<{status: number; text: string}> {
+  const out = capture();
+  const status = await runAdrCli(['decide', ...args], {cwd: root, git: fakeGit(), stdout: out.stdout});
+  return {status, text: out.text()};
+}
+
+test('#291: decide --adr --rule records one ledger line for every finding of the rule', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.deepEqual(
+    readLedger(root).map((entry) => [entry.adrId, entry.ruleId, entry.target]),
+    [['ADR-0001', 'R1', '*']],
+  );
+});
+
+test('#291: decide --adr --rule reports how many findings it covers', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  const {text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.match(text, /ADR-0001\/R1: covers 3 findings/);
+});
+
+test('#291: a rule-level override clears every finding of the rule, including new targets', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts', 'src/b.ts', 'src/new.ts']), 0);
+});
+
+test('#291: a rule-level decision leaves the other rules of the ADR blocked', async () => {
+  const root = seed(test);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), TWO_RULE_ADR);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 3);
+});
+
+test('#291: decide --adr without --rule covers every rule of the ADR', async () => {
+  const root = seed(test);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), TWO_RULE_ADR);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--override', '--reason', 'accepted risk']);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 0);
+});
+
+test('#291: a rule-level amendment records the --amendment ADR', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--amend', '--amendment', 'ADR-0002']);
+  assert.equal(readLedger(root)[0]?.amendmentAdr, 'ADR-0002');
+});
+
+test('#291: a rule-level amendment without --amendment exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--amend']);
+  assert.equal(status, 1);
+});
+
+test('#291: a rule-level decision for an unknown rule exits 1 and records nothing', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R9', '--revise']);
+  assert.deepEqual([status, readLedger(root).length], [1, 0]);
+});
+
+test('#291: a rule-level decision for an unknown ADR exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['--adr', 'ADR-0999', '--revise']);
+  assert.equal(status, 1);
+});
+
+test('#291: a rule-level decision that matches no finding needs --standing', async () => {
+  const root = seed(test);
+  const {status, text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r', '--stage', 'implementation']);
+  assert.deepEqual([status, /no finding .* add --standing/.test(text)], [1, true]);
+});
+
+test('#291: a standing rule-level decision can be recorded before any finding', async () => {
+  const root = seed(test);
+  await decide(root, [
+    '--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r',
+    '--standing', '--expires', 'until-adr-change', '--stage', 'implementation',
+  ]);
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 0);
+});
+
+test('#291: a standing until-adr-change rule-level decision lapses when the ADR changes', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  await decide(root, [
+    '--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r',
+    '--standing', '--expires', 'until-adr-change',
+  ]);
+  writeFileSync(join(root, 'docs', 'adr', '0001-src.md'), ADR.replace('Decision.', 'Decision, revised.'));
+  assert.equal(await implementationCheck(root, ['src/a.ts']), 3);
+});
+
+test('#291: a standing rule-level decision without --expires exits 1', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status, text} = await decide(root, ['--adr', 'ADR-0001', '--rule', 'R1', '--override', '--reason', 'r', '--standing']);
+  assert.deepEqual([status, /needs expires/.test(text)], [1, true]);
+});
+
+test('#291: decide rejects a finding id together with --rule', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts']);
+  const {status} = await decide(root, ['F1', '--rule', 'R1', '--revise']);
+  assert.equal(status, 1);
+});
+
+test('#291: per-finding decide --amend --adr still names the amendment ADR', async () => {
+  const root = seed(test);
+  await implementationCheck(root, ['src/a.ts', 'src/b.ts']);
+  await decide(root, ['F2', '--amend', '--adr', 'ADR-0002']);
+  const [entry] = readLedger(root);
+  assert.deepEqual([entry?.target, entry?.amendmentAdr], ['src/b.ts', 'ADR-0002']);
+});
+
+test('#291: decide --help shows the rule-level form', async () => {
+  const root = seed(test);
+  const out = capture();
+  await runAdrCli(['decide', '--help'], {cwd: root, git: fakeGit(), stdout: out.stdout});
+  assert.match(out.text(), /decide --adr <ADR-id> \[--rule <rule-id>\]/);
+});
+
 test('check-tickets without --post does not comment on the adapter', async () => {
   const root = seed(test);
   let comments = 0;

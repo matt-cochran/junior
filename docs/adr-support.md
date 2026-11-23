@@ -203,6 +203,28 @@ and its reason. An override covers one deliverable. A standing override (`--stan
 finding again, citing the lapsed decision. A ticket-stage decision is shown again at design and
 implementation for the same work, so you can confirm it in one step.
 
+### Deciding for a whole rule or ADR
+
+A large change can flag one rule on hundreds of files. To decide them together, name the ADR and rule
+instead of a finding:
+
+```bash
+junior adr decide --adr ADR-0067 --rule D3 --override --reason "<why>"
+junior adr decide --adr ADR-0067 --rule D3 --amend --amendment ADR-0070
+junior adr decide --adr ADR-0067 --rule D3 --override --reason "<why>" --standing --expires until-adr-change
+junior adr decide --adr ADR-0067 --revise     # without --rule: every rule of ADR-0067
+```
+
+In this form `--adr` names the ADR being decided, so an amendment names its proposed ADR with
+`--amendment`. The ADR id and rule id must match the ADR files exactly. The decision is stored as one ledger
+entry whose `target` is `*` (and whose `ruleId` is also `*` without `--rule`). It covers every finding of
+that rule in the last check and any target a later check flags for the same rule. Like a per-finding
+decision, it applies to the same deliverable, or, with `--standing --expires`, to later work until it
+lapses. The latest matching entry wins, so a later per-finding decision still overrides it for its own
+target. The command prints the decision id and how many findings of the last check it covers. If the last
+check has no finding for that rule, it refuses unless the decision is standing; with no check to read the
+stage from, pass `--stage design|implementation|ticket`.
+
 Agents never record a decision. When a check reports findings, they stop and show them to you.
 
 ## Tickets
