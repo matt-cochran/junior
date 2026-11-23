@@ -230,9 +230,66 @@ function assembleReceipt(state:RunState, run:LaunchRun):Receipt {
  return receipt;
 }
 
+/** The worker never started for want of a machine slot: empty event and log
+ * files, a failed status and the reason. */
+function refuseWorker(state:RunState, run:LaunchRun, error:string, timeout?:RunState['admissionTimeout']):void {
+ run.workerStatus=1;
+ writeFileSync(run.eventsPath,''); writeFileSync(run.logPath,'');
+ if (timeout) state.admissionTimeout=timeout;
+ run.legacyError=error;
+}
+
+/** Hold a worker slot only around Pi. It is released before launch returns, so
+ * the checks that follow never hold two machine slots. Waiting for that slot
+ * may not consume the time reserved for the contract checks. */
+async function runAdmitted(state:RunState, run:LaunchRun, machine:ResolvedMachineConfig):Promise<void> {
+ const admissionTimeoutMs=Math.max(0, Math.min(machine.admissionTimeoutMs, workerRemainingMs(state)));
+ if (admissionTimeoutMs <= 0) {
+  refuseWorker(state, run, 'Worker admission timed out: no worker time remains before the reserved check window.', {kind:'worker', waitedMs:0, wait:null});
+  return;
+ }
+ const attempt=await acquireAdmission(state, {kind:'worker', holder:`${state.t.id}:worker`, config:machine, timeoutMs:admissionTimeoutMs, nextPhase:'worker'});
+ if (!attempt.admitted) {
+  const detail=attempt.wait ? `: ${attempt.wait.detail}` : '';
+  if (attempt.error === 'E_ADMISSION_TIMEOUT') {
+   refuseWorker(state, run, `Worker admission timed out after ${attempt.waitedMs} ms${detail}.`, {kind:'worker', waitedMs:attempt.waitedMs, wait:attempt.wait});
+  } else {
+   refuseWorker(state, run, `Worker admission interrupted${detail}.`);
+  }
+  return;
+ }
+ const grant:AdmissionGrant=attempt.grant;
+ try { await runStreaming(state, run); }
+ finally { grant.release(); }
+}
+
+/** Pick how the worker runs: mock, skipped, legacy spawn, or streamed with or
+ * without admission. */
+async function runWorker(state:RunState, run:LaunchRun, machine:ResolvedMachineConfig, preInterrupt:boolean, preDeadline:boolean):Promise<void> {
+ const {mock, deps} = state;
+ if (mock) runMock(run);
+ else if (preInterrupt || preDeadline) runSkipped(state, run, preInterrupt, preDeadline);
+ else if (deps.spawnPi) runLegacy(state, run);
+ // Admission off (and no injected admit): spawn without an await in between,
+ // exactly as before admission existed.
+ else if (!machine.enabled && !(deps as any).admit) await runStreaming(state, run);
+ else await runAdmitted(state, run, machine);
+}
+
+/** Copy the run's outcome and receipt onto the state. */
+function recordOutcome(state:RunState, run:LaunchRun):RunState {
+ const receipt=assembleReceipt(state, run);
+ state.stdout=run.stdout; state.stderr=run.stderr; state.legacyError=run.legacyError;
+ state.workerStatus=run.workerStatus; state.streamResult=run.streamResult;
+ state.workerFailure=run.workerFailure;
+ state.segments=run.segments; state.segmentReceipts=run.segmentReceipts;
+ state.receipt=receipt; state.receiptOk=state.mock || receiptValid(receipt);
+ return state;
+}
+
 /** Launch: Pi overlay/guard env, spawn or stream the worker, continuations and the receipt. */
 export async function launch(state:RunState):Promise<RunState|any> {
- const {mock, deps, settings, dir, heartbeat, emit, signal, t} = state;
+ const {deps, settings, dir, heartbeat, emit, signal, t} = state;
  // Execute the worker. Live runs use the streaming async child lifecycle and
  // never spawnSync; the injected spawnPi seam remains for legacy offline tests.
  const machine=resolveMachineConfig(state.sourceCwd, t);
@@ -252,56 +309,14 @@ export async function launch(state:RunState):Promise<RunState|any> {
  applyGuardEnv(state, piBashEnv, policyRouting);
  const run:LaunchRun={ stdout:'', stderr:'', legacyError:undefined, workerStatus:0, streamResult:undefined, workerFailure:undefined,
   segments:[], segmentReceipts:[], retriedFailure:false, eventsPath:join(dir,'events.jsonl'), logPath:join(dir,'worker.log'), piBashEnv };
- let workerGrant:AdmissionGrant|undefined;
  try {
-  if (mock) runMock(run);
-  else if (preInterrupt || preDeadline) runSkipped(state, run, preInterrupt, preDeadline);
-  else if (deps.spawnPi) runLegacy(state, run);
-  // Admission off (and no injected admit): spawn without an await in between,
-  // exactly as before admission existed.
-  else if (!machine.enabled && !(deps as any).admit) await runStreaming(state, run);
-  else {
-   // The worker slot is held only around Pi. It is released before launch
-   // returns, so the checks that follow never hold two machine slots. Waiting
-   // for that slot may not consume the time reserved for the contract checks.
-   const admissionTimeoutMs=Math.max(0, Math.min(machine.admissionTimeoutMs, workerRemainingMs(state)));
-   if (admissionTimeoutMs <= 0) {
-    run.workerStatus=1;
-    writeFileSync(run.eventsPath,''); writeFileSync(run.logPath,'');
-    state.admissionTimeout={kind:'worker', waitedMs:0, wait:null};
-    run.legacyError='Worker admission timed out: no worker time remains before the reserved check window.';
-   } else {
-    const attempt=await acquireAdmission(state, {kind:'worker', holder:`${t.id}:worker`, config:machine, timeoutMs:admissionTimeoutMs, nextPhase:'worker'});
-    if (!attempt.admitted) {
-     run.workerStatus=1;
-     writeFileSync(run.eventsPath,''); writeFileSync(run.logPath,'');
-     if (attempt.error === 'E_ADMISSION_TIMEOUT') {
-      state.admissionTimeout={kind:'worker', waitedMs:attempt.waitedMs, wait:attempt.wait};
-      run.legacyError=`Worker admission timed out after ${attempt.waitedMs} ms${attempt.wait ? `: ${attempt.wait.detail}` : ''}.`;
-     } else {
-      run.legacyError=`Worker admission interrupted${attempt.wait ? `: ${attempt.wait.detail}` : ''}.`;
-     }
-    } else {
-     workerGrant=attempt.grant;
-     await runStreaming(state, run);
-    }
-   }
-  }
+  await runWorker(state, run, machine, preInterrupt, preDeadline);
  } finally {
-  workerGrant?.release();
   // Pi has finished on every path; copied credentials and lock files never
   // outlive the process that needed them. Session files stay for resume.
   cleanupPiAgentOverlay(piOverlay.dir);
  }
- const receipt=assembleReceipt(state, run);
- const receiptOk=mock || receiptValid(receipt);
-
- state.stdout=run.stdout; state.stderr=run.stderr; state.legacyError=run.legacyError;
- state.workerStatus=run.workerStatus; state.streamResult=run.streamResult;
- state.workerFailure=run.workerFailure;
- state.segments=run.segments; state.segmentReceipts=run.segmentReceipts;
- state.receipt=receipt; state.receiptOk=receiptOk;
- return state;
+ return recordOutcome(state, run);
 }
 
 /** Pi's own error texts from the event stream (`errorMessage`/`finalError`),

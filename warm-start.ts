@@ -250,13 +250,121 @@ function probeReflink(source: string, target: string, copyFile: typeof copyFileS
   }
 }
 
+/** One warm start's copy phase: where to copy, and what it has copied so far. */
+interface WarmCopy {
+  root: string;
+  worktree: string;
+  exclude: string[];
+  clock: Clock;
+  deadlineAt: number;
+  copyFile: typeof copyFileSync;
+  result: WarmStartResult;
+  problems: string[];
+}
+
+const errorText = (e: any): string => e?.message || String(e);
+
+/** Resolve warmFrom.path to an existing directory, or say why it cannot be used. */
+function resolveWarmRoot(warmFrom: WarmFrom, sourceCwd: string): { root: string } | { reason: string } {
+  if (!warmFrom || typeof warmFrom.path !== 'string' || !warmFrom.path.trim()) {
+    return { reason: 'warmFrom.path is empty' };
+  }
+  const root = isAbsolute(warmFrom.path) ? warmFrom.path : resolve(sourceCwd, warmFrom.path);
+  if (!existsSync(root)) return { reason: `warmFrom path does not exist: ${root}` };
+  let rootStat;
+  try {
+    rootStat = statSync(root);
+  } catch (e: any) {
+    return { reason: `warmFrom path is unreadable: ${errorText(e)}` };
+  }
+  if (!rootStat.isDirectory()) return { reason: `warmFrom path is not a directory: ${root}` };
+  return { root };
+}
+
+/** Select the cache directories to copy, or say why there are none. */
+function selectCacheDirs(
+  root: string,
+  include: string[],
+  exclude: string[],
+  clock: Clock,
+  deadlineAt: number,
+): { dirs: string[]; problems: string[] } | { reason: string } {
+  const discovered = discover(root, include, exclude, clock, deadlineAt);
+  const problems = discovered.skipped.map((item) => `skipped unreadable directory ${item.path}: ${item.error}`);
+  if (discovered.timedOut) {
+    problems.push('wall deadline exceeded while selecting cache directories');
+    return { reason: problems.join('; ') };
+  }
+  if (discovered.dirs.length === 0) {
+    return { reason: problems.length > 0 ? problems.join('; ') : 'no cache directories matched warmFrom include' };
+  }
+  return { dirs: discovered.dirs, problems };
+}
+
+function addCopied(result: WarmStartResult, directory: string, copied: { files: number; bytes: number }): void {
+  result.files += copied.files;
+  result.bytes += copied.bytes;
+  result.dirs.push(reportedPath(directory));
+}
+
+/** Decide the copy method once, by probing a reflink on the first file. */
+function probeMethod(copy: WarmCopy, sourceDir: string): void {
+  if (copy.result.method !== null) return;
+  const first = firstRegularFile(sourceDir, copy.root, copy.exclude);
+  if (!first) return;
+  const probeTarget = join(copy.worktree, relative(copy.root, first));
+  if (probeReflink(first, probeTarget, copy.copyFile)) copy.result.method = 'reflink';
+}
+
+/** Copy one cache directory. True when it copied cleanly; a failure is recorded
+ * as a problem, keeping whatever files did land. */
+function copyCacheDir(copy: WarmCopy, directory: string, filter: ReturnType<typeof copyFilter>): boolean {
+  const sourceDir = join(copy.root, directory);
+  const targetDir = join(copy.worktree, directory);
+  try {
+    probeMethod(copy, sourceDir);
+    cpSync(sourceDir, targetDir, {
+      recursive: true,
+      mode: constants.COPYFILE_FICLONE,
+      filter,
+    });
+    addCopied(copy.result, directory, countCopied(targetDir));
+    if (copy.result.method === null) copy.result.method = 'copy';
+    return true;
+  } catch (e: any) {
+    const copied = countCopied(targetDir);
+    if (copied.files > 0) addCopied(copy.result, directory, copied);
+    copy.problems.push(`could not copy ${reportedPath(directory)}: ${errorText(e)}`);
+    return false;
+  }
+}
+
+/** Copy each selected directory until done or past the deadline. True when
+ * the deadline cut the copy short. */
+function copyCacheDirs(copy: WarmCopy, dirs: string[]): boolean {
+  let blockedByDeadline = false;
+  const deadlinePassed = (): boolean => copy.clock.now() >= copy.deadlineAt;
+  const filter = copyFilter(copy.root, copy.exclude, copy.clock, copy.deadlineAt, () => {
+    blockedByDeadline = true;
+  });
+  for (const directory of dirs) {
+    if (deadlinePassed()) return true;
+    const linked = symlinkedTarget(copy.worktree, directory);
+    if (linked) {
+      copy.problems.push(`skipped directory ${reportedPath(directory)}: target ${linked} is a symlink`);
+      continue;
+    }
+    if (copyCacheDir(copy, directory, filter) && deadlinePassed()) return true;
+  }
+  return blockedByDeadline;
+}
+
 /** Copy caches into the worktree. Never throws. */
 export function warmStart(
   warmFrom: WarmFrom,
   opts: { sourceCwd: string; worktree: string; deadlineAt: number; clock?: Clock; copyFile?: typeof copyFileSync },
 ): WarmStartResult {
   const clock = opts.clock ?? systemClock;
-  const probeCopyFile = opts.copyFile ?? copyFileSync;
   const startedAt = clock.now();
   const result: WarmStartResult = {
     warm: false,
@@ -276,88 +384,34 @@ export function warmStart(
   };
 
   try {
-    if (!warmFrom || typeof warmFrom.path !== 'string' || !warmFrom.path.trim()) {
-      return cold('warmFrom.path is empty');
-    }
-    const root = isAbsolute(warmFrom.path) ? warmFrom.path : resolve(opts.sourceCwd, warmFrom.path);
-    if (!existsSync(root)) return cold(`warmFrom path does not exist: ${root}`);
-    let rootStat;
-    try {
-      rootStat = statSync(root);
-    } catch (e: any) {
-      return cold(`warmFrom path is unreadable: ${e?.message || String(e)}`);
-    }
-    if (!rootStat.isDirectory()) return cold(`warmFrom path is not a directory: ${root}`);
-
+    const located = resolveWarmRoot(warmFrom, opts.sourceCwd);
+    if ('reason' in located) return cold(located.reason);
+    const { root } = located;
     const include = warmFrom.include ?? DEFAULT_INCLUDE;
     const exclude = warmFrom.exclude ?? [];
     if (clock.now() >= opts.deadlineAt) return cold('wall deadline exceeded before warm start');
 
-    const discovered = discover(root, include, exclude, clock, opts.deadlineAt);
-    const problems = discovered.skipped.map((item) => `skipped unreadable directory ${item.path}: ${item.error}`);
-    if (discovered.timedOut) {
-      problems.push('wall deadline exceeded while selecting cache directories');
-      return cold(problems.join('; '));
-    }
-    if (discovered.dirs.length === 0) {
-      return cold(problems.length > 0 ? problems.join('; ') : 'no cache directories matched warmFrom include');
-    }
+    const selected = selectCacheDirs(root, include, exclude, clock, opts.deadlineAt);
+    if ('reason' in selected) return cold(selected.reason);
 
-    let blockedByDeadline = false;
-    const filter = copyFilter(root, exclude, clock, opts.deadlineAt, () => {
-      blockedByDeadline = true;
-    });
-    for (const directory of discovered.dirs) {
-      if (clock.now() >= opts.deadlineAt) {
-        blockedByDeadline = true;
-        break;
-      }
-      const linked = symlinkedTarget(opts.worktree, directory);
-      if (linked) {
-        problems.push(`skipped directory ${reportedPath(directory)}: target ${linked} is a symlink`);
-        continue;
-      }
-      const sourceDir = join(root, directory);
-      const targetDir = join(opts.worktree, directory);
-      try {
-        if (result.method === null) {
-          const first = firstRegularFile(sourceDir, root, exclude);
-          if (first) {
-            const probeTarget = join(opts.worktree, relative(root, first));
-            if (probeReflink(first, probeTarget, probeCopyFile)) result.method = 'reflink';
-          }
-        }
-        cpSync(sourceDir, targetDir, {
-          recursive: true,
-          mode: constants.COPYFILE_FICLONE,
-          filter,
-        });
-        const copied = countCopied(targetDir);
-        result.files += copied.files;
-        result.bytes += copied.bytes;
-        result.dirs.push(reportedPath(directory));
-        if (result.method === null) result.method = 'copy';
-        if (clock.now() >= opts.deadlineAt) {
-          blockedByDeadline = true;
-          break;
-        }
-      } catch (e: any) {
-        const copied = countCopied(targetDir);
-        if (copied.files > 0) {
-          result.files += copied.files;
-          result.bytes += copied.bytes;
-          result.dirs.push(reportedPath(directory));
-        }
-        problems.push(`could not copy ${reportedPath(directory)}: ${e?.message || String(e)}`);
-      }
-    }
+    const copy: WarmCopy = {
+      root,
+      worktree: opts.worktree,
+      exclude,
+      clock,
+      deadlineAt: opts.deadlineAt,
+      copyFile: opts.copyFile ?? copyFileSync,
+      result,
+      problems: selected.problems,
+    };
+    const blockedByDeadline = copyCacheDirs(copy, selected.dirs);
 
     result.warm = result.files > 0;
     if (result.files === 0) result.method = null;
-    if (blockedByDeadline) problems.push('wall deadline exceeded while copying cache directories');
-    if (problems.length > 0) result.reason = problems.join('; ');
+    if (blockedByDeadline) copy.problems.push('wall deadline exceeded while copying cache directories');
+    if (copy.problems.length > 0) result.reason = copy.problems.join('; ');
     return finish();
   } catch (e: any) {
-    return cold(`warm start failed: ${e?.message || String(e)}`);
+    return cold(`warm start failed: ${errorText(e)}`);
   }
 }
