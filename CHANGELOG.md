@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `junior adr check` holds up on large change sets. It prints its plan size
+  and then progress lines with an ETA on stderr (`ADR 12/64 (ADR-0012), cells
+  5400/30604 (17%), ~14m 2s left`), so a long run no longer looks hung; stdout
+  and `--json` are unchanged. Generated, vendored, build-output and lock files
+  (`**/generated/**`, `*.Generated.cs`, `Generated.cs`, `vendor/`,
+  `node_modules/`, `dist/`, `package-lock.json` and other lock files) are
+  skipped by default; `adr.exclude` adds globs, `adr.excludeDefaults: false`
+  drops the defaults and `--no-exclude` judges everything for one run. Above
+  `adr.prefilterCells` (default 500) planned per-file cells, a path-scoped
+  ADR/file pair is judged only when the file shares a word with the ADR
+  (`--no-prefilter` turns this off), and a plan of 2,000 cells or more says to
+  narrow it with `junior adr scope --adr <ADR-id>`. A `NO_DISCRIMINATION` run
+  writes a compact `.delivery/adr-check/latest.json` with a summary and only
+  the scored findings, counting the unscored ones (#291).
+
 - An agent can no longer fake a human budget or consent approval by writing the
   approval file directly. The Pi worker guard blocks a `write` or `edit` of
   `.junior/budget-approvals.json` or `.delivery/external-context-consent.json`

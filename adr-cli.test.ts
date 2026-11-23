@@ -1069,3 +1069,121 @@ test('#249: an implementation check with no --base diffs against origin/HEAD on 
   assert.notEqual(status, 1, stderr);
   assert.match(recorder.questions(), /devOnlyMarker/);
 });
+
+// --- Scaling a large check (issue #291) -------------------------------------
+
+function mostlyUnscored(): GateClassifier {
+  // The first question of each batch gets a low-confidence (scored) answer; the rest get none.
+  return async ({questions}) => {
+    const ids = Object.keys(questions);
+    return {answers: ids.length > 0 ? {[ids[0]]: {type: 'choice', choice: 'conforms', confidence: 0.3}} : {}};
+  };
+}
+
+function manyFiles(count: number): string[] {
+  return Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+}
+
+async function largeCheck(root: string, extra: Partial<NonNullable<Parameters<typeof runAdrCli>[1]>> = {}, argv: string[] = []) {
+  const out = capture();
+  const err = capture();
+  const code = await runAdrCli(['check', '--stage', 'implementation', ...argv], {
+    cwd: root,
+    classify: mostlyUnscored(),
+    git: fakeGit(manyFiles(120)),
+    stdout: out.stdout,
+    stderr: err.stdout,
+    ...extra,
+  });
+  return {code, out: out.text(), err: err.text()};
+}
+
+test('a large implementation check prints its plan size on stderr before judging', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root);
+  assert.match(err, /^ADR check: judging 120 cells \(1 ADR x 120 subjects\)/m);
+});
+
+test('an implementation check prints ADR and cell progress on stderr', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root, {progressIntervalMs: 0});
+  assert.match(err, /^ADR 1\/1 \(ADR-0001\), cells 120\/120 \(100%\), done in /m);
+});
+
+test('progress output keeps --json stdout parseable', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {progressIntervalMs: 0}, ['--json']);
+  assert.equal(JSON.parse(out).gate.checked, 120);
+});
+
+test('an inconclusive mostly-unscored check writes only the scored findings to latest.json', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  const document = latest(root);
+  assert.deepEqual(
+    {compact: document.compact, findings: document.findings.length, unscored: document.summary.unscored},
+    {compact: true, findings: 6, unscored: 114},
+  );
+});
+
+test('a compacted latest.json keeps the original finding ids of its scored findings', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.equal(latest(root).findings[1].id, 'F21');
+});
+
+test('a compacted check still prints every finding on --json stdout', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {}, ['--json']);
+  assert.equal(JSON.parse(out).findings.length, 120);
+});
+
+test('an implementation check skips a generated file by default', async () => {
+  const root = seed(test);
+  await runAdrCli(['check', '--stage', 'implementation'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(['src/generated/client.ts', 'src/Api.Generated.cs', 'src/real.ts']),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.deepEqual(latest(root).findings.map((finding: any) => finding.target), ['src/real.ts']);
+});
+
+test('an implementation check with --no-exclude judges generated files too', async () => {
+  const root = seed(test);
+  await runAdrCli(['check', '--stage', 'implementation', '--no-exclude'], {
+    cwd: root,
+    classify: contradicting(),
+    git: fakeGit(['src/generated/client.ts', 'src/real.ts']),
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.equal(latest(root).findings.length, 2);
+});
+
+test('a check of a very large change says to narrow it with junior adr scope', async () => {
+  const root = seed(test);
+  const {err} = await largeCheck(root, {git: fakeGit(manyFiles(2000))}, ['--no-prefilter']);
+  assert.match(err, /junior adr scope --adr <ADR-id>/);
+});
+
+test('an implementation check with --whole-change leaves generated files out of the diff', async (t) => {
+  const {root, git} = gitProject(t);
+  mkdirSync(join(root, 'src', 'generated'), {recursive: true});
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const base = true;\n');
+  writeFileSync(join(root, 'src', 'generated', 'api.ts'), 'export const gen = 0;\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  const base = git(['rev-parse', 'HEAD']).stdout.trim();
+  writeFileSync(join(root, 'src', 'app.ts'), 'export const wholeChangeMarker = true;\n');
+  writeFileSync(join(root, 'src', 'generated', 'api.ts'), 'export const generatedMarker = 1;\n');
+  const recorder = recordingClassifier('conforms');
+  await runAdrCli(['check', '--stage', 'implementation', '--base', base, '--whole-change'], {
+    cwd: root,
+    classify: recorder.classify,
+    stdout: capture().stdout,
+    stderr: capture().stdout,
+  });
+  assert.doesNotMatch(recorder.questions(), /generatedMarker/);
+});

@@ -31,6 +31,26 @@ export interface WholeChangeOptions {
   head?: string;
   /** Test seam: the git runner; defaults to the sandbox-safe synchronous runner. */
   git?: WholeChangeGit;
+  /** #291: paths left out of the subject (generated, vendored, lock files). */
+  exclude?: (path: string) => boolean;
+}
+
+/** The `b/` path of a `diff --git` header line, unquoted. */
+function diffHeaderPath(header: string): string | null {
+  const quoted = /^diff --git "?a\/.*?"? "?b\/(.*?)"?$/.exec(header);
+  return quoted?.[1] ?? null;
+}
+
+/** #291: drop the per-file sections of a unified diff whose path is excluded. */
+export function excludeDiffSections(diff: string, exclude: (path: string) => boolean): string {
+  const sections = diff.split(/(?=^diff --git )/m);
+  return sections
+    .filter((section) => {
+      if (!section.startsWith('diff --git ')) return true;
+      const path = diffHeaderPath(section.split('\n', 1)[0] ?? '');
+      return path === null || !exclude(path);
+    })
+    .join('');
 }
 
 function posix(path: string): string {
@@ -366,8 +386,15 @@ export function changeGraph({root, files}: {root: string; files: readonly string
  * character limit.
  */
 export function buildWholeChangeSubject(opts: WholeChangeOptions): GateSubject {
-  const {files, untracked} = changedPaths(opts);
-  const diff = unifiedDiff(opts, untracked);
+  const changed = changedPaths(opts);
+  const keep = (path: string) => opts.exclude === undefined || !opts.exclude(path);
+  const kept = changed.files.filter(keep);
+  // Every changed path excluded: keep the list so the gate drops the subject
+  // as excluded instead of judging an empty, file-less change.
+  const files = kept.length === 0 ? changed.files : kept;
+  const untracked = changed.untracked.filter(keep);
+  const raw = unifiedDiff(opts, untracked);
+  const diff = opts.exclude === undefined ? raw : excludeDiffSections(raw, opts.exclude);
   const relationships = `\n\nRelationships\n${changeGraph({root: opts.root, files})}`;
   const budget = Math.max(0, WHOLE_CHANGE_TEXT_LIMIT - relationships.length);
   return {

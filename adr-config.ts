@@ -18,6 +18,7 @@ import {
   ADR_PREFIX_FILE_PATTERN,
   adrFilePattern,
   adrIdFromFileName,
+  globToRegExp,
   parseAdr,
 } from './adr.ts';
 
@@ -39,6 +40,63 @@ export interface AdrConfig {
   minDiscriminationCells?: number;
   /** NO_DISCRIMINATION fires when uncertain/checked reaches this ratio. Default 0.9. */
   maxUncertainRatio?: number;
+  /** #291: extra globs whose files a check never judges, added to DEFAULT_ADR_EXCLUDE. */
+  exclude?: string[];
+  /** #291: false drops DEFAULT_ADR_EXCLUDE so only `exclude` applies. Default true. */
+  excludeDefaults?: boolean;
+  /** #291: above this many planned per-file cells, path-scoped pairs go through the lexical pre-filter. Default 500. */
+  prefilterCells?: number;
+}
+
+/**
+ * #291: generated, vendored, build-output and lock files. An ADR rule judged
+ * against them only produces uncertain cells, so a check skips them by default.
+ * Matching is case-insensitive (`Generated.cs`, `generated.cs`).
+ */
+export const DEFAULT_ADR_EXCLUDE: readonly string[] = [
+  '**/node_modules/**',
+  '**/vendor/**',
+  '**/dist/**',
+  '**/generated/**',
+  '**/__generated__/**',
+  '**/generated.*',
+  '**/*.generated.*',
+  '**/*.g.cs',
+  '**/*.g.i.cs',
+  '**/*.designer.cs',
+  '**/*.min.js',
+  '**/*.min.css',
+  '**/package-lock.json',
+  '**/npm-shrinkwrap.json',
+  '**/yarn.lock',
+  '**/pnpm-lock.yaml',
+  '**/bun.lockb',
+  '**/Cargo.lock',
+  '**/Gemfile.lock',
+  '**/poetry.lock',
+  '**/Pipfile.lock',
+  '**/uv.lock',
+  '**/composer.lock',
+  '**/go.sum',
+  '**/packages.lock.json',
+];
+
+/** The exclude globs a check applies under `config`. */
+export function adrExcludePatterns(config: Pick<AdrConfig, 'exclude' | 'excludeDefaults'>): string[] {
+  return [...(config.excludeDefaults === false ? [] : DEFAULT_ADR_EXCLUDE), ...(config.exclude ?? [])];
+}
+
+/** A predicate matching any of `patterns` against a repository-relative path, ignoring case. */
+export function excludeMatcher(patterns: readonly string[]): (path: string) => boolean {
+  const compiled = patterns.map((pattern) => {
+    const entry = pattern.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+    if (entry.endsWith('/') && !/[*?[]/.test(entry)) return new RegExp(`${globToRegExp(`${entry}**`).source}`, 'i');
+    return new RegExp(globToRegExp(entry).source, 'i');
+  });
+  return (path: string) => {
+    const normalized = path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+    return compiled.some((pattern) => pattern.test(normalized));
+  };
 }
 
 export interface AdrPatternConfig {
@@ -152,6 +210,23 @@ export function readAdrConfig(root: string): AdrConfig | null {
       throw new Error('adr.maxUncertainRatio must be a number between 0 and 1');
     }
     config.maxUncertainRatio = maxUncertainRatio;
+  }
+  if (block.exclude !== undefined) {
+    if (!Array.isArray(block.exclude) || block.exclude.some((entry) => typeof entry !== 'string' || entry.trim() === '')) {
+      throw new Error('adr.exclude must be an array of non-empty glob strings');
+    }
+    config.exclude = [...block.exclude] as string[];
+  }
+  if (block.excludeDefaults !== undefined) {
+    if (typeof block.excludeDefaults !== 'boolean') throw new Error('adr.excludeDefaults must be a boolean');
+    config.excludeDefaults = block.excludeDefaults;
+  }
+  if (block.prefilterCells !== undefined) {
+    const prefilterCells = block.prefilterCells;
+    if (typeof prefilterCells !== 'number' || !Number.isFinite(prefilterCells) || prefilterCells < 0) {
+      throw new Error('adr.prefilterCells must be a non-negative number');
+    }
+    config.prefilterCells = prefilterCells;
   }
   return config;
 }

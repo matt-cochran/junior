@@ -111,3 +111,45 @@ export function mustJudge(adr: Adr, subject: GateSubject): MustJudgeReason | nul
   if (files.length === 0 && isOnTopic(adr, text)) return 'topic';
   return null;
 }
+
+/** Words that appear in almost every rule or diff and say nothing about its topic. */
+const GENERIC_WORDS = new Set([
+  'must', 'should', 'shall', 'never', 'always', 'code', 'file', 'used', 'using',
+  'make', 'need', 'within', 'without', 'rule', 'decision', 'change', 'keep',
+  'true', 'false', 'null', 'return', 'const', 'function', 'class', 'public',
+  'private', 'static', 'string', 'void', 'import', 'export', 'value', 'name',
+  'type', 'other', 'which', 'where', 'like', 'just', 'here', 'about', 'after',
+  'before', 'because', 'through', 'instead', 'every', 'cannot', 'would', 'could',
+]);
+
+/** Significant words, with camelCase and PascalCase identifiers split into their parts. */
+function topicWords(text: string): Set<string> {
+  const split = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  return new Set(significantWords(split).filter((word) => !GENERIC_WORDS.has(word)));
+}
+
+const adrWordCache = new WeakMap<Adr, Set<string>>();
+
+function adrTopicWords(adr: Adr): Set<string> {
+  let words = adrWordCache.get(adr);
+  if (!words) {
+    words = topicWords([adr.title, adr.decision, ...adr.rules.map((rule) => rule.text)].join(' '));
+    adrWordCache.set(adr, words);
+  }
+  return words;
+}
+
+/**
+ * #291: the cheap, offline relevance pre-filter for large change sets. A
+ * subject is lexically relevant to an ADR when its path or text shares at
+ * least one significant word with the ADR title, decision or rules. It errs
+ * toward keeping a pair: only a subject with no shared word at all is dropped,
+ * and an ADR with no significant words is always relevant.
+ */
+export function lexicallyRelevant(adr: Adr, subject: GateSubject): boolean {
+  const adrWords = adrTopicWords(adr);
+  if (adrWords.size === 0) return true;
+  const subjectWords = topicWords([subject.target, ...(subject.files ?? []), subject.text ?? ''].join(' '));
+  for (const word of subjectWords) if (adrWords.has(word)) return true;
+  return false;
+}
