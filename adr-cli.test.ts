@@ -1116,20 +1116,58 @@ test('progress output keeps --json stdout parseable', async () => {
   assert.equal(JSON.parse(out).gate.checked, 120);
 });
 
-test('an inconclusive mostly-unscored check writes only the scored findings to latest.json', async () => {
+test('an inconclusive mostly-unscored check keeps every finding in a compact latest.json', async () => {
   const root = seed(test);
   await largeCheck(root);
   const document = latest(root);
   assert.deepEqual(
-    {compact: document.compact, findings: document.findings.length, unscored: document.summary.unscored},
-    {compact: true, findings: 6, unscored: 114},
+    {compact: document.compact, findings: document.findings.length, scored: document.summary.scored, unscored: document.summary.unscored},
+    {compact: true, findings: 120, scored: 6, unscored: 114},
   );
 });
 
-test('a compacted latest.json keeps the original finding ids of its scored findings', async () => {
+test('a compacted latest.json keeps every finding under its original id', async () => {
   const root = seed(test);
   await largeCheck(root);
-  assert.equal(latest(root).findings[1].id, 'F21');
+  assert.equal(latest(root).findings[20].id, 'F21');
+});
+
+test('a compacted latest.json slims unscored findings to the decide fields', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.deepEqual(Object.keys(latest(root).findings[1]).sort(), [
+    'adrHash', 'adrId', 'cleared', 'confidence', 'id', 'probability', 'ruleId', 'stage', 'target', 'verdict',
+  ]);
+});
+
+test('a compacted latest.json keeps the rule text of a scored finding', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  assert.equal(latest(root).findings[0].rule, 'Source changes stay within the approved tree.');
+});
+
+test('decide records a ledger line for a slimmed unscored finding of a compacted check', async () => {
+  const root = seed(test);
+  await largeCheck(root);
+  const code = await runAdrCli(['decide', 'F2', '--override', '--reason', 'generated scaffolding'], {
+    cwd: root,
+    git: fakeGit(),
+    stdout: capture().stdout,
+  });
+  const entry = readLedger(root)[0];
+  assert.deepEqual(
+    {code, adrId: entry?.adrId, ruleId: entry?.ruleId, target: entry?.target, verdict: entry?.verdict, probability: entry?.probability},
+    {code: 0, adrId: 'ADR-0001', ruleId: 'R1', target: 'src/file-1.ts', verdict: 'uncertain', probability: null},
+  );
+});
+
+test('a compact latest.json is less than half the size of the full document for a large run', async () => {
+  const root = seed(test);
+  const {out} = await largeCheck(root, {git: fakeGit(manyFiles(200))}, ['--json']);
+  const full = Buffer.byteLength(out);
+  const compact = Buffer.byteLength(readFileSync(join(root, '.delivery', 'adr-check', 'latest.json'), 'utf8'));
+  process.stdout.write(`# compact latest.json: ${compact} of ${full} bytes (${Math.round((compact / full) * 100)}%)\n`);
+  assert.ok(compact < full / 2, `compact ${compact} bytes vs full ${full} bytes`);
 });
 
 test('a compacted check still prints every finding on --json stdout', async () => {

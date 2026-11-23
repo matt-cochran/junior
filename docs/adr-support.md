@@ -161,9 +161,12 @@ usable:
   text are always judged. The result reports `prefiltered: {pairs, cells, threshold}`, and the Markdown
   report names the count. Use `--no-prefilter` to judge every pair.
 - **A compact `latest.json`.** When a run ends `NO_DISCRIMINATION`, `.delivery/adr-check/latest.json` keeps
-  only the findings with a probability, under their original `F` ids, and a `summary` with the
-  `checked`, `findings`, `scored` and `unscored` counts and `unscoredByAdr`. The file carries
-  `"compact": true`. `--json` on stdout still prints every finding.
+  every finding under its original `F` id, but slims the unscored ones (no probability) to `id`, `adrId`,
+  `ruleId`, `target`, `verdict`, `probability`, `confidence`, `adrHash`, `stage`, `deliverable` (when set)
+  and `cleared`, dropping the rule text and the decision, lapsed and carried fields. Scored findings stay
+  complete, so `junior adr decide` still works on any finding. The file carries `"compact": true` and a
+  `summary` with the `checked`, `findings`, `scored` and `unscored` counts and `unscoredByAdr`. `--json`
+  on stdout still prints every finding in full.
 
 ### Which ADRs are retrieved
 

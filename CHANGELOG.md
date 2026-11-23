@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADR/file pair is judged only when the file shares a word with the ADR
   (`--no-prefilter` turns this off), and a plan of 2,000 cells or more says to
   narrow it with `junior adr scope --adr <ADR-id>`. A `NO_DISCRIMINATION` run
-  writes a compact `.delivery/adr-check/latest.json` with a summary and only
-  the scored findings, counting the unscored ones (#291).
+  writes a compact `.delivery/adr-check/latest.json` with a summary, the
+  scored findings in full and the unscored ones slimmed to the fields
+  `junior adr decide` needs (no rule text or ledger lookups), all under their
+  original ids (#291).
 
 - An agent can no longer fake a human budget or consent approval by writing the
   approval file directly. The Pi worker guard blocks a `write` or `edit` of

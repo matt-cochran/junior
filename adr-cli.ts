@@ -510,9 +510,30 @@ function progressReporter(deps: AdrCliDeps): (event: GateProgress) => void {
 }
 
 /**
- * #291: an inconclusive, mostly-uncertain run keeps only its scored findings in
- * latest.json (with their original ids) and counts the unscored ones, so a
- * large run does not write tens of megabytes of null-probability rows.
+ * #291: the fields an unscored finding keeps in a compact latest.json: enough
+ * for `decide F<n>` and a rule-level decide to find and record it, without the
+ * rule text and ledger lookups repeated on every row.
+ */
+function slimFinding(finding: {id: string} & AdrGateFinding): Record<string, unknown> {
+  return {
+    id: finding.id,
+    adrId: finding.adrId,
+    ruleId: finding.ruleId,
+    target: finding.target,
+    verdict: finding.verdict,
+    probability: finding.probability,
+    confidence: finding.confidence,
+    adrHash: finding.adrHash,
+    stage: finding.stage,
+    ...(finding.deliverable !== undefined ? {deliverable: finding.deliverable} : {}),
+    cleared: finding.cleared,
+  };
+}
+
+/**
+ * #291: an inconclusive, mostly-uncertain run keeps every finding in
+ * latest.json under its original id, but slims the unscored (null-probability)
+ * ones, so a large run does not write tens of megabytes of repeated rule text.
  */
 function compactDocument(
   document: {stage: CheckStage; at: string; gate: AdrGateResult; findings: ({id: string} & AdrGateFinding)[]},
@@ -538,7 +559,7 @@ function compactDocument(
       unscoredByAdr: byAdr,
     },
     gate,
-    findings: scored,
+    findings: document.findings.map((finding) => (finding.probability === null ? slimFinding(finding) : finding)),
   };
 }
 
@@ -572,7 +593,7 @@ function reportCheck(
 
   if (compact) {
     const summary = compact.summary as {scored: number; unscored: number};
-    errorOutput(deps)(`${latestPath(root)}: kept ${plural(summary.scored, 'scored finding')}; ${plural(summary.unscored, 'unscored uncertain finding')} counted only\n`);
+    errorOutput(deps)(`${latestPath(root)}: kept ${plural(summary.scored, 'scored finding')}; ${plural(summary.unscored, 'unscored uncertain finding')} slimmed\n`);
   }
   if (gate.inconclusive && gate.inconclusiveReason) errorOutput(deps)(`${gate.inconclusiveReason}\n`);
   return gate.blocked ? 3 : gate.inconclusive ? 2 : 0;
