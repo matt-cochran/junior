@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import guardBash, { guardBashInput, guardPathAccess, CROSSMATRIX_STORE_REASON, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
+import guardBash, { guardBashInput, guardPathAccess, CROSSMATRIX_STORE_REASON, APPROVAL_STORE_REASON, applyAffinityHeader, applyProviderRouting } from './pi-guard.ts';
 
 const env = (value?: string) => (value === undefined ? {} : { JUNIOR_PI_BASH_TIMEOUT_S: value });
 
@@ -176,6 +176,65 @@ test('a sanctioned matrix command chained with a store read is blocked', () => {
   assert.equal(blocked?.reason, CROSSMATRIX_STORE_REASON);
 });
 
+// --- human approval store guard (#289) -------------------------------------
+
+test('guardPathAccess blocks a write to the budget approvals file', () => {
+ assert.deepEqual(guardPathAccess('write', { path: '.junior/budget-approvals.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks an edit of the external context consent file', () => {
+ assert.deepEqual(guardPathAccess('edit', { path: '.delivery/external-context-consent.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks a write that reaches the budget approvals file through a nested path', () => {
+ assert.deepEqual(guardPathAccess('write', { path: 'sub/../.junior/budget-approvals.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks an edit of the consent file by absolute path', () => {
+ assert.deepEqual(guardPathAccess('edit', { path: '/exec/.delivery/external-context-consent.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks a write to the budget approvals file under the source root', () => {
+ const result = guardPathAccess('write', { path: '.junior/budget-approvals.json' }, { JUNIOR_PI_SOURCE_ROOT: '/src' }, '/src/.delivery/wt/1/worktree');
+ assert.deepEqual(result, { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks a write to the budget approvals file without write roots', () => {
+ assert.deepEqual(guardPathAccess('write', { path: '.junior/budget-approvals.json' }, { JUNIOR_PI_WRITE_ROOTS: '' }, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess allows reading the budget approvals file', () => {
+ assert.equal(guardPathAccess('read', { path: '.junior/budget-approvals.json' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess allows reading the external context consent file', () => {
+ assert.equal(guardPathAccess('read', { path: '.delivery/external-context-consent.json' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess allows writing another file under .junior', () => {
+ assert.equal(guardPathAccess('write', { path: '.junior/config.json' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess allows writing another file under .delivery', () => {
+ assert.equal(guardPathAccess('write', { path: '.delivery/notes.md' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess allows writing a similarly named file in another directory', () => {
+ assert.equal(guardPathAccess('write', { path: 'docs/budget-approvals.json.md' }, {}, '/exec'), null);
+});
+
+test('guardPathAccess blocks a bash command that names the budget approvals file', () => {
+ assert.deepEqual(guardPathAccess('bash', { command: 'cat .junior/budget-approvals.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess blocks a bash command that names the external context consent file', () => {
+ assert.deepEqual(guardPathAccess('bash', { command: 'rm .delivery/external-context-consent.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess allows a bash command that names neither approval store', () => {
+ assert.equal(guardPathAccess('bash', { command: 'cat .junior/config.json' }, {}, '/exec'), null);
+});
+
 // --- default hook-bypass guard (#281) ---------------------------------------
 
 test('guardBashInput refuses git commit --no-verify with no policy', () => {
@@ -274,4 +333,12 @@ test('guardBashInput leaves a plain quoted mention runnable', () => {
   const input: any = { command: 'echo "git commit --no-verify"' };
   guardBashInput(input, {});
   assert.equal(input.command, 'exec </dev/null\necho "git commit --no-verify"');
+});
+
+test('guardPathAccess blocks a bash redirect straight into the budget approvals file', () => {
+ assert.deepEqual(guardPathAccess('bash', { command: 'cd .junior && echo {} >budget-approvals.json' }, {}, '/exec'), { block:true, reason:APPROVAL_STORE_REASON });
+});
+
+test('guardPathAccess allows a bash command that names a longer file starting with the store name', () => {
+ assert.equal(guardPathAccess('bash', { command: 'cat docs/budget-approvals.json.md' }, {}, '/exec'), null);
 });

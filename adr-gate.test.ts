@@ -15,7 +15,9 @@ import { adrContentHash, appendDecision, readLedger, type AdrDecisionInput } fro
 import type { GateClassifier, GateQuestion } from './worker.ts';
 import {
   confirmCarried,
+  findingsForRule,
   recordGateDecision,
+  recordRuleDecision,
   renderGateMarkdown,
   runAdrGate,
   type GateSubject,
@@ -380,6 +382,50 @@ test('recordGateDecision appends the finding to the ledger', async (t) => {
   assert.equal(readLedger(root).length, 1);
 });
 
+test('#291: findingsForRule keeps only the findings of that ADR rule', () => {
+  const findings = [
+    {adrId: 'ADR-0001', ruleId: 'R1'},
+    {adrId: 'ADR-0001', ruleId: 'R2'},
+    {adrId: 'ADR-0002', ruleId: 'R1'},
+  ];
+  assert.equal(findingsForRule(findings, {adrId: 'ADR-0001', ruleId: 'R1'}).length, 1);
+});
+
+test('#291: findingsForRule without a rule keeps every rule of the ADR', () => {
+  const findings = [
+    {adrId: 'ADR-0001', ruleId: 'R1'},
+    {adrId: 'ADR-0001', ruleId: 'R2'},
+    {adrId: 'ADR-0002', ruleId: 'R1'},
+  ];
+  assert.equal(findingsForRule(findings, {adrId: 'ADR-0001'}).length, 2);
+});
+
+test('#291: recordRuleDecision records target * with the worst covered verdict', (t) => {
+  const root = project(t);
+  const entry = recordRuleDecision(
+    root,
+    {adrId: 'ADR-0001', ruleId: 'R1', adrHash: 'hash-a', covered: [{verdict: 'uncertain'}, {verdict: 'contradicts'}]},
+    {by: 'reviewer', decision: 'override', rationale: 'accepted', stage: 'implementation'},
+  );
+  assert.deepEqual([entry.target, entry.ruleId, entry.verdict], ['*', 'R1', 'contradicts']);
+});
+
+test('#291: a rule-level override clears the gate for a target it never saw', async (t) => {
+  const {root, adrs, config} = seed(t);
+  recordRuleDecision(
+    root,
+    {adrId: 'ADR-0001', ruleId: 'R1', adrHash: '', covered: []},
+    {by: 'reviewer', decision: 'override', rationale: 'accepted', stage: 'design', deliverable: 'D1'},
+  );
+  const result = await run(
+    root,
+    config,
+    fakeClassifier({'ADR-0001/R1': {choice: 'contradicts', confidence: 0.95}}).classify,
+    {adrs},
+  );
+  assert.equal(result.findings[0]?.cleared, true);
+});
+
 test('confirmCarried appends the carried decision at the current stage', async (t) => {
   const {root, adrs, config} = seed(t);
   appendDecision(root, decision({stage: 'ticket'}), {clock: () => NOW});
@@ -573,4 +619,85 @@ test('a gate with mostly conforming rows still passes', async (t) => {
   const {root, adrs, config} = seed(t);
   const result = await run(root, config, fakeClassifier().classify, {adrs, subjects: fileRows(12)});
   assert.match(renderGateMarkdown(result), /PASS\s*$/);
+});
+
+// --- Scaling a large check (issue #291) -------------------------------------
+
+test('a subject whose every file is generated is not judged', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const {classify} = fakeClassifier({}, {choice: 'contradicts', confidence: 0.95});
+  const result = await run(root, config, classify, {
+    adrs,
+    subjects: [{target: 'src/generated/api.ts', files: ['src/generated/api.ts']}, {target: 'src/real.ts', files: ['src/real.ts']}],
+  });
+  assert.deepEqual(result.findings.map((finding) => finding.target), ['src/real.ts']);
+});
+
+test('the gate result lists the subjects it excluded', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {
+    adrs,
+    subjects: [{target: 'src/Api.Generated.cs', files: ['src/Api.Generated.cs']}],
+  });
+  assert.deepEqual(result.excluded, ['src/Api.Generated.cs']);
+});
+
+test('an empty exclude list judges a generated file', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {
+    adrs,
+    exclude: [],
+    subjects: [{target: 'src/generated/api.ts', files: ['src/generated/api.ts']}],
+  });
+  assert.equal(result.checked, 1);
+});
+
+const UNRELATED: GateSubject = {target: 'src/math.ts', files: ['src/math.ts'], text: '+ export const sum = (a, b) => a + b;'};
+const RELATED: GateSubject = {target: 'src/tree.ts', files: ['src/tree.ts'], text: '+ // keep the source tree honest'};
+
+test('above adr.prefilterCells a path-scoped file sharing no word with the ADR is not judged', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, {...config, prefilterCells: 0}, fakeClassifier().classify, {adrs, subjects: [UNRELATED, RELATED]});
+  assert.equal(result.checked, 1);
+});
+
+test('the gate result counts the pairs the pre-filter dropped', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, {...config, prefilterCells: 0}, fakeClassifier().classify, {adrs, subjects: [UNRELATED, RELATED]});
+  assert.deepEqual(result.prefiltered, {pairs: 1, cells: 1, threshold: 0});
+});
+
+test('below adr.prefilterCells every path-scoped file is judged', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, config, fakeClassifier().classify, {adrs, subjects: [UNRELATED, RELATED]});
+  assert.equal(result.checked, 2);
+});
+
+test('prefilter false judges every pair above adr.prefilterCells', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, {...config, prefilterCells: 0}, fakeClassifier().classify, {adrs, subjects: [UNRELATED, RELATED], prefilter: false});
+  assert.equal(result.checked, 2);
+});
+
+test('the pre-filter never drops a file that cites the ADR', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const cited: GateSubject = {target: 'src/math.ts', files: ['src/math.ts'], text: '+ // see ADR-0001\n+ export const sum = 1;'};
+  const result = await run(root, {...config, prefilterCells: 0}, fakeClassifier().classify, {adrs, subjects: [cited]});
+  assert.equal(result.checked, 1);
+});
+
+test('renderGateMarkdown names the pre-filtered pairs and --no-prefilter', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const result = await run(root, {...config, prefilterCells: 0}, fakeClassifier().classify, {adrs, subjects: [UNRELATED, RELATED]});
+  assert.match(renderGateMarkdown(result), /Pre-filtered: 1 ADR\/file pair .*--no-prefilter/);
+});
+
+test('the gate reports its plan and then each judged rule to progress', async (t) => {
+  const {root, adrs, config} = seed(t);
+  const events: unknown[] = [];
+  await run(root, config, fakeClassifier().classify, {adrs, subjects: fileRows(3), progress: (event) => events.push(event)});
+  assert.deepEqual(events, [
+    {phase: 'plan', adrs: 1, subjects: 3, cells: 3, excluded: 0, prefiltered: 0},
+    {phase: 'judge', adrIndex: 1, adrs: 1, adrId: 'ADR-0001', cellsDone: 3, cells: 3},
+  ]);
 });

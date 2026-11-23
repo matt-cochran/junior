@@ -10,6 +10,12 @@
 // This module is deliberately pure apart from appendDecision/readLedger: the
 // active/lapsed/carried-forward queries fold the ledger in file order and do
 // no I/O.
+//
+// #291: a rule-level decision is one entry whose target is ANY_TARGET ('*'),
+// and an ADR-level decision also has ruleId ANY_RULE ('*'). The wildcard
+// matches every target (and rule) of that ADR, including targets a later check
+// flags for the first time. The latest matching entry still wins, whether it
+// names one target or the wildcard.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -102,6 +108,10 @@ const VERDICTS = new Set<AdrDecisionVerdict>([
 ]);
 const CONFIDENCES = new Set<AdrDecisionConfidence>(['high', 'medium', 'low']);
 const UNTIL_ADR_CHANGE = 'until-adr-change';
+/** #291: the target of a rule- or ADR-level decision; it matches every target. */
+export const ANY_TARGET = '*';
+/** #291: the ruleId of an ADR-level decision; it matches every rule of the ADR. */
+export const ANY_RULE = '*';
 const RFC3339_DATE =
   /^\d{4}-\d{2}-\d{2}(?:[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2}))?$/;
 
@@ -192,6 +202,9 @@ function validate(input: AdrDecisionInput): Omit<AdrDecision, 'id' | 'at'> {
   const adrId = nonEmpty(input.adrId, 'adrId');
   const ruleId = nonEmpty(input.ruleId, 'ruleId');
   const target = nonEmpty(input.target, 'target');
+  if (ruleId === ANY_RULE && target !== ANY_TARGET) {
+    throw new Error(`an ADR-level decision (ruleId ${ANY_RULE}) needs target ${ANY_TARGET}`);
+  }
   const deliverable = optionalString(input.deliverable, 'deliverable');
   const pr = optionalString(input.pr, 'pr');
   const ticket = optionalString(input.ticket, 'ticket');
@@ -288,8 +301,16 @@ function isSuperseded(entries: readonly AdrDecision[], index: number): boolean {
   return false;
 }
 
+function matchesRule(entry: AdrDecision, ruleId: string): boolean {
+  return entry.ruleId === ruleId || entry.ruleId === ANY_RULE;
+}
+
 function matchesKey(entry: AdrDecision, key: AdrDecisionKey): boolean {
-  return entry.adrId === key.adrId && entry.ruleId === key.ruleId && entry.target === key.target;
+  return (
+    entry.adrId === key.adrId &&
+    matchesRule(entry, key.ruleId) &&
+    (entry.target === key.target || entry.target === ANY_TARGET)
+  );
 }
 
 function hasLapsed(entry: AdrDecision, ctx: AdrDecisionContext): boolean {
@@ -353,7 +374,7 @@ export function carriedForward(
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!entry || entry.stage !== 'ticket') continue;
-    if (entry.adrId !== key.adrId || entry.ruleId !== key.ruleId) continue;
+    if (entry.adrId !== key.adrId || !matchesRule(entry, key.ruleId)) continue;
     if (entry.deliverable !== key.deliverable) continue;
     return entry;
   }

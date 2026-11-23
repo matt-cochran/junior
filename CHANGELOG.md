@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-23
+
+### Added
+
+- `junior adr decide --adr <ADR-id> [--rule <rule-id>]` records one decision for
+  every finding of an ADR rule, or of every rule of the ADR without `--rule`,
+  instead of picking one finding id out of thousands. It takes the same kinds
+  as the per-finding form (`--override --reason`, `--revise`, `--amend`, where
+  the amendment ADR is named with `--amendment` because `--adr` names the ADR
+  being decided) and the same `--standing --expires <date|until-adr-change>`.
+  The ledger stores it as one entry with `target` `*` (and `ruleId` `*` at ADR
+  level), so it also covers targets a later check flags; the latest matching
+  entry still wins. It prints how many findings of the last check it covers,
+  refuses an unknown ADR or rule, and refuses when nothing matches unless the
+  decision is standing. The per-finding form is unchanged (#291).
+
+### Fixed
+
+- `junior adr check` holds up on large change sets. It prints its plan size
+  and then progress lines with an ETA on stderr (`ADR 12/64 (ADR-0012), cells
+  5400/30604 (17%), ~14m 2s left`), so a long run no longer looks hung; stdout
+  and `--json` are unchanged. Generated, vendored, build-output and lock files
+  (`**/generated/**`, `*.Generated.cs`, `Generated.cs`, `vendor/`,
+  `node_modules/`, `dist/`, `package-lock.json` and other lock files) are
+  skipped by default; `adr.exclude` adds globs, `adr.excludeDefaults: false`
+  drops the defaults and `--no-exclude` judges everything for one run. Above
+  `adr.prefilterCells` (default 500) planned per-file cells, a path-scoped
+  ADR/file pair is judged only when the file shares a word with the ADR
+  (`--no-prefilter` turns this off), and a plan of 2,000 cells or more says to
+  narrow it with `junior adr scope --adr <ADR-id>`. A `NO_DISCRIMINATION` run
+  writes a compact `.delivery/adr-check/latest.json` with a summary, the
+  scored findings in full and the unscored ones slimmed to the fields
+  `junior adr decide` needs (no rule text or ledger lookups), all under their
+  original ids (#291).
+
+- An agent can no longer fake a human budget or consent approval by writing the
+  approval file directly. The Pi worker guard blocks a `write` or `edit` of
+  `.junior/budget-approvals.json` or `.delivery/external-context-consent.json`
+  (in the execution checkout or the source root) and any worker bash command
+  that names either file, and `junior setup --yes` adds matching Claude Code
+  `Edit(...)` deny rules. Reading the files stays allowed. Existing projects
+  show the deny rules as outdated in `junior doctor` until `junior setup` runs
+  (#289).
+
 ## [0.20.0] - 2026-11-21
 
 ### Added
